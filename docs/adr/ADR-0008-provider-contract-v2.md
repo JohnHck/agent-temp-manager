@@ -1,6 +1,6 @@
 # ADR-0008: Provider contract v2 and the Claude Desktop scenario
 
-Status: PROPOSED
+Status: ACCEPTED (maintainer gate 2026-10-20, after PR #19)
 Date: 2026-10-20
 Phase: P1 (contract and Claude Code runtime members), P2 (Claude Desktop provider)
 

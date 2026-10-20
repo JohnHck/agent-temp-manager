@@ -54,6 +54,7 @@ if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
 Set-AtmLanguage -Requested $Lang
 foreach ($providerFile in $providerFiles) { . $providerFile.FullName }
 . (Join-Path $here 'lib\Engine.Clean.ps1')
+. (Join-Path $here 'lib\Engine.Diagnose.ps1')
 . (Join-Path $here 'lib\Report.ps1')
 . (Join-Path $here 'lib\Tui.ps1')
 
@@ -147,6 +148,8 @@ try {
             Write-Host (Get-AtmText 'cli.native' (Get-AtmText "native.$script:AtmNativeMode"))
             Write-Host (Get-AtmText 'cli.realDeletion' $(if ($script:AtmRealDeletionEnabled) { Get-AtmText 'cli.enabled' } else { Get-AtmText 'cli.disabledV01' }))
             Write-Host (Get-AtmText 'cli.language' (Get-AtmLanguage))
+            $idState = Get-AtmIdentityState
+            Write-Host (Get-AtmText 'cli.identity' $idState.Name (Get-AtmYesNo ([bool]$idState.IsElevatedAdministrator)) $idState.ElevationType $idState.IntegrityLevel $idState.SessionId)
             exit 0
         }
         default { Show-Help; exit $(if ($Command -in @('help', '-h', '--help', '/?')) { 0 } else { 1 }) }

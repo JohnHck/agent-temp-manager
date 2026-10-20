@@ -1,6 +1,6 @@
 # ADR-0009: Diagnose engine, command, JSON schema and layering
 
-Status: PROPOSED, with one open decision (D-6)
+Status: ACCEPTED (maintainer gate 2026-10-20, after PR #19); D-6 accepted: the command is `agent-temp diagnose`
 Date: 2026-10-20
 Phase: P1 (engine skeleton, command, schema v1), P5 (TUI view, final presentation)
 

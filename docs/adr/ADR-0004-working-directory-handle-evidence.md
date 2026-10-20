@@ -1,6 +1,6 @@
 # ADR-0004: Working-directory and open-handle evidence
 
-Status: PROPOSED, with two open decisions (D-1, D-2)
+Status: ACCEPTED IN PRINCIPLE (maintainer gate 2026-10-20, after PR #19): D-1 and D-2 only in P1-C, after an isolated prototype proves safety and compatibility; not implemented before that
 Date: 2026-10-20
 Phase: P1 (after the maintainer decides D-1 and D-2)
 

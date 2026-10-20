@@ -1,6 +1,6 @@
 # ADR-0006: Git read-only execution and worktree states
 
-Status: PROPOSED, with two open decisions (D-3, D-4)
+Status: ACCEPTED (maintainer gate 2026-10-20, after PR #19) with conditions: D-3 conditional (commands configured by the repository must be prevented; without a proven guarantee the fact is UNKNOWN and the unsafe command is not run); D-4 accepted with its restriction (only Git processes created by the engine and contained in its own job object; pre-existing processes are never affected)
 Date: 2026-10-20
 Phase: P3
 

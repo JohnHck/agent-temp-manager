@@ -76,6 +76,71 @@ namespace AgentTempManager
         }
     }
 
+    // Token information of the CURRENT process only (PRIV-10, docs/adr/ADR-0003). Opens its own token with
+    // TOKEN_QUERY; never enables a privilege and never opens another process.
+    public static class AtmToken
+    {
+        const uint TOKEN_QUERY = 0x0008;
+        const int TokenElevationTypeClass = 18;
+        const int TokenIntegrityLevelClass = 25;
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetCurrentProcess();
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool OpenProcessToken(IntPtr process, uint desiredAccess, out IntPtr token);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool GetTokenInformation(IntPtr token, int infoClass, IntPtr info, uint length, out uint returnLength);
+
+        [DllImport("advapi32.dll")]
+        private static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
+
+        [DllImport("advapi32.dll")]
+        private static extern IntPtr GetSidSubAuthority(IntPtr sid, uint index);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        // 1 = default, 2 = full, 3 = limited (TOKEN_ELEVATION_TYPE); 0 when it cannot be read.
+        public static int GetElevationType()
+        {
+            IntPtr token;
+            if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, out token)) return 0;
+            IntPtr buf = Marshal.AllocHGlobal(4);
+            try
+            {
+                uint ret;
+                if (!GetTokenInformation(token, TokenElevationTypeClass, buf, 4, out ret)) return 0;
+                return Marshal.ReadInt32(buf);
+            }
+            finally { Marshal.FreeHGlobal(buf); CloseHandle(token); }
+        }
+
+        // Last sub-authority of the mandatory label SID (0x1000 low, 0x2000 medium, 0x3000 high, 0x4000 system...);
+        // -1 when it cannot be read.
+        public static long GetIntegrityRid()
+        {
+            IntPtr token;
+            if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, out token)) return -1;
+            IntPtr buf = IntPtr.Zero;
+            try
+            {
+                uint len;
+                GetTokenInformation(token, TokenIntegrityLevelClass, IntPtr.Zero, 0, out len);
+                if (len == 0 || len > 4096) return -1;
+                buf = Marshal.AllocHGlobal((int)len);
+                if (!GetTokenInformation(token, TokenIntegrityLevelClass, buf, len, out len)) return -1;
+                IntPtr sid = Marshal.ReadIntPtr(buf);   // TOKEN_MANDATORY_LABEL.Label.Sid
+                if (sid == IntPtr.Zero) return -1;
+                int count = Marshal.ReadByte(GetSidSubAuthorityCount(sid));
+                if (count < 1) return -1;
+                return (long)(uint)Marshal.ReadInt32(GetSidSubAuthority(sid, (uint)(count - 1)));
+            }
+            finally { if (buf != IntPtr.Zero) Marshal.FreeHGlobal(buf); CloseHandle(token); }
+        }
+    }
+
     public sealed class AtmTreeStats
     {
         public string Path;

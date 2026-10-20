@@ -1,6 +1,6 @@
 # ADR-0005: Services and virtualization
 
-Status: PROPOSED
+Status: ACCEPTED (maintainer gate 2026-10-20, after PR #19)
 Date: 2026-10-20
 Phase: P2
 

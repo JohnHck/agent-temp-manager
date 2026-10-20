@@ -1,6 +1,6 @@
 # ADR-0002: Dependency graph and correlation
 
-Status: PROPOSED
+Status: ACCEPTED (maintainer gate 2026-10-20, after PR #19)
 Date: 2026-10-20
 Phase: P4 (collectors of P1 to P3 produce the nodes and the raw evidence)
 

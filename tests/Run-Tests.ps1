@@ -15,6 +15,7 @@ $srcDir = Join-Path (Split-Path -Parent $testsDir) 'src'
 . (Join-Path $srcDir 'lib\Engine.Audit.ps1')
 . (Join-Path $srcDir 'providers\ClaudeCode.ps1')
 . (Join-Path $srcDir 'lib\Engine.Clean.ps1')
+. (Join-Path $srcDir 'lib\Engine.Diagnose.ps1')
 . (Join-Path $srcDir 'lib\Report.ps1')
 . (Join-Path $srcDir 'lib\Tui.ps1')
 . (Join-Path (Split-Path -Parent $testsDir) 'install\InstallCommon.ps1')
@@ -1747,6 +1748,115 @@ try {
         $txt = [IO.File]::ReadAllText((Join-Path $tools 'Invoke-CleanEnvTest.ps1'))
         Assert-True (-not ($txt -match 'Remove-Item|DeleteTree|Temp\\claude')) 'roteiro nao exclui temporarios'
         Assert-True ($txt -match "install\\Install-AgentTempManager\.ps1'\) \*>") 'instala sem -ProjectsFile'
+    }
+
+    # ------------------------------------------------------------------ V0.2 diagnose: model, identity, layering
+    Test-Case 'Diagnose' 'Modelo: cobertura, evidencia e achado validam codigos e listas fechadas' {
+        $c = New-AtmCoverage -Collector 'processes' -Status 'PARTIAL' -Reasons @('OTHER_ACCOUNT') -ElevationWouldHelp 'YES' -Observed 3 -Expected 5
+        Assert-Eq $c.Status 'PARTIAL' 'status'
+        Assert-Eq $c.Observed 3 'observados'
+        $bad = @(
+            { New-AtmCoverage -Collector 'Processes' -Status 'COMPLETE' },
+            { New-AtmCoverage -Collector 'processes' -Status 'CLEAN' },
+            { New-AtmCoverage -Collector 'processes' -Status 'DENIED' },
+            { New-AtmCoverage -Collector 'processes' -Status 'DENIED' -Reasons @('access denied') },
+            { New-AtmCoverage -Collector 'processes' -Status 'COMPLETE' -ElevationWouldHelp 'MAYBE' },
+            { New-AtmCoverage -Collector 'processes' -Status 'complete' },
+            { New-AtmCoverage -Collector 'processes' -Status 'COMPLETE' -ElevationWouldHelp 'yes' },
+            { New-AtmFinding -Kind 'tempPartition' -Key 'x' -State 'UNKNOWN' },
+            { New-AtmEvidence -Code 'bad code' -Source 'audit' -Collector 'inventory' },
+            { New-AtmEvidence -Code 'AUDIT_FLAG' -Source 'Audit' -Collector 'inventory' },
+            { New-AtmFinding -Kind 'File' -Key 'x' -State 'UNKNOWN' },
+            { New-AtmFinding -Kind 'TempPartition' -Key '' -State 'UNKNOWN' },
+            { New-AtmFinding -Kind 'TempPartition' -Key 'x' -State 'not a code' },
+            { New-AtmFinding -Kind 'TempPartition' -Key 'x' -State 'UNKNOWN' -Coverage @('COMPLETE') })
+        foreach ($b in $bad) {
+            $threw = $false; try { $null = & $b } catch { $threw = $true }
+            Assert-True $threw "recusado: $b"
+        }
+        $e = New-AtmEvidence -Code 'AUDIT_FLAG' -Source 'audit' -Collector 'inventory' -Detail (('x' * 600) + "`r`nlinha")
+        Assert-True ($e.Detail.Length -le 512 -and $e.Detail -notmatch "[`r`n]") 'detalhe limitado e sem quebras de linha'
+        Assert-Eq $e.ObservedUtc.Kind ([DateTimeKind]::Utc) 'horario em UTC'
+        Assert-Eq (ConvertTo-AtmExceptionCode 'System.UnauthorizedAccessException') 'EXCEPTION_SYSTEMUNAUTHORIZEDACCESSEXCEPTION' 'codigo de excecao'
+    }
+    Test-Case 'Diagnose' 'Ausencia de evidencia nunca vira "sem dependencia": UNKNOWN sem cobertura conclusiva' {
+        foreach ($state in $script:AtmNoDependencyStates) {
+            foreach ($st in $script:AtmCoverageStatuses) {
+                $conclusive = $script:AtmConclusiveCoverage -contains $st
+                $reasons = $(if ($conclusive) { @() } else { @('TEST_REASON') })
+                $cov = @((New-AtmCoverage -Collector 'identity' -Status 'COMPLETE'), (New-AtmCoverage -Collector 'processes' -Status $st -Reasons $reasons))
+                $f = New-AtmFinding -Kind 'TempPartition' -Key 'k' -State $state -Coverage $cov
+                Assert-Eq $f.State $(if ($conclusive) { $state } else { 'UNKNOWN' }) "$state com cobertura $st"
+                Assert-Eq $f.RequestedState $state 'estado pedido preservado'
+                if (-not $conclusive) { Assert-Eq (@($f.IncompleteCoverage) -join ',') 'processes' 'coletor incompleto listado' }
+            }
+            Assert-Eq (New-AtmFinding -Kind 'TempPartition' -Key 'k' -State $state).State 'UNKNOWN' "$state sem nenhuma cobertura"
+        }
+        $f = New-AtmFinding -Kind 'TempPartition' -Key 'k' -State 'IN_USE' -Coverage @(New-AtmCoverage -Collector 'processes' -Status 'DENIED' -Reasons @('ACCESS_DENIED'))
+        Assert-Eq $f.State 'IN_USE' 'evidencia positiva nao depende de cobertura completa'
+    }
+    Test-Case 'Diagnose' 'Identidade: tipo de elevacao, integridade e falhas de leitura (fontes injetadas)' {
+        $cases = @(
+            @(1, 0x2000, $false, 'DEFAULT', 'MEDIUM'), @(2, 0x3000, $true, 'FULL', 'HIGH'), @(3, 0x2000, $false, 'LIMITED', 'MEDIUM'),
+            @(1, 0x4000, $true, 'DEFAULT', 'SYSTEM'), @(3, 0x1000, $false, 'LIMITED', 'LOW'), @(1, 0x2100, $false, 'DEFAULT', 'MEDIUM_PLUS'),
+            @(1, 0, $false, 'DEFAULT', 'UNTRUSTED'), @(1, 0x5000, $false, 'DEFAULT', 'PROTECTED'))
+        foreach ($c in $cases) {
+            $raw = [pscustomobject]@{ Name = 'TEST\alice'; Sid = 'S-1-5-21-1-2-3-1001'; IsAdmin = $c[2]; ElevationTypeRaw = $c[0]; IntegrityRid = $c[1]; SessionId = 1 }
+            $s = Get-AtmIdentityState -Source ({ $raw }.GetNewClosure())
+            Assert-Eq $s.ElevationType $c[3] "tipo $($c[0])"
+            Assert-Eq $s.IntegrityLevel $c[4] "integridade $($c[1])"
+            Assert-Eq $s.IsElevatedAdministrator $c[2] 'administrador elevado'
+            Assert-Eq $s.Coverage.Status 'COMPLETE' 'cobertura completa'
+            Assert-Eq $s.Coverage.ElevationWouldHelp 'NO' 'elevacao nao muda a leitura do proprio token'
+        }
+        $s = Get-AtmIdentityState -Source { [pscustomobject]@{ Name = 'TEST\alice'; Sid = 'S-1-5-21-1-2-3-1001'; IsAdmin = $false; ElevationTypeRaw = 0; IntegrityRid = -1; SessionId = 1 } }
+        Assert-Eq $s.Coverage.Status 'PARTIAL' 'token ilegivel -> parcial'
+        Assert-Eq (@($s.Coverage.Reasons) -join ',') 'TOKEN_ELEVATION_TYPE_UNREADABLE,TOKEN_INTEGRITY_UNREADABLE' 'motivos'
+        Assert-Eq $s.ElevationType 'UNKNOWN' 'tipo desconhecido'
+        $s = Get-AtmIdentityState -Source { throw (New-Object UnauthorizedAccessException('texto-que-nao-pode-aparecer')) }
+        Assert-Eq $s.Coverage.Status 'FAILED' 'falha de leitura'
+        Assert-Eq (@($s.Coverage.Reasons) -join ',') 'IDENTITY_UNREADABLE,EXCEPTION_UNAUTHORIZEDACCESSEXCEPTION' 'codigo do tipo da excecao, nunca a mensagem'
+        Assert-True ($null -eq $s.Name -and $s.IntegrityLevel -eq 'UNKNOWN') 'nada inventado'
+    }
+    Test-Case 'Diagnose' 'Identidade real do processo (somente leitura): token consistente e igual a identidade da V0.1' {
+        $s = Get-AtmIdentityState
+        Assert-Eq $s.Sid $me.Sid 'SID'
+        Assert-Eq $s.Name $me.Name 'nome'
+        Assert-Eq $s.IsElevatedAdministrator $me.IsAdmin 'administrador elevado'
+        Assert-Eq $s.Coverage.Status 'COMPLETE' 'token legivel'
+        Assert-True ($s.ElevationType -ne 'UNKNOWN' -and $s.IntegrityLevel -ne 'UNKNOWN') 'tipo e integridade lidos'
+        if ($s.IsElevatedAdministrator) { Assert-True (@('FULL', 'DEFAULT') -contains $s.ElevationType -and @('HIGH', 'SYSTEM') -contains $s.IntegrityLevel) "administrador elevado: $($s.ElevationType)/$($s.IntegrityLevel)" }
+        if ($s.ElevationType -eq 'LIMITED') { Assert-True ((-not $s.IsElevatedAdministrator) -and @('LOW', 'MEDIUM', 'MEDIUM_PLUS') -contains $s.IntegrityLevel) 'token filtrado' }
+        if ($s.ElevationType -eq 'FULL') { Assert-True (@('HIGH', 'SYSTEM') -contains $s.IntegrityLevel) 'token completo' }
+        Assert-Eq $s.SessionId ([Diagnostics.Process]::GetCurrentProcess().SessionId) 'sessao'
+        $script:caseNote = "$($s.ElevationType)/$($s.IntegrityLevel)"
+    }
+    Test-Case 'Diagnose' 'CLI version mostra identidade, tipo de elevacao e integridade (PRIV-10) nos dois idiomas' {
+        $cmd = Join-Path $srcDir 'bin\agent-temp.cmd'
+        $out = (& cmd.exe /c "`"$cmd`" version -Lang en-US" 2>&1) -join "`n"
+        Assert-True ($out -match 'identity: .+ \| elevated administrator: (yes|no) \| elevation type: (DEFAULT|FULL|LIMITED) \| integrity: [A-Z_]+ \| session: \d+') 'en-US: linha de identidade'
+        Assert-True ($out -match 'real deletion: DISABLED' -and $out -match 'language: en-US') 'linhas existentes preservadas'
+        $out = (& cmd.exe /c "`"$cmd`" version -Lang pt-BR" 2>&1) -join "`n"
+        Assert-True ($out -match 'identidade: .+ \| administrador elevado: (sim|n.{1,3}o) \| tipo de eleva.{1,6}o: (DEFAULT|FULL|LIMITED) \| integridade: [A-Z_]+') 'pt-BR: linha de identidade'
+    }
+    Test-Case 'Camadas' 'Motor de diagnostico somente leitura, sem saida no terminal nem controle de processos/servicos/VMs; codigo nativo sem privilegios' {
+        $lib = Join-Path $srcDir 'lib'
+        $files = @(Get-ChildItem -LiteralPath $lib -File | Where-Object { $_.Name -eq 'Engine.Diagnose.ps1' -or $_.Name -like 'Diagnose.*.ps1' })
+        Assert-True ($files.Count -ge 1) 'motor de diagnostico presente'
+        $banned = @('Write-Host', 'Write-Progress', 'Read-Host', 'AtmDeleter', 'DeleteTree', 'Remove-Item', 'AtmLockProbe', 'Invoke-AtmClean', 'AtmRealDeletionEnabled',
+            'Stop-Process', 'Start-Process', 'Stop-Service', 'Start-Service', 'Set-Service', 'Restart-Service', 'Suspend-Service', 'Invoke-CimMethod', 'Invoke-WmiMethod',
+            'Set-CimInstance', 'Remove-CimInstance', 'Set-ItemProperty', 'New-Item', 'Set-Acl', 'CreateSubKey', 'SetValue', 'sc.exe', 'net stop', 'net start')
+        foreach ($f in $files) {
+            $txt = [IO.File]::ReadAllText($f.FullName)
+            foreach ($pat in $banned) { Assert-True (-not $txt.Contains($pat)) "$($f.Name) contem '$pat'" }
+            Assert-True (-not ($txt -match '(?i)\b(Start|Stop|Save|Suspend|Resume|Restart|Checkpoint|Remove|Set|New)-VM\b')) "$($f.Name) usa cmdlet de VM"
+        }
+        $native = [IO.File]::ReadAllText((Join-Path $lib 'Native.cs'))
+        foreach ($pat in @('SeDebugPrivilege', 'AdjustTokenPrivileges', 'RmShutdown', 'RmRestart', 'TerminateProcess', 'WriteProcessMemory')) { Assert-True (-not $native.Contains($pat)) "Native.cs contem '$pat'" }
+        foreach ($f in @('Tui.ps1', 'Report.ps1')) {
+            $txt = [IO.File]::ReadAllText((Join-Path $lib $f))
+            foreach ($pat in @('Get-AtmIdentityRaw', 'AtmToken]')) { Assert-True (-not $txt.Contains($pat)) "$f chama coletor diretamente: $pat" }
+        }
     }
 
     # ------------------------------------------------------------------ scale

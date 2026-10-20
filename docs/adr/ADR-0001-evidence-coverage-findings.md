@@ -1,6 +1,6 @@
 # ADR-0001: Evidence, coverage and findings
 
-Status: PROPOSED
+Status: ACCEPTED (maintainer gate 2026-10-20, after PR #19)
 Date: 2026-10-20
 Phase: P1 (model and helpers), used by every later phase
 

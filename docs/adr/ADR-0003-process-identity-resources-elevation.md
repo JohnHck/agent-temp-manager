@@ -1,6 +1,6 @@
 # ADR-0003: Process identity, resources and elevation state
 
-Status: PROPOSED
+Status: ACCEPTED (maintainer gate 2026-10-20, after PR #19)
 Date: 2026-10-20
 Phase: P1
 

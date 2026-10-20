@@ -1,6 +1,6 @@
 # ADR-0007: Worktree discovery scope and scale limits
 
-Status: PROPOSED, with one open decision (D-5)
+Status: PARTIALLY ACCEPTED (maintainer gate 2026-10-20, after PR #19): the closed list of discovery sources is accepted; D-5 (b), showing full repository and worktree paths in reports and JSON, needs a privacy review before P3-B
 Date: 2026-10-20
 Phase: P3
 
