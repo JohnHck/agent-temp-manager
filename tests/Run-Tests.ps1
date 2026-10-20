@@ -1839,6 +1839,95 @@ try {
         $out = (& cmd.exe /c "`"$cmd`" version -Lang pt-BR" 2>&1) -join "`n"
         Assert-True ($out -match 'identidade: .+ \| administrador elevado: (sim|n.{1,3}o) \| tipo de eleva.{1,6}o: (DEFAULT|FULL|LIMITED) \| integridade: [A-Z_]+') 'pt-BR: linha de identidade'
     }
+    Test-Case 'Providers' 'Contrato v2: v1 inalterado; provider somente runtime registra sem membros de temporarios; validacao de versao, capacidades e membros' {
+        $claude = (Get-AtmProviders)[0]
+        $c = Get-AtmProviderContract $claude
+        Assert-Eq $c.Version 1 'Claude Code continua v1'
+        Assert-Eq (@($c.Capabilities) -join ',') 'temp' 'v1 = temp'
+        $rt = [pscustomobject]@{ Id = 'fake-runtime'; DisplayName = 'Fake runtime'; ContractVersion = 2; Capabilities = @('runtime'); GetServiceHints = { @([pscustomobject]@{ Name = 'FakeAgentService'; Role = 'vm-host' }) } }
+        try {
+            Register-AtmProvider $rt
+            Assert-Eq @(Get-AtmProviders).Count 2 'registrado'
+            Assert-Eq (@(Get-AtmProviderCapabilities $rt) -join ',') 'runtime' 'capacidade runtime'
+        } finally {
+            for ($k = $script:AtmProviders.Count - 1; $k -ge 0; $k--) { if ($script:AtmProviders[$k].Id -eq 'fake-runtime') { $script:AtmProviders.RemoveAt($k) } }
+        }
+        Assert-Eq @(Get-AtmProviders).Count 1 'registro de teste removido'
+        $both = $claude.PSObject.Copy(); $both.Id = 'fake-both'
+        $both | Add-Member -NotePropertyName ContractVersion -NotePropertyValue 2
+        $both | Add-Member -NotePropertyName Capabilities -NotePropertyValue @('temp', 'runtime')
+        $both | Add-Member -NotePropertyName GetProcessMatchers -NotePropertyValue { @() }
+        $threw = $false; try { Register-AtmProvider $both } catch { $threw = $true }
+        try { Assert-True (-not $threw) 'v2 com temp e runtime aceito' } finally { for ($k = $script:AtmProviders.Count - 1; $k -ge 0; $k--) { if ($script:AtmProviders[$k].Id -eq 'fake-both') { $script:AtmProviders.RemoveAt($k) } } }
+        $bad = @(
+            [pscustomobject]@{ Id = 'b1'; DisplayName = 'B'; ContractVersion = 3; Capabilities = @('runtime') },
+            [pscustomobject]@{ Id = 'b2'; DisplayName = 'B'; ContractVersion = 2; Capabilities = @() },
+            [pscustomobject]@{ Id = 'b3'; DisplayName = 'B'; ContractVersion = 2; Capabilities = @('Runtime') },
+            [pscustomobject]@{ Id = 'b4'; DisplayName = 'B'; ContractVersion = 2; Capabilities = @('runtime', 'runtime') },
+            [pscustomobject]@{ Id = 'b5'; DisplayName = 'B'; ContractVersion = 2; Capabilities = @('gui') },
+            [pscustomobject]@{ Id = 'b6'; DisplayName = 'B'; ContractVersion = 2; Capabilities = @('temp') },
+            [pscustomobject]@{ Id = 'b7'; DisplayName = 'B'; ContractVersion = 2; Capabilities = @('runtime'); GetServiceHints = 'FakeAgentService' },
+            [pscustomobject]@{ Id = 'B8'; DisplayName = 'B'; ContractVersion = 2; Capabilities = @('runtime') },
+            [pscustomobject]@{ Id = 'b9'; ContractVersion = 2; Capabilities = @('runtime') })
+        foreach ($b in $bad) {
+            $threw = $false; try { Register-AtmProvider $b } catch { $threw = $true }
+            Assert-True $threw "recusado: $($b.Id)"
+        }
+        $v1rt = $claude.PSObject.Copy(); $v1rt.Id = 'b10'; $v1rt | Add-Member -NotePropertyName GetServiceHints -NotePropertyValue { @() }
+        $threw = $false; try { Register-AtmProvider $v1rt } catch { $threw = $true }
+        Assert-True $threw 'membro de runtime sem a capacidade runtime recusado (v1)'
+        Assert-Eq @(Get-AtmProviders).Count 1 'nenhum provider invalido registrado'
+    }
+    Test-Case 'Providers' 'Inventario ignora provider somente runtime (override -Providers sem registro); nenhum perfil sem agente quebra' {
+        $p = New-TestProfile 'v2inv'
+        $rc = New-TestRoot -ProfileInfo $p
+        $rt = [pscustomobject]@{ Id = 'fake-runtime'; DisplayName = 'Fake runtime'; ContractVersion = 2; Capabilities = @('runtime') }
+        $a = Get-InvArgs -Profiles @($p)
+        $a['Providers'] = @((Get-AtmProviders)[0], $rt)
+        $i = Invoke-AtmInventory @a
+        Assert-Eq (@($i.Providers | ForEach-Object { $_.Id }) -join ',') 'claude-code' 'somente providers temp no inventario'
+        Assert-Eq @($i.Partitions | Where-Object { $_.Provider -eq 'fake-runtime' }).Count 0 'nenhuma particao do runtime'
+        Assert-Eq (Find-Part $i $rc).Provider 'claude-code' 'claude intacto'
+        $a['Providers'] = @($rt)
+        $threw = $false; try { $null = Invoke-AtmInventory @a } catch { $threw = $true }
+        Assert-True $threw 'sem provider temp: erro explicito (nao inventario vazio)'
+    }
+    Test-Case 'Providers' 'Dicas de runtime: validas, ausentes, malformadas e com excecao (cobertura FAILED, nunca "nada em execucao")' {
+        Assert-True ($null -eq (Get-AtmProviderRuntimeHints (Get-AtmProviders)[0])) 'v1 sem runtime: nenhuma leitura'
+        $ok = [pscustomobject]@{ Id = 'fake-runtime'; DisplayName = 'F'; ContractVersion = 2; Capabilities = @('runtime')
+            GetProcessMatchers = { @([pscustomobject]@{ ImageName = 'fake-agent.exe'; CommandLineMarker = '--fake-agent' }, @{ ImageName = 'fake-helper.exe' }) }
+            GetServiceHints = { @([pscustomobject]@{ Name = 'FakeAgentService'; Role = 'vm-host' }) }
+            GetVirtualizationHints = { @([pscustomobject]@{ Kind = 'ServiceOwner'; Value = 'FakeAgentService' }) } }
+        $h = Get-AtmProviderRuntimeHints $ok
+        Assert-Eq $h.Coverage.Collector 'provider-fake-runtime' 'coletor por provider'
+        Assert-Eq $h.Coverage.Status 'COMPLETE' 'completo'
+        Assert-Eq @($h.ProcessMatchers).Count 2 'matchers (objeto e hashtable)'
+        Assert-True ($null -eq $h.ProcessMatchers[1].CommandLineMarker) 'marcador opcional ausente = $null'
+        Assert-Eq $h.ServiceHints[0].Name 'FakeAgentService' 'servico'
+        $none = [pscustomobject]@{ Id = 'fake-none'; DisplayName = 'F'; ContractVersion = 2; Capabilities = @('runtime') }
+        $h = Get-AtmProviderRuntimeHints $none
+        Assert-Eq $h.Coverage.Status 'COMPLETE' 'sem membros: completo, sem dicas'
+        Assert-Eq (@($h.ProcessMatchers).Count + @($h.ServiceHints).Count + @($h.VirtualizationHints).Count) 0 'nenhuma dica'
+        $badCases = @(
+            @({ @([pscustomobject]@{ ImageName = 'C:\x\fake.exe' }) }, 'HINT_MALFORMED_PROCESS_MATCHERS'),
+            @({ @([pscustomobject]@{ ImageName = 'fake.dll' }) }, 'HINT_MALFORMED_PROCESS_MATCHERS'),
+            @({ @([pscustomobject]@{ ImageName = 'fake.exe'; CommandLineMarker = ('x' * 300) }) }, 'HINT_MALFORMED_PROCESS_MATCHERS'),
+            @({ @(1..300 | ForEach-Object { [pscustomobject]@{ ImageName = "f$_.exe" } }) }, 'HINT_MALFORMED_PROCESS_MATCHERS'),
+            @({ throw (New-Object InvalidOperationException('texto-que-nao-pode-aparecer')) }, 'HINT_FAILED_PROCESS_MATCHERS'))
+        foreach ($bc in $badCases) {
+            $pv = [pscustomobject]@{ Id = 'fake-bad'; DisplayName = 'F'; ContractVersion = 2; Capabilities = @('runtime'); GetProcessMatchers = $bc[0]
+                GetServiceHints = { @([pscustomobject]@{ Name = 'FakeAgentService' }) } }
+            $h = Get-AtmProviderRuntimeHints $pv
+            Assert-Eq $h.Coverage.Status 'FAILED' "falha: $($bc[1])"
+            Assert-True (@($h.Coverage.Reasons) -contains $bc[1]) "motivo $($bc[1]): $(@($h.Coverage.Reasons) -join ',')"
+            Assert-Eq @($h.ProcessMatchers).Count 0 'membro invalido descartado inteiro'
+            Assert-Eq @($h.ServiceHints).Count 1 'membros validos mantidos'
+            Assert-True (-not ((@($h.Coverage.Reasons) -join ' ') -match 'texto-que')) 'mensagem da excecao nunca registrada'
+        }
+        $pv = [pscustomobject]@{ Id = 'fake-bad'; DisplayName = 'F'; ContractVersion = 2; Capabilities = @('runtime'); GetServiceHints = { @([pscustomobject]@{ Name = 'Bad|Name' }) }; GetVirtualizationHints = { @(@{ Kind = 'vmname'; Value = 'x' }) } }
+        $h = Get-AtmProviderRuntimeHints $pv
+        Assert-Eq (@($h.Coverage.Reasons) -join ',') 'HINT_MALFORMED_SERVICE_HINTS,HINT_MALFORMED_VIRTUALIZATION_HINTS' 'servico e virtualizacao malformados'
+    }
     Test-Case 'Camadas' 'Motor de diagnostico somente leitura, sem saida no terminal nem controle de processos/servicos/VMs; codigo nativo sem privilegios' {
         $lib = Join-Path $srcDir 'lib'
         $files = @(Get-ChildItem -LiteralPath $lib -File | Where-Object { $_.Name -eq 'Engine.Diagnose.ps1' -or $_.Name -like 'Diagnose.*.ps1' })

@@ -29,6 +29,36 @@ Rules:
 * Providers do not classify, gate or delete. All safety logic is shared and identical for every agent.
 * Unknown structure is not a provider error: the engine flags it and blocks it.
 
+## Contract v2 (V0.2): capabilities and runtime hints
+
+Decision record: [ADR-0008](adr/ADR-0008-provider-contract-v2.md). A provider **without** `ContractVersion` is a v1
+provider: it is validated exactly as described above and has the single capability `temp`. Nothing changes for it.
+
+A v2 provider declares:
+
+| Member | Type | Meaning |
+|---|---|---|
+| `ContractVersion` | `2` | Contract version. Any other value is refused. |
+| `Capabilities` | string[] | Non-empty subset of `temp` and `runtime` (exact, lower case, no duplicates). |
+
+* `temp`: the eleven v1 members above are required and validated as in v1. Only providers with this capability are
+  used by the temporary-directory inventory (audit, preview, clean).
+* `runtime`: optional members describing runtime evidence for `agent-temp diagnose`. Each one, when present, must be
+  a script block; declaring one without the `runtime` capability is refused. An absent member means "no hints from
+  this provider", never "nothing is running".
+
+| Runtime member | Signature | Returns |
+|---|---|---|
+| `GetProcessMatchers` | `{ }` | `@({ ImageName; CommandLineMarker })`: exact image file name (`*.exe`), optional marker matched in memory against the command line (the command line is never stored or printed). |
+| `GetServiceHints` | `{ }` | `@({ Name; Role })`: exact Windows service names; `Role` is an optional lower-case id. |
+| `GetVirtualizationHints` | `{ }` | `@({ Kind; Value })` with `Kind` `ServiceOwner` (a service that owns a VM) or `VmName`. |
+| `GetWorktreeHints` | `{ param($ProfileInfo, $Registry) }` | `{ Readable; Dirs }`: absolute local starting directories (used from V0.2-P3). |
+
+Hint results are validated when diagnose reads them. A member that throws or returns a malformed value gives that
+provider's coverage record (`provider-<id>`) the status `FAILED` (`HINT_FAILED` / `HINT_MALFORMED`); diagnostics
+continue with the other providers. The same rules as v1 apply: providers only read, never decide, never open
+credential or token files, and can never weaken a gate or a coverage status.
+
 ## V1: Claude Code
 
 * Base: `<TEMP>\claude` (also `<CLAUDE_CODE_TMPDIR>\claude` when set).

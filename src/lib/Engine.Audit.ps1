@@ -34,13 +34,40 @@ $script:AtmSoftFlags = @('ANCESTOR_REFERENCE', 'AMBIGUOUS_REFERENCE', 'SESSION_R
 $script:AtmProviders = New-Object System.Collections.Generic.List[object]
 $script:AtmProviderMembers = @('Id', 'DisplayName', 'TempSubdir', 'ScopePattern', 'RootPattern', 'EnvVarNames',
     'GetExtraTempDirs', 'GetConfigDirs', 'GetSessionEvidence', 'GetActivityEvidence', 'GetProjectKey')
+# Contract v2 (docs/adr/ADR-0008): capabilities and optional runtime members. A provider without ContractVersion is a
+# v1 provider with the single capability 'temp', validated exactly as before.
+$script:AtmProviderCapabilityNames = @('temp', 'runtime')
+$script:AtmProviderRuntimeMembers = @('GetProcessMatchers', 'GetServiceHints', 'GetVirtualizationHints', 'GetWorktreeHints')
+
+function Get-AtmProviderContract {
+    # Works on unregistered objects too (the -Providers override of Invoke-AtmInventory skips registration).
+    param($Provider)
+    $names = @($Provider.PSObject.Properties.Name)
+    if ($names -notcontains 'ContractVersion') { return [pscustomobject]@{ Version = 1; Capabilities = @('temp') } }
+    $v = 0
+    if (-not [int]::TryParse([string]$Provider.ContractVersion, [ref]$v) -or $v -ne 2) { throw (Get-AtmText 'err.providerContract' ([string]$Provider.ContractVersion)) }
+    $caps = @(if ($names -contains 'Capabilities') { @($Provider.Capabilities) | Where-Object { $null -ne $_ } })
+    if ($caps.Count -eq 0) { throw (Get-AtmText 'err.providerCapabilities' '-') }
+    foreach ($c in $caps) { if (-not ($c -is [string]) -or $script:AtmProviderCapabilityNames -cnotcontains $c) { throw (Get-AtmText 'err.providerCapabilities' ([string]$c)) } }
+    if (@($caps | Select-Object -Unique).Count -ne $caps.Count) { throw (Get-AtmText 'err.providerCapabilities' ($caps -join ',')) }
+    return [pscustomobject]@{ Version = 2; Capabilities = [string[]]$caps }
+}
+
+function Get-AtmProviderCapabilities { param($Provider) return @((Get-AtmProviderContract $Provider).Capabilities) }
 
 function Register-AtmProvider {
     param($Provider)
     $names = @($Provider.PSObject.Properties.Name)
-    foreach ($m in $script:AtmProviderMembers) { if ($names -notcontains $m) { throw (Get-AtmText 'err.providerMember' $m) } }
-    if ($Provider.Id -notmatch '^[a-z0-9-]+$') { throw (Get-AtmText 'err.providerId' $Provider.Id) }
-    if ($Provider.TempSubdir -notmatch '^[A-Za-z0-9._-]+$') { throw (Get-AtmText 'err.providerSubdir' $Provider.TempSubdir) }
+    $contract = Get-AtmProviderContract $Provider
+    $isTemp = $contract.Capabilities -ccontains 'temp'
+    $required = $(if ($isTemp) { $script:AtmProviderMembers } else { @('Id', 'DisplayName') })
+    foreach ($m in $required) { if ($names -notcontains $m) { throw (Get-AtmText 'err.providerMember' $m) } }
+    if ($Provider.Id -cnotmatch '^[a-z0-9-]+$') { throw (Get-AtmText 'err.providerId' $Provider.Id) }
+    if ($isTemp -and $Provider.TempSubdir -notmatch '^[A-Za-z0-9._-]+$') { throw (Get-AtmText 'err.providerSubdir' $Provider.TempSubdir) }
+    foreach ($m in $script:AtmProviderRuntimeMembers) {
+        if ($names -notcontains $m) { continue }
+        if ($contract.Capabilities -cnotcontains 'runtime' -or -not ($Provider.$m -is [scriptblock])) { throw (Get-AtmText 'err.providerRuntimeMember' $m) }
+    }
     for ($i = $script:AtmProviders.Count - 1; $i -ge 0; $i--) { if ($script:AtmProviders[$i].Id -eq $Provider.Id) { $script:AtmProviders.RemoveAt($i) } }
     $script:AtmProviders.Add($Provider)
 }
@@ -528,7 +555,9 @@ function Invoke-AtmInventory {
     $config = Get-AtmConfig -ConfigDir $ConfigDir
     $identity = $(if ($IdentityOverride) { $IdentityOverride } else { Get-AtmCurrentIdentity })
     $progress = (-not $NoProgress) -and ($null -ne $ProgressCallback)
-    $providerList = @(if ($null -ne $Providers) { $Providers } else { Get-AtmProviders })
+    # Only providers with the 'temp' capability describe temporary directories; runtime-only providers (contract v2)
+    # are used by the diagnose engine.
+    $providerList = @(@(if ($null -ne $Providers) { $Providers } else { Get-AtmProviders }) | Where-Object { (Get-AtmProviderCapabilities $_) -ccontains 'temp' })
     if ($providerList.Count -eq 0) { throw (Get-AtmText 'err.noProvider') }
 
     # Phase 1: profiles

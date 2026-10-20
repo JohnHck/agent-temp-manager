@@ -177,3 +177,78 @@ function Get-AtmIdentityState {
         Coverage                = $cov
     }
 }
+
+# ---------------------------------------------------------------------------------------------
+# Provider runtime hints (contract v2, ADR-0008)
+# ---------------------------------------------------------------------------------------------
+
+$script:AtmHintMaxItems = 256
+$script:AtmHintSpecs = @(
+    [pscustomobject]@{ Member = 'GetProcessMatchers'; Slot = 'ProcessMatchers'; Code = 'PROCESS_MATCHERS'; Props = @('ImageName', 'CommandLineMarker') },
+    [pscustomobject]@{ Member = 'GetServiceHints'; Slot = 'ServiceHints'; Code = 'SERVICE_HINTS'; Props = @('Name', 'Role') },
+    [pscustomobject]@{ Member = 'GetVirtualizationHints'; Slot = 'VirtualizationHints'; Code = 'VIRTUALIZATION_HINTS'; Props = @('Kind', 'Value') }
+)
+
+function Get-AtmHintProperty {
+    # Hints may be hashtables or objects; a missing property is $null (never a StrictMode error).
+    param($Item, [string]$Name)
+    if ($Item -is [System.Collections.IDictionary]) { if ($Item.Contains($Name)) { return $Item[$Name] } return $null }
+    if (@($Item.PSObject.Properties.Name) -contains $Name) { return $Item.$Name }
+    return $null
+}
+
+function Test-AtmHintText {
+    param($Value, [int]$Max = 256)
+    return (($Value -is [string]) -and $Value.Length -gt 0 -and $Value.Length -le $Max -and $Value -notmatch '[\x00-\x1f]')
+}
+
+function Test-AtmHintItem {
+    param([string]$Slot, $Values)
+    switch ($Slot) {
+        'ProcessMatchers' { return ((Test-AtmHintText $Values.ImageName) -and $Values.ImageName -match '^[^\/:*?"<>|]+\.exe$' -and ($null -eq $Values.CommandLineMarker -or (Test-AtmHintText $Values.CommandLineMarker))) }
+        'ServiceHints' { return ((Test-AtmHintText $Values.Name) -and $Values.Name -match '^[A-Za-z0-9_.\- ]+$' -and ($null -eq $Values.Role -or ($Values.Role -is [string] -and $Values.Role -cmatch $script:AtmIdPattern))) }
+        'VirtualizationHints' { return (@('ServiceOwner', 'VmName') -ccontains $Values.Kind -and (Test-AtmHintText $Values.Value)) }
+    }
+    return $false
+}
+
+function Get-AtmProviderRuntimeHints {
+    # Calls the parameterless runtime members of one provider with the 'runtime' capability and validates them.
+    # Returns $null for a provider without that capability. An absent member means "no hints", never "nothing
+    # running". A member that throws or returns anything malformed is discarded as a whole and makes the provider's
+    # coverage record (provider-<id>) FAILED; valid members are kept.
+    param($Provider)
+    if ((Get-AtmProviderCapabilities $Provider) -cnotcontains 'runtime') { return $null }
+    $names = @($Provider.PSObject.Properties.Name)
+    $started = [datetime]::UtcNow
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $reasons = New-Object System.Collections.Generic.List[string]
+    $slots = @{ ProcessMatchers = @(); ServiceHints = @(); VirtualizationHints = @() }
+    foreach ($spec in $script:AtmHintSpecs) {
+        if ($names -notcontains $spec.Member) { continue }
+        $raw = $null
+        try { $raw = @(& $Provider.($spec.Member)) }
+        catch { $reasons.Add('HINT_FAILED_' + $spec.Code); $reasons.Add((ConvertTo-AtmExceptionCode $_.Exception.GetType().Name)); continue }
+        $items = @($raw | Where-Object { $null -ne $_ })
+        $valid = New-Object System.Collections.Generic.List[object]
+        $ok = $items.Count -le $script:AtmHintMaxItems
+        foreach ($it in $items) {
+            if (-not $ok) { break }
+            $v = [ordered]@{}
+            foreach ($p in $spec.Props) { $v[$p] = Get-AtmHintProperty -Item $it -Name $p }
+            $o = [pscustomobject]$v
+            if (Test-AtmHintItem -Slot $spec.Slot -Values $o) { $valid.Add($o) } else { $ok = $false }
+        }
+        if ($ok) { $slots[$spec.Slot] = $valid.ToArray() } else { $reasons.Add('HINT_MALFORMED_' + $spec.Code) }
+    }
+    $sw.Stop()
+    $status = $(if ($reasons.Count -gt 0) { 'FAILED' } else { 'COMPLETE' })
+    $cov = New-AtmCoverage -Collector ('provider-' + $Provider.Id) -Status $status -Reasons $reasons.ToArray() -ElevationWouldHelp 'NO' -StartedUtc $started -ElapsedMs $sw.ElapsedMilliseconds
+    [pscustomobject]@{
+        ProviderId          = $Provider.Id
+        ProcessMatchers     = @($slots['ProcessMatchers'])
+        ServiceHints        = @($slots['ServiceHints'])
+        VirtualizationHints = @($slots['VirtualizationHints'])
+        Coverage            = $cov
+    }
+}
