@@ -1873,6 +1873,12 @@ try {
             $threw = $false; try { Register-AtmProvider $b } catch { $threw = $true }
             Assert-True $threw "recusado: $($b.Id)"
         }
+        # Full v1 compatibility: the V0.1 Id check (case-insensitive) is unchanged for providers without ContractVersion.
+        $v1up = $claude.PSObject.Copy(); $v1up.Id = 'Fake-Upper-V1'
+        try {
+            Register-AtmProvider $v1up
+            Assert-True (@(Get-AtmProviders | Where-Object { $_.Id -eq 'Fake-Upper-V1' }).Count -eq 1) 'v1 com Id em maiusculas continua aceito (como na V0.1)'
+        } finally { for ($k = $script:AtmProviders.Count - 1; $k -ge 0; $k--) { if ($script:AtmProviders[$k].Id -eq 'Fake-Upper-V1') { $script:AtmProviders.RemoveAt($k) } } }
         $v1rt = $claude.PSObject.Copy(); $v1rt.Id = 'b10'; $v1rt | Add-Member -NotePropertyName GetServiceHints -NotePropertyValue { @() }
         $threw = $false; try { Register-AtmProvider $v1rt } catch { $threw = $true }
         Assert-True $threw 'membro de runtime sem a capacidade runtime recusado (v1)'

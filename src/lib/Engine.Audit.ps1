@@ -55,6 +55,14 @@ function Get-AtmProviderContract {
 
 function Get-AtmProviderCapabilities { param($Provider) return @((Get-AtmProviderContract $Provider).Capabilities) }
 
+function Test-AtmProviderId {
+    # v1 keeps the V0.1 check unchanged (case-insensitive, full compatibility with existing providers); v2 requires
+    # the documented lower-case form exactly.
+    param([string]$Id, $Contract)
+    if ($Contract.Version -ge 2) { return ($Id -cmatch '^[a-z0-9-]+$') }
+    return ($Id -match '^[a-z0-9-]+$')
+}
+
 function Register-AtmProvider {
     param($Provider)
     $names = @($Provider.PSObject.Properties.Name)
@@ -62,7 +70,7 @@ function Register-AtmProvider {
     $isTemp = $contract.Capabilities -ccontains 'temp'
     $required = $(if ($isTemp) { $script:AtmProviderMembers } else { @('Id', 'DisplayName') })
     foreach ($m in $required) { if ($names -notcontains $m) { throw (Get-AtmText 'err.providerMember' $m) } }
-    if ($Provider.Id -cnotmatch '^[a-z0-9-]+$') { throw (Get-AtmText 'err.providerId' $Provider.Id) }
+    if (-not (Test-AtmProviderId -Id $Provider.Id -Contract $contract)) { throw (Get-AtmText 'err.providerId' $Provider.Id) }
     if ($isTemp -and $Provider.TempSubdir -notmatch '^[A-Za-z0-9._-]+$') { throw (Get-AtmText 'err.providerSubdir' $Provider.TempSubdir) }
     foreach ($m in $script:AtmProviderRuntimeMembers) {
         if ($names -notcontains $m) { continue }
