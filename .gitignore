@@ -1,0 +1,7 @@
+dist/
+*.local.json
+!*.local.example.json
+src/manifest.json
+src/install-state.json
+test-results*.json
+.local/

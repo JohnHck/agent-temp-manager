@@ -1,0 +1,7 @@
+{
+  "_comment": "Copy to projects.local.json (or pass -ProjectsFile to the installer). Evaluated before projects.json. Example rules only.",
+  "projects": [
+    { "name": "Example API", "pattern": "example-?api" },
+    { "name": "Example Web", "pattern": "(^|-)example-web(-|$)" }
+  ]
+}

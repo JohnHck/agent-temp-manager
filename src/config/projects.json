@@ -1,0 +1,4 @@
+{
+  "_comment": "Generic project recognition, informational only (never affects cleanup eligibility). Order: home profile, optional site rules (projects.local.json, not versioned, see projects.local.example.json), the agent's own session evidence (working directory whose scope matches), otherwise 'unidentified project'. Patterns are case-insensitive .NET regexes matched against the scope name AFTER the owning profile path prefix is removed. Optional keys homeProjectName / unknownProjectName override the localized defaults.",
+  "projects": []
+}
