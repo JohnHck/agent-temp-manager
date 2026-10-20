@@ -1,0 +1,8 @@
+# Identities accepted by tools/Test-AtmCommitIdentity.ps1 in addition to GitHub noreply addresses.
+#
+#   email:<address>        a contributor who chose to publish this address (needs maintainer approval)
+#   commit:<40-hex sha>    a reviewed historical commit that is deliberately kept in the history
+#
+# 586f09a: the GitHub rebase merge of PR #2 recorded the account's primary e-mail as committer. The maintainer
+# decided to keep the history (no rewrite); see docs/SECURITY-MODEL.md, "Commit identity".
+commit:586f09acb8c503911e0b81e44ea052793cd5d48c

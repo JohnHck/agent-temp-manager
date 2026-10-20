@@ -1057,6 +1057,81 @@ try {
         Assert-Eq @($f | Where-Object { $_.File -eq 'ficticio.md' }).Count 0 'valores ficticios aceitos'
         Assert-True (@($f | Where-Object { $_.Excerpt -match 'MariaSilva|111111111|exemplo-real' }).Count -eq 0) 'achados nao reproduzem o dado'
     }
+    Test-Case 'Privacidade' 'Identidade Git: autor, committer e trailers; noreply aceito; pessoal detectado sem expor o endereco' {
+        if (-not (Get-Command git -ErrorAction SilentlyContinue)) { $script:caseSkipped = $true; $script:caseNote = 'git indisponivel'; return }
+        $tool = Join-Path (Split-Path -Parent $testsDir) 'tools\Test-AtmCommitIdentity.ps1'
+        $shell = (Get-Process -Id $PID).Path
+        $g = Join-Path $sandbox 'identity-repo'; [void][IO.Directory]::CreateDirectory($g)
+        # Fictitious addresses, assembled at run time so the privacy scanner never sees them in the source.
+        $personal = 'maria.teste' + '@' + 'exemplo-pessoal.com.br'
+        $other = 'joao.contrib' + '@' + 'exemplo-pessoal.com.br'
+        $noreply = '1234567+alice-dev' + '@' + 'users.noreply.github.com'
+        $botMail = '49699333+dependabot[bot]' + '@' + 'users.noreply.github.com'
+        $webflow = 'noreply' + '@' + 'github.com'
+        $ghSupport = 'support' + '@' + 'github.com'
+        $assistant = 'noreply' + '@' + 'anthropic.com'
+        $saved = @{}; foreach ($v in @('GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL')) { $saved[$v] = [Environment]::GetEnvironmentVariable($v) }
+        $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try {
+            # Isolated from the user's and the system's Git configuration (no hooks, signing or identity leak in).
+            $env:GIT_CONFIG_GLOBAL = Join-Path $g 'empty.gitconfig'; [IO.File]::WriteAllText($env:GIT_CONFIG_GLOBAL, '')
+            $env:GIT_CONFIG_NOSYSTEM = '1'
+            & git -C $g init -q 2>&1 | Out-Null
+            function New-IdCommit([string]$Author, [string]$Committer, [string[]]$Trailers = @()) {
+                $env:GIT_AUTHOR_NAME = 'Autor'; $env:GIT_AUTHOR_EMAIL = $Author
+                $env:GIT_COMMITTER_NAME = 'Committer'; $env:GIT_COMMITTER_EMAIL = $Committer
+                $msg = @('-m', 'teste'); if ($Trailers.Count) { $msg += @('-m', ($Trailers -join "`n")) }
+                & git -C $g commit -q --allow-empty @msg 2>&1 | Out-Null
+                Assert-Eq $LASTEXITCODE 0 'commit de teste'
+                return (& git -C $g rev-parse HEAD).Trim()
+            }
+            function Invoke-IdTool([string[]]$ToolArgs) {
+                $out = @(& $shell -NoProfile -ExecutionPolicy Bypass -File $tool -RepoDir $g @ToolArgs 2>&1 | ForEach-Object { "$_" })
+                return [pscustomobject]@{ Code = $LASTEXITCODE; Text = ($out -join "`n") }
+            }
+            $c0 = New-IdCommit $noreply $noreply @("Co-authored-by: Assistente <$assistant>")
+            $c1 = New-IdCommit $botMail $webflow @("Signed-off-by: dependabot[bot] <$ghSupport>")
+            $r = Invoke-IdTool @('-All')
+            Assert-Eq $r.Code 0 "noreply, bot, web-flow e trailers organizacionais aceitos: $($r.Text)"
+
+            $c2 = New-IdCommit $personal $noreply
+            $c3 = New-IdCommit $noreply $personal                       # what a GitHub merge did in the incident
+            $c4 = New-IdCommit $noreply $noreply @("Co-authored-by: Joao <$other>", "Signed-off-by: Maria <$personal>")
+            $c5 = New-IdCommit $assistant $noreply                       # trailer-only address used as author
+            $r = Invoke-IdTool @('-All')
+            Assert-Eq $r.Code 1 'achados geram codigo 1'
+            foreach ($exp in @("$($c2.Substring(0, 12)) author", "$($c3.Substring(0, 12)) committer", "$($c4.Substring(0, 12)) Co-authored-by", "$($c4.Substring(0, 12)) Signed-off-by", "$($c5.Substring(0, 12)) author")) {
+                Assert-True ($r.Text -match [regex]::Escape($exp)) "detecta $exp"
+            }
+            Assert-True ($r.Text -match 'achados: 5') "cinco achados: $($r.Text)"
+            foreach ($secret in @($personal, $other, 'maria.teste', 'joao.contrib', 'exemplo-pessoal')) { Assert-True (-not $r.Text.Contains($secret)) 'endereco nunca aparece completo' }
+            Assert-True ($r.Text -match 'm\*\*\*@e\*\*\*') 'endereco mascarado'
+
+            $r = Invoke-IdTool @('-Range', "$c1..$c2")
+            Assert-Eq $r.Code 1 'faixa com um commit pessoal'
+            Assert-True ($r.Text -match 'commits verificados: 1 ') 'a faixa limita os commits verificados'
+            $r = Invoke-IdTool @('-Range', "$c0..$c1")
+            Assert-Eq $r.Code 0 'faixa limpa'
+            $r = Invoke-IdTool @('-Commit', $c3)
+            Assert-Eq $r.Code 1 'commit unico (push) com committer pessoal'
+
+            $al = Join-Path $sandbox 'identity-allowlist.txt'
+            [IO.File]::WriteAllText($al, "# teste`nemail:$($personal.ToUpperInvariant())`nemail:$other`ncommit:$c5`n")
+            $r = Invoke-IdTool @('-All', '-AllowListFile', $al)
+            Assert-Eq $r.Code 0 "allow-list: e-mails publicados por decisao e commit aceito ($($r.Text))"
+            Assert-True ($r.Text -match 'excecoes aceitas: 1') 'commit aceito contabilizado'
+            [IO.File]::WriteAllText($al, "email:nao-e-um-endereco`n")
+            $r = Invoke-IdTool @('-All', '-AllowListFile', $al)
+            Assert-Eq $r.Code 2 'linha invalida na allow-list e erro (nao aceita tudo)'
+            $r = Invoke-IdTool @('-All', '-Commit', $c0)
+            Assert-Eq $r.Code 2 'parametros conflitantes'
+            $r = Invoke-IdTool @('-Range', 'ref-inexistente..HEAD')
+            Assert-Eq $r.Code 2 'faixa invalida e erro, nunca "limpo"'
+        } finally {
+            $ErrorActionPreference = $eap
+            foreach ($v in $saved.Keys) { [Environment]::SetEnvironmentVariable($v, $saved[$v]) }
+        }
+    }
     Test-Case 'Privacidade' 'Repositorio (arquivos de trabalho e index Git) sem dados pessoais, da maquina ou privados' {
         $repo = Split-Path -Parent $testsDir
         $scan = Join-Path $repo 'tools\Test-AtmPrivacy.ps1'

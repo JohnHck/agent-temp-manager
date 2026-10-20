@@ -126,3 +126,31 @@ PID, process name and the inventoried path. The agent's session registry is pars
 and `procStart`, plus the leaf name of `cwd` (for project naming) - the full working directory is not kept.
 Reports contain paths and aggregates. `-ExportJson` output includes the machine name,
 user names, SIDs, profile paths and project slugs: review it before sharing.
+
+## Commit identity
+
+Public Git history must not expose personal e-mail addresses. `tools/Test-AtmCommitIdentity.ps1` checks the
+author, the committer and the `Co-authored-by` / `Signed-off-by` trailers of every commit in a range:
+
+* accepted: GitHub noreply addresses (users and bots), the fixed address GitHub uses as committer of commits it
+  creates, and, in trailers only, organizational addresses (AI assistant co-author lines, Dependabot sign-off);
+* reported: any other address, printed masked (first letter and domain initial only), never in full;
+* exceptions: `.github/commit-identity-allowlist.txt` lists addresses a contributor chose to publish (added with a
+  maintainer's approval) and reviewed historical commits that are deliberately kept.
+
+CI runs it on every pull request (base..head) and on every push to `main` (before..after). It is informative and is
+not a required check, so it never blocks an external contribution by itself; a maintainer decides.
+
+Limits, stated plainly:
+
+* A check after a push only **detects**: the commit is already public. Rewriting history afterwards does not remove
+  copies (clones, caches, references by SHA).
+* A pull-request check cannot see the commit GitHub creates when it merges (merge, squash or rebase); that commit's
+  committer comes from the account that clicks merge. Only the account setting "Keep my email addresses private"
+  prevents it, and the push check detects it.
+* Prevention therefore relies on: commits made locally with the noreply address, the account settings "Keep my
+  email addresses private" and "Block command line pushes that expose my email", and no public e-mail on the
+  maintainer's profile.
+
+Known exception: commit `586f09a` (rebase merge of PR #2) carries the maintainer account's primary address as
+committer. The history was kept on purpose; the commit is listed in the allow-list.
