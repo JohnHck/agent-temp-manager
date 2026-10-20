@@ -1986,6 +1986,25 @@ try {
         Assert-Eq (@($d.Providers | ForEach-Object { $_.Id }) -join ',') 'claude-code,fake-runtime' 'somente providers validos'
         $threw = $false; try { $null = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -DeadlineSeconds -1 } catch { $threw = $true }
         Assert-True $threw 'prazo negativo recusado'
+        # Full v1 compatibility in diagnose too: a v1 provider with an upper-case Id (accepted by V0.1) takes part.
+        $v1up = (Get-AtmProviders)[0].PSObject.Copy(); $v1up.Id = 'Fake-Upper-V1'; $v1up.TempSubdir = 'fake-upper'
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0], $v1up)
+        Assert-True (@($d.Providers | Where-Object { $_.Id -eq 'Fake-Upper-V1' -and $_.ContractVersion -eq 1 }).Count -eq 1) 'v1 com Id em maiusculas listado'
+        Assert-Eq @($d.Coverage | Where-Object { $_.Status -eq 'FAILED' }).Count 0 'nenhuma cobertura FAILED por causa do Id'
+        Assert-True ((@($d.Inventory.Providers | ForEach-Object { $_.Id }) -join ',') -eq 'claude-code,Fake-Upper-V1') 'inventario usa os dois providers temp'
+    }
+    Test-Case 'Somente leitura' 'diagnose nao altera nada no sandbox (nomes, tamanhos, mtime, atributos)' {
+        $p = New-TestProfile 'diagro'
+        1..2 | ForEach-Object { $null = New-TestRoot -ProfileInfo $p }
+        $before = Get-TreeListing $p.ProfilePath
+        for ($w = 0; $w -lt 20; $w++) { Start-Sleep -Milliseconds 500; $again = Get-TreeListing $p.ProfilePath; if ($again -eq $before) { break }; $before = $again }
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser
+        $null = ConvertTo-AtmDiagnoseJson -Result $d
+        $null = Show-AtmDiagnose -Result $d 6>&1
+        $after = Get-TreeListing $p.ProfilePath
+        $diff = @(Compare-Object ($before -split "`n") ($after -split "`n") | ForEach-Object { $_.SideIndicator + ' ' + ($_.InputObject -replace '^.*\\(Users\d+)', '$1') })
+        Assert-Eq $diff.Count 0 ('listagem identica: ' + ($diff -join ' ; '))
+        Assert-Eq @($d.Findings).Count 2 'duas particoes diagnosticadas'
     }
     Test-Case 'Diagnose' 'JSON atm.diagnose/1: campos iguais ao documento do schema; identico nos dois idiomas (exceto language); horarios ISO UTC; listas sempre arrays' {
         $p = New-TestProfile 'diagjson'

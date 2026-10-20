@@ -322,19 +322,21 @@ function Invoke-AtmDiagnose {
     $provInfo = New-Object System.Collections.Generic.List[object]
     $hints = New-Object System.Collections.Generic.List[object]
     foreach ($p in $provList) {
-        $provId = 'invalid'
-        if ($null -ne $p -and @($p.PSObject.Properties.Name) -contains 'Id' -and ([string]$p.Id) -cmatch '^[a-z0-9-]+$') { $provId = [string]$p.Id }
+        $rawId = $(if ($null -ne $p -and @($p.PSObject.Properties.Name) -contains 'Id') { [string]$p.Id } else { '' })
         $contract = $null
         # Contract violation: reported below as PROVIDER_CONTRACT_INVALID; the provider takes no part in the run.
         try { $contract = Get-AtmProviderContract $p } catch { $contract = $null }
-        if ($null -eq $contract -or $provId -eq 'invalid') {
-            $coverage.Add((New-AtmCoverage -Collector ('provider-' + $provId) -Status 'FAILED' -Reasons @('PROVIDER_CONTRACT_INVALID') -ElevationWouldHelp 'NO'))
+        # Validity follows the registration rules (v1 Id check unchanged); the collector name is only lower-cased.
+        $collector = $(if ($rawId -match '^[A-Za-z0-9-]+$') { 'provider-' + $rawId.ToLowerInvariant() } else { 'provider-invalid' })
+        if ($null -eq $contract -or -not (Test-AtmProviderId -Id $rawId -Contract $contract)) {
+            $coverage.Add((New-AtmCoverage -Collector $collector -Status 'FAILED' -Reasons @('PROVIDER_CONTRACT_INVALID') -ElevationWouldHelp 'NO'))
             continue
         }
         $validProviders.Add($p)
-        $provInfo.Add([pscustomobject]@{ Id = $provId; DisplayName = [string]$p.DisplayName; ContractVersion = $contract.Version; Capabilities = @($contract.Capabilities) })
+        $provInfo.Add([pscustomobject]@{ Id = $rawId; DisplayName = [string]$p.DisplayName; ContractVersion = $contract.Version; Capabilities = @($contract.Capabilities) })
         if ($contract.Capabilities -cnotcontains 'runtime') { continue }
-        if ([datetime]::UtcNow -gt $deadline) { $coverage.Add((New-AtmDeadlineCoverage ('provider-' + $provId))); continue }
+        # -ge: a deadline of 0 means that only the identity is read.
+        if ([datetime]::UtcNow -ge $deadline) { $coverage.Add((New-AtmDeadlineCoverage $collector)); continue }
         $h = Get-AtmProviderRuntimeHints $p
         $hints.Add($h)
         $coverage.Add($h.Coverage)
@@ -342,7 +344,7 @@ function Invoke-AtmDiagnose {
 
     # V0.1 temporary-directory inventory (read-only) and the coverage it implies.
     $inv = $null
-    if ([datetime]::UtcNow -gt $deadline) {
+    if ([datetime]::UtcNow -ge $deadline) {
         foreach ($c in @('inventory', 'processes', 'temp-profiles')) { $coverage.Add((New-AtmDeadlineCoverage $c)) }
     } else {
         $ia = @{} + $InventoryArgs
