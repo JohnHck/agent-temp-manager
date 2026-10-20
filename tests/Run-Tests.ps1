@@ -34,6 +34,68 @@ $sandbox = Get-AtmNormalizedPath (Join-Path ([IO.Path]::GetTempPath()) ('atm-tes
 # Administrators group on an elevated Windows Server runner (CI). Test profiles and the test identity use it, so the
 # engine's owner gate (owner == profile SID) is exercised identically everywhere.
 $testOwnerSid = (Get-Acl -LiteralPath $sandbox).GetOwner([Security.Principal.SecurityIdentifier]).Value
+
+function Get-SandboxAclTargetProblems {
+    # The only directory whose ACL the suite may replace: a freshly created, empty, plain (non-reparse) directory named
+    # atm-tests-<8 hex> directly inside the canonical temporary root, with no reparse point on any ancestor.
+    param([string]$Path, [string]$TempRoot)
+    $problems = New-Object System.Collections.Generic.List[string]
+    $root = Get-AtmNormalizedPath $TempRoot
+    $canon = Get-AtmNormalizedPath $Path
+    if (-not $root -or -not $canon) { $problems.Add('caminho nao normalizavel'); return $problems.ToArray() }
+    if (-not [string]::Equals([IO.Path]::GetDirectoryName($canon), $root.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) { $problems.Add('fora da raiz temporaria de testes') }
+    if ([IO.Path]::GetFileName($canon) -cnotmatch '^atm-tests-[0-9a-f]{8}$') { $problems.Add('nome inesperado') }
+    if (-not [IO.Directory]::Exists($canon)) { $problems.Add('inexistente'); return $problems.ToArray() }
+    $d = New-Object IO.DirectoryInfo($canon)
+    while ($d) {
+        if (($d.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $problems.Add("reparse point: $($d.FullName)") }
+        $d = $d.Parent
+    }
+    if (@([IO.Directory]::EnumerateFileSystemEntries($canon)).Count -ne 0) { $problems.Add('nao vazio') }
+    return $problems.ToArray()
+}
+
+function Get-SandboxAclResultProblems {
+    # Expected result: protected DACL (nothing inherited from ancestors), owner = test owner, and exactly two explicit
+    # allow entries, FullControl for SYSTEM and Administrators, inherited by subdirectories and files.
+    param([string]$Path, [string]$OwnerSid)
+    $problems = New-Object System.Collections.Generic.List[string]
+    $acl = Get-Acl -LiteralPath $Path
+    if (-not $acl.AreAccessRulesProtected) { $problems.Add('heranca ainda ativa') }
+    if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $OwnerSid) { $problems.Add('owner inesperado') }
+    $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+    $sids = @($rules | ForEach-Object { $_.IdentityReference.Value } | Sort-Object)
+    if (($sids -join ',') -ne 'S-1-5-18,S-1-5-32-544') { $problems.Add("entradas inesperadas: $($sids -join ',')") }
+    foreach ($r in $rules) {
+        if ($r.IsInherited -or $r.AccessControlType -ne 'Allow' -or $r.FileSystemRights -ne 'FullControl' -or
+            $r.InheritanceFlags -ne ([Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit')) { $problems.Add("entrada inesperada: $($r.IdentityReference.Value)") }
+    }
+    return $problems.ToArray()
+}
+
+function Set-SandboxSingleOwnerAcl {
+    # The whole DACL is replaced by an exact descriptor (protected; SYSTEM and Administrators, full control, inherited
+    # by subfolders and files). Only the access section is written; the owner is unchanged. icacls is not used here:
+    # its /inheritance:r was observed to copy the inherited entries instead of removing them.
+    param([string]$Path)
+    $acl = Get-Acl -LiteralPath $Path
+    $acl.SetSecurityDescriptorSddlForm('D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)', [Security.AccessControl.AccessControlSections]::Access)
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
+if ($testOwnerSid -ne $me.Sid) {
+    # Elevated session (CI runner): new files are owned by Administrators while the sandbox inherits an allow ACE for
+    # the user SID, which the engine rightly reports as a third-party writer. The sandbox (and only it, after the guard
+    # above) gets the ACL of a single-owner profile: SYSTEM + Administrators. Ancestors are never touched.
+    $bad = @(Get-SandboxAclTargetProblems -Path $sandbox -TempRoot ([IO.Path]::GetTempPath()))
+    if ($bad.Count) { throw "sandbox recusado para ajuste de ACL: $($bad -join '; ')" }
+    $parentSddl = (Get-Acl -LiteralPath ([IO.Path]::GetDirectoryName($sandbox))).Sddl
+    Set-SandboxSingleOwnerAcl -Path $sandbox
+    $bad = @(Get-SandboxAclResultProblems -Path $sandbox -OwnerSid $testOwnerSid)
+    if ($bad.Count) { throw "ACL do sandbox diferente do esperado: $($bad -join '; ')" }
+    if ((Get-Acl -LiteralPath ([IO.Path]::GetDirectoryName($sandbox))).Sddl -ne $parentSddl) { throw 'ACL da raiz temporaria foi alterada' }
+    $script:sandboxAclAdjusted = $true
+} else { $script:sandboxAclAdjusted = $false }
 $testIdentity = [pscustomobject]@{ Sid = $testOwnerSid; Name = $me.Name; IsAdmin = $me.IsAdmin }
 $nowFuture = [datetime]::UtcNow.AddDays(10)      # everything created now looks 10 days old
 $uni = 'Usu' + [char]0x00E1 + 'rio Teste ' + [char]0x00E7 + ' ' + [char]0x65E5 + [char]0x672C
@@ -1457,6 +1519,41 @@ try {
             $iOp = [regex]::Match($txt, '(Install-AtmProduct|Uninstall-AtmProduct|Restore-AtmPrevious) -').Index
             Assert-True ($iElev -ge 0 -and $iEnter -gt $iElev -and $iOp -gt $iEnter -and $txt.Contains('Exit-AtmPrivateTemp')) "${w}: elevacao -> TEMP privado -> operacao -> limpeza"
         }
+    }
+
+    Test-Case 'Ambiente de teste' 'Ajuste de ACL do sandbox (sessao elevada): somente o sandbox vazio e canonico; ACL resultante verificada' {
+        $fakeRoot = Join-Path $sandbox 'acl-guard'
+        $ok = Join-Path $fakeRoot 'atm-tests-0123abcd'; [void][IO.Directory]::CreateDirectory($ok)
+        Assert-Eq @(Get-SandboxAclTargetProblems -Path $ok -TempRoot $fakeRoot).Count 0 'sandbox valido aceito'
+        $full = Join-Path $fakeRoot 'atm-tests-1111aaaa'; [void][IO.Directory]::CreateDirectory($full); [IO.File]::WriteAllText((Join-Path $full 'f.txt'), 'x')
+        Assert-True ((@(Get-SandboxAclTargetProblems -Path $full -TempRoot $fakeRoot) -join ';') -match 'nao vazio') 'nao vazio recusado'
+        $odd = Join-Path $fakeRoot 'atm-tests-XYZ'; [void][IO.Directory]::CreateDirectory($odd)
+        Assert-True ((@(Get-SandboxAclTargetProblems -Path $odd -TempRoot $fakeRoot) -join ';') -match 'nome inesperado') 'nome inesperado recusado'
+        $deep = Join-Path $fakeRoot 'sub\atm-tests-2222bbbb'; [void][IO.Directory]::CreateDirectory($deep)
+        Assert-True ((@(Get-SandboxAclTargetProblems -Path $deep -TempRoot $fakeRoot) -join ';') -match 'fora da raiz') 'fora da raiz recusado'
+        $self = @(Get-SandboxAclTargetProblems -Path $fakeRoot -TempRoot $fakeRoot) -join ';'
+        Assert-True ($self -match 'fora da raiz' -and $self -match 'nome inesperado') 'a propria raiz temporaria e recusada'
+        $tgt = Join-Path $sandbox 'acl-guard-alvo'; [void][IO.Directory]::CreateDirectory($tgt)
+        $jn = Join-Path $fakeRoot 'atm-tests-3333cccc'; New-Junction -Link $jn -Target $tgt
+        Assert-True ((@(Get-SandboxAclTargetProblems -Path $jn -TempRoot $fakeRoot) -join ';') -match 'reparse point') 'junction recusada'
+        $jroot = Join-Path $sandbox 'acl-guard-jroot'; New-Junction -Link $jroot -Target $fakeRoot
+        Assert-True ((@(Get-SandboxAclTargetProblems -Path (Join-Path $jroot 'atm-tests-0123abcd') -TempRoot $jroot) -join ';') -match 'reparse point') 'ancestral reparse recusado'
+        Assert-True (@(Get-SandboxAclTargetProblems -Path (Join-Path $fakeRoot 'atm-tests-4444dddd') -TempRoot $fakeRoot) -contains 'inexistente') 'inexistente recusado'
+        # The result check rejects an ACL that still inherits from ancestors (the unadjusted case) ...
+        $okOwner = (Get-Acl -LiteralPath $ok).GetOwner([Security.Principal.SecurityIdentifier]).Value
+        Assert-True ((@(Get-SandboxAclResultProblems -Path $ok -OwnerSid $okOwner) -join ';') -match 'heranca ainda ativa') 'ACL herdada nao passa na verificacao'
+        # ... and accepts exactly what the adjustment produces (applied here to a directory inside the sandbox, then
+        # reset to inherited so the sandbox can be removed even without elevation).
+        $cleanupActions.Add([scriptblock]::Create("icacls '$ok' /reset 2>&1 | Out-Null"))
+        Set-SandboxSingleOwnerAcl -Path $ok
+        $applied = @(Get-SandboxAclResultProblems -Path $ok -OwnerSid $okOwner)
+        $o = icacls $ok /reset 2>&1
+        Assert-Eq $applied.Count 0 "ACL aplicada = SYSTEM + Administradores, protegida ($($applied -join '; '))"
+        Assert-Eq $LASTEXITCODE 0 'heranca restaurada'
+        if ($script:sandboxAclAdjusted) {
+            Assert-Eq @(Get-SandboxAclResultProblems -Path $sandbox -OwnerSid $testOwnerSid).Count 0 'ACL ajustada do sandbox = SYSTEM + Administradores'
+            $script:caseNote = 'sessao elevada: ACL do sandbox ajustada e verificada'
+        } else { $script:caseNote = 'sessao nao elevada: nenhum ajuste de ACL (owner = usuario)' }
     }
 
     Test-Case 'Ambiente limpo' 'Gerador do Windows Sandbox: .wsb valido, rede desativada, release somente leitura; nada e iniciado' {
