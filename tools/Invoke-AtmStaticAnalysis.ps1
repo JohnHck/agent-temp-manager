@@ -75,10 +75,21 @@ try {
     # 2. Every code file signed by an allowed signer.
     $code = @(Get-ChildItem -LiteralPath $moduleDir -Recurse -File | Where-Object { $_.Extension -in @('.dll', '.psd1', '.psm1', '.ps1', '.ps1xml') })
     if ($code.Count -eq 0) { throw 'pacote sem arquivos de codigo' }
+    $badSignatures = New-Object System.Collections.Generic.List[string]
     foreach ($f in $code) {
         $s = Get-AuthenticodeSignature -LiteralPath $f.FullName
         $signer = $(if ($s.SignerCertificate) { $s.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) } else { '' })
-        if ($s.Status -ne 'Valid' -or $AllowedSigners -notcontains $signer) { throw "assinatura invalida ou nao permitida: $($f.Name) ($($s.Status), '$signer')" }
+        if ($s.Status -ne 'Valid' -or $AllowedSigners -notcontains $signer) {
+            # Diagnostics only: every rejected file is listed before failing; nothing here accepts a file.
+            $type = $(if ($s.PSObject.Properties['SignatureType']) { [string]$s.SignatureType } else { 'n/a' })
+            try { $embedded = (New-Object Security.Cryptography.X509Certificates.X509Certificate2 ([Security.Cryptography.X509Certificates.X509Certificate]::CreateFromSignedFile($f.FullName))).GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) } catch { $embedded = '(none)' }
+            $badSignatures.Add(("{0} | sha256 {1} | status {2} | type {3} | signer '{4}' | embedded '{5}'" -f $f.FullName.Substring($moduleDir.Length + 1), (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash, $s.Status, $type, $signer, $embedded))
+        }
+    }
+    if ($badSignatures.Count -gt 0) {
+        Write-Host "PowerShell $($PSVersionTable.PSVersion) | arquivos rejeitados: $($badSignatures.Count)"
+        foreach ($b in $badSignatures) { Write-Host "  $b" }
+        throw "assinatura invalida ou nao permitida: $($badSignatures.Count) arquivo(s)"
     }
     Write-Host "Assinaturas Authenticode verificadas: $($code.Count) arquivos"
 
