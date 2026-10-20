@@ -52,6 +52,25 @@ agent-temp preview
 Paths are grouped into **A. blocked**, **B. needs investigation**, **C. technically eligible** (for human
 review). Eligible paths are printed as allowlist lines `path|fingerprint`.
 
+## Diagnose (read-only, V0.2 in development)
+
+```powershell
+agent-temp diagnose
+agent-temp diagnose -ExportJson D:\reports\diagnose.json   # schema atm.diagnose/1, new file outside audited dirs
+agent-temp diagnose -DeadlineSeconds 60                     # global time limit (default 300 s)
+```
+
+Shows the identity of the process (user, elevated administrator, token elevation type, integrity level, session),
+the providers, one **coverage** record per collector and the findings. In this development stage the collectors are
+the token identity, provider runtime hints and the V0.1 temporary-directory inventory; processes, services,
+virtualization and Git worktrees are added by later V0.2 phases.
+
+Coverage statuses: `COMPLETE`, `PARTIAL`, `DENIED`, `TIMEOUT`, `NOT_PRESENT`, `NOT_OBSERVABLE`, `UNAVAILABLE`, `FAILED`.
+Only `COMPLETE` and `NOT_PRESENT` are conclusive; anything else means **unknown** and is never reported as absent,
+stopped or unused. Partial coverage is a result, not an error (exit code `0`). The export is refused (exit code `10`)
+when the inventory did not run, because the audited directories are then unknown. JSON fields:
+[DIAGNOSE-SCHEMA.md](DIAGNOSE-SCHEMA.md). `diagnose` never requests elevation and changes nothing.
+
 ## Clean (assisted, fail-closed)
 
 1. Run `agent-temp preview`, copy the eligible lines you **reviewed** into a text file (UTF-8), one per line.

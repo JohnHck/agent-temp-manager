@@ -134,6 +134,7 @@ function ConvertTo-AtmIntegrityLevel {
 
 function Get-AtmIdentityRaw {
     # The current process token only. Get-AtmCurrentIdentity (V0.1, used by the gates) is deliberately unchanged.
+    Initialize-AtmNative
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($id)
     [pscustomobject]@{
@@ -250,5 +251,140 @@ function Get-AtmProviderRuntimeHints {
         ServiceHints        = @($slots['ServiceHints'])
         VirtualizationHints = @($slots['VirtualizationHints'])
         Coverage            = $cov
+    }
+}
+
+# ---------------------------------------------------------------------------------------------
+# Invoke-AtmDiagnose (ADR-0009). P1-A collectors: identity, provider runtime hints, the V0.1 temporary-directory
+# inventory and the coverage it implies (processes, temp-profiles). Runtime collectors of later phases (process
+# trees, services, virtualization, Git worktrees) add coverage records and findings here.
+# ---------------------------------------------------------------------------------------------
+
+$script:AtmDiagnoseSchema = 'atm.diagnose/1'
+$script:AtmDiagnoseDefaultDeadlineSeconds = 300
+
+function New-AtmDeadlineCoverage {
+    param([string]$Collector)
+    return (New-AtmCoverage -Collector $Collector -Status 'TIMEOUT' -Reasons @('DEADLINE_EXCEEDED'))
+}
+
+function Get-AtmInventoryCoverage {
+    # Coverage implied by a V0.1 inventory. Read from the inventory itself; nothing is re-measured.
+    param($Inventory, $Identity, [datetime]$StartedUtc, [long]$ElapsedMs, [bool]$OverDeadline)
+    $out = New-Object System.Collections.Generic.List[object]
+    # The V0.1 inventory cannot be interrupted: no budget is enforced on it (BudgetMs = $null). Finishing after the
+    # deadline is reported as PARTIAL, never hidden.
+    if ($OverDeadline) { $out.Add((New-AtmCoverage -Collector 'inventory' -Status 'PARTIAL' -Reasons @('DEADLINE_EXCEEDED') -ElevationWouldHelp 'NO' -StartedUtc $StartedUtc -ElapsedMs $ElapsedMs)) }
+    else { $out.Add((New-AtmCoverage -Collector 'inventory' -Status 'COMPLETE' -ElevationWouldHelp 'NO' -StartedUtc $StartedUtc -ElapsedMs $ElapsedMs)) }
+    $admin = [bool]$Identity.IsElevatedAdministrator
+    $s = $Inventory.Snapshot
+    if ($s.Failed) {
+        $out.Add((New-AtmCoverage -Collector 'processes' -Status 'FAILED' -Reasons @('PROCESS_SNAPSHOT_FAILED') -ElevationWouldHelp 'UNKNOWN'))
+    } elseif ($s.Uninspectable -gt 0) {
+        # Other accounts' processes need elevation; protected processes stay uninspectable even when elevated.
+        $out.Add((New-AtmCoverage -Collector 'processes' -Status 'PARTIAL' -Reasons @('UNINSPECTABLE_PROCESSES') -ElevationWouldHelp $(if ($admin) { 'NO' } else { 'YES' }) -Observed $s.Readable -Expected $s.Total))
+    } else {
+        $out.Add((New-AtmCoverage -Collector 'processes' -Status 'COMPLETE' -ElevationWouldHelp 'NO' -Observed $s.Readable -Expected $s.Total))
+    }
+    $profiles = @($Inventory.Profiles)
+    $inacc = @($Inventory.InaccessibleProfiles).Count
+    $unver = @($Inventory.UnverifiedTempProfiles).Count
+    $reasons = @()
+    if ($inacc -gt 0) { $reasons += 'PROFILES_INACCESSIBLE' }
+    if ($unver -gt 0) { $reasons += 'TEMP_LOCATION_UNVERIFIED' }
+    $st = $(if ($reasons.Count -gt 0) { 'PARTIAL' } else { 'COMPLETE' })
+    $help = $(if ($reasons.Count -eq 0) { 'NO' } elseif ($admin) { 'UNKNOWN' } else { 'YES' })
+    $out.Add((New-AtmCoverage -Collector 'temp-profiles' -Status $st -Reasons $reasons -ElevationWouldHelp $help -Observed ($profiles.Count - $inacc - $unver) -Expected $profiles.Count))
+    return $out.ToArray()
+}
+
+function Invoke-AtmDiagnose {
+    <#
+      Read-only diagnose run. Never calls the clean engine, never requests elevation.
+      -InventoryArgs: passed to Invoke-AtmInventory (tests pass ProfilesOverride / ProcessesOverride / NowUtc).
+      -IdentitySource: test override for the token identity. -Providers: provider objects (default: registered).
+      -DeadlineSeconds: global deadline; a collector not started before it is TIMEOUT, never COMPLETE.
+    #>
+    param([hashtable]$InventoryArgs = @{}, [scriptblock]$IdentitySource, $Providers, [int]$DeadlineSeconds = $script:AtmDiagnoseDefaultDeadlineSeconds)
+    if ($DeadlineSeconds -lt 0) { throw (Get-AtmText 'err.diagDeadline' $DeadlineSeconds) }
+    $started = [datetime]::UtcNow
+    $deadline = $started.AddSeconds($DeadlineSeconds)
+    $coverage = New-Object System.Collections.Generic.List[object]
+    $findings = New-Object System.Collections.Generic.List[object]
+
+    # Identity always runs: it reads only the own token, and every other coverage record is explained by it.
+    $identity = Get-AtmIdentityState -Source $IdentitySource
+    $coverage.Add($identity.Coverage)
+
+    # Providers: contract and runtime hints. An invalid provider object is reported and left out of the run.
+    $provList = @(if ($null -ne $Providers) { $Providers } else { Get-AtmProviders })
+    $validProviders = New-Object System.Collections.Generic.List[object]
+    $provInfo = New-Object System.Collections.Generic.List[object]
+    $hints = New-Object System.Collections.Generic.List[object]
+    foreach ($p in $provList) {
+        $provId = 'invalid'
+        if ($null -ne $p -and @($p.PSObject.Properties.Name) -contains 'Id' -and ([string]$p.Id) -cmatch '^[a-z0-9-]+$') { $provId = [string]$p.Id }
+        $contract = $null
+        # Contract violation: reported below as PROVIDER_CONTRACT_INVALID; the provider takes no part in the run.
+        try { $contract = Get-AtmProviderContract $p } catch { $contract = $null }
+        if ($null -eq $contract -or $provId -eq 'invalid') {
+            $coverage.Add((New-AtmCoverage -Collector ('provider-' + $provId) -Status 'FAILED' -Reasons @('PROVIDER_CONTRACT_INVALID') -ElevationWouldHelp 'NO'))
+            continue
+        }
+        $validProviders.Add($p)
+        $provInfo.Add([pscustomobject]@{ Id = $provId; DisplayName = [string]$p.DisplayName; ContractVersion = $contract.Version; Capabilities = @($contract.Capabilities) })
+        if ($contract.Capabilities -cnotcontains 'runtime') { continue }
+        if ([datetime]::UtcNow -gt $deadline) { $coverage.Add((New-AtmDeadlineCoverage ('provider-' + $provId))); continue }
+        $h = Get-AtmProviderRuntimeHints $p
+        $hints.Add($h)
+        $coverage.Add($h.Coverage)
+    }
+
+    # V0.1 temporary-directory inventory (read-only) and the coverage it implies.
+    $inv = $null
+    if ([datetime]::UtcNow -gt $deadline) {
+        foreach ($c in @('inventory', 'processes', 'temp-profiles')) { $coverage.Add((New-AtmDeadlineCoverage $c)) }
+    } else {
+        $ia = @{} + $InventoryArgs
+        if ($null -ne $Providers) { $ia['Providers'] = @($validProviders | Where-Object { (Get-AtmProviderCapabilities $_) -ccontains 'temp' }) }
+        $invStarted = [datetime]::UtcNow
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $err = $null
+        # Inventory failure: reported as INVENTORY_FAILED (exception type only); nothing is reported as absent.
+        try { $inv = Invoke-AtmInventory @ia } catch { $err = $_.Exception.GetType().Name; $inv = $null }
+        $sw.Stop()
+        if ($null -eq $inv) {
+            $coverage.Add((New-AtmCoverage -Collector 'inventory' -Status 'FAILED' -Reasons @('INVENTORY_FAILED', (ConvertTo-AtmExceptionCode $err)) -ElevationWouldHelp 'UNKNOWN' -StartedUtc $invStarted -ElapsedMs $sw.ElapsedMilliseconds))
+            foreach ($c in @('processes', 'temp-profiles')) { $coverage.Add((New-AtmCoverage -Collector $c -Status 'FAILED' -Reasons @('INVENTORY_FAILED'))) }
+        } else {
+            $invCov = @(Get-AtmInventoryCoverage -Inventory $inv -Identity $identity -StartedUtc $invStarted -ElapsedMs $sw.ElapsedMilliseconds -OverDeadline ([datetime]::UtcNow -gt $deadline))
+            foreach ($c in $invCov) { $coverage.Add($c) }
+            foreach ($part in @($inv.Partitions | Where-Object { $_.Kind -ne 'NotScanned' })) {
+                $now = [datetime]::UtcNow
+                $ev = New-Object System.Collections.Generic.List[object]
+                $ev.Add((New-AtmEvidence -Code 'AUDIT_CLASS' -Source 'audit' -Collector 'inventory' -ObservedUtc $now -Detail $part.Class))
+                foreach ($fl in $part.Flags) { $ev.Add((New-AtmEvidence -Code 'AUDIT_FLAG' -Source 'audit' -Collector 'inventory' -ObservedUtc $now -Detail $fl)) }
+                # Runtime evidence (process trees, handles, services, worktrees) is not collected in P1-A.
+                $findings.Add((New-AtmFinding -Kind 'TempPartition' -Key $part.Path -State 'RUNTIME_NOT_DIAGNOSED' -Evidence $ev.ToArray() -Coverage $invCov -Provider $part.Provider))
+            }
+        }
+    }
+
+    $covArr = $coverage.ToArray()
+    [pscustomobject]@{
+        SchemaVersion    = $script:AtmDiagnoseSchema
+        ToolVersion      = $script:AtmVersion
+        Machine          = $env:COMPUTERNAME
+        StartedUtc       = $started
+        FinishedUtc      = [datetime]::UtcNow
+        DeadlineUtc      = $deadline
+        DeadlineSeconds  = $DeadlineSeconds
+        Identity         = $identity
+        Providers        = $provInfo.ToArray()
+        ProviderHints    = $hints.ToArray()
+        Coverage         = $covArr
+        CoverageComplete = (@($covArr | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status }).Count -eq 0)
+        Findings         = $findings.ToArray()
+        Inventory        = $inv
     }
 }

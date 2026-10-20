@@ -307,3 +307,87 @@ function Show-AtmCleanResult {
     $ok = @($Result.Deleted | Where-Object { $_.Completed -and $_.Verified })
     Write-Host ('  ' + (Get-AtmText 'clean.deleted' $ok.Count (Format-AtmMB (Get-AtmSum $ok 'Bytes'))))
 }
+
+# ---------------------------------------------------------------------------------------------
+# Diagnose (V0.2): presentation of an Invoke-AtmDiagnose result. Codes are printed as-is; text from the catalog.
+# ---------------------------------------------------------------------------------------------
+
+function Format-AtmUtcIso { param($Utc) if ($null -eq $Utc) { return $null } return ([datetime]$Utc).ToUniversalTime().ToString('o') }
+
+function Show-AtmDiagnose {
+    param($Result)
+    $r = $Result
+    Write-AtmHeader (Get-AtmText 'diag.title')
+    $id = $r.Identity
+    Write-Host ('  ' + (Get-AtmText 'cli.identity' $id.Name (Get-AtmYesNo ([bool]$id.IsElevatedAdministrator)) $id.ElevationType $id.IntegrityLevel $id.SessionId))
+    Write-Host ('  ' + (Get-AtmText 'diag.deadline' $r.DeadlineSeconds (Format-AtmUtcIso $r.StartedUtc) (Format-AtmUtcIso $r.FinishedUtc)))
+    Write-Host ('  ' + (Get-AtmText 'diag.providers' ((@($r.Providers) | ForEach-Object { "$($_.Id) v$($_.ContractVersion) [$(@($_.Capabilities) -join ',')]" }) -join '; ')))
+
+    Write-AtmHeader (Get-AtmText 'diag.coverageTitle')
+    $rows = foreach ($c in @($r.Coverage)) {
+        $obs = $(if ($null -ne $c.Observed -and $null -ne $c.Expected) { "$($c.Observed)/$($c.Expected)" } else { '-' })
+        New-AtmRow ([ordered]@{
+                'col.collector' = $c.Collector
+                'col.coverage'  = $c.Status
+                'col.meaning'   = (Get-AtmText ('coverage.' + $c.Status))
+                'col.reasons'   = $(if (@($c.Reasons).Count) { @($c.Reasons) -join ', ' } else { '-' })
+                'col.elevation' = $c.ElevationWouldHelp
+                'col.observed'  = $obs
+            })
+    }
+    Write-AtmTable $rows
+
+    Write-AtmHeader (Get-AtmText 'diag.findingsTitle')
+    $f = @($r.Findings)
+    if ($f.Count -eq 0) { Write-Host ('  ' + (Get-AtmText 'common.none')) }
+    foreach ($g in @($f | Group-Object Kind, State | Sort-Object Name)) {
+        Write-Host ('  ' + (Get-AtmText 'diag.findingsLine' $g.Group[0].Kind $g.Group[0].State $g.Count))
+    }
+    $classes = @($f | ForEach-Object { @($_.Evidence | Where-Object { $_.Code -eq 'AUDIT_CLASS' } | ForEach-Object { $_.Detail }) } | Group-Object | Sort-Object Name)
+    foreach ($c in $classes) { Write-Host ('    ' + (Get-AtmText 'diag.auditClassLine' $c.Name $c.Count)) }
+    if (@($r.Coverage | Where-Object { $_.Collector -eq 'inventory' -and $_.Status -ne 'COMPLETE' }).Count -gt 0) { Write-Host ('  ' + (Get-AtmText 'diag.inventoryIncomplete')) -ForegroundColor Yellow }
+    Write-Host ('  ' + (Get-AtmText 'diag.notYet'))
+
+    Write-AtmHeader (Get-AtmText 'diag.summaryTitle')
+    Write-Host ('  ' + (Get-AtmText 'diag.coverageComplete' (Get-AtmYesNo ([bool]$r.CoverageComplete) -Upper))) -ForegroundColor $(if ($r.CoverageComplete) { 'Green' } else { 'Yellow' })
+    Write-Host ('  ' + (Get-AtmText 'diag.unknownNote'))
+    Write-Host ('  ' + (Get-AtmText 'diag.readOnly')) -ForegroundColor Green
+}
+
+function ConvertTo-AtmDiagnoseJson {
+    # Schema atm.diagnose/1 (docs/DIAGNOSE-SCHEMA.md). Codes only; no command lines, environment values, tokens,
+    # exception messages or file contents. Every array is explicit, every time is ISO 8601 UTC.
+    param($Result)
+    $r = $Result
+    $id = $r.Identity
+    $inv = $r.Inventory
+    $export = [ordered]@{
+        schemaVersion    = $r.SchemaVersion
+        toolVersion      = $r.ToolVersion
+        language         = (Get-AtmLanguage)
+        machine          = $r.Machine
+        startedUtc       = (Format-AtmUtcIso $r.StartedUtc)
+        finishedUtc      = (Format-AtmUtcIso $r.FinishedUtc)
+        deadlineUtc      = (Format-AtmUtcIso $r.DeadlineUtc)
+        deadlineSeconds  = $r.DeadlineSeconds
+        coverageComplete = [bool]$r.CoverageComplete
+        identity         = [ordered]@{ user = $id.Name; sid = $id.Sid; elevatedAdministrator = $id.IsElevatedAdministrator; elevationType = $id.ElevationType; integrityLevel = $id.IntegrityLevel; sessionId = $id.SessionId }
+        providers        = @(@($r.Providers) | ForEach-Object { [ordered]@{ id = $_.Id; displayName = $_.DisplayName; contractVersion = $_.ContractVersion; capabilities = @($_.Capabilities) } })
+        coverage         = @(@($r.Coverage) | ForEach-Object {
+                [ordered]@{ collector = $_.Collector; status = $_.Status; reasons = @($_.Reasons); elevationWouldHelp = $_.ElevationWouldHelp; observed = $_.Observed; expected = $_.Expected
+                    startedUtc = (Format-AtmUtcIso $_.StartedUtc); elapsedMs = $_.ElapsedMs; budgetMs = $_.BudgetMs }
+            })
+        findings         = @(@($r.Findings) | ForEach-Object {
+                [ordered]@{ kind = $_.Kind; key = $_.Key; state = $_.State; requestedState = $_.RequestedState; provider = $_.Provider
+                    coverage = @(@($_.Coverage) | ForEach-Object { $_.Collector }); incompleteCoverage = @($_.IncompleteCoverage)
+                    evidence = @(@($_.Evidence) | ForEach-Object { [ordered]@{ code = $_.Code; source = $_.Source; collector = $_.Collector; observedUtc = (Format-AtmUtcIso $_.ObservedUtc); detail = $_.Detail } }) }
+            })
+        inventory        = [ordered]@{
+            collected        = ($null -ne $inv)
+            coverageComplete = $(if ($inv) { [bool]$inv.CoverageComplete } else { $null })
+            partitions       = $(if ($inv) { @($inv.Partitions | Where-Object { $_.Kind -ne 'NotScanned' }).Count } else { $null })
+            bytes            = $(if ($inv) { Get-AtmSum @($inv.Partitions | Where-Object { $_.Kind -ne 'NotScanned' }) 'Bytes' } else { $null })
+        }
+    }
+    return ($export | ConvertTo-Json -Depth 8)
+}

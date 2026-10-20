@@ -16,7 +16,8 @@ param(
     [string]$LogFile,
     [switch]$NoProgress,
     [switch]$Ascii,
-    [string]$Lang
+    [string]$Lang,
+    [int]$DeadlineSeconds = -1
 )
 
 $ErrorActionPreference = 'Stop'
@@ -66,10 +67,11 @@ $cliInvArgs['NoProgress'] = [bool]$NoProgress
 $cliInvArgs['ProgressCallback'] = { param($pct, $msg) $act = Get-AtmText 'cli.progressActivity'; if ($pct -ge 100) { Write-Progress -Activity $act -Completed } else { Write-Progress -Activity $act -Status $msg -PercentComplete $pct } }
 
 function Show-Help {
-    foreach ($k in @('help.title', 'help.blank', 'help.tui', 'help.audit', 'help.preview', 'help.clean', 'help.clean2', 'help.verify', 'help.version', 'help.help', 'help.blank',
-            'help.drill', 'help.export', 'help.cleanOpts', 'help.cleanOpts2', 'help.cleanOpts3', 'help.tuiOpts', 'help.lang', 'help.blank', 'help.examples')) { Write-Host (Get-AtmText $k) }
+    foreach ($k in @('help.title', 'help.blank', 'help.tui', 'help.audit', 'help.preview', 'help.diagnose', 'help.clean', 'help.clean2', 'help.verify', 'help.version', 'help.help', 'help.blank',
+            'help.drill', 'help.export', 'help.diagOpts', 'help.cleanOpts', 'help.cleanOpts2', 'help.cleanOpts3', 'help.tuiOpts', 'help.lang', 'help.blank', 'help.examples')) { Write-Host (Get-AtmText $k) }
     Write-Host '  agent-temp'
     Write-Host '  agent-temp audit'
+    Write-Host '  agent-temp diagnose -ExportJson D:\reports\diagnose.json'
     Write-Host '  agent-temp audit -User alice'
     Write-Host '  agent-temp audit -Project MyProject'
     Write-Host '  agent-temp audit -Path "C:\Users\alice\AppData\Local\Temp\claude\<slug>\<uuid>"'
@@ -104,6 +106,21 @@ try {
             $inv = Invoke-AtmInventory @cliInvArgs
             $rows = Invoke-AtmPreview -Inventory $inv -IncludeOtherUsers:$IncludeOtherUsers
             Show-AtmPreview -Inventory $inv -Rows $rows -User $User -Project $Project -Root $Root
+            exit 0
+        }
+        'diagnose' {
+            # Read-only (docs/adr/ADR-0009). Partial coverage is a result, not an error: exit code 0.
+            $diagArgs = @{ InventoryArgs = $cliInvArgs }
+            if ($DeadlineSeconds -ge 0) { $diagArgs['DeadlineSeconds'] = $DeadlineSeconds }
+            $res = Invoke-AtmDiagnose @diagArgs
+            Show-AtmDiagnose -Result $res
+            if ($ExportJson) {
+                # Fail closed: without an inventory the audited directories are unknown, so no path can be validated.
+                if ($null -eq $res.Inventory -or -not (Test-AtmOutputPathOutsideBases -Path $ExportJson -Inventory $res.Inventory -MustNotExist)) { throw (Get-AtmText 'cli.diagExportRefused') }
+                [IO.File]::WriteAllText($ExportJson, (ConvertTo-AtmDiagnoseJson -Result $res), (New-Object Text.UTF8Encoding($false)))
+                Write-Host (Get-AtmText 'cli.exportWritten' $ExportJson)
+                Write-Host (Get-AtmText 'cli.diagExportPrivacy') -ForegroundColor Yellow
+            }
             exit 0
         }
         'clean' {
