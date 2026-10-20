@@ -57,8 +57,13 @@ review). Eligible paths are printed as allowlist lines `path|fingerprint`.
 ```powershell
 agent-temp diagnose
 agent-temp diagnose -ExportJson D:\reports\diagnose.json   # schema atm.diagnose/1, new file outside audited dirs
-agent-temp diagnose -DeadlineSeconds 60                     # global time limit (default 300 s)
+agent-temp diagnose -DeadlineSeconds 60                     # global deadline (default 300 s), see below
 ```
+
+**The deadline is not a maximum duration.** Collectors that have not started when it passes are skipped and reported
+as `TIMEOUT`. The V0.1 temporary-directory inventory cannot be interrupted once it has started: it runs to the end and
+is reported as `PARTIAL` (`DEADLINE_EXCEEDED`) if it finishes after the deadline. `-DeadlineSeconds 0` reads only the
+process identity.
 
 Shows the identity of the process (user, elevated administrator, token elevation type, integrity level, session),
 the providers, one **coverage** record per collector and the findings. In this development stage the collectors are
