@@ -1685,6 +1685,53 @@ try {
         foreach ($f in @('src/lib/Engine.Audit.ps1', 'src/lib/Engine.Clean.ps1', 'src/lib/I18n.ps1', 'src/providers/ClaudeCode.ps1', 'install/InstallCommon.ps1')) { Assert-True ($wh -notcontains $f) "sem excecao de Write-Host: $f" }
     }
 
+    Test-Case 'Analise estatica' 'Assinaturas do PSScriptAnalyzer: excecao de catalogo restrita a um arquivo e hash; demais casos recusados' {
+        . (Join-Path (Split-Path -Parent $testsDir) 'tools\StaticAnalysisSignature.ps1')
+        # The allow-list itself is unchanged and the exception list stays one exact, complete entry.
+        Assert-Eq (@($script:AtmAnalyzerAllowedSigners) -join '|') 'Microsoft Corporation|Microsoft 3rd Party Application Component|Json.NET (.NET Foundation)' 'allow-list global inalterada'
+        Assert-True ($script:AtmAnalyzerAllowedSigners -notcontains 'Microsoft Windows') 'Microsoft Windows fora da allow-list global'
+        $ex = @($script:AtmAnalyzerSignatureExceptions)
+        Assert-Eq $ex.Count 1 'uma unica excecao'
+        foreach ($e in $ex) {
+            Assert-True ($e.Path -notmatch '[*?\\/]') "caminho exato, sem curinga: $($e.Path)"
+            Assert-True ($e.Sha256 -cmatch '^[0-9A-F]{64}$') 'SHA-256 fixado'
+            Assert-Eq $e.SignatureType 'Catalog' 'somente assinatura de catalogo'
+            Assert-True ($script:AtmAnalyzerAllowedSigners -ccontains $e.EmbeddedSigner) 'certificado embutido de signatario permitido'
+            Assert-True (([string]$e.Justification).Trim().Length -ge 20) 'justificativa'
+        }
+        $good = $ex[0]
+        $catalog = [pscustomobject]@{ RelativePath = $good.Path; Sha256 = $good.Sha256; Status = 'Valid'; SignatureType = 'Catalog'; Signer = $good.Signer; EmbeddedSigner = $good.EmbeddedSigner }
+        $v = Test-AtmAnalyzerSignature -Facts $catalog
+        Assert-True ($v.Accepted -and $v.Exception -eq $good.Path) 'caso exato aceito pela excecao'
+        $v = Test-AtmAnalyzerSignature -Facts ([pscustomobject]@{ RelativePath = 'x.dll'; Sha256 = ('0' * 64); Status = 'Valid'; SignatureType = 'Authenticode'; Signer = 'Microsoft Corporation'; EmbeddedSigner = 'Microsoft Corporation' })
+        Assert-True ($v.Accepted -and $null -eq $v.Exception) 'signatario permitido aceito sem excecao'
+        $negatives = [ordered]@{
+            'status HashMismatch'                = @{ Status = 'HashMismatch' }
+            'status NotSigned'                   = @{ Status = 'NotSigned' }
+            'hash difere (adulterado ou versao)' = @{ Sha256 = ('A' * 64) }
+            'outro arquivo com o mesmo hash'     = @{ RelativePath = 'Other.dll' }
+            'mesmo nome em subpasta'             = @{ RelativePath = 'lib\Newtonsoft.Json.dll' }
+            'outro signatario de catalogo'       = @{ Signer = 'Contoso' }
+            'Microsoft Windows embutido'         = @{ SignatureType = 'Authenticode' }
+            'tipo de assinatura ausente'         = @{ SignatureType = '' }
+            'sem certificado embutido'           = @{ EmbeddedSigner = '' }
+            'certificado embutido diferente'     = @{ EmbeddedSigner = 'Contoso' }
+            'signatario em outra caixa'          = @{ Signer = 'microsoft windows' }
+        }
+        foreach ($n in $negatives.Keys) {
+            $f = $catalog.PSObject.Copy()
+            foreach ($k in $negatives[$n].Keys) { $f.$k = $negatives[$n][$k] }
+            $v = Test-AtmAnalyzerSignature -Facts $f
+            Assert-True (-not $v.Accepted) "recusado: $n ($($v.Reason))"
+        }
+        # Real facts of an unsigned file named like the excepted one: rejected.
+        $fake = Join-Path $sandbox 'sig\Newtonsoft.Json.dll'; [void][IO.Directory]::CreateDirectory((Split-Path -Parent $fake))
+        [IO.File]::WriteAllBytes($fake, [byte[]](1..64))
+        $facts = Get-AtmAnalyzerSignatureInfo -Path $fake -RelativePath 'Newtonsoft.Json.dll'
+        Assert-True ($facts.Status -ne 'Valid' -and $facts.EmbeddedSigner -eq '') "arquivo real sem assinatura: $($facts.Status)"
+        Assert-True (-not (Test-AtmAnalyzerSignature -Facts $facts).Accepted) 'arquivo real falso recusado'
+    }
+
     Test-Case 'Ambiente limpo' 'Gerador do Windows Sandbox: .wsb valido, rede desativada, release somente leitura; nada e iniciado' {
         $tools = Join-Path (Split-Path -Parent $testsDir) 'tools\clean-env'
         foreach ($f in @('New-CleanEnvSandbox.ps1', 'Invoke-CleanEnvTest.ps1')) { $tk = $null; $e = $null; [void][Management.Automation.Language.Parser]::ParseFile((Join-Path $tools $f), [ref]$tk, [ref]$e); Assert-Eq $e.Count 0 "$f sintaxe" }

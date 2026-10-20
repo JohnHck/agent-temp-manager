@@ -4,7 +4,8 @@
 .DESCRIPTION
   1. Downloads PSScriptAnalyzer $Version from the PowerShell Gallery into -WorkDir (never into a module path,
      nothing is installed) and verifies the package SHA-512 published by the Gallery.
-  2. Verifies the Authenticode signature of every code file of the module against an allow-list of signers.
+  2. Verifies the Authenticode signature of every code file of the module against an allow-list of signers, plus
+     the reviewed, per-file exceptions of tools/StaticAnalysisSignature.ps1 (exact path and SHA-256).
   3. Imports the module by path and analyses src/, install/, tools/ and tests/ (*.ps1, *.psm1, *.psd1) with
      tools/PSScriptAnalyzerSettings.psd1.
   4. Applies the reviewed exceptions of tools/static-analysis-exceptions.psd1 (one rule, listed files, optional
@@ -30,12 +31,12 @@ $Version = '1.25.0'
 $PackageUrl = "https://www.powershellgallery.com/api/v2/package/PSScriptAnalyzer/$Version"
 # SHA-512 (base64) published by the PowerShell Gallery for PSScriptAnalyzer 1.25.0.
 $PackageSha512 = '5/tXMmLmBLqymRSuYpIdJLl8L4i1GbQSd7QD72zhY/FLfRs23HNEmmjlrlqNlQKJGxDCZBMf0YE63ym/ExwWYw=='
-$AllowedSigners = @('Microsoft Corporation', 'Microsoft 3rd Party Application Component', 'Json.NET (.NET Foundation)')
 $ScanDirs = @('src', 'install', 'tools', 'tests')
 
 $repo = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $settings = Join-Path $repo 'tools\PSScriptAnalyzerSettings.psd1'
 $exceptionsFile = Join-Path $repo 'tools\static-analysis-exceptions.psd1'
+. (Join-Path $repo 'tools\StaticAnalysisSignature.ps1')
 
 function Get-Sha512Base64([string]$Path) {
     $alg = [Security.Cryptography.SHA512]::Create()
@@ -72,18 +73,19 @@ try {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [IO.Compression.ZipFile]::ExtractToDirectory($pkg, $moduleDir)
 
-    # 2. Every code file signed by an allowed signer.
     $code = @(Get-ChildItem -LiteralPath $moduleDir -Recurse -File | Where-Object { $_.Extension -in @('.dll', '.psd1', '.psm1', '.ps1', '.ps1xml') })
     if ($code.Count -eq 0) { throw 'pacote sem arquivos de codigo' }
+    # 2. Every code file signed by an allowed signer, or matching a reviewed per-file exception.
     $badSignatures = New-Object System.Collections.Generic.List[string]
+    $signatureExceptionsUsed = New-Object System.Collections.Generic.List[object]
     foreach ($f in $code) {
-        $s = Get-AuthenticodeSignature -LiteralPath $f.FullName
-        $signer = $(if ($s.SignerCertificate) { $s.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) } else { '' })
-        if ($s.Status -ne 'Valid' -or $AllowedSigners -notcontains $signer) {
-            # Diagnostics only: every rejected file is listed before failing; nothing here accepts a file.
-            $type = $(if ($s.PSObject.Properties['SignatureType']) { [string]$s.SignatureType } else { 'n/a' })
-            try { $embedded = (New-Object Security.Cryptography.X509Certificates.X509Certificate2 ([Security.Cryptography.X509Certificates.X509Certificate]::CreateFromSignedFile($f.FullName))).GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) } catch { $embedded = '(none)' }
-            $badSignatures.Add(("{0} | sha256 {1} | status {2} | type {3} | signer '{4}' | embedded '{5}'" -f $f.FullName.Substring($moduleDir.Length + 1), (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash, $s.Status, $type, $signer, $embedded))
+        $facts = Get-AtmAnalyzerSignatureInfo -Path $f.FullName -RelativePath $f.FullName.Substring($moduleDir.Length + 1)
+        $verdict = Test-AtmAnalyzerSignature -Facts $facts
+        $line = "{0} | sha256 {1} | status {2} | type {3} | signer '{4}' | embedded '{5}'" -f $facts.RelativePath, $facts.Sha256, $facts.Status, $facts.SignatureType, $facts.Signer, $facts.EmbeddedSigner
+        if (-not $verdict.Accepted) { $badSignatures.Add("$line | $($verdict.Reason)"); continue }
+        if ($verdict.Exception) {
+            Write-Host "EXCECAO DE ASSINATURA REVISADA aplicada: $line" -ForegroundColor Yellow
+            $signatureExceptionsUsed.Add([ordered]@{ path = $facts.RelativePath; sha256 = $facts.Sha256; signatureType = $facts.SignatureType; signer = $facts.Signer; embeddedSigner = $facts.EmbeddedSigner })
         }
     }
     if ($badSignatures.Count -gt 0) {
@@ -91,6 +93,8 @@ try {
         foreach ($b in $badSignatures) { Write-Host "  $b" }
         throw "assinatura invalida ou nao permitida: $($badSignatures.Count) arquivo(s)"
     }
+    # On images where Windows has no catalog for these files the exceptions are simply not needed (not stale).
+    if ($signatureExceptionsUsed.Count -eq 0) { Write-Host 'Excecoes de assinatura revisadas: nenhuma necessaria nesta maquina' }
     Write-Host "Assinaturas Authenticode verificadas: $($code.Count) arquivos"
 
     # 3. Import by path (no module path changes) and analyse.
@@ -147,6 +151,7 @@ try {
             enforcedRules = $enforced; enforcedActive = $enforcedActive.Count
             exceptions = @($exceptions | ForEach-Object { [ordered]@{ rule = $_.Rule; files = @($_.Files); match = $_['Match']; justification = $_.Justification } })
             staleExceptions = $stale.Count
+            signatureExceptionsUsed = $signatureExceptionsUsed
             findings = $findings
         }
         [IO.File]::WriteAllText($ReportFile, ($rep | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding($false)))

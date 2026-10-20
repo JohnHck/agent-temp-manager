@@ -10,7 +10,19 @@ PowerShell**, which is most of this project. PowerShell is analysed with PSScrip
   folder (nothing is installed, no module path is changed). The package SHA-512 must equal the value published by
   the Gallery, and every code file of the module must carry a valid Authenticode signature from an allowed signer
   (Microsoft Corporation, Microsoft 3rd Party Application Component, Json.NET (.NET Foundation)). The module is then
-  imported by path and its version checked. Any integrity or tool failure fails the job (exit code 3).
+  imported by path and its version checked. Any integrity or tool failure fails the job (exit code 3); every rejected
+  file is listed with its SHA-256, status, signature type, signer and embedded certificate.
+* **Reviewed signature exception (one file):** newer GitHub runner images (20261015) resolve `Newtonsoft.Json.dll`
+  of the pinned package through a Windows catalog, so Windows reports the signer `Microsoft Windows` instead of the
+  file's embedded `Json.NET (.NET Foundation)` signature. `tools/StaticAnalysisSignature.ps1` accepts that file only
+  when the normal check fails **and** all of these hold: exact relative path, exact SHA-256 of the 1.25.0 file, status
+  `Valid`, signature type `Catalog`, signer exactly `Microsoft Windows`, and an embedded certificate of
+  `Json.NET (.NET Foundation)`. `Microsoft Windows` is **not** added to the allow-list; any other file, hash, signer or
+  type is rejected, and a new package version voids the entry. The embedded certificate is only extracted, not
+  validated: integrity rests on the package SHA-512, the per-file SHA-256 and the valid Windows catalog signature.
+  A use of the exception is logged and listed in the report (`signatureExceptionsUsed`); on machines without that
+  catalog it is simply not needed. The suite tests the accepted case and the rejected ones (invalid status, tampered
+  hash, other file, other signer, embedded signature type, missing or different embedded certificate).
 * **Scope:** every `*.ps1`, `*.psm1` and `*.psd1` under `src/`, `install/`, `tools/` and `tests/`.
 * **Rules:** every default rule, with nothing excluded, plus compatibility rules for Windows PowerShell 5.1
   (Windows 10 and Windows Server 2019 profiles) and PowerShell 7 on Windows: `PSUseCompatibleSyntax`,
