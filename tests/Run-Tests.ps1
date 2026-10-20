@@ -1651,6 +1651,22 @@ try {
         } else { $script:caseNote = 'sessao nao elevada: nenhum ajuste de ACL (owner = usuario)' }
     }
 
+    Test-Case 'Ambiente de teste' 'Teste de instalacao real (e2e) recusa rodar fora de maquina descartavel e nao cria nada' {
+        $e2e = Join-Path $testsDir 'e2e\Invoke-InstallE2E.ps1'
+        $out = Join-Path $sandbox 'e2e-out'
+        $shell = (Get-Process -Id $PID).Path
+        # The runner markers are cleared in the child, so the refusal is verified in CI too.
+        # Windows PowerShell 5.1 turns the child's stderr into a terminating error under 'Stop'; collect it instead.
+        $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try {
+            $o = @(& $shell -NoProfile -ExecutionPolicy Bypass -Command "`$env:GITHUB_ACTIONS = ''; `$env:RUNNER_ENVIRONMENT = ''; & '$($e2e.Replace("'", "''"))' -OutDir '$($out.Replace("'", "''"))'" 2>&1 | ForEach-Object { "$_" })
+            $code = $LASTEXITCODE
+        } finally { $ErrorActionPreference = $eap }
+        Assert-True ($code -ne 0) 'recusa com codigo de saida diferente de zero'
+        Assert-True (($o -join ' ') -match 'Recusado') "mensagem de recusa: $($o -join ' ')"
+        Assert-True (-not (Test-Path -LiteralPath $out)) 'nada criado'
+    }
+
     Test-Case 'Analise estatica' 'Excecoes revisadas: justificadas, restritas e sem enfraquecer as regras impostas' {
         $root = Split-Path -Parent $testsDir
         $cfg = Import-PowerShellDataFile -LiteralPath (Join-Path $root 'tools\static-analysis-exceptions.psd1')

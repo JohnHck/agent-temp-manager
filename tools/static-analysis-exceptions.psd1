@@ -15,7 +15,7 @@
             Files         = @('src/agent-temp.ps1', 'src/lib/Report.ps1', 'src/lib/Tui.ps1',
                               'install/Install-AgentTempManager.ps1', 'install/Uninstall-AgentTempManager.ps1', 'install/Restore-AgentTempManagerPrevious.ps1',
                               'tools/Build-Release.ps1', 'tools/Invoke-AtmStaticAnalysis.ps1', 'tools/clean-env/New-CleanEnvSandbox.ps1',
-                              'tests/Run-Tests.ps1', 'tests/Get-TempSnapshot.ps1')
+                              'tests/Run-Tests.ps1', 'tests/Get-TempSnapshot.ps1', 'tests/e2e/Invoke-InstallE2E.ps1')
             Justification = 'Interactive console presentation (coloured output) by design. The engines, providers, catalog and installer library stay under this rule.'
         }
         @{

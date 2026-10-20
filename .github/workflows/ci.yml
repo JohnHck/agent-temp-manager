@@ -88,6 +88,39 @@ jobs:
           }
           exit $LASTEXITCODE
 
+  # Real installation on disposable GitHub-hosted VMs (administrator, UAC disabled): build the release, install
+  # for real, CLI from a new process, V0.1 clean never deletes, update, rollback, tamper detection, a real standard
+  # user (created only in the VM), uninstall. Not a required check. UAC prompts and filtered tokens cannot be
+  # tested here (see docs/TESTING.md, privilege matrix).
+  install-e2e:
+    name: install e2e (${{ matrix.os }}, installer ${{ matrix.installer }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-2022, windows-11-arm]
+        installer: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: End-to-end installation
+        shell: powershell
+        env:
+          INSTALLER_SHELL: ${{ matrix.installer }}
+        run: |
+          ./tests/e2e/Invoke-InstallE2E.ps1 -OutDir "$env:RUNNER_TEMP\atm-e2e" -InstallerShell $env:INSTALLER_SHELL
+          exit $LASTEXITCODE
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: install-e2e-${{ matrix.os }}-${{ matrix.installer }}
+          path: ${{ runner.temp }}/atm-e2e
+          if-no-files-found: warn
+          retention-days: 14
+
   # Informative (not a required check, never fails on findings): PSScriptAnalyzer pinned by version and package
   # SHA-512, module signatures verified, imported by path. Fails only if integrity or the tool itself fails.
   static-analysis:
