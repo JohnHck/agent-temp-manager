@@ -31,14 +31,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - name: Environment (${{ matrix.shell }})
-        shell: ${{ matrix.shell }}
+      # A step's `shell` cannot read the matrix context, so each shell has its own literal step.
+      - name: Tests (Windows PowerShell 5.1)
+        if: matrix.shell == 'powershell'
+        shell: powershell
         run: |
           $PSVersionTable.PSVersion.ToString()
-          $PSVersionTable.PSEdition
-      - name: Tests (${{ matrix.shell }})
-        shell: ${{ matrix.shell }}
-        run: ./tests/Run-Tests.ps1 -SkipHeavy -ReportFile test-results-${{ matrix.shell }}.json
+          ./tests/Run-Tests.ps1 -SkipHeavy -ReportFile test-results-powershell.json
+      - name: Tests (PowerShell 7)
+        if: matrix.shell == 'pwsh'
+        shell: pwsh
+        run: |
+          $PSVersionTable.PSVersion.ToString()
+          ./tests/Run-Tests.ps1 -SkipHeavy -ReportFile test-results-pwsh.json
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
