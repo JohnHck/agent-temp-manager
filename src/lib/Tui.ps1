@@ -145,7 +145,7 @@ function Get-AtmTuiScreenRows {
             $cols = @(@{ Name = (Get-AtmText 'col.user'); Width = 0 }, @{ Name = 'SID'; Width = 46 }, @{ Name = (Get-AtmText 'col.status'); Width = 22 }, @{ Name = 'Roots'; Width = 6; Right = $true }, @{ Name = (Get-AtmText 'col.files'); Width = 10; Right = $true }, @{ Name = 'MB'; Width = 10; Right = $true }, @{ Name = 'A/R/U/O'; Width = 13 })
             foreach ($pr in $inv.Profiles) {
                 $pp = @($parts | Where-Object { $_.Sid -eq $pr.Sid -and $_.ProfilePath -eq $pr.ProfilePath })
-                $st = Get-AtmProfileStatusLabel -Inventory $inv -Profile $pr
+                $st = Get-AtmProfileStatusLabel -Inventory $inv -ProfileInfo $pr
                 $aruo = '{0}/{1}/{2}/{3}' -f @($pp | Where-Object Class -eq 'ACTIVE_EVIDENCE').Count, @($pp | Where-Object Class -eq 'RECENT').Count, @($pp | Where-Object Class -eq 'LIVENESS_UNKNOWN').Count, @($pp | Where-Object Class -eq 'ORPHAN_SUSPECTED').Count
                 $rows.Add(@($pr.UserName, $pr.Sid, (Get-AtmStatusText $st), $pp.Count, ('{0:N0}' -f (Get-AtmSum $pp 'Files')), (Format-AtmMB (Get-AtmSum $pp 'Bytes')), $aruo))
                 $items.Add([pscustomobject]@{ Kind = 'user'; Profile = $pr })
@@ -323,7 +323,7 @@ function Get-AtmTuiDashboardLines {
     $inv = $State.Inventory; $G = $State.G; $w = $State.Width
     $parts = @(Get-AtmTuiParts $State)
     $bytes = Get-AtmSum $parts 'Bytes'
-    $audited = @($inv.Profiles | Where-Object { (Get-AtmProfileStatusLabel -Inventory $inv -Profile $_) -like 'AUDITADO*' }).Count
+    $audited = @($inv.Profiles | Where-Object { (Get-AtmProfileStatusLabel -Inventory $inv -ProfileInfo $_) -like 'AUDITADO*' }).Count
     $cards = @(
         @{ T = (Get-AtmText 'dash.profiles'); L = @((Get-AtmText 'dash.discovered' @($inv.Profiles).Count), (Get-AtmText 'dash.audited' $audited), (Get-AtmText 'dash.incomplete' (@($inv.InaccessibleProfiles).Count + @($inv.UnverifiedTempProfiles).Count))); C = 'Cyan' }
         @{ T = (Get-AtmText 'dash.filesDirs'); L = @((Get-AtmText 'dash.files' (Get-AtmSum $parts 'Files')), (Get-AtmText 'dash.dirs' (Get-AtmSum $parts 'Dirs')), (Get-AtmText 'dash.partitions' $parts.Count)); C = 'Cyan' }

@@ -52,11 +52,11 @@ function Select-AtmPartitions {
 
 function Get-AtmProfileStatusLabel {
     # Returns a stable status CODE; Get-AtmStatusText renders it in the current language.
-    param($Inventory, $Profile)
-    $sts = @($Inventory.ProfileBaseStatus[$Profile.Sid + '|' + $Profile.ProfilePath])
-    $unreadable = @(Get-AtmProfileRegistries -Registries $Inventory.Registries -Profile $Profile | Where-Object { -not $_.Readable }).Count
-    $bases = @($Inventory.Bases | Where-Object { $_.Sid -eq $Profile.Sid -and $_.Profile.ProfilePath -eq $Profile.ProfilePath })
-    $tempUnverified = (@($Inventory.PSObject.Properties.Name) -contains 'UnverifiedTempProfiles') -and (@($Inventory.UnverifiedTempProfiles) -contains $Profile)
+    param($Inventory, [Alias('Profile')]$ProfileInfo)
+    $sts = @($Inventory.ProfileBaseStatus[$ProfileInfo.Sid + '|' + $ProfileInfo.ProfilePath])
+    $unreadable = @(Get-AtmProfileRegistries -Registries $Inventory.Registries -ProfileInfo $ProfileInfo | Where-Object { -not $_.Readable }).Count
+    $bases = @($Inventory.Bases | Where-Object { $_.Sid -eq $ProfileInfo.Sid -and $_.Profile.ProfilePath -eq $ProfileInfo.ProfilePath })
+    $tempUnverified = (@($Inventory.PSObject.Properties.Name) -contains 'UnverifiedTempProfiles') -and (@($Inventory.UnverifiedTempProfiles) -contains $ProfileInfo)
     if (@($bases | Where-Object { $_.Status -eq 'OK' }).Count -gt 0) {
         if (@($sts | Where-Object { $_.Status -in @('INACCESSIBLE', 'INVALID') }).Count -gt 0 -or @($bases | Where-Object { $_.Status -eq 'ENUMERATION_FAILED' }).Count -gt 0 -or $unreadable -gt 0 -or $tempUnverified) { return 'AUDITADO_PARCIAL' }
         return 'AUDITADO'
@@ -102,7 +102,7 @@ function Show-AtmAudit {
         $pp = @($all | Where-Object { $_.Sid -eq $pr.Sid -and $_.ProfilePath -eq $pr.ProfilePath })
         New-AtmRow ([ordered]@{
                 'col.user' = $pr.UserName; 'col.sid' = $pr.Sid; 'col.profile' = $pr.ProfilePath; 'col.origin' = $pr.Origin; 'col.loaded' = (Get-AtmYesNo $pr.Loaded)
-                'col.status' = (Get-AtmStatusText (Get-AtmProfileStatusLabel -Inventory $inv -Profile $pr))
+                'col.status' = (Get-AtmStatusText (Get-AtmProfileStatusLabel -Inventory $inv -ProfileInfo $pr))
                 'col.roots' = $pp.Count; 'col.files' = (Get-AtmSum $pp 'Files'); 'col.dirs' = (Get-AtmSum $pp 'Dirs'); 'col.mb' = (Format-AtmMB (Get-AtmSum $pp 'Bytes')); 'col.gb' = (Format-AtmGB (Get-AtmSum $pp 'Bytes'))
                 'col.active' = @($pp | Where-Object { $_.Class -eq 'ACTIVE_EVIDENCE' }).Count; 'col.recent' = @($pp | Where-Object { $_.Class -eq 'RECENT' }).Count
                 'col.unknown' = @($pp | Where-Object { $_.Class -eq 'LIVENESS_UNKNOWN' }).Count; 'col.orphan' = @($pp | Where-Object { $_.Class -eq 'ORPHAN_SUSPECTED' }).Count
@@ -167,7 +167,7 @@ function Show-AtmAudit {
     Write-Host ('  ' + (Get-AtmText 'audit.references' $inv.References.Direct $inv.References.Ancestor $inv.References.Ambiguous $inv.References.Unresolved.Count))
     foreach ($u in $inv.References.Unresolved) { Write-Host "   - $u" }
     foreach ($pr in $inv.Profiles) {
-        foreach ($reg in @(Get-AtmProfileRegistries -Registries $inv.Registries -Profile $pr)) {
+        foreach ($reg in @(Get-AtmProfileRegistries -Registries $inv.Registries -ProfileInfo $pr)) {
             $live = @($reg.Entries | Where-Object { $_.State -eq 'LIVE' }).Count
             Write-Host ('  ' + (Get-AtmText 'audit.registry' $reg.Provider $pr.UserName $(if ($reg.Readable) { Get-AtmText 'audit.readable' } else { Get-AtmText 'audit.unreadable' }) @($reg.Entries).Count $live $reg.Unparseable))
         }
@@ -211,7 +211,7 @@ function ConvertTo-AtmExportJson {
     $export = [ordered]@{
         toolVersion = $inv.ToolVersion; language = (Get-AtmLanguage); machine = $inv.Machine; user = $inv.Identity.Name; startedUtc = $inv.StartedUtc.ToString('o'); coverageComplete = $inv.CoverageComplete
         processes = [ordered]@{ total = $inv.Snapshot.Total; readable = $inv.Snapshot.Readable; uninspectable = $inv.Snapshot.Uninspectable; failed = $inv.Snapshot.Failed }
-        profiles = @($inv.Profiles | ForEach-Object { [ordered]@{ sid = $_.Sid; user = $_.UserName; path = $_.ProfilePath; origin = $_.Origin; status = (Get-AtmProfileStatusLabel -Inventory $inv -Profile $_) } })
+        profiles = @($inv.Profiles | ForEach-Object { [ordered]@{ sid = $_.Sid; user = $_.UserName; path = $_.ProfilePath; origin = $_.Origin; status = (Get-AtmProfileStatusLabel -Inventory $inv -ProfileInfo $_) } })
         partitions = @($inv.Partitions | Where-Object { $_.Kind -ne 'NotScanned' } | ForEach-Object {
                 [ordered]@{ sid = $_.Sid; user = $_.UserName; project = $_.Project; projectIdentified = $_.ProjectIdentified; projectSource = $_.ProjectSource; scope = $_.Slug; kind = $_.Kind; path = $_.Path; class = $_.Class; bytes = $_.Bytes; allocatedBytesEstimate = $_.AllocatedBytesEstimate
                     files = $_.Files; dirs = $_.Dirs; directChildren = $_.DirectChildren; reparsePoints = $_.ReparsePoints; errors = $_.ErrorCount; measurementComplete = $_.MeasurementComplete

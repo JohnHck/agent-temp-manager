@@ -132,11 +132,11 @@ function New-TestProfile {
     }
 }
 
-function Get-Base { param($Profile) return (Join-Path $Profile.TempCandidates[0].TempPath 'claude') }
+function Get-Base { param([Alias('Profile')]$ProfileInfo) return (Join-Path $ProfileInfo.TempCandidates[0].TempPath 'claude') }
 
 function New-TestRoot {
-    param($Profile, [string]$Slug = 'C--work-proj', [string]$Uuid = ([guid]::NewGuid().ToString()), [hashtable]$Files = @{ 'a.txt' = 100; 'sub\b.bin' = 2048 })
-    $p = Join-Path (Join-Path (Get-Base $Profile) $Slug) $Uuid
+    param([Alias('Profile')]$ProfileInfo, [string]$Slug = 'C--work-proj', [string]$Uuid = ([guid]::NewGuid().ToString()), [hashtable]$Files = @{ 'a.txt' = 100; 'sub\b.bin' = 2048 })
+    $p = Join-Path (Join-Path (Get-Base $ProfileInfo) $Slug) $Uuid
     [void][IO.Directory]::CreateDirectory($p)
     foreach ($k in $Files.Keys) {
         $f = Join-Path $p $k
@@ -234,7 +234,7 @@ try {
     # ------------------------------------------------------------------ unicode / spaces
     Test-Case 'Unicode e espacos' 'Perfil e arquivos com espacos/Unicode' {
         $p = New-TestProfile $uni
-        $r = New-TestRoot -Profile $p -Files @{ ('arquivo com espa' + [char]0x00E7 + 'o ' + [char]0x00E3 + '.txt') = 10; ('pasta ' + [char]0x65E5 + '\x y.bin') = 20 }
+        $r = New-TestRoot -ProfileInfo $p -Files @{ ('arquivo com espa' + [char]0x00E7 + 'o ' + [char]0x00E3 + '.txt') = 10; ('pasta ' + [char]0x65E5 + '\x y.bin') = 20 }
         $i = Inv -Profiles @($p)
         $x = Find-Part $i $r
         Assert-True $x 'particao encontrada'
@@ -248,20 +248,20 @@ try {
     # ------------------------------------------------------------------ classification
     Test-Case 'Classificacao' 'RECENT por NewestWriteTime < 72h' {
         $p = New-TestProfile 'recent'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         [IO.File]::SetLastWriteTimeUtc((Join-Path $r 'sub\b.bin'), $nowFuture.AddHours(-1))
         $x = Find-Part (Inv -Profiles @($p)) $r
         Assert-Eq $x.Class 'RECENT' 'classe'
     }
     Test-Case 'Classificacao' 'Idade > 72h sem evidencias = ORPHAN_SUSPECTED (somente informativo)' {
         $p = New-TestProfile 'old'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $i = Inv -Profiles @($p)
         Assert-Eq (Find-Part $i $r).Class 'ORPHAN_SUSPECTED' 'classe'
     }
     Test-Case 'Classificacao' 'Relogio adiantado (CLOCK_SKEW) bloqueia' {
         $p = New-TestProfile 'skew'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         [IO.File]::SetLastWriteTimeUtc((Join-Path $r 'a.txt'), $nowFuture.AddDays(1))
         $i = Inv -Profiles @($p)
         $x = Find-Part $i $r
@@ -271,7 +271,7 @@ try {
     Test-Case 'Classificacao' 'Arquivos soltos, diretorio nao-UUID e slug invalido nunca sao roots de sessao' {
         $p = New-TestProfile 'loose'
         $b = Get-Base $p
-        $null = New-TestRoot -Profile $p
+        $null = New-TestRoot -ProfileInfo $p
         [IO.File]::WriteAllText((Join-Path $b 'solto.json'), '{}')
         [void][IO.Directory]::CreateDirectory((Join-Path $b 'C--work-proj\nao-e-uuid'))
         [IO.File]::WriteAllText((Join-Path $b 'C--work-proj\arquivo.txt'), 'x')
@@ -296,7 +296,7 @@ try {
         $p1 = New-TestProfile 'shareA'
         $p2 = New-TestProfile 'shareB' -Sid 'S-1-5-21-1-2-3-777'
         $p2.TempCandidates = $p1.TempCandidates
-        $r = New-TestRoot -Profile $p1
+        $r = New-TestRoot -ProfileInfo $p1
         $i = Inv -Profiles @($p1, $p2)
         Assert-True ((Find-Part $i $r).Flags -contains 'SHARED_TEMP') 'flag'
         Assert-Eq @($i.Partitions).Count 1 'sem duplicar particoes'
@@ -305,7 +305,7 @@ try {
     # ------------------------------------------------------------------ partitions
     Test-Case 'Particoes exclusivas' 'Soma das particoes = total independente, sem duplicidade' {
         $p = New-TestProfile 'sum'
-        1..5 | ForEach-Object { $null = New-TestRoot -Profile $p -Slug ('C--p' + ($_ % 2)) -Files @{ 'x.bin' = (1000 * $_); 'd\y.bin' = 7; 'd\e\z.bin' = 3 } }
+        1..5 | ForEach-Object { $null = New-TestRoot -ProfileInfo $p -Slug ('C--p' + ($_ % 2)) -Files @{ 'x.bin' = (1000 * $_); 'd\y.bin' = 7; 'd\e\z.bin' = 3 } }
         [IO.File]::WriteAllBytes((Join-Path (Get-Base $p) 'loose.bin'), (New-Object byte[] 555))
         [IO.File]::WriteAllBytes((Join-Path (Get-Base $p) 'C--p0\loose2.bin'), (New-Object byte[] 66))
         $i = Inv -Profiles @($p)
@@ -324,7 +324,7 @@ try {
     # ------------------------------------------------------------------ errors / permissions
     Test-Case 'Permissoes' 'Diretorio inacessivel dentro da root -> erro, medicao incompleta, BLOQUEADO' {
         $p = New-TestProfile 'denied'
-        $r = New-TestRoot -Profile $p -Files @{ 'a.txt' = 1; 'secreto\b.txt' = 2 }
+        $r = New-TestRoot -ProfileInfo $p -Files @{ 'a.txt' = 1; 'secreto\b.txt' = 2 }
         $d = Join-Path $r 'secreto'
         $o = icacls $d /deny "*$($me.Sid):(OI)(CI)(RD)" 2>&1
         $cleanupActions.Add([scriptblock]::Create("icacls '$d' /remove:d '*$($me.Sid)' | Out-Null"))
@@ -341,7 +341,7 @@ try {
     Test-Case 'Permissoes' 'Base inacessivel -> perfil com cobertura incompleta' {
         $p = New-TestProfile 'basedenied'
         $b = Get-Base $p
-        $null = New-TestRoot -Profile $p
+        $null = New-TestRoot -ProfileInfo $p
         $o = icacls $b /deny "*$($me.Sid):(RD)" 2>&1
         $cleanupActions.Add([scriptblock]::Create("icacls '$b' /remove:d '*$($me.Sid)' | Out-Null"))
         $i = Inv -Profiles @($p)
@@ -352,7 +352,7 @@ try {
     }
     Test-Case 'Permissoes' 'Sem permissao de exclusao (deny DE/DC) -> sondagem ACCESS_DENIED, BLOQUEADO' {
         $p = New-TestProfile 'nodelete'
-        $r = New-TestRoot -Profile $p -Files @{ 'a.txt' = 5 }
+        $r = New-TestRoot -ProfileInfo $p -Files @{ 'a.txt' = 5 }
         $f = Join-Path $r 'a.txt'
         $o = icacls $f /deny "*$($me.Sid):(DE)" 2>&1
         $o = icacls $r /deny "*$($me.Sid):(DC)" 2>&1
@@ -365,7 +365,7 @@ try {
     }
     Test-Case 'Permissoes' 'Arquivo somente leitura (protegido) bloqueia; sem -Force' {
         $p = New-TestProfile 'readonly'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $f = Join-Path $r 'a.txt'
         [IO.File]::SetAttributes($f, [IO.FileAttributes]::ReadOnly)
         $cleanupActions.Add([scriptblock]::Create("try { [IO.File]::SetAttributes('$f', 'Normal') } catch { }"))
@@ -379,7 +379,7 @@ try {
     }
     Test-Case 'Permissoes' 'Outro usuario: nao-admin BLOQUEADO; admin exige -IncludeOtherUsers' {
         $p = New-TestProfile 'otheruser'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $fakeMe = [pscustomobject]@{ Sid = 'S-1-5-21-9-9-9-1000'; Name = 'TEST\outro'; IsAdmin = $false }
         $i = Inv -Profiles @($p) -Identity $fakeMe
         $g = Test-AtmCandidate -Partition (Find-Part $i $r) -Inventory $i
@@ -392,7 +392,7 @@ try {
     }
     Test-Case 'Permissoes' 'Owner NTFS diferente do SID do perfil -> OWNER_DIVERGENTE' {
         $p = New-TestProfile 'owner' -Sid 'S-1-5-21-1-2-3-4444'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $ident = [pscustomobject]@{ Sid = 'S-1-5-21-1-2-3-4444'; Name = 'TEST\owner'; IsAdmin = $false }
         $i = Inv -Profiles @($p) -Identity $ident
         $g = Test-AtmCandidate -Partition (Find-Part $i $r) -Inventory $i
@@ -402,7 +402,7 @@ try {
     # ------------------------------------------------------------------ processes / sessions / references
     Test-Case 'Processos' 'Cobertura de processos incompleta bloqueia SEMPRE (nao-admin e admin), sem override' {
         $p = New-TestProfile 'procgap'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $procs = New-Procs -Extra @([pscustomobject]@{ ProcessId = 900; Name = 'svc.exe'; ParentProcessId = 1; CommandLine = $null; CreationDate = (Get-Date) })
         $i = Inv -Profiles @($p) -Procs $procs
         Assert-Eq $i.Snapshot.Uninspectable 1 'registrado'
@@ -422,7 +422,7 @@ try {
     }
     Test-Case 'Processos' 'Falha na coleta de processos nunca presume ausencia' {
         $p = New-TestProfile 'procfail'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $i = Inv -Profiles @($p)
         $i.Snapshot.Failed = $true
         $x = Find-Part $i $r
@@ -432,7 +432,7 @@ try {
     }
     Test-Case 'Referencias' 'Referencia direta em linha de comando -> ACTIVE_EVIDENCE (sem expor a linha)' {
         $p = New-TestProfile 'ref'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $procs = New-Procs -Extra @([pscustomobject]@{ ProcessId = 501; Name = 'node.exe'; ParentProcessId = 1; CommandLine = "node.exe --token=SEGREDO `"$r\sub\b.bin`""; CreationDate = (Get-Date) })
         $i = Inv -Profiles @($p) -Procs $procs
         $x = Find-Part $i $r
@@ -442,14 +442,14 @@ try {
     }
     Test-Case 'Referencias' 'Referencia com barras normais e caixa diferente' {
         $p = New-TestProfile 'refslash'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $procs = New-Procs -Extra @([pscustomobject]@{ ProcessId = 502; Name = 'bash.exe'; ParentProcessId = 1; CommandLine = ('bash -c cd ' + $r.ToUpperInvariant().Replace('\', '/') + '/x'); CreationDate = (Get-Date) })
         Assert-Eq (Find-Part (Inv -Profiles @($p) -Procs $procs) $r).Class 'ACTIVE_EVIDENCE' 'classe'
     }
     Test-Case 'Referencias' 'Referencia so ao ancestral (projeto/base) NAO comprova atividade dos filhos' {
         $p = New-TestProfile 'anc'
-        $r1 = New-TestRoot -Profile $p -Slug 'C--a'
-        $r2 = New-TestRoot -Profile $p -Slug 'C--b'
+        $r1 = New-TestRoot -ProfileInfo $p -Slug 'C--a'
+        $r2 = New-TestRoot -ProfileInfo $p -Slug 'C--b'
         $slugDir = [IO.Path]::GetDirectoryName($r1)
         $procs = New-Procs -Extra @([pscustomobject]@{ ProcessId = 503; Name = 'x.exe'; ParentProcessId = 1; CommandLine = "x.exe `"$slugDir`""; CreationDate = (Get-Date) })
         $i = Inv -Profiles @($p) -Procs $procs
@@ -464,7 +464,7 @@ try {
     }
     Test-Case 'Referencias' 'Referencia ambigua (nome curto/curinga) nao e descartada' {
         $p = New-TestProfile 'amb'
-        $r = New-TestRoot -Profile $p -Slug 'C--longo-projeto'
+        $r = New-TestRoot -ProfileInfo $p -Slug 'C--longo-projeto'
         $procs = New-Procs -Extra @([pscustomobject]@{ ProcessId = 505; Name = 'z.exe'; ParentProcessId = 1; CommandLine = "z.exe $(Get-Base $p)\C--LON~1\x"; CreationDate = (Get-Date) })
         $x = Find-Part (Inv -Profiles @($p) -Procs $procs) $r
         Assert-True ($x.Flags -contains 'AMBIGUOUS_REFERENCE') 'ambigua'
@@ -479,7 +479,7 @@ try {
     }
     Test-Case 'Processos reais' 'Processo real referenciando a root e detectado (CIM, passagem unica)' {
         $p = New-TestProfile 'realproc'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $sp = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList @('-NoProfile', '-Command', "Start-Sleep 60; '$r\sub'") -PassThru -WindowStyle Hidden
         $cleanupActions.Add([scriptblock]::Create("Stop-Process -Id $($sp.Id) -ErrorAction SilentlyContinue"))
         Start-Sleep -Milliseconds 1500
@@ -495,7 +495,7 @@ try {
         $created = (Get-Date).AddMinutes(-30)
         $ft = $created.ToUniversalTime().ToFileTimeUtc()
         $pa = New-TestProfile 'sessA'; $pb = New-TestProfile 'sessB'
-        $ra = New-TestRoot -Profile $pa; $rb = New-TestRoot -Profile $pb
+        $ra = New-TestRoot -ProfileInfo $pa; $rb = New-TestRoot -ProfileInfo $pb
         $ua = Split-Path $ra -Leaf; $ub = Split-Path $rb -Leaf
         [IO.File]::WriteAllText((Join-Path (Join-Path $pa.ProfilePath '.claude') 'sessions\4242.json'), "{`"pid`":4242,`"sessionId`":`"$ua`",`"procStart`":`"$ft`"}")
         [IO.File]::WriteAllText((Join-Path (Join-Path $pb.ProfilePath '.claude') 'sessions\4343.json'), "{`"pid`":4343,`"sessionId`":`"$ub`",`"procStart`":`"$ft`"}")
@@ -509,7 +509,7 @@ try {
     }
     Test-Case 'Sessoes simultaneas' 'PID reutilizado, PID sem horario e registro corrompido' {
         $p = New-TestProfile 'sessX'
-        $r1 = New-TestRoot -Profile $p; $r2 = New-TestRoot -Profile $p
+        $r1 = New-TestRoot -ProfileInfo $p; $r2 = New-TestRoot -ProfileInfo $p
         $u1 = Split-Path $r1 -Leaf; $u2 = Split-Path $r2 -Leaf
         $ft = (Get-Date).AddDays(-3).ToUniversalTime().ToFileTimeUtc()
         [IO.File]::WriteAllText((Join-Path (Join-Path $p.ProfilePath '.claude') 'sessions\700.json'), "{`"pid`":700,`"sessionId`":`"$u1`",`"procStart`":`"$ft`"}")
@@ -526,7 +526,7 @@ try {
     }
     Test-Case 'Sessoes simultaneas' 'Transcricao recente da sessao exige investigacao' {
         $p = New-TestProfile 'transcript'
-        $r = New-TestRoot -Profile $p -Slug 'C--t'
+        $r = New-TestRoot -ProfileInfo $p -Slug 'C--t'
         $u = Split-Path $r -Leaf
         $tdir = Join-Path (Join-Path $p.ProfilePath '.claude') 'projects\C--t'
         [void][IO.Directory]::CreateDirectory($tdir)
@@ -540,7 +540,7 @@ try {
     Test-Case 'Perfis nao carregados' 'Perfil nao carregado/env desconhecido -> CONFIG_DIR_UNKNOWN (investigar)' {
         $p = New-TestProfile 'unloaded'
         $p.Loaded = $false; $p.EnvStatus = 'NOT_LOADED'; $p.EnvKnown = $false
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $i = Inv -Profiles @($p)
         $x = Find-Part $i $r
         Assert-True ($x.Flags -contains 'CONFIG_DIR_UNKNOWN') 'flag'
@@ -563,7 +563,7 @@ try {
     }
     Test-Case 'Reparse points' 'Junction dentro da root: contada, nao atravessada, bloqueia; deleter aborta sem excluir' {
         $p = New-TestProfile 'jinside'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $target = Join-Path $sandbox 'alvo-jinside'; [void][IO.Directory]::CreateDirectory($target); [IO.File]::WriteAllText((Join-Path $target 'canario.txt'), 'vivo')
         New-Junction -Link (Join-Path $r 'sub\link') -Target $target
         $i = Inv -Profiles @($p)
@@ -593,7 +593,7 @@ try {
     }
     Test-Case 'Reparse points' 'Symlink de diretorio (se permitido) tambem e bloqueado' {
         $p = New-TestProfile 'symlink'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $target = Join-Path $sandbox 'alvo-sym'; [void][IO.Directory]::CreateDirectory($target)
         try { $o = cmd /c mklink /D "`"$(Join-Path $r 'sym')`"" "`"$target`"" 2>&1 } catch { }
         if (-not [IO.Directory]::Exists((Join-Path $r 'sym'))) { $script:caseSkipped = $true; $script:caseNote = 'symlink exige privilegio (SeCreateSymbolicLink) ou modo desenvolvedor; reparse coberto por junctions'; return }
@@ -604,7 +604,7 @@ try {
     # ------------------------------------------------------------------ locks / in use
     Test-Case 'Arquivos em uso' 'Arquivo aberto (FileShare.None e ReadWrite|Delete) -> EM_USO, preservado' {
         $p = New-TestProfile 'locked'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $i = Inv -Profiles @($p)
         foreach ($share in @([IO.FileShare]::None, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))) {
             $fs = [IO.File]::Open((Join-Path $r 'a.txt'), 'Open', 'Read', $share)
@@ -620,7 +620,7 @@ try {
     }
     Test-Case 'Arquivos em uso' 'Processo com diretorio corrente dentro da root -> EM_USO' {
         $p = New-TestProfile 'cwd'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $sp = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep 60') -WorkingDirectory (Join-Path $r 'sub') -PassThru -WindowStyle Hidden
         $cleanupActions.Add([scriptblock]::Create("Stop-Process -Id $($sp.Id) -ErrorAction SilentlyContinue"))
         Start-Sleep -Milliseconds 1500
@@ -632,7 +632,7 @@ try {
     # ------------------------------------------------------------------ allowlist / traversal
     Test-Case 'Path traversal' 'Entradas maliciosas ou nao canonicas sao rejeitadas' {
         $p = New-TestProfile 'trav'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $b = Get-Base $p
         $bad = @{
             "$b\C--work-proj\..\C--work-proj\$(Split-Path $r -Leaf)" = 'PATH_TRAVERSAL'
@@ -652,7 +652,7 @@ try {
     }
     Test-Case 'Path traversal' 'Perfil, TEMP, base, projeto e raiz do disco nunca sao aceitos' {
         $p = New-TestProfile 'roots'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $b = Get-Base $p
         $targets = @($p.ProfilePath, $p.TempCandidates[0].TempPath, $b, [IO.Path]::GetDirectoryName($r), 'C:\', $sandbox)
         $entries = @($targets | ForEach-Object { [pscustomobject]@{ Source = 't'; Path = $_; Fingerprint = $null } })
@@ -675,7 +675,7 @@ try {
     # ------------------------------------------------------------------ clean flow
     Test-Case 'Clean' 'Sem confirmacao ou confirmacao divergente: nada e apagado' {
         $p = New-TestProfile 'noconfirm'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $e = @([pscustomobject]@{ Source = 't'; Path = $r; Fingerprint = $null })
         foreach ($reader in @({ param($x) $null }, { param($x) '' }, { param($x) $x.ToLowerInvariant() }, { param($x) "$x " }, { param($x) 'sim' })) {
             $c = Invoke-AtmClean -Entries $e -PlanPresenter $presenter -ConfirmationReader $reader -InventoryArgs (Get-InvArgs -Profiles @($p))
@@ -692,7 +692,7 @@ try {
         $c = Invoke-AtmClean -Entries @() -PlanPresenter $presenter -ConfirmationReader ${function:Confirm-Correct}
         Assert-Eq $c.Aborted 'ALLOWLIST_VAZIA' 'vazia'
         $p = New-TestProfile 'outside'
-        $r1 = New-TestRoot -Profile $p; $r2 = New-TestRoot -Profile $p
+        $r1 = New-TestRoot -ProfileInfo $p; $r2 = New-TestRoot -ProfileInfo $p
         $before = Get-StableTreeListing $r2
         $c = Invoke-AtmClean -Entries @([pscustomobject]@{ Source = 't'; Path = $r1; Fingerprint = $null }) -PlanPresenter $presenter -ConfirmationReader ${function:Confirm-Correct} -InventoryArgs (Get-InvArgs -Profiles @($p))
         Assert-Eq @($c.Deleted | Where-Object { $_.Completed -and $_.Verified }).Count 1 'somente r1'
@@ -703,7 +703,7 @@ try {
     }
     Test-Case 'Clean' 'Alteracao entre preview e clean (fingerprint) -> recusado' {
         $p = New-TestProfile 'changed'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $fp = (Find-Part (Inv -Profiles @($p)) $r).Fingerprint
         [IO.File]::WriteAllBytes((Join-Path $r 'novo.bin'), (New-Object byte[] 3))
         [IO.File]::SetLastWriteTimeUtc((Join-Path $r 'novo.bin'), [datetime]::UtcNow.AddDays(-5))
@@ -714,7 +714,7 @@ try {
     }
     Test-Case 'Clean' 'Alteracao apos a confirmacao (antes da exclusao) -> preservado na revalidacao' {
         $p = New-TestProfile 'toctou'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $hook = { param($part) [IO.File]::WriteAllBytes((Join-Path $part.Path 'apareceu.bin'), (New-Object byte[] 9)) }
         $c = Invoke-AtmClean -Entries @([pscustomobject]@{ Source = 't'; Path = $r; Fingerprint = $null }) -PlanPresenter $presenter -ConfirmationReader ${function:Confirm-Correct} -InventoryArgs (Get-InvArgs -Profiles @($p)) -BeforeDeleteHook $hook
         Assert-Eq @($c.Deleted).Count 0 'nada excluido'
@@ -723,7 +723,7 @@ try {
     }
     Test-Case 'Clean' 'Root removida entre preview e clean / durante a revalidacao' {
         $p = New-TestProfile 'vanish'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $hook = { param($part) [AgentTempManager.AtmDeleter]::DeleteTree($part.Path) | Out-Null }
         $c = Invoke-AtmClean -Entries @([pscustomobject]@{ Source = 't'; Path = $r; Fingerprint = $null }) -PlanPresenter $presenter -ConfirmationReader ${function:Confirm-Correct} -InventoryArgs (Get-InvArgs -Profiles @($p)) -BeforeDeleteHook $hook
         Assert-Eq @($c.Skipped).Count 1 'tratado como desaparecido'
@@ -734,7 +734,7 @@ try {
     }
     Test-Case 'Clean' 'Caixa divergente e duplicados na allowlist sao recusados' {
         $p = New-TestProfile 'case'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $c = Invoke-AtmClean -Entries @([pscustomobject]@{ Source = 't'; Path = $r.ToUpperInvariant().Replace('C:\', 'C:\'); Fingerprint = $null }) -PlanPresenter $presenter -ConfirmationReader ${function:Confirm-Correct} -InventoryArgs (Get-InvArgs -Profiles @($p))
         Assert-Eq $c.Aborted 'NENHUM_CAMINHO_ELEGIVEL' 'caixa'
         $c2 = Invoke-AtmClean -Entries @([pscustomobject]@{ Source = 'a'; Path = $r; Fingerprint = $null }, [pscustomobject]@{ Source = 'b'; Path = $r; Fingerprint = $null }) -PlanPresenter $presenter -ConfirmationReader { param($x) 'nao' } -InventoryArgs (Get-InvArgs -Profiles @($p))
@@ -743,7 +743,7 @@ try {
     }
     Test-Case 'Clean' 'Classes ACTIVE/RECENT/UNKNOWN nunca entram no plano' {
         $p = New-TestProfile 'classes'
-        $ra = New-TestRoot -Profile $p; $rr = New-TestRoot -Profile $p; $ru = New-TestRoot -Profile $p
+        $ra = New-TestRoot -ProfileInfo $p; $rr = New-TestRoot -ProfileInfo $p; $ru = New-TestRoot -ProfileInfo $p
         [IO.File]::SetLastWriteTimeUtc((Join-Path $rr 'a.txt'), $nowFuture.AddHours(-3))
         $procs = New-Procs -Extra @(
             [pscustomobject]@{ ProcessId = 801; Name = 'n.exe'; ParentProcessId = 1; CommandLine = "n $ra"; CreationDate = (Get-Date) },
@@ -757,7 +757,7 @@ try {
     # ------------------------------------------------------------------ read-only guarantee
     Test-Case 'Somente leitura' 'audit + preview nao alteram nada no sandbox' {
         $p = New-TestProfile 'ro'
-        1..3 | ForEach-Object { $null = New-TestRoot -Profile $p }
+        1..3 | ForEach-Object { $null = New-TestRoot -ProfileInfo $p }
         # NTFS updates directory timestamps lazily after recent creations: wait until the tree is stable.
         $before = Get-TreeListing $p.ProfilePath
         for ($w = 0; $w -lt 20; $w++) { Start-Sleep -Milliseconds 500; $again = Get-TreeListing $p.ProfilePath; if ($again -eq $before) { break }; $before = $again }
@@ -796,7 +796,7 @@ try {
     # ------------------------------------------------------------------ security review regressions
     Test-Case 'Revisao de seguranca' 'H1: troca por junction durante a exclusao e impossivel (cadeia fixada por handle)' {
         $p = New-TestProfile 'pin'
-        $r = New-TestRoot -Profile $p -Files @{ 'sub\alvo.txt' = 5; 'a.txt' = 1 }
+        $r = New-TestRoot -ProfileInfo $p -Files @{ 'sub\alvo.txt' = 5; 'a.txt' = 1 }
         $victim = Join-Path $sandbox 'vitima-pin'; [void][IO.Directory]::CreateDirectory($victim); [IO.File]::WriteAllText((Join-Path $victim 'alvo.txt'), 'vivo')
         $slugDir = [IO.Path]::GetDirectoryName($r)
         # Control: without pinning the same renames succeed (so the assertion below proves the pin, not something else).
@@ -827,7 +827,7 @@ try {
     }
     Test-Case 'Revisao de seguranca' 'M1: base/projeto com escrita concedida a terceiros bloqueia; %WINDIR%\Temp e compartilhado' {
         $p = New-TestProfile 'aclbase'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $b = Get-Base $p
         $o = icacls $b /grant '*S-1-5-32-545:(OI)(CI)(M)' 2>&1
         $i = Inv -Profiles @($p)
@@ -841,7 +841,7 @@ try {
     }
     Test-Case 'Revisao de seguranca' 'M2: procStart em formato inesperado nunca vira "sessao encerrada"' {
         $p = New-TestProfile 'procstart'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $u = Split-Path $r -Leaf
         $ms = [long]([datetime]::UtcNow - [datetime]'1970-01-01').TotalMilliseconds
         [IO.File]::WriteAllText((Join-Path (Join-Path $p.ProfilePath '.claude') 'sessions\910.json'), "{`"pid`":910,`"sessionId`":`"$u`",`"procStart`":`"$ms`"}")
@@ -852,7 +852,7 @@ try {
     }
     Test-Case 'Revisao de seguranca' 'L1/L2/L4: drill-down e saidas validados; tokens de linha de comando nao sao exibidos' {
         $p = New-TestProfile 'lows'
-        $r = New-TestRoot -Profile $p -Slug 'C--longo-projeto'
+        $r = New-TestRoot -ProfileInfo $p -Slug 'C--longo-projeto'
         $procs = New-Procs -Extra @([pscustomobject]@{ ProcessId = 920; Name = 'z.exe'; ParentProcessId = 1; CommandLine = "z.exe $(Get-Base $p)\C--LON~1\SEGREDO-TOKEN"; CreationDate = (Get-Date) })
         $i = Inv -Profiles @($p) -Procs $procs
         $x = Find-Part $i $r
@@ -876,7 +876,7 @@ try {
             Assert-True (-not ([regex]::IsMatch([IO.File]::ReadAllText($f.FullName), 'AtmRealDeletionEnabled\s*='))) "$($f.Name) nao pode alterar a trava"
         }
         $p = New-TestProfile 'gate01'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $before = Get-StableTreeListing $r
         $script:readerCalled = $false
         $script:AtmRealDeletionEnabled = $false
@@ -891,7 +891,7 @@ try {
     }
     Test-Case 'Gate V0.1' 'TOCTOU: plano fixado diferente da medicao validada -> nada e excluido' {
         $p = New-TestProfile 'planmismatch'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $s = [AgentTempManager.AtmScanner]::ScanTree($r, 3, 4096)
         $d = [AgentTempManager.AtmDeleter]::DeleteTree($r, $s.Files + 1, $s.Dirs, $s.Bytes, $s.NewestWriteTimeUtc.Ticks, $null)
         Assert-True (-not $d.Attempted) 'nao tentou'
@@ -908,7 +908,7 @@ try {
     }
     Test-Case 'Gate V0.1' 'H1 entre processos: outro processo nao consegue renomear root, projeto ou base durante a exclusao' {
         $p = New-TestProfile 'pinxproc'
-        $r = New-TestRoot -Profile $p -Files @{ 'sub\x.txt' = 3 }
+        $r = New-TestRoot -ProfileInfo $p -Files @{ 'sub\x.txt' = 3 }
         $slugDir = [IO.Path]::GetDirectoryName($r)
         $script:xprocResults = @()
         $hook = [Action[string]]{
@@ -926,9 +926,9 @@ try {
     }
     Test-Case 'Gate V0.1' 'Referencias com ":" ou "." colados e nomes nao resolvidos nunca sao ignorados' {
         $p = New-TestProfile 'refterm'
-        $r = New-TestRoot -Profile $p -Slug 'C--proj'
-        $r2 = New-TestRoot -Profile $p -Slug 'C--proj'
-        $other = New-TestRoot -Profile $p -Slug 'C--outro'
+        $r = New-TestRoot -ProfileInfo $p -Slug 'C--proj'
+        $r2 = New-TestRoot -ProfileInfo $p -Slug 'C--proj'
+        $other = New-TestRoot -ProfileInfo $p -Slug 'C--outro'
         foreach ($cl in @("docker run -v $($r):/work img", "tool --dir=$r.", "x `"$r`".bak")) {
             $procs = New-Procs -Extra @([pscustomobject]@{ ProcessId = 930; Name = 't.exe'; ParentProcessId = 1; CommandLine = $cl; CreationDate = (Get-Date) })
             Assert-Eq (Find-Part (Inv -Profiles @($p) -Procs $procs) $r).Class 'ACTIVE_EVIDENCE' "referencia detectada em: $($cl.Substring(0, 12))..."
@@ -946,7 +946,7 @@ try {
             Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; using Microsoft.Win32.SafeHandles; public static class AtmTestOpen { [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern SafeFileHandle CreateFileW(string n, uint a, uint s, IntPtr sa, uint d, uint f, IntPtr t); public static int TryOpenDirForWrite(string p) { using (SafeFileHandle h = CreateFileW(p, 0x0002 | 0x0100, 7, IntPtr.Zero, 3, 0x02000000 | 0x00200000, IntPtr.Zero)) { return h.IsInvalid ? Marshal.GetLastWin32Error() : 0; } } }'
         }
         $p = New-TestProfile 'pinwrite'
-        $r = New-TestRoot -Profile $p -Files @{ 'a.txt' = 1 }
+        $r = New-TestRoot -ProfileInfo $p -Files @{ 'a.txt' = 1 }
         [void][IO.Directory]::CreateDirectory((Join-Path $r 'vazio'))
         Assert-Eq ([AtmTestOpen]::TryOpenDirForWrite((Join-Path $r 'vazio'))) 0 'controle: sem fixacao a abertura para escrita funciona'
         $script:pinWrite = -1
@@ -956,7 +956,7 @@ try {
     }
     Test-Case 'Gate V0.1' 'Preview sempre exibe o motivo do bloqueio, mesmo com evidencias longas' {
         $p = New-TestProfile 'whyshown'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $extra = @(1..40 | ForEach-Object { [pscustomobject]@{ ProcessId = 1000 + $_; Name = ('processo-com-nome-longo-' + $_ + '.exe'); ParentProcessId = 1; CommandLine = "x `"$r\sub`""; CreationDate = (Get-Date) } })
         $i = Inv -Profiles @($p) -Procs (New-Procs -Extra $extra)
         $rows = Invoke-AtmPreview -Inventory $i
@@ -989,7 +989,7 @@ try {
     }
     Test-Case 'TUI' 'Navegacao headless: dashboard, usuarios, roots, detalhe, classes, erros, preview, ajuda' {
         $p = New-TestProfile 'tui'
-        $r1 = New-TestRoot -Profile $p; $r2 = New-TestRoot -Profile $p
+        $r1 = New-TestRoot -ProfileInfo $p; $r2 = New-TestRoot -ProfileInfo $p
         [IO.File]::SetLastWriteTimeUtc((Join-Path $r2 'a.txt'), $nowFuture.AddHours(-1))
         $ia = Get-InvArgs -Profiles @($p)
         $keys = @((New-Key 'D1' '1'), (New-Key 'Escape'), (New-Key 'D2' '2'), (New-Key 'Enter'), (New-Key 'Enter'), (New-Key 'Escape'), (New-Key 'Escape'), (New-Key 'Escape'),
@@ -1004,7 +1004,7 @@ try {
     }
     Test-Case 'TUI' 'Fallback ASCII e terminal estreito (60x20)' {
         $p = New-TestProfile 'tuiascii'
-        $null = New-TestRoot -Profile $p
+        $null = New-TestRoot -ProfileInfo $p
         $o = Invoke-HeadlessTui -Keys @((New-Key 'D1' '1'), (New-Key 'Escape'), (New-Key 'D4' '4'), (New-Key 'Q' 'q')) -InvArgs (Get-InvArgs -Profiles @($p)) -Ascii -W 60 -H 20
         $all = $o.Frames -join "`n"
         Assert-True ($all -match '^[\x09\x0A\x20-\x7E]*$') 'somente ASCII imprimivel'
@@ -1015,7 +1015,7 @@ try {
         # (answered with an empty line = no), which shifts every later answer by one line.
         foreach ($asAdmin in @($false, $true)) {
             $p = New-TestProfile ('tuiclean' + [int]$asAdmin)
-            $r = New-TestRoot -Profile $p
+            $r = New-TestRoot -ProfileInfo $p
             $ia = Get-InvArgs -Profiles @($p) -Identity ([pscustomobject]@{ Sid = $testOwnerSid; Name = $me.Name; IsAdmin = $asAdmin })
             $others = @(if ($asAdmin) { '' })
             $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines @('', '', '')
@@ -1212,9 +1212,9 @@ try {
     }
     Test-Case 'I18n' 'en-US: auditoria, preview, plano de limpeza e TUI totalmente em ingles; codigos do motor identicos' {
         $p = New-TestProfile 'idioma'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         [IO.File]::SetLastWriteTimeUtc((Join-Path $r 'a.txt'), $nowFuture.AddHours(-1))
-        $r2 = New-TestRoot -Profile $p
+        $r2 = New-TestRoot -ProfileInfo $p
         try {
             Set-AtmLanguage -Requested 'pt-BR'
             $iPt = Inv -Profiles @($p)
@@ -1243,7 +1243,7 @@ try {
     Test-Case 'I18n' 'ASCII: acentos transliterados (pt-BR) e nada fora do ASCII imprimivel' {
         Assert-Eq (ConvertTo-AtmAscii ('Usu' + [char]0x00E1 + 'rio ' + [char]0x00E7 + [char]0x00E3 + ' ' + [char]0x540D)) 'Usuario ca ?' 'transliteracao'
         $p = New-TestProfile ('Jos' + [char]0x00E9)
-        $null = New-TestRoot -Profile $p
+        $null = New-TestRoot -ProfileInfo $p
         $o = Invoke-HeadlessTui -Keys @((New-Key 'D1' '1'), (New-Key 'Escape'), (New-Key 'D2' '2'), (New-Key 'Q' 'q')) -InvArgs (Get-InvArgs -Profiles @($p)) -Ascii -W 140 -H 30
         $all = $o.Frames -join "`n"
         Assert-True ($all -match '^[\x09\x0A\x20-\x7E]*$') 'somente ASCII'
@@ -1267,27 +1267,27 @@ try {
     # ------------------------------------------------------------------ portability
     Test-Case 'Portabilidade' 'Windows com apenas um usuario' {
         $p = New-TestProfile 'unico'
-        $r = New-TestRoot -Profile $p
+        $r = New-TestRoot -ProfileInfo $p
         $i = Inv -Profiles @($p)
         Assert-Eq @($i.Profiles).Count 1 'um perfil'
-        Assert-Eq (Get-AtmProfileStatusLabel -Inventory $i -Profile $p) 'AUDITADO' 'rotulo'
+        Assert-Eq (Get-AtmProfileStatusLabel -Inventory $i -ProfileInfo $p) 'AUDITADO' 'rotulo'
         Assert-True $i.CoverageComplete 'cobertura completa com processos inspecionaveis'
         Assert-Eq @($i.Partitions).Count 1 'uma particao'
         Show-AtmAudit -Inventory $i
     }
     Test-Case 'Portabilidade' 'Varios usuarios: auditado, inacessivel, hive nao carregado, sem Claude Code' {
-        $pa = New-TestProfile 'multiA'; $ra = New-TestRoot -Profile $pa
-        $pb = New-TestProfile 'multiB' -Sid 'S-1-5-21-1-2-3-4444'; $null = New-TestRoot -Profile $pb
+        $pa = New-TestProfile 'multiA'; $ra = New-TestRoot -ProfileInfo $pa
+        $pb = New-TestProfile 'multiB' -Sid 'S-1-5-21-1-2-3-4444'; $null = New-TestRoot -ProfileInfo $pb
         $bb = Get-Base $pb
         $o = icacls $bb /deny "*$($me.Sid):(RD)" 2>&1
         $cleanupActions.Add([scriptblock]::Create("icacls '$bb' /remove:d '*$($me.Sid)' | Out-Null"))
         $pc = New-TestProfile 'multiC'; [IO.Directory]::Delete((Get-Base $pc)); $pc.EnvStatus = 'NOT_LOADED'; $pc.Loaded = $false; $pc.EnvKnown = $false
         $pd = New-TestProfile 'multiD' -NoConfig; [IO.Directory]::Delete((Get-Base $pd))
         $i = Inv -Profiles @($pa, $pb, $pc, $pd)
-        Assert-Eq (Get-AtmProfileStatusLabel -Inventory $i -Profile $pa) 'AUDITADO' 'A auditado'
-        Assert-Eq (Get-AtmProfileStatusLabel -Inventory $i -Profile $pb) 'INACESSIVEL' 'B inacessivel'
-        Assert-Eq (Get-AtmProfileStatusLabel -Inventory $i -Profile $pc) 'TEMP_NAO_VERIFICAVEL' 'C: ausencia no local padrao nao prova nada'
-        Assert-Eq (Get-AtmProfileStatusLabel -Inventory $i -Profile $pd) 'SEM_TEMP_CLAUDE' 'D: sem Claude Code'
+        Assert-Eq (Get-AtmProfileStatusLabel -Inventory $i -ProfileInfo $pa) 'AUDITADO' 'A auditado'
+        Assert-Eq (Get-AtmProfileStatusLabel -Inventory $i -ProfileInfo $pb) 'INACESSIVEL' 'B inacessivel'
+        Assert-Eq (Get-AtmProfileStatusLabel -Inventory $i -ProfileInfo $pc) 'TEMP_NAO_VERIFICAVEL' 'C: ausencia no local padrao nao prova nada'
+        Assert-Eq (Get-AtmProfileStatusLabel -Inventory $i -ProfileInfo $pd) 'SEM_TEMP_CLAUDE' 'D: sem Claude Code'
         Assert-True (-not $i.CoverageComplete) 'cobertura incompleta declarada'
         Assert-True (@($i.UnverifiedTempProfiles) -contains $pc) 'C listado como nao verificavel'
         Assert-True (@($i.Partitions | Where-Object { $_.Sid -ne $pa.Sid -or $_.ProfilePath -ne $pa.ProfilePath }).Count -eq 0) 'nenhuma particao atribuida ao perfil errado'
@@ -1333,7 +1333,7 @@ try {
         $i = Inv -Profiles @($p)
         Assert-Eq @($i.Partitions).Count 0 'nada inventariado'
         Assert-Eq @($i.InaccessibleProfiles).Count 0 'ausencia legitima nao e erro'
-        Assert-Eq (Get-AtmProfileStatusLabel -Inventory $i -Profile $p) 'SEM_TEMP_CLAUDE' 'rotulo'
+        Assert-Eq (Get-AtmProfileStatusLabel -Inventory $i -ProfileInfo $p) 'SEM_TEMP_CLAUDE' 'rotulo'
         $p2 = New-TestProfile 'tempvazio'
         $i2 = Inv -Profiles @($p2)
         Assert-Eq @($i2.Partitions).Count 0 'TEMP\claude vazio'
@@ -1345,9 +1345,9 @@ try {
     Test-Case 'Portabilidade' 'Projetos: nao identificado por padrao; identificado pelo diretorio de trabalho da sessao; colisao nao identifica' {
         $p = New-TestProfile 'projetos'
         $cfgRoot = Join-Path $p.ProfilePath '.claude'
-        $r1 = New-TestRoot -Profile $p -Slug 'D--src-gamma'; $r2 = New-TestRoot -Profile $p -Slug 'D--src-gamma'
-        $r3 = New-TestRoot -Profile $p -Slug 'C--src-delta'; $r4 = New-TestRoot -Profile $p -Slug 'C--src-delta'
-        $r5 = New-TestRoot -Profile $p -Slug 'C--a-b'
+        $r1 = New-TestRoot -ProfileInfo $p -Slug 'D--src-gamma'; $r2 = New-TestRoot -ProfileInfo $p -Slug 'D--src-gamma'
+        $r3 = New-TestRoot -ProfileInfo $p -Slug 'C--src-delta'; $r4 = New-TestRoot -ProfileInfo $p -Slug 'C--src-delta'
+        $r5 = New-TestRoot -ProfileInfo $p -Slug 'C--a-b'
         $u1 = Split-Path $r1 -Leaf; $u4 = Split-Path $r4 -Leaf; $u5 = Split-Path $r5 -Leaf
         [IO.File]::WriteAllText((Join-Path $cfgRoot 'sessions\61.json'), ('{"pid":61,"sessionId":"' + $u1 + '","cwd":"D:\\src\\gamma"}'))
         [IO.File]::WriteAllText((Join-Path $cfgRoot 'sessions\62.json'), ('{"pid":62,"sessionId":"' + $u4 + '","cwd":"C:\\outro\\lugar"}'))
@@ -1365,7 +1365,7 @@ try {
     Test-Case 'Portabilidade' 'Nomes Unicode, espacos e especiais (apostrofo, &, #, parenteses) em perfil e instalacao' {
         $name = "O'Brien & Co (Ltda) #1 " + [char]0x00E7 + [char]0x00E3 + [char]0x00E9 + ' ' + [char]0x540D + [char]0x524D
         $p = New-TestProfile $name
-        $r = New-TestRoot -Profile $p -Files @{ ("arq '&' #1 " + [char]0x00E7 + '.txt') = 3 }
+        $r = New-TestRoot -ProfileInfo $p -Files @{ ("arq '&' #1 " + [char]0x00E7 + '.txt') = 3 }
         $i = Inv -Profiles @($p)
         $x = Find-Part $i $r
         Assert-True ($x -and $x.Files -eq 1 -and $x.Bytes -eq 3) 'medido'
@@ -1407,15 +1407,19 @@ try {
     }
     Test-Case 'Providers' 'Provider ficticio (somente teste) usa o mesmo motor, gates e particoes' {
         $p = New-TestProfile 'multi'
-        $rc = New-TestRoot -Profile $p
+        $rc = New-TestRoot -ProfileInfo $p
         $fakeRoot = Join-Path $p.TempCandidates[0].TempPath ('fake-agent\scope1\run-0001')
         [void][IO.Directory]::CreateDirectory($fakeRoot); [IO.File]::WriteAllBytes((Join-Path $fakeRoot 'x.bin'), (New-Object byte[] 42))
         $claude = (Get-AtmProviders)[0]
         $fake = [pscustomobject]@{
             Id = 'fake-agent'; DisplayName = 'Fake'; TempSubdir = 'fake-agent'; ScopePattern = '^scope\d+$'; RootPattern = '^run-\d{4}$'; EnvVarNames = @()
-            GetExtraTempDirs = { param($Profile) @() }; GetConfigDirs = { param($Profile) [pscustomobject]@{ Dirs = @(); Known = $true } }
-            GetSessionEvidence = { param($Profile, $Snapshot) [pscustomobject]@{ Readable = $true; Unparseable = 0; Entries = @() } }
-            GetActivityEvidence = { param($Profile, $Scope, $RootName) [pscustomobject]@{ Readable = $true; LastWriteUtc = $null } }
+            # Written as a third-party provider would be before the ProfileInfo rename: the old parameter name
+            # $Profile must keep working, because the engine passes provider arguments by position. Built from text
+            # so the analyser does not report the deliberate use of the automatic-variable name.
+            GetExtraTempDirs = [scriptblock]::Create('param($Profile) if ($null -eq $Profile.Sid) { throw "perfil nao recebido" }; @()')
+            GetConfigDirs = [scriptblock]::Create('param($Profile) [pscustomobject]@{ Dirs = @(); Known = ($null -ne $Profile -and [bool]$Profile.Sid) }')
+            GetSessionEvidence = [scriptblock]::Create('param($Profile, $Snapshot) [pscustomobject]@{ Readable = [bool]$Profile.Sid; Unparseable = 0; Entries = @() }')
+            GetActivityEvidence = [scriptblock]::Create('param($Profile, $Scope, $RootName) if ($null -eq $Profile.Sid) { throw "perfil nao recebido" }; [pscustomobject]@{ Readable = $true; LastWriteUtc = $null }')
             GetProjectKey = { param($Scope, $ProfilePath) [pscustomobject]@{ IsHome = $false; Key = $Scope } }
         }
         $a = Get-InvArgs -Profiles @($p)
@@ -1428,6 +1432,9 @@ try {
         Assert-Eq (Find-Part $i $rc).Provider 'claude-code' 'claude intacto'
         Assert-Eq (Get-AtmSum $i.Partitions 'Bytes') (42 + 2148) 'particoes exclusivas entre providers'
         Assert-Eq (Test-AtmCandidate -Partition $x -Inventory $i).Category 'ELIGIBLE' 'mesmos gates'
+        Assert-True (-not ((@($x.Flags) -join ' ') -match 'CONFIG_DIR_UNKNOWN')) 'provider com o nome antigo do parametro ($Profile) recebe o perfil'
+        # Named calls with the old parameter name keep working through the alias.
+        Assert-Eq (Get-AtmClaudeConfigDirs -Profile $p).Known (Get-AtmClaudeConfigDirs -ProfileInfo $p).Known 'alias -Profile'
         Assert-Eq @(Get-AtmProviders).Count 1 'provider de teste nao foi registrado globalmente'
     }
 
@@ -1661,7 +1668,7 @@ try {
     if (-not $SkipHeavy) {
         Test-Case 'Escala' "Root com $HeavyFiles arquivos: passagem unica, memoria controlada" {
             $p = New-TestProfile 'heavy'
-            $r = New-TestRoot -Profile $p -Files @{}
+            $r = New-TestRoot -ProfileInfo $p -Files @{}
             if (-not ('AtmTestGen' -as [type])) {
                 Add-Type -TypeDefinition 'public static class AtmTestGen { public static void Make(string root, int n) { for (int i = 0; i < n; i++) { string d = System.IO.Path.Combine(root, "d" + (i / 1000)); if (i % 1000 == 0) System.IO.Directory.CreateDirectory(d); System.IO.File.WriteAllBytes(System.IO.Path.Combine(d, "f" + i + ".bin"), new byte[i % 7]); } } }'
             }

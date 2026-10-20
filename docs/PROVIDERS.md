@@ -12,11 +12,15 @@ an object exposing exactly these members (validated at registration):
 | `ScopePattern` | regex | First-level directories under the base (project scopes). |
 | `RootPattern` | regex | Second-level directories: session roots, the only deletable unit. |
 | `EnvVarNames` | string[] | Per-user environment variables the engine reads (registry + current process). |
-| `GetExtraTempDirs` | `{ param($Profile) }` | Additional TEMP-like directories (e.g. an override variable). |
-| `GetConfigDirs` | `{ param($Profile) }` | `{ Dirs; Known }`, where the agent keeps its configuration. |
-| `GetSessionEvidence` | `{ param($Profile, $Snapshot) }` | `{ Readable; Unparseable; Entries[{SessionId; Pid; State; Scope; ProjectName}] }` with State `LIVE`, `LIVE_UNVERIFIED`, `PID_REUSED`, `DEAD` or `UNVERIFIABLE`. `Scope`/`ProjectName` (optional) come from the session's working directory and are used only to name projects. |
-| `GetActivityEvidence` | `{ param($Profile, $Scope, $RootName) }` | `{ Readable; LastWriteUtc }` of an activity artifact. |
+| `GetExtraTempDirs` | `{ param($ProfileInfo) }` | Additional TEMP-like directories (e.g. an override variable). |
+| `GetConfigDirs` | `{ param($ProfileInfo) }` | `{ Dirs; Known }`, where the agent keeps its configuration. |
+| `GetSessionEvidence` | `{ param($ProfileInfo, $Snapshot) }` | `{ Readable; Unparseable; Entries[{SessionId; Pid; State; Scope; ProjectName}] }` with State `LIVE`, `LIVE_UNVERIFIED`, `PID_REUSED`, `DEAD` or `UNVERIFIABLE`. `Scope`/`ProjectName` (optional) come from the session's working directory and are used only to name projects. |
+| `GetActivityEvidence` | `{ param($ProfileInfo, $Scope, $RootName) }` | `{ Readable; LastWriteUtc }` of an activity artifact. |
 | `GetProjectKey` | `{ param($Scope, $ProfilePath) }` | `{ IsHome; Key }` used by informational project rules. |
+
+Arguments are passed **by position**, so parameter names are free. `$ProfileInfo` is the recommended name; providers
+written with `$Profile` keep working, but `$Profile` shadows the PowerShell automatic variable and is reported by
+static analysis.
 
 Rules:
 

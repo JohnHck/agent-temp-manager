@@ -440,13 +440,13 @@ function Get-AtmSelfChainPids {
 # ---------------------------------------------------------------------------------------------
 
 function New-AtmPartition {
-    param($Profile, $Base, [string]$Slug, [string]$Name, [string]$Kind, $Stats, [string]$Path)
+    param([Alias('Profile')]$ProfileInfo, $Base, [string]$Slug, [string]$Name, [string]$Kind, $Stats, [string]$Path)
     [pscustomobject]@{
         Provider              = $Base.Provider.Id
         Kind                  = $Kind            # SessionRoot | UnrecognizedDir | LooseFile | BaseLooseFiles | ReparsePoint | Unmeasured | NotScanned
-        Sid                   = $Profile.Sid
-        UserName              = $Profile.UserName
-        ProfilePath           = $Profile.ProfilePath
+        Sid                   = $ProfileInfo.Sid
+        UserName              = $ProfileInfo.UserName
+        ProfilePath           = $ProfileInfo.ProfilePath
         TempPath              = $Base.TempPath
         BasePath              = $Base.Path
         Slug                  = $Slug
@@ -489,11 +489,11 @@ function Get-AtmFingerprint {
     return (-join ($h[0..7] | ForEach-Object { $_.ToString('X2') }))
 }
 
-function Get-AtmRegistryKey { param([string]$ProviderId, $Profile) return ($ProviderId + '|' + $Profile.Sid + '|' + $Profile.ProfilePath) }
+function Get-AtmRegistryKey { param([string]$ProviderId, [Alias('Profile')]$ProfileInfo) return ($ProviderId + '|' + $ProfileInfo.Sid + '|' + $ProfileInfo.ProfilePath) }
 
 function Get-AtmProfileRegistries {
-    param($Registries, $Profile)
-    $suffix = '|' + $Profile.Sid + '|' + $Profile.ProfilePath
+    param($Registries, [Alias('Profile')]$ProfileInfo)
+    $suffix = '|' + $ProfileInfo.Sid + '|' + $ProfileInfo.ProfilePath
     return @($Registries.Keys | Where-Object { $_.EndsWith($suffix) } | ForEach-Object { $r = $Registries[$_]; [pscustomobject]@{ Provider = $_.Substring(0, $_.Length - $suffix.Length); Readable = $r.Readable; Unparseable = $r.Unparseable; Entries = $r.Entries } })
 }
 
@@ -591,7 +591,7 @@ function Invoke-AtmInventory {
             $isReparse = ($c.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
             $isDir = ($c.Attributes -band [IO.FileAttributes]::Directory) -ne 0
             if ($isReparse) {
-                $p = New-AtmPartition -Profile $b.Profile -Base $b -Slug $null -Name $c.Name -Kind 'ReparsePoint' -Stats $null -Path $c.FullName
+                $p = New-AtmPartition -ProfileInfo $b.Profile -Base $b -Slug $null -Name $c.Name -Kind 'ReparsePoint' -Stats $null -Path $c.FullName
                 $p.ReparsePoints = 1; Add-AtmFlag $p 'REPARSE_POINT'; Add-AtmFlag $p 'NOT_SESSION_ROOT'
                 $b.Partitions.Add($p); continue
             }
@@ -611,7 +611,7 @@ function Invoke-AtmInventory {
             $roots = $null
             try { $roots = $c.GetFileSystemInfos() }
             catch {
-                $p = New-AtmPartition -Profile $b.Profile -Base $b -Slug $slug -Name (Get-AtmText 'part.wholeScope') -Kind 'Unmeasured' -Stats $null -Path $c.FullName
+                $p = New-AtmPartition -ProfileInfo $b.Profile -Base $b -Slug $slug -Name (Get-AtmText 'part.wholeScope') -Kind 'Unmeasured' -Stats $null -Path $c.FullName
                 $p.ErrorCount = 1; $p.ErrorSamples = @($_.Exception.GetType().Name + ': ' + $c.FullName)
                 Add-AtmFlag $p 'READ_ERRORS'; Add-AtmFlag $p 'MEASUREMENT_INCOMPLETE'; Add-AtmFlag $p 'NOT_SESSION_ROOT'
                 $b.Partitions.Add($p); $slugRec.Partitions.Add($p); continue
@@ -627,12 +627,12 @@ function Invoke-AtmInventory {
                 $stats = $null
                 if ($OnlyRootPath -and -not [string]::Equals($rPath, $OnlyRootPath, [StringComparison]::OrdinalIgnoreCase)) {
                     $kind2 = 'NotScanned'
-                    $p = New-AtmPartition -Profile $b.Profile -Base $b -Slug $slug -Name $r.Name -Kind $kind2 -Stats $null -Path $rPath
+                    $p = New-AtmPartition -ProfileInfo $b.Profile -Base $b -Slug $slug -Name $r.Name -Kind $kind2 -Stats $null -Path $rPath
                 } else {
                     $stats = [AgentTempManager.AtmScanner]::ScanTree($rPath, $script:AtmMaxSamples, $cluster)
                     if ($stats.RootIsReparsePoint) { $kind = 'ReparsePoint' }
                     if (-not $stats.Exists -and $stats.ErrorCount -eq 0) { continue }   # removed between listing and scan
-                    $p = New-AtmPartition -Profile $b.Profile -Base $b -Slug $slug -Name $r.Name -Kind $kind -Stats $stats -Path $rPath
+                    $p = New-AtmPartition -ProfileInfo $b.Profile -Base $b -Slug $slug -Name $r.Name -Kind $kind -Stats $stats -Path $rPath
                 }
                 $slugRec.Roots[$r.Name.ToLowerInvariant()] = $p
                 $slugRec.Partitions.Add($p)
@@ -641,7 +641,7 @@ function Invoke-AtmInventory {
             if ($hasUuid -and $slugRec.Recognized) { $recognizedSlugs++ }
         }
         if ($looseStats) {
-            $p = New-AtmPartition -Profile $b.Profile -Base $b -Slug $null -Name (Get-AtmText 'part.looseFiles') -Kind 'BaseLooseFiles' -Stats $null -Path $b.Path
+            $p = New-AtmPartition -ProfileInfo $b.Profile -Base $b -Slug $null -Name (Get-AtmText 'part.looseFiles') -Kind 'BaseLooseFiles' -Stats $null -Path $b.Path
             $p.Bytes = $looseStats.Bytes; $p.AllocatedBytesEstimate = $looseStats.Alloc; $p.Files = $looseStats.Files
             $p.NewestWriteTimeUtc = $looseStats.Newest; $p.LastWriteTimeUtc = $looseStats.Newest; $p.ProtectedFiles = $looseStats.Protected
             $p.MeasurementComplete = $true
@@ -662,14 +662,14 @@ function Invoke-AtmInventory {
     $refStats = Find-AtmReferences -Bases $okBases -Snapshot $snapshot -SelfPids $selfPids
     $registries = @{}
     foreach ($b in $okBases) {
-        $rk = Get-AtmRegistryKey -ProviderId $b.Provider.Id -Profile $b.Profile
+        $rk = Get-AtmRegistryKey -ProviderId $b.Provider.Id -ProfileInfo $b.Profile
         if (-not $registries.ContainsKey($rk)) { $registries[$rk] = & $b.Provider.GetSessionEvidence $b.Profile $snapshot }
     }
 
     # Phase 6: classification
     if ($progress) { & $ProgressCallback (90) (Get-AtmText 'progress.6') }
     foreach ($b in $okBases) {
-        $reg = $registries[(Get-AtmRegistryKey -ProviderId $b.Provider.Id -Profile $b.Profile)]
+        $reg = $registries[(Get-AtmRegistryKey -ProviderId $b.Provider.Id -ProfileInfo $b.Profile)]
         $evidenceNames = Get-AtmProjectEvidenceNames -Registry $reg
         foreach ($p in $b.Partitions) {
             if ($p.Slug) {
@@ -685,7 +685,7 @@ function Invoke-AtmInventory {
     $inaccessibleProfiles = @()
     foreach ($pr in $profiles) {
         $sts = $profileStatus[$pr.Sid + '|' + $pr.ProfilePath]
-        $regs = @(Get-AtmProfileRegistries -Registries $registries -Profile $pr)
+        $regs = @(Get-AtmProfileRegistries -Registries $registries -ProfileInfo $pr)
         $bad = @($sts | Where-Object { $_.Status -in @('INACCESSIBLE', 'ENUMERATION_FAILED', 'INVALID') })
         $enumFailed = @($bases | Where-Object { $_.Sid -eq $pr.Sid -and $_.Profile.ProfilePath -eq $pr.ProfilePath -and $_.Status -eq 'ENUMERATION_FAILED' })
         if ($bad.Count -gt 0 -or $enumFailed.Count -gt 0 -or @($regs | Where-Object { -not $_.Readable }).Count -gt 0) { $inaccessibleProfiles += $pr }

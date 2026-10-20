@@ -6,13 +6,13 @@
 #   ScopePattern         regex for first-level directories under the base (project scopes)
 #   RootPattern          regex for second-level directories (session roots = the only deletable unit)
 #   EnvVarNames          per-user environment variables the engine must read (registry + current process)
-#   GetExtraTempDirs     { param($Profile) } -> @([pscustomobject]@{ TempPath; Source })
-#   GetConfigDirs        { param($Profile) } -> [pscustomobject]@{ Dirs = @(); Known = $bool }
-#   GetSessionEvidence   { param($Profile, $Snapshot) } -> [pscustomobject]@{ Readable; Unparseable; Entries = @(@{ SessionId; Pid; State; Scope; ProjectName }) }
+#   GetExtraTempDirs     { param($ProfileInfo) } -> @([pscustomobject]@{ TempPath; Source })
+#   GetConfigDirs        { param($ProfileInfo) } -> [pscustomobject]@{ Dirs = @(); Known = $bool }
+#   GetSessionEvidence   { param($ProfileInfo, $Snapshot) } -> [pscustomobject]@{ Readable; Unparseable; Entries = @(@{ SessionId; Pid; State; Scope; ProjectName }) }
 #                          State: LIVE | LIVE_UNVERIFIED | PID_REUSED | DEAD | UNVERIFIABLE
 #                          Scope/ProjectName (optional): scope directory name and display name derived from the
 #                          session's working directory; used only to name projects, never for safety decisions.
-#   GetActivityEvidence  { param($Profile, $Scope, $RootName) } -> [pscustomobject]@{ Readable; LastWriteUtc }
+#   GetActivityEvidence  { param($ProfileInfo, $Scope, $RootName) } -> [pscustomobject]@{ Readable; LastWriteUtc }
 #   GetProjectKey        { param($Scope, $ProfilePath) } -> [pscustomobject]@{ IsHome; Key }
 # Providers only READ. They never decide eligibility and never delete.
 Set-StrictMode -Version 2.0
@@ -24,24 +24,24 @@ function ConvertTo-AtmClaudeSlug {
 }
 
 function Get-AtmClaudeConfigDirs {
-    param($Profile)
+    param([Alias('Profile')]$ProfileInfo)
     $dirs = New-Object System.Collections.Generic.List[string]
     $vals = @()
-    if ($Profile.EnvValues -and $Profile.EnvValues.ContainsKey('CLAUDE_CONFIG_DIR')) { $vals = @($Profile.EnvValues['CLAUDE_CONFIG_DIR']) }
+    if ($ProfileInfo.EnvValues -and $ProfileInfo.EnvValues.ContainsKey('CLAUDE_CONFIG_DIR')) { $vals = @($ProfileInfo.EnvValues['CLAUDE_CONFIG_DIR']) }
     foreach ($v in $vals) { if ($v) { $dirs.Add($v) } }
-    if ($dirs.Count -eq 0 -and $Profile.ProfilePath) { $dirs.Add((Join-AtmPath $Profile.ProfilePath '.claude')) }
-    return [pscustomobject]@{ Dirs = @($dirs | Select-Object -Unique); Known = [bool]$Profile.EnvKnown }
+    if ($dirs.Count -eq 0 -and $ProfileInfo.ProfilePath) { $dirs.Add((Join-AtmPath $ProfileInfo.ProfilePath '.claude')) }
+    return [pscustomobject]@{ Dirs = @($dirs | Select-Object -Unique); Known = [bool]$ProfileInfo.EnvKnown }
 }
 
 function Get-AtmClaudeSessionEvidence {
     # Claude Code writes <configDir>\sessions\<pid>.json (pid, sessionId, procStart). Only *.json files are read;
     # *.key files and credentials are never opened. Contents are never printed or stored beyond these 3 fields.
-    param($Profile, $Snapshot)
+    param([Alias('Profile')]$ProfileInfo, $Snapshot)
     $r = [ordered]@{ Readable = $true; Unparseable = 0; Entries = @(); Notes = @() }
     $entries = New-Object System.Collections.Generic.List[object]
     $byPid = @{}
     foreach ($p in $Snapshot.Processes) { $byPid[$p.Pid] = $p }
-    foreach ($cfg in (Get-AtmClaudeConfigDirs $Profile).Dirs) {
+    foreach ($cfg in (Get-AtmClaudeConfigDirs $ProfileInfo).Dirs) {
         $dir = Join-AtmPath $cfg 'sessions'
         $files = @()
         try {
@@ -91,9 +91,9 @@ function Get-AtmClaudeSessionEvidence {
 
 function Get-AtmClaudeActivityEvidence {
     # Session transcript <configDir>\projects\<slug>\<sessionId>.jsonl: last write time only, never content.
-    param($Profile, [string]$Scope, [string]$RootName)
+    param([Alias('Profile')]$ProfileInfo, [string]$Scope, [string]$RootName)
     $res = [ordered]@{ Readable = $true; LastWriteUtc = $null }
-    foreach ($cfg in (Get-AtmClaudeConfigDirs $Profile).Dirs) {
+    foreach ($cfg in (Get-AtmClaudeConfigDirs $ProfileInfo).Dirs) {
         $pd = Join-AtmPath (Join-AtmPath $cfg 'projects') $Scope
         $f = Join-AtmPath $pd ($RootName + '.jsonl')
         try {
@@ -117,16 +117,16 @@ Register-AtmProvider ([pscustomobject]@{
         RootPattern         = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
         EnvVarNames         = @('CLAUDE_CODE_TMPDIR', 'CLAUDE_CONFIG_DIR')
         GetExtraTempDirs    = {
-            param($Profile)
+            param([Alias('Profile')]$ProfileInfo)
             $out = @()
-            if ($Profile.EnvValues -and $Profile.EnvValues.ContainsKey('CLAUDE_CODE_TMPDIR')) {
-                foreach ($v in @($Profile.EnvValues['CLAUDE_CODE_TMPDIR'])) { if ($v) { $out += [pscustomobject]@{ TempPath = $v; Source = 'CLAUDE_CODE_TMPDIR' } } }
+            if ($ProfileInfo.EnvValues -and $ProfileInfo.EnvValues.ContainsKey('CLAUDE_CODE_TMPDIR')) {
+                foreach ($v in @($ProfileInfo.EnvValues['CLAUDE_CODE_TMPDIR'])) { if ($v) { $out += [pscustomobject]@{ TempPath = $v; Source = 'CLAUDE_CODE_TMPDIR' } } }
             }
             return $out
         }
-        GetConfigDirs       = { param($Profile) Get-AtmClaudeConfigDirs $Profile }
-        GetSessionEvidence  = { param($Profile, $Snapshot) Get-AtmClaudeSessionEvidence -Profile $Profile -Snapshot $Snapshot }
-        GetActivityEvidence = { param($Profile, $Scope, $RootName) Get-AtmClaudeActivityEvidence -Profile $Profile -Scope $Scope -RootName $RootName }
+        GetConfigDirs       = { param($ProfileInfo) Get-AtmClaudeConfigDirs $ProfileInfo }
+        GetSessionEvidence  = { param($ProfileInfo, $Snapshot) Get-AtmClaudeSessionEvidence -ProfileInfo $ProfileInfo -Snapshot $Snapshot }
+        GetActivityEvidence = { param($ProfileInfo, $Scope, $RootName) Get-AtmClaudeActivityEvidence -ProfileInfo $ProfileInfo -Scope $Scope -RootName $RootName }
         GetProjectKey       = {
             param($Scope, $ProfilePath)
             if ($ProfilePath) {
