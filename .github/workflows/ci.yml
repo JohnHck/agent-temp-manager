@@ -52,3 +52,62 @@ jobs:
           path: test-results-${{ matrix.shell }}.json
           if-no-files-found: warn
           retention-days: 14
+
+  # Informative (not a required check): reports personal e-mail addresses in commit metadata. On a pull request it
+  # checks base..head; on a push to main it checks before..after, which also covers commits GitHub creates when it
+  # merges. A push check only detects: the commit is already public (see docs/SECURITY-MODEL.md, "Commit identity").
+  commit-identity:
+    name: commit identity
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Check author, committer and trailers
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.event.after }}
+        run: |
+          if ($env:EVENT_NAME -eq 'pull_request') {
+            ./tools/Test-AtmCommitIdentity.ps1 -Range "$($env:PR_BASE_SHA)..$($env:PR_HEAD_SHA)"
+          } elseif ($env:EVENT_NAME -eq 'push') {
+            git cat-file -e "$($env:PUSH_BEFORE)^{commit}" 2>$null
+            if ($env:PUSH_BEFORE -notmatch '^0+$' -and $LASTEXITCODE -eq 0) {
+              ./tools/Test-AtmCommitIdentity.ps1 -Range "$($env:PUSH_BEFORE)..$($env:PUSH_AFTER)"
+            } else {
+              ./tools/Test-AtmCommitIdentity.ps1 -Commit $env:PUSH_AFTER
+            }
+          } else {
+            ./tools/Test-AtmCommitIdentity.ps1 -All
+          }
+          exit $LASTEXITCODE
+
+  # Informative (not a required check, never fails on findings): PSScriptAnalyzer pinned by version and package
+  # SHA-512, module signatures verified, imported by path. Fails only if integrity or the tool itself fails.
+  static-analysis:
+    name: static analysis (PSScriptAnalyzer)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: PSScriptAnalyzer (informative)
+        shell: pwsh
+        run: |
+          ./tools/Invoke-AtmStaticAnalysis.ps1 -WorkDir "$env:RUNNER_TEMP\atm-static-analysis" -ReportFile static-analysis.json
+          exit $LASTEXITCODE
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: static-analysis
+          path: static-analysis.json
+          if-no-files-found: warn
+          retention-days: 14
