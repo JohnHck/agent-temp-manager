@@ -15,3 +15,9 @@
   culture prefix in `Resolve-AtmLanguage`.
 * Never write real paths, user names, machine names or SIDs in tests or docs; run
   `tools/Test-AtmPrivacy.ps1 -Path .` before opening a pull request.
+* Commit with your GitHub noreply address (GitHub Settings > Emails) unless you deliberately want your address in
+  the public history. The `commit identity` check reports other addresses; it is informative, and a maintainer can
+  add an address you chose to publish to `.github/commit-identity-allowlist.txt`. See
+  [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md), "Commit identity".
+* `static analysis (PSScriptAnalyzer)` reports PowerShell findings on every pull request; new code should not add
+  findings in the security or compatibility rules ([docs/STATIC-ANALYSIS.md](docs/STATIC-ANALYSIS.md)).
