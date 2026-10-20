@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Static analysis of every PowerShell script of the repository with a pinned, verified PSScriptAnalyzer.
 .DESCRIPTION
@@ -7,9 +7,13 @@
   2. Verifies the Authenticode signature of every code file of the module against an allow-list of signers.
   3. Imports the module by path and analyses src/, install/, tools/ and tests/ (*.ps1, *.psm1, *.psd1) with
      tools/PSScriptAnalyzerSettings.psd1.
-  4. Prints a summary, writes a JSON report and, under GitHub Actions, a job summary.
-  Exit codes: 0 = analysis done (Informative mode: always, whatever the findings), 1 = findings in Enforce mode,
-  3 = integrity or tool failure (never ignored).
+  4. Applies the reviewed exceptions of tools/static-analysis-exceptions.psd1 (one rule, listed files, optional
+     message pattern, mandatory justification). Excepted findings stay counted and listed; unused entries are
+     reported as stale.
+  5. Prints a summary, writes a JSON report and, under GitHub Actions, a job summary.
+  Exit codes: 0 = analysis done (Informative mode: always, whatever the findings), 1 = Enforce mode and at least
+  one non-excepted finding in an enforced rule (security, compatibility, rules brought to zero), 3 = integrity,
+  configuration or tool failure (never ignored).
 .EXAMPLE
   ./tools/Invoke-AtmStaticAnalysis.ps1 -ReportFile static-analysis.json
 #>
@@ -31,6 +35,7 @@ $ScanDirs = @('src', 'install', 'tools', 'tests')
 
 $repo = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $settings = Join-Path $repo 'tools\PSScriptAnalyzerSettings.psd1'
+$exceptionsFile = Join-Path $repo 'tools\static-analysis-exceptions.psd1'
 
 function Get-Sha512Base64([string]$Path) {
     $alg = [Security.Cryptography.SHA512]::Create()
@@ -39,6 +44,18 @@ function Get-Sha512Base64([string]$Path) {
 }
 
 try {
+    # 0. Reviewed exceptions: validated before anything else, a malformed entry is a configuration error.
+    $cfg = Import-PowerShellDataFile -LiteralPath $exceptionsFile
+    foreach ($k in @($cfg.Keys)) { if ($k -notin @('Exceptions', 'EnforcedRules')) { throw "chave desconhecida em static-analysis-exceptions.psd1: $k" } }
+    $exceptions = @($cfg.Exceptions)
+    $enforced = @($cfg.EnforcedRules)
+    if ($enforced.Count -eq 0) { throw 'EnforcedRules vazio' }
+    foreach ($e in $exceptions) {
+        foreach ($k in @($e.Keys)) { if ($k -notin @('Rule', 'Files', 'Match', 'Justification')) { throw "chave desconhecida em uma excecao: $k" } }
+        if (-not $e.Rule -or @($e.Files).Count -eq 0 -or -not ([string]$e.Justification).Trim()) { throw "excecao incompleta (Rule, Files e Justification sao obrigatorios): $($e.Rule)" }
+        if ($enforced -contains $e.Rule -and -not $e['Match']) { throw "excecao de regra imposta sem Match restrito: $($e.Rule)" }
+    }
+
     # 1. Pinned package, verified before anything is extracted.
     [void][IO.Directory]::CreateDirectory($WorkDir)
     $pkg = Join-Path $WorkDir "PSScriptAnalyzer.$Version.nupkg"
@@ -79,33 +96,60 @@ try {
     foreach ($f in $files) {
         $rel = $f.Substring($repo.Length + 1).Replace('\', '/')
         foreach ($r in @(Invoke-ScriptAnalyzer -Path $f -Settings $settings)) {
-            $findings.Add([pscustomobject]@{ File = $rel; Line = $r.Line; Rule = $r.RuleName; Severity = [string]$r.Severity; Message = $r.Message })
+            $findings.Add([pscustomobject]@{ File = $rel; Line = $r.Line; Rule = $r.RuleName; Severity = [string]$r.Severity; Message = $r.Message; Exception = $null })
         }
     }
 
-    # 4. Report.
+    # Exceptions: first matching entry wins; record which one.
+    $used = New-Object 'System.Collections.Generic.HashSet[int]'
+    foreach ($x in $findings) {
+        for ($i = 0; $i -lt $exceptions.Count; $i++) {
+            $e = $exceptions[$i]
+            if ($x.Rule -ne $e.Rule -or @($e.Files) -notcontains $x.File) { continue }
+            if ($e['Match'] -and $x.Message -notmatch $e['Match']) { continue }
+            $x.Exception = $i; [void]$used.Add($i); break
+        }
+    }
+    $active = @($findings | Where-Object { $null -eq $_.Exception })
+    $excepted = @($findings | Where-Object { $null -ne $_.Exception })
+    $enforcedActive = @($active | Where-Object { $enforced -contains $_.Rule })
+    $stale = @(for ($i = 0; $i -lt $exceptions.Count; $i++) { if (-not $used.Contains($i)) { $exceptions[$i] } })
+
+    # 5. Report.
     Write-Host ''
-    Write-Host ("Arquivos analisados: {0} | achados: {1}" -f $files.Count, $findings.Count)
-    $byRule = @($findings | Group-Object Rule | Sort-Object Count -Descending)
-    foreach ($g in $byRule) { Write-Host ("  {0,5}  {1,-12} {2}" -f $g.Count, @($g.Group)[0].Severity, $g.Name) }
+    Write-Host ("Arquivos analisados: {0} | achados: {1} | ativos: {2} | excecoes revisadas: {3} | regras impostas com achados: {4}" -f $files.Count, $findings.Count, $active.Count, $excepted.Count, $enforcedActive.Count)
+    $byRule = @($active | Group-Object Rule | Sort-Object Count -Descending)
+    Write-Host 'Ativos por regra:'
+    foreach ($g in $byRule) { Write-Host ("  {0,5}  {1,-12} {2}{3}" -f $g.Count, @($g.Group)[0].Severity, $g.Name, $(if ($enforced -contains $g.Name) { '  [IMPOSTA]' } else { '' })) }
+    Write-Host 'Excecoes revisadas aplicadas:'
+    foreach ($g in @($excepted | Group-Object Exception | Sort-Object { [int]$_.Name })) { $e = $exceptions[[int]$g.Name]; Write-Host ("  {0,5}  {1} em {2}" -f $g.Count, $e.Rule, (@($e.Files) -join ', ')) }
+    foreach ($e in $stale) { Write-Host ("AVISO: excecao sem efeito (obsoleta): {0} em {1}" -f $e.Rule, (@($e.Files) -join ', ')) -ForegroundColor Yellow }
     Write-Host ''
-    foreach ($x in ($findings | Sort-Object File, Line)) {
+    foreach ($x in ($active | Sort-Object File, Line)) {
         $m = $x.Message -replace '\s+', ' '; if ($m.Length -gt 160) { $m = $m.Substring(0, 157) + '...' }
         Write-Host ("{0}:{1} [{2}] {3}: {4}" -f $x.File, $x.Line, $x.Severity, $x.Rule, $m)
     }
     if ($ReportFile) {
-        $rep = [ordered]@{ tool = 'PSScriptAnalyzer'; version = $Version; packageSha512 = $PackageSha512; mode = $Mode; files = @($files | ForEach-Object { $_.Substring($repo.Length + 1).Replace('\', '/') }); findings = $findings }
-        [IO.File]::WriteAllText($ReportFile, ($rep | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding($false)))
+        $rep = [ordered]@{
+            tool = 'PSScriptAnalyzer'; version = $Version; packageSha512 = $PackageSha512; mode = $Mode
+            files = @($files | ForEach-Object { $_.Substring($repo.Length + 1).Replace('\', '/') })
+            enforcedRules = $enforced; enforcedActive = $enforcedActive.Count
+            exceptions = @($exceptions | ForEach-Object { [ordered]@{ rule = $_.Rule; files = @($_.Files); match = $_['Match']; justification = $_.Justification } })
+            staleExceptions = $stale.Count
+            findings = $findings
+        }
+        [IO.File]::WriteAllText($ReportFile, ($rep | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding($false)))
     }
     if ($env:GITHUB_STEP_SUMMARY) {
         $md = New-Object System.Text.StringBuilder
         [void]$md.AppendLine("### PSScriptAnalyzer $Version ($Mode)").AppendLine()
-        [void]$md.AppendLine("Files analysed: $($files.Count) - findings: $($findings.Count)").AppendLine()
-        [void]$md.AppendLine('| Count | Severity | Rule |').AppendLine('|---:|---|---|')
-        foreach ($g in $byRule) { [void]$md.AppendLine("| $($g.Count) | $(@($g.Group)[0].Severity) | $($g.Name) |") }
+        [void]$md.AppendLine("Files analysed: $($files.Count) - findings: $($findings.Count) - active: $($active.Count) - reviewed exceptions: $($excepted.Count) - enforced rules with findings: $($enforcedActive.Count)").AppendLine()
+        [void]$md.AppendLine('| Count | Severity | Rule | Enforced |').AppendLine('|---:|---|---|---|')
+        foreach ($g in $byRule) { [void]$md.AppendLine("| $($g.Count) | $(@($g.Group)[0].Severity) | $($g.Name) | $(if ($enforced -contains $g.Name) { 'yes' } else { '' }) |") }
         [IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, $md.ToString())
     }
-    if ($Mode -eq 'Enforce' -and $findings.Count -gt 0) { exit 1 }
+    if ($stale.Count -gt 0 -and $Mode -eq 'Enforce') { Write-Host 'ERRO: excecoes obsoletas devem ser removidas.' -ForegroundColor Red; exit 3 }
+    if ($Mode -eq 'Enforce' -and $enforcedActive.Count -gt 0) { exit 1 }
     exit 0
 } catch {
     Write-Host "ERRO: $($_.Exception.Message)" -ForegroundColor Red

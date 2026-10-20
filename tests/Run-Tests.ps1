@@ -1651,6 +1651,24 @@ try {
         } else { $script:caseNote = 'sessao nao elevada: nenhum ajuste de ACL (owner = usuario)' }
     }
 
+    Test-Case 'Analise estatica' 'Excecoes revisadas: justificadas, restritas e sem enfraquecer as regras impostas' {
+        $root = Split-Path -Parent $testsDir
+        $cfg = Import-PowerShellDataFile -LiteralPath (Join-Path $root 'tools\static-analysis-exceptions.psd1')
+        $enforced = @($cfg.EnforcedRules)
+        foreach ($r in @('PSAvoidUsingInvokeExpression', 'PSAvoidUsingPlainTextForPassword', 'PSAvoidUsingConvertToSecureStringWithPlainText', 'PSUsePSCredentialType', 'PSAvoidUsingUsernameAndPasswordParams', 'PSAvoidUsingBrokenHashAlgorithms', 'PSUseCompatibleSyntax', 'PSUseCompatibleCommands', 'PSUseCompatibleTypes', 'PSAvoidAssignmentToAutomaticVariable', 'PSAvoidUsingEmptyCatchBlock')) {
+            Assert-True ($enforced -contains $r) "regra imposta: $r"
+        }
+        foreach ($e in @($cfg.Exceptions)) {
+            Assert-True ([bool]$e['Rule'] -and @($e['Files']).Count -gt 0 -and ([string]$e['Justification']).Trim().Length -ge 20) "excecao completa: $($e['Rule'])"
+            if ($enforced -contains $e['Rule']) { Assert-True ([bool]$e['Match']) "excecao de regra imposta restrita por Match: $($e['Rule'])" }
+            foreach ($f in @($e['Files'])) { Assert-True (Test-Path -LiteralPath (Join-Path $root $f) -PathType Leaf) "arquivo da excecao existe: $f" }
+            Assert-True (-not (@($e['Files']) | Where-Object { $_ -match '[*?]' })) 'sem curingas nos arquivos'
+        }
+        # The engines and the installer library are never exempt from the console-output rule.
+        $wh = @($cfg.Exceptions | Where-Object { $_['Rule'] -eq 'PSAvoidUsingWriteHost' } | ForEach-Object { @($_['Files']) })
+        foreach ($f in @('src/lib/Engine.Audit.ps1', 'src/lib/Engine.Clean.ps1', 'src/lib/I18n.ps1', 'src/providers/ClaudeCode.ps1', 'install/InstallCommon.ps1')) { Assert-True ($wh -notcontains $f) "sem excecao de Write-Host: $f" }
+    }
+
     Test-Case 'Ambiente limpo' 'Gerador do Windows Sandbox: .wsb valido, rede desativada, release somente leitura; nada e iniciado' {
         $tools = Join-Path (Split-Path -Parent $testsDir) 'tools\clean-env'
         foreach ($f in @('New-CleanEnvSandbox.ps1', 'Invoke-CleanEnvTest.ps1')) { $tk = $null; $e = $null; [void][Management.Automation.Language.Parser]::ParseFile((Join-Path $tools $f), [ref]$tk, [ref]$e); Assert-Eq $e.Count 0 "$f sintaxe" }
