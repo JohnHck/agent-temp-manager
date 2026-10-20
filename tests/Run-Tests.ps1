@@ -1137,7 +1137,8 @@ try {
         $scan = Join-Path $repo 'tools\Test-AtmPrivacy.ps1'
         $copy = Join-Path $sandbox 'publishable'
         foreach ($rel in @('src', 'install', 'docs', 'tests', 'tools', '.github')) { if (Test-Path (Join-Path $repo $rel)) { Copy-AtmTree -From (Join-Path $repo $rel) -To (Join-Path $copy $rel) } }
-        foreach ($f in @(Get-ChildItem -LiteralPath $repo -File -Force)) { Copy-Item -LiteralPath $f.FullName -Destination $copy }
+        # '.git' is a file (pointer to the main repository) in a linked worktree; it is never published.
+        foreach ($f in @(Get-ChildItem -LiteralPath $repo -File -Force | Where-Object { $_.Name -ne '.git' })) { Copy-Item -LiteralPath $f.FullName -Destination $copy }
         $hits = @(& $scan -Path $copy -NeedlesFile $env:ATM_PRIVATE_NEEDLES)
         Assert-Eq $hits.Count 0 (($hits | ForEach-Object { "$($_.File):$($_.Line) $($_.Kind)" }) -join '; ')
         if ((Get-Command git -ErrorAction SilentlyContinue) -and (Test-Path (Join-Path $repo '.git'))) {
