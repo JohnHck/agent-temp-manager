@@ -242,7 +242,6 @@ function Get-AtmTuiTextLines {
         }
         'detail' {
             $p = $Screen.Filter.Partition
-            $kv = New-Object System.Collections.Generic.List[object]
             $pairs = @(
                 @('det.path', $p.Path), @('det.agent', $p.Provider), @('det.kind', $p.Kind), @('det.class', $p.Class), @('det.user', $p.UserName), @('det.sid', $p.Sid), @('det.profile', $p.ProfilePath), @('det.temp', $p.TempPath)
                 @('det.project', $(if ($p.ProjectIdentified) { Get-AtmText 'det.projectWithSource' $p.Project $p.ProjectSource } else { $p.Project })), @('det.scope', $p.Slug)

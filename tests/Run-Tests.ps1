@@ -326,7 +326,7 @@ try {
         $p = New-TestProfile 'denied'
         $r = New-TestRoot -ProfileInfo $p -Files @{ 'a.txt' = 1; 'secreto\b.txt' = 2 }
         $d = Join-Path $r 'secreto'
-        $o = icacls $d /deny "*$($me.Sid):(OI)(CI)(RD)" 2>&1
+        $null = icacls $d /deny "*$($me.Sid):(OI)(CI)(RD)" 2>&1
         $cleanupActions.Add([scriptblock]::Create("icacls '$d' /remove:d '*$($me.Sid)' | Out-Null"))
         $i = Inv -Profiles @($p)
         $x = Find-Part $i $r
@@ -342,7 +342,7 @@ try {
         $p = New-TestProfile 'basedenied'
         $b = Get-Base $p
         $null = New-TestRoot -ProfileInfo $p
-        $o = icacls $b /deny "*$($me.Sid):(RD)" 2>&1
+        $null = icacls $b /deny "*$($me.Sid):(RD)" 2>&1
         $cleanupActions.Add([scriptblock]::Create("icacls '$b' /remove:d '*$($me.Sid)' | Out-Null"))
         $i = Inv -Profiles @($p)
         Assert-True (@($i.Bases)[0].Status -in @('ENUMERATION_FAILED', 'INACCESSIBLE')) "status $(@($i.Bases)[0].Status)"
@@ -354,8 +354,8 @@ try {
         $p = New-TestProfile 'nodelete'
         $r = New-TestRoot -ProfileInfo $p -Files @{ 'a.txt' = 5 }
         $f = Join-Path $r 'a.txt'
-        $o = icacls $f /deny "*$($me.Sid):(DE)" 2>&1
-        $o = icacls $r /deny "*$($me.Sid):(DC)" 2>&1
+        $null = icacls $f /deny "*$($me.Sid):(DE)" 2>&1
+        $null = icacls $r /deny "*$($me.Sid):(DC)" 2>&1
         $cleanupActions.Add([scriptblock]::Create("icacls '$f' /remove:d '*$($me.Sid)' | Out-Null; icacls '$r' /remove:d '*$($me.Sid)' | Out-Null"))
         $i = Inv -Profiles @($p)
         $g = Test-AtmCandidate -Partition (Find-Part $i $r) -Inventory $i
@@ -595,7 +595,7 @@ try {
         $p = New-TestProfile 'symlink'
         $r = New-TestRoot -ProfileInfo $p
         $target = Join-Path $sandbox 'alvo-sym'; [void][IO.Directory]::CreateDirectory($target)
-        try { $o = cmd /c mklink /D "`"$(Join-Path $r 'sym')`"" "`"$target`"" 2>&1 } catch { }
+        try { $null = cmd /c mklink /D "`"$(Join-Path $r 'sym')`"" "`"$target`"" 2>&1 } catch { }
         if (-not [IO.Directory]::Exists((Join-Path $r 'sym'))) { $script:caseSkipped = $true; $script:caseNote = 'symlink exige privilegio (SeCreateSymbolicLink) ou modo desenvolvedor; reparse coberto por junctions'; return }
         $cleanupActions.Add([scriptblock]::Create("try { [IO.Directory]::Delete('$(Join-Path $r 'sym')', `$false) } catch { }"))
         Assert-True ((Find-Part (Inv -Profiles @($p)) $r).Flags -contains 'REPARSE_POINT') 'flag'
@@ -829,7 +829,7 @@ try {
         $p = New-TestProfile 'aclbase'
         $r = New-TestRoot -ProfileInfo $p
         $b = Get-Base $p
-        $o = icacls $b /grant '*S-1-5-32-545:(OI)(CI)(M)' 2>&1
+        $null = icacls $b /grant '*S-1-5-32-545:(OI)(CI)(M)' 2>&1
         $i = Inv -Profiles @($p)
         $g = Test-AtmCandidate -Partition (Find-Part $i $r) -Inventory $i
         Assert-Eq $g.Category 'BLOCKED' 'bloqueado'
@@ -1268,7 +1268,7 @@ try {
     # ------------------------------------------------------------------ portability
     Test-Case 'Portabilidade' 'Windows com apenas um usuario' {
         $p = New-TestProfile 'unico'
-        $r = New-TestRoot -ProfileInfo $p
+        $null = New-TestRoot -ProfileInfo $p
         $i = Inv -Profiles @($p)
         Assert-Eq @($i.Profiles).Count 1 'um perfil'
         Assert-Eq (Get-AtmProfileStatusLabel -Inventory $i -ProfileInfo $p) 'AUDITADO' 'rotulo'
@@ -1280,7 +1280,7 @@ try {
         $pa = New-TestProfile 'multiA'; $ra = New-TestRoot -ProfileInfo $pa
         $pb = New-TestProfile 'multiB' -Sid 'S-1-5-21-1-2-3-4444'; $null = New-TestRoot -ProfileInfo $pb
         $bb = Get-Base $pb
-        $o = icacls $bb /deny "*$($me.Sid):(RD)" 2>&1
+        $null = icacls $bb /deny "*$($me.Sid):(RD)" 2>&1
         $cleanupActions.Add([scriptblock]::Create("icacls '$bb' /remove:d '*$($me.Sid)' | Out-Null"))
         $pc = New-TestProfile 'multiC'; [IO.Directory]::Delete((Get-Base $pc)); $pc.EnvStatus = 'NOT_LOADED'; $pc.Loaded = $false; $pc.EnvKnown = $false
         $pd = New-TestProfile 'multiD' -NoConfig; [IO.Directory]::Delete((Get-Base $pd))
@@ -1374,7 +1374,7 @@ try {
         Assert-True (@($c.Deleted | Where-Object { $_.Completed -and $_.Verified }).Count -eq 1) 'motor de exclusao (sandbox) funciona com o nome'
         $inst = Join-Path $sandbox "PF O'Neil & Co (x) #1\AgentTempManager"
         [void][IO.Directory]::CreateDirectory((Split-Path -Parent $inst))
-        $res = Install-AtmProduct -SourceDir $srcDir -InstallDir $inst -TrustSid $me.Sid -SkipPath -SourceWithoutManifest
+        $null = Install-AtmProduct -SourceDir $srcDir -InstallDir $inst -TrustSid $me.Sid -SkipPath -SourceWithoutManifest
         Assert-True (Test-Path (Join-Path $inst 'lib\AgentTempManager.Native.dll')) 'DLL compilada em caminho com apostrofo'
         Assert-True (-not (Test-Path (Join-Path $inst 'config\projects.local.json'))) 'instalado sem configuracao pessoal'
         $out = & cmd.exe /c "`"$(Join-Path $inst 'bin\agent-temp.cmd')`" version" 2>&1
@@ -1572,7 +1572,7 @@ try {
     Test-Case 'Instalacao' 'Diretorio pai gravavel por usuarios comuns e recusado; PATH pre-existente nunca e removido' {
         $parent = Join-Path $sandbox 'PF4'
         [void][IO.Directory]::CreateDirectory($parent)
-        $o = icacls $parent /grant '*S-1-5-32-545:(OI)(CI)(M)' 2>&1
+        $null = icacls $parent /grant '*S-1-5-32-545:(OI)(CI)(M)' 2>&1
         $threw = $false; try { $null = Install-AtmProduct -SourceDir $srcDir -InstallDir (Join-Path $parent 'AgentTempManager') -TrustSid $me.Sid -SkipPath -SourceWithoutManifest } catch { $threw = ($_.Exception.Message -match 'pai inseguro') }
         Assert-True $threw 'pai inseguro recusado'
         Assert-True (-not (Test-Path (Join-Path $parent 'AgentTempManager'))) 'nada instalado'
@@ -1639,7 +1639,7 @@ try {
         $cleanupActions.Add([scriptblock]::Create("icacls '$ok' /reset 2>&1 | Out-Null"))
         Set-SandboxSingleOwnerAcl -Path $ok
         $applied = @(Get-SandboxAclResultProblems -Path $ok -OwnerSid $okOwner)
-        $o = icacls $ok /reset 2>&1
+        $null = icacls $ok /reset 2>&1
         Assert-Eq $applied.Count 0 "ACL aplicada = SYSTEM + Administradores, protegida ($($applied -join '; '))"
         Assert-Eq $LASTEXITCODE 0 'heranca restaurada'
         if ($script:sandboxAclAdjusted) {
