@@ -1011,19 +1011,24 @@ try {
         foreach ($f in $o.Frames) { foreach ($ln in ($f -split "`n")) { Assert-True ($ln.Length -le 60) 'largura' } }
     }
     Test-Case 'TUI' 'Limpeza pela TUI usa o motor: allowlist, plano, frase; cancelamentos nao apagam' {
-        $p = New-TestProfile 'tuiclean'
-        $r = New-TestRoot -Profile $p
-        $ia = Get-InvArgs -Profiles @($p)
-        $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines @('', '', '')
-        Assert-True ([IO.Directory]::Exists($r)) 'cancelado: preservado'
-        $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines @('', $r, 'APAGAR 1 caminhos', '')
-        Assert-True ([IO.Directory]::Exists($r)) 'frase errada: preservado'
-        Assert-Eq $o.State.LastClean.Aborted 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE' 'motor abortou'
-        $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines @('', "$(Get-Base $p)", '')
-        Assert-Eq $o.State.LastClean.Aborted 'NENHUM_CAMINHO_ELEGIVEL' 'base recusada pelo motor'
-        $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines @('', $r, 'APAGAR 1 CAMINHOS', '')
-        Assert-True (-not [IO.Directory]::Exists($r)) 'confirmado: excluido pelo motor'
-        Assert-True ($null -ne $o.State.LastClean.PostInventory) 'auditoria posterior'
+        # Both prompt flows, whatever the session: an administrator is also asked whether to include other users
+        # (answered with an empty line = no), which shifts every later answer by one line.
+        foreach ($asAdmin in @($false, $true)) {
+            $p = New-TestProfile ('tuiclean' + [int]$asAdmin)
+            $r = New-TestRoot -Profile $p
+            $ia = Get-InvArgs -Profiles @($p) -Identity ([pscustomobject]@{ Sid = $testOwnerSid; Name = $me.Name; IsAdmin = $asAdmin })
+            $others = @(if ($asAdmin) { '' })
+            $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines @('', '', '')
+            Assert-True ([IO.Directory]::Exists($r)) "cancelado: preservado (admin=$asAdmin)"
+            $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines (@('', $r) + $others + @('APAGAR 1 caminhos', ''))
+            Assert-True ([IO.Directory]::Exists($r)) "frase errada: preservado (admin=$asAdmin)"
+            Assert-Eq $o.State.LastClean.Aborted 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE' "motor abortou (admin=$asAdmin)"
+            $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines (@('', "$(Get-Base $p)") + $others + @(''))
+            Assert-Eq $o.State.LastClean.Aborted 'NENHUM_CAMINHO_ELEGIVEL' "base recusada pelo motor (admin=$asAdmin)"
+            $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines (@('', $r) + $others + @('APAGAR 1 CAMINHOS', ''))
+            Assert-True (-not [IO.Directory]::Exists($r)) "confirmado: excluido pelo motor (admin=$asAdmin)"
+            Assert-True ($null -ne $o.State.LastClean.PostInventory) "auditoria posterior (admin=$asAdmin)"
+        }
     }
     Test-Case 'Camadas' 'TUI e relatorio nunca chamam APIs de exclusao; motor de auditoria nao exclui nem imprime' {
         $lib = Join-Path $srcDir 'lib'
@@ -1379,6 +1384,10 @@ try {
     }
     Test-Case 'Instalacao' 'Auditoria de ACL: escrita por Users/Everyone e detectada; Program Files padrao e aceito' {
         $d = Join-Path $sandbox 'aclcheck'; [void][IO.Directory]::CreateDirectory($d); [IO.File]::WriteAllText((Join-Path $d 'x.ps1'), '#')
+        # The scenario needs an ordinary-user write entry; in an elevated session the sandbox only grants SYSTEM and
+        # Administrators, so the entry is granted explicitly (redundant, and harmless, for a standard account).
+        $o = icacls $d /grant "*$($me.Sid):(OI)(CI)(M)" 2>&1
+        Assert-Eq $LASTEXITCODE 0 "ACE do usuario comum concedida: $o"
         Assert-True (Test-AtmInstallAcl -Path $d -AlsoTrustSid $me.Sid).Ok 'diretorio privado ok'
         Assert-True (-not (Test-AtmInstallAcl -Path $d).Ok) 'sem confiar no usuario: owner/ACE do usuario comum detectados'
         $o = icacls $d /grant '*S-1-5-32-545:(OI)(CI)(M)' 2>&1
