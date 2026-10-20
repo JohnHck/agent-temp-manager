@@ -68,6 +68,7 @@ clean-environment test: [docs/INSTALL.md](docs/INSTALL.md).
 * [docs/USAGE.md](docs/USAGE.md) - commands, TUI keys, languages, examples
 * [docs/INSTALL.md](docs/INSTALL.md) - install, update, rollback, uninstall, clean-environment test
 * [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md) - threat model, gates, limitations
+* [docs/ELEVATION.md](docs/ELEVATION.md) - privileges and UAC: requirements, current model, elevation on demand
 * [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - engines, presentation layers, data flow
 * [docs/PROVIDERS.md](docs/PROVIDERS.md) - provider contract (adding an agent)
 * [docs/TESTING.md](docs/TESTING.md) - test suite and coverage

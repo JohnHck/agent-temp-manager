@@ -23,6 +23,25 @@
 The tool never grants permissions, never changes ACLs or ownership, never enables privileges
 (backup/restore/take-ownership), and never elevates itself.
 
+## Privileges and UAC
+
+Requirements PRIV-1 to PRIV-11, with the status of each one in V0.1 (implemented, partial or planned) and what has
+been validated, are in [ELEVATION.md](ELEVATION.md).
+
+Current behaviour (V0.1):
+
+* **Manual elevation.** The tool never elevates itself and never handles credentials; only the installer scripts
+  need an elevated PowerShell, which the user opens through the Windows UAC prompt, and they refuse to run without
+  it before changing anything.
+* Everything else runs without administrative rights; missing rights reduce coverage and are reported, never
+  guessed.
+* Decisions use the **process** identity. After elevating with another account's credentials, that is the
+  administrator's account, so the requesting user's profile is treated as another user's.
+
+Requirements for any future elevated or destructive operation: re-validate inputs, paths, ACLs and installed-file
+integrity in the process that acts, and still require the typed confirmation of the exact plan there: consenting to
+UAC authorizes a process, not an operation. Changing the elevation model is a documented decision before V0.3.
+
 ## Release gate (V0.1)
 
 `Engine.Clean.ps1` ships with `$script:AtmRealDeletionEnabled = $false`. `clean` (CLI and TUI) validates the

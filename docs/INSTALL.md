@@ -3,6 +3,23 @@
 All three operations require an **elevated** PowerShell (Run as administrator). Nothing elevates silently.
 Running the tool afterwards does **not** require elevation.
 
+## Elevation (UAC)
+
+The installer never asks for elevation itself: you open the elevated PowerShell, Windows shows the UAC prompt, and
+the scripts refuse to run without it ("no automatic elevation is performed"). See [ELEVATION.md](ELEVATION.md).
+
+1. Start menu, type `PowerShell`, choose **Run as administrator**, approve the UAC prompt. Start the scripts with
+   `powershell -NoProfile ...` as below, so no profile script runs elevated, and close the window when done.
+2. **Consent prompt** (your account is an administrator): the elevated session runs as you.
+3. **Credentials prompt** (a standard account, or a policy that always asks for credentials, and someone types an
+   administrator account's password): the elevated session runs as **that administrator account**, with its own
+   profile, `%TEMP%` and `HKCU`, not as the person who asked. The installation is machine-wide and the installer
+   records that administrator as the installing account. Afterwards, every user runs `agent-temp` without
+   elevation. Details: [ELEVATION.md](ELEVATION.md#elevating-with-another-accounts-credentials).
+4. **Cancelling** the UAC prompt opens no elevated session and changes nothing. If the scripts are started without
+   elevation they stop before changing anything.
+5. Never type an administrator password anywhere except the Windows UAC prompt. The tool never asks for one.
+
 ## Install
 
 Extract the release into a directory that **only administrators can write** (the installer runs elevated and

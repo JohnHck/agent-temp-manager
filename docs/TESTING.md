@@ -43,5 +43,24 @@ pwsh       -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1       
 | Privacy | scanner self-test with planted data; working tree and Git index free of SIDs, e-mails, user paths, tokens, machine/user names and private identifiers; only `dist/` ignored |
 | Portability | one user; several users (audited / inaccessible / hive not loaded / no Claude Code); profile on another drive letter (`subst`); no Claude Code; empty TEMP and empty root; unidentified projects and session-based identification with collision handling; Unicode, spaces, apostrophe, `&`, `#`, parentheses in profile and install paths; per-profile TEMP expansion (redirected, other drive, unresolvable variable) |
 
+## Privilege matrix
+
+Requirement PRIV-11 ([ELEVATION.md](ELEVATION.md)): behaviour that depends on privileges is verified with **real**
+tokens, not only with the injected test identities the suite uses for gate logic. Expected results for V0.1:
+
+| Scenario | Expected | Covered today |
+|---|---|---|
+| Standard user, not elevated | audit/preview/TUI work; other profiles inaccessible and other accounts' processes not observable are reported; coverage incomplete; clean blocked; installer scripts refuse | Suite, locally (Windows 10, PS 5.1 and 7) |
+| Administrator, not elevated (filtered UAC token) | Same as a standard user (`elevated administrator: NO`) | Not yet (manual) |
+| Administrator, elevated (consent prompt) | Full process coverage where Windows allows; other users' paths need `-IncludeOtherUsers`; installer works | Suite in CI (elevated Windows Server runner, PS 5.1 and 7); real installation: not yet (clean environment) |
+| Elevated with another account's credentials (standard user, or policy requiring credentials) | Process identity = that administrator account (its profile is "own"); the requester's profile is another user's and needs `-IncludeOtherUsers`; installer records the administrator | Not yet (manual) |
+| UAC prompt cancelled | No elevated session, nothing changed | Not yet (manual) |
+| Non-interactive session (SSH, WinRM, scheduled task) | Runs with the caller's token; never waits for a prompt | Not yet (manual) |
+| Windows 11 | Same results as Windows 10 for every row above | Not yet (manual) |
+
+Gate logic for administrators and other users is also exercised with injected identities (`IsAdmin`, profile SID
+different from the process SID) in every run, on both shells. Manual rows are recorded in the release notes as
+done or `NAO_TESTADO`, never assumed.
+
 Results are `PASS`, `FAIL` or `NAO_TESTADO` (a prerequisite was unavailable, e.g. no free drive letter for
 `subst` or no symlink privilege); `NAO_TESTADO` is never counted as a pass.

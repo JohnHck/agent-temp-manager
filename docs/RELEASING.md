@@ -32,5 +32,10 @@ Output: `dist/agent-temp-manager-<version>.zip` (with `src/manifest.json`) and `
 5. Git: public author identity configured per repository (or per commit), `git gc --prune=now`, first commit
    reviewed (`git show --stat`).
 6. Repository settings: private vulnerability reporting enabled (SECURITY.md), branch protection, CI enabled.
-7. Release: tag `v<version>`, attach the zip and `SHA256SUMS.txt`, paste the CHANGELOG section and the known
+7. Privileges ([ELEVATION.md](ELEVATION.md)): no self-elevation and no credential handling in the code (search for
+   `RunAs`, `-Verb`, `Get-Credential`, `SecureString`); installer scripts refuse without elevation; the
+   [privilege matrix](TESTING.md#privilege-matrix) rows run or listed as `NAO_TESTADO` in the release notes,
+   including standard user, elevated administrator and credentials-prompt elevation on Windows 10 and 11 with
+   PowerShell 5.1 and 7. A release that changes privilege behaviour needs every row run.
+8. Release: tag `v<version>`, attach the zip and `SHA256SUMS.txt`, paste the CHANGELOG section and the known
    limitations from docs/SECURITY-MODEL.md.

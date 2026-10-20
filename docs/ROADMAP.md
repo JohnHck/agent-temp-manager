@@ -26,6 +26,11 @@ never move.
   are no overrides for incomplete coverage.
 * **Read-only by default.** Only an explicit, confirmed command may change the system, and only within the limits of
   the version that introduced it.
+* **Least privilege, UAC only.** Everything that can run without administrative rights does. Elevation is explicit,
+  only for operations that need it, and only through the Windows UAC prompt; the tool never handles credentials.
+  Anything elevated re-validates itself, and destructive operations need a typed confirmation independent of UAC.
+  Requirements PRIV-1 to PRIV-11 and their status in V0.1: [ELEVATION.md](ELEVATION.md). V0.1 uses manual
+  elevation (installation only) and never elevates itself.
 * **No personal data.** Nothing user- or machine-specific is built in, printed beyond what the user asked for, or
   exported: no command lines, tokens, credentials or file contents.
 * **Portable.** Windows PowerShell 5.1 and PowerShell 7, any user profile layout, any drive, no network access.
@@ -81,6 +86,8 @@ can be based on evidence instead of assumptions. V0.2 is strictly read-only.
 * **Temporary directories:** the V0.1 inventory, extended with the runtime evidence above.
 * **Dependencies:** which temporary paths, worktrees, services and processes depend on each other.
 * A diagnostics view in the TUI and a `diagnose` command (name to be confirmed) with JSON export.
+* Runs without elevation (PRIV-1): each finding states whether elevation would add coverage, and the report shows
+  the process identity and elevation state (PRIV-10). Diagnostics never request elevation.
 * A Claude Desktop provider/scenario, behind the same provider contract.
 
 **Acceptance criteria.**
@@ -114,14 +121,20 @@ already built in V0.1 and the evidence gathered in V0.2.
 * Race-condition protection: ancestors and directories pinned by handle, deletion by handle, the plan must match the
   validated measurement exactly, writes after confirmation abort that path.
 * Post-cleanup audit and a deletion report (what was deleted, what was preserved and why).
+* **Elevation model decided first** ([ELEVATION.md](ELEVATION.md), manual vs on demand) and implemented to PRIV-2
+  to PRIV-9: elevation only through UAC, cancellation and failure change nothing, requester and elevated identity
+  shown, full re-validation and the typed confirmation inside the elevated process.
 
 **Acceptance criteria.**
 * Any doubt, change, missing coverage or runtime dependency preserves the path (fail-closed), and the test suite
   proves each case.
 * Sessions that are active, recent or of unknown liveness are never deleted.
 * Real deletion is validated in a clean environment and in elevated and multi-user scenarios before release.
+* Every row of the [privilege matrix](TESTING.md#privilege-matrix) is run for real (standard user, administrator
+  not elevated and elevated, credentials-prompt elevation, UAC cancelled, non-interactive session; Windows 10 and
+  11; PowerShell 5.1 and 7).
 
-**Dependencies.** V0.2 (runtime diagnostics).
+**Dependencies.** V0.2 (runtime diagnostics); the elevation-model decision.
 
 **Mandatory tests.** Junction and symlink swaps during deletion; changes between preview, confirmation and deletion;
 open files; other users' profiles with and without elevation; incomplete coverage; partial failures; both shells.
@@ -140,6 +153,8 @@ the user authorizes one at a time.
 * Recovery procedures derived from V0.2 diagnostics (for example, a stuck agent service or virtual machine).
 * Each operation shows what it will change, how to undo it and requires its own authorization.
 * Before/after state capture and an undo path for every operation; a recovery log.
+* Each operation declares whether it needs elevation; only those request it (PRIV-2), one operation per elevated
+  process (PRIV-9), with its own typed confirmation inside that process (PRIV-8).
 
 **Acceptance criteria.**
 * No operation runs without individual authorization; there is no "fix everything" mode.
@@ -168,6 +183,8 @@ long-running agent virtual machines.
 
 **Acceptance criteria.**
 * Monitoring is opt-in, uses bounded local storage and can be removed completely.
+* Monitoring runs without elevation (PRIV-1); installing a scheduler entry is an explicit, separately confirmed
+  step that never stores credentials (PRIV-3).
 * Monitoring never deletes, recovers or changes anything; it only recommends the V0.3/V0.4 actions.
 * Collected history contains no personal data beyond what the audit already shows locally.
 
@@ -191,7 +208,8 @@ installation and removal in a sandbox.
 * Completed security review of every engine and the installer.
 
 **Acceptance criteria.**
-* All previous acceptance criteria still hold; clean-environment, elevated and multi-user tests pass.
+* All previous acceptance criteria still hold; clean-environment, elevated and multi-user tests pass, and the full
+  privilege matrix passes on Windows 10 and 11 with PowerShell 5.1 and 7.
 * A new provider can be added without changing the engines.
 
 **Dependencies.** V0.1–V0.5.
