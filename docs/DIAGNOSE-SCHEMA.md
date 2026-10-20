@@ -79,7 +79,7 @@ absent, stopped or unused.
 |---|---|---|
 | `kind` | string | `Process`, `Service`, `VirtualMachine`, `Worktree`, `Repository`, `AgentSession` or `TempPartition`. |
 | `key` | string | Stable identity of the item (for a temporary partition: its path). |
-| `state` | string | State code. In P1-A temporary partitions are `RUNTIME_NOT_DIAGNOSED`. A "no dependency" state becomes `UNKNOWN` unless every coverage record of the finding is conclusive. |
+| `state` | string | State code from the closed list of the finding's kind (any other is refused). In P1-A temporary partitions are `RUNTIME_NOT_DIAGNOSED`. A "no dependency" state becomes `UNKNOWN` unless every coverage record of the finding is conclusive. |
 | `requestedState` | string | State before that rule was applied. |
 | `provider` | string or null | Provider that contributed the item. |
 | `coverage` | array | Collectors (ids in `coverage[]`) the state depends on. |

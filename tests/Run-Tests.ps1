@@ -1780,20 +1780,65 @@ try {
         Assert-Eq (ConvertTo-AtmExceptionCode 'System.UnauthorizedAccessException') 'EXCEPTION_SYSTEMUNAUTHORIZEDACCESSEXCEPTION' 'codigo de excecao'
     }
     Test-Case 'Diagnose' 'Ausencia de evidencia nunca vira "sem dependencia": UNKNOWN sem cobertura conclusiva' {
-        foreach ($state in $script:AtmNoDependencyStates) {
-            foreach ($st in $script:AtmCoverageStatuses) {
-                $conclusive = $script:AtmConclusiveCoverage -contains $st
-                $reasons = $(if ($conclusive) { @() } else { @('TEST_REASON') })
-                $cov = @((New-AtmCoverage -Collector 'identity' -Status 'COMPLETE'), (New-AtmCoverage -Collector 'processes' -Status $st -Reasons $reasons))
-                $f = New-AtmFinding -Kind 'TempPartition' -Key 'k' -State $state -Coverage $cov
-                Assert-Eq $f.State $(if ($conclusive) { $state } else { 'UNKNOWN' }) "$state com cobertura $st"
-                Assert-Eq $f.RequestedState $state 'estado pedido preservado'
-                if (-not $conclusive) { Assert-Eq (@($f.IncompleteCoverage) -join ',') 'processes' 'coletor incompleto listado' }
+        # Every kind that allows a "no dependency" state, with every coverage status (T-1).
+        $exercised = @{}
+        foreach ($kind in $script:AtmFindingKinds) {
+            foreach ($state in @($script:AtmFindingStates[$kind] | Where-Object { $script:AtmNoDependencyStates -ccontains $_ })) {
+                $exercised[$state] = $true
+                foreach ($st in $script:AtmCoverageStatuses) {
+                    $conclusive = $script:AtmConclusiveCoverage -ccontains $st
+                    $reasons = $(if ($conclusive) { @() } else { @('TEST_REASON') })
+                    $cov = @((New-AtmCoverage -Collector 'identity' -Status 'COMPLETE'), (New-AtmCoverage -Collector 'processes' -Status $st -Reasons $reasons))
+                    $f = New-AtmFinding -Kind $kind -Key 'k' -State $state -Coverage $cov
+                    Assert-Eq $f.State $(if ($conclusive) { $state } else { 'UNKNOWN' }) "$kind/$state com cobertura $st"
+                    Assert-Eq $f.RequestedState $state 'estado pedido preservado'
+                    if (-not $conclusive) { Assert-Eq (@($f.IncompleteCoverage) -join ',') 'processes' 'coletor incompleto listado' }
+                }
+                Assert-Eq (New-AtmFinding -Kind $kind -Key 'k' -State $state).State 'UNKNOWN' "$kind/$state sem nenhuma cobertura"
             }
-            Assert-Eq (New-AtmFinding -Kind 'TempPartition' -Key 'k' -State $state).State 'UNKNOWN' "$state sem nenhuma cobertura"
         }
+        foreach ($state in $script:AtmNoDependencyStates) { Assert-True $exercised.ContainsKey($state) "$state exercitado em algum tipo" }
         $f = New-AtmFinding -Kind 'TempPartition' -Key 'k' -State 'IN_USE' -Coverage @(New-AtmCoverage -Collector 'processes' -Status 'DENIED' -Reasons @('ACCESS_DENIED'))
         Assert-Eq $f.State 'IN_USE' 'evidencia positiva nao depende de cobertura completa'
+    }
+    Test-Case 'Diagnose' 'Estados fechados por tipo de achado (T-1): tabela coerente; desconhecido, de outro tipo ou em minusculas recusado; cobertura malformada recusada' {
+        Assert-Eq (@($script:AtmFindingStates.Keys | Sort-Object) -join ',') (@($script:AtmFindingKinds | Sort-Object) -join ',') 'um item da tabela por tipo'
+        $all = @{}
+        foreach ($kind in $script:AtmFindingKinds) {
+            $states = @($script:AtmFindingStates[$kind])
+            Assert-True ($states -ccontains 'UNKNOWN') "$kind aceita UNKNOWN (destino do bloqueio)"
+            foreach ($s in $states) { Assert-True ($s -cmatch $script:AtmCodePattern) "$kind/$s e um codigo"; $all[$s] = $true }
+        }
+        foreach ($s in $script:AtmNoDependencyStates) { Assert-True $all.ContainsKey($s) "$s pertence a algum tipo" }
+        $cov = @(New-AtmCoverage -Collector 'processes' -Status 'COMPLETE')
+        $refused = 0
+        foreach ($kind in $script:AtmFindingKinds) {
+            $own = @($script:AtmFindingStates[$kind])
+            foreach ($s in $own) { Assert-Eq (New-AtmFinding -Kind $kind -Key 'k' -State $s -Coverage $cov).RequestedState $s "$kind aceita $s" }
+            $other = @($all.Keys | Where-Object { $own -cnotcontains $_ })
+            $bad = @($other) + @('CLEAN', 'FREE', 'UNUSED', 'DISPOSABLE', 'NOT_RUNNING') + @($own | ForEach-Object { $_.ToLowerInvariant() })
+            foreach ($s in $bad) {
+                $threw = $false; try { $null = New-AtmFinding -Kind $kind -Key 'k' -State $s -Coverage $cov } catch { $threw = $true }
+                Assert-True $threw "$kind recusa $s"
+                $refused++
+            }
+        }
+        Assert-True ($refused -gt 40) "combinacoes negativas exercitadas: $refused"
+        $badCov = @(
+            [pscustomobject]@{ Status = 'COMPLETE' },
+            [pscustomobject]@{ Collector = 'processes' },
+            [pscustomobject]@{ Collector = 'processes'; Status = 'complete' },
+            [pscustomobject]@{ Collector = 'processes'; Status = 'CLEAN' },
+            [pscustomobject]@{ Collector = 'processes'; Status = $null },
+            [pscustomobject]@{ Collector = 'Processes'; Status = 'COMPLETE' },
+            [pscustomobject]@{ Collector = ''; Status = 'COMPLETE' },
+            'COMPLETE')
+        foreach ($state in @('IN_USE', 'NO_DEPENDENCY_OBSERVED', 'RUNTIME_NOT_DIAGNOSED')) {
+            foreach ($c in $badCov) {
+                $threw = $false; try { $null = New-AtmFinding -Kind 'TempPartition' -Key 'k' -State $state -Coverage @($c) } catch { $threw = $true }
+                Assert-True $threw "cobertura malformada recusada ($state): $($c | Out-String)"
+            }
+        }
     }
     Test-Case 'Diagnose' 'Identidade: tipo de elevacao, integridade e falhas de leitura (fontes injetadas)' {
         $cases = @(
@@ -1958,6 +2003,52 @@ try {
         Assert-True (-not $d.CoverageComplete) 'cobertura incompleta'
         $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs) -IdentitySource $diagIdAdmin
         Assert-Eq (@($d.Coverage | Where-Object { $_.Collector -eq 'processes' })[0].ElevationWouldHelp) 'NO' 'administrador elevado: processos protegidos continuam invisiveis'
+    }
+    Test-Case 'Diagnose' 'Coerencia de cobertura (T-3): inventario incompleto nunca aparece completo no resultado, no JSON nem no relatorio' {
+        # Each row builds a real sandbox inventory; nothing is mocked except the process snapshot failure.
+        $rows = @(
+            @{ Name = 'controle'; Collector = $null; Status = 'COMPLETE'; Reason = $null },
+            @{ Name = 'snapshot'; Collector = 'processes'; Status = 'FAILED'; Reason = 'PROCESS_SNAPSHOT_FAILED' },
+            @{ Name = 'uninspectable'; Collector = 'processes'; Status = 'PARTIAL'; Reason = 'UNINSPECTABLE_PROCESSES' },
+            @{ Name = 'inaccessible'; Collector = 'temp-profiles'; Status = 'PARTIAL'; Reason = 'PROFILES_INACCESSIBLE' },
+            @{ Name = 'unverified'; Collector = 'temp-profiles'; Status = 'PARTIAL'; Reason = 'TEMP_LOCATION_UNVERIFIED' })
+        $origSnapshot = ${function:Get-AtmProcessSnapshot}
+        foreach ($row in $rows) {
+            $n = $row.Name
+            $procs = New-Procs
+            $p = New-TestProfile ('diagcoh' + $n)
+            $r = New-TestRoot -ProfileInfo $p
+            # A second TEMP location that cannot be read (invalid name): the profile is inaccessible without any ACL change.
+            if ($n -eq 'inaccessible') { $p.TempCandidates = @($p.TempCandidates) + @([pscustomobject]@{ TempPath = (Join-Path $p.ProfilePath 'Temp|ilegivel'); Source = 'test' }) }
+            if ($n -eq 'uninspectable') { $procs = New-Procs -Extra @([pscustomobject]@{ ProcessId = 4243; Name = 'other.exe'; ParentProcessId = 1; CommandLine = $null; CreationDate = (Get-Date).AddHours(-1) }) }
+            if ($n -eq 'unverified') { $p.Loaded = $false; $p.EnvStatus = 'NOT_LOADED'; $p.EnvKnown = $false }
+            if ($n -eq 'snapshot') { ${function:script:Get-AtmProcessSnapshot} = { param($Override) [pscustomobject]([ordered]@{ Failed = $true; Error = 'x'; Processes = @(); Total = 0; Readable = 0; Uninspectable = 0; UninspectableByName = @{} }) } }
+            try { $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0]) }
+            finally { ${function:script:Get-AtmProcessSnapshot} = $origSnapshot }
+            $control = ($n -eq 'controle')
+            Assert-Eq ([bool]$d.Inventory.CoverageComplete) $control ("$n`: Inventory.CoverageComplete (bases $(@($d.Inventory.Bases | ForEach-Object { $_.Status }) -join ','); registros legiveis $(@($d.Inventory.Registries.Values | ForEach-Object { $_.Readable }) -join ','))")
+            Assert-Eq ([bool]$d.CoverageComplete) $control "$n`: diagnose CoverageComplete"
+            if (-not $control) {
+                $c = @($d.Coverage | Where-Object { $_.Collector -eq $row.Collector })[0]
+                Assert-True ($c.Status -ceq $row.Status -and @($c.Reasons) -ccontains $row.Reason) "$n`: $($row.Collector) $($row.Status) $($row.Reason) (obtido $($c.Status) $(@($c.Reasons) -join ','))"
+                $f = @($d.Findings | Where-Object { $_.Key -eq $r })
+                Assert-Eq $f.Count 1 "$n`: achado da particao"
+                Assert-True (@($f[0].IncompleteCoverage) -ccontains $row.Collector) "$n`: achado lista $($row.Collector) como incompleto"
+                if ($n -eq 'inaccessible') { Assert-Eq @($d.Inventory.InaccessibleProfiles).Count 1 'perfil inacessivel no inventario' }
+                if ($n -eq 'unverified') { Assert-Eq @($d.Inventory.UnverifiedTempProfiles).Count 1 'TEMP nao verificavel no inventario' }
+            } else {
+                foreach ($c in $d.Coverage) { Assert-Eq $c.Status 'COMPLETE' "controle: $($c.Collector) completo" }
+            }
+            $j = (ConvertTo-AtmDiagnoseJson -Result $d) | ConvertFrom-Json
+            Assert-Eq ([bool]$j.coverageComplete) $control "$n`: JSON coverageComplete"
+            Assert-Eq ([bool]$j.inventory.coverageComplete) $control "$n`: JSON inventory.coverageComplete"
+            if (-not $control) { Assert-True (@($j.coverage | Where-Object { $_.collector -ceq $row.Collector -and $_.status -ceq $row.Status -and @($_.reasons) -ccontains $row.Reason }).Count -eq 1) "$n`: JSON com o mesmo codigo" }
+            $old = Get-AtmLanguage
+            try { Set-AtmLanguage -Requested 'en-US'; $txt = (Show-AtmDiagnose -Result $d 6>&1 | Out-String) } finally { Set-AtmLanguage -Requested $old }
+            $yes = $txt.Contains('Complete coverage: YES'); $no = $txt.Contains('Complete coverage: NO')
+            Assert-True ($yes -eq $control -and $no -ne $control) "$n`: relatorio (YES=$yes NO=$no)"
+            if (-not $control) { Assert-True ($txt.Contains($row.Reason)) "$n`: relatorio mostra $($row.Reason)" }
+        }
     }
     Test-Case 'Diagnose' 'Prazo e falhas: TIMEOUT/FAILED, nunca COMPLETE; provider invalido isolado; nada e inventado' {
         $p = New-TestProfile 'diagdl'

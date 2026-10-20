@@ -18,6 +18,19 @@ $script:AtmFindingKinds = @('Process', 'Service', 'VirtualMachine', 'Worktree', 
 # States meaning "nothing depends on it". New-AtmFinding replaces them with UNKNOWN unless every coverage record of
 # the finding is conclusive. There is no option to change this.
 $script:AtmNoDependencyStates = @('NO_DEPENDENCY_OBSERVED', 'CLEAN_AND_PUBLISHED_UNKNOWN')
+# Closed list of states per finding kind (ADR-0001 rule 2). Only states with an accepted basis are listed:
+# TempPartition: RUNTIME_NOT_DIAGNOSED (P1-A) and the graph states of ADR-0002; Worktree: the summary states of
+# ADR-0006 rule 14. The other kinds have no state yet: each later phase adds its own, with tests. UNKNOWN is in every
+# list because New-AtmFinding may replace a requested state with it.
+$script:AtmFindingStates = @{
+    'Process'        = @('UNKNOWN')
+    'Service'        = @('UNKNOWN')
+    'VirtualMachine' = @('UNKNOWN')
+    'Worktree'       = @('IN_USE', 'LOCAL_WORK', 'UNPUBLISHED_COMMITS', 'APPARENT_ORPHAN', 'CLEAN_AND_PUBLISHED_UNKNOWN', 'UNKNOWN')
+    'Repository'     = @('UNKNOWN')
+    'AgentSession'   = @('UNKNOWN')
+    'TempPartition'  = @('RUNTIME_NOT_DIAGNOSED', 'IN_USE', 'NO_DEPENDENCY_OBSERVED', 'UNKNOWN')
+}
 $script:AtmElevationTypes = @('DEFAULT', 'FULL', 'LIMITED', 'UNKNOWN')
 $script:AtmIntegrityLevels = @('UNTRUSTED', 'LOW', 'MEDIUM', 'MEDIUM_PLUS', 'HIGH', 'SYSTEM', 'PROTECTED', 'UNKNOWN')
 $script:AtmCodePattern = '^[A-Z][A-Z0-9_]*$'
@@ -83,10 +96,18 @@ function New-AtmFinding {
     if ($script:AtmFindingKinds -cnotcontains $Kind) { throw (Get-AtmText 'err.diagFinding' "kind '$Kind'") }
     if ([string]::IsNullOrWhiteSpace($Key)) { throw (Get-AtmText 'err.diagFinding' 'empty key') }
     if ($State -cnotmatch $script:AtmCodePattern) { throw (Get-AtmText 'err.diagFinding' "state '$State'") }
+    # The kind was checked case-sensitively above, so the (case-insensitive) table lookup cannot stand in for it.
+    if (@($script:AtmFindingStates[$Kind]) -cnotcontains $State) { throw (Get-AtmText 'err.diagFinding' "state '$State' for kind '$Kind'") }
     $ev = @($Evidence | Where-Object { $null -ne $_ })
     foreach ($e in $ev) { if (@($e.PSObject.Properties.Name) -cnotcontains 'Code') { throw (Get-AtmText 'err.diagFinding' 'evidence') } }
     $cov = @($Coverage | Where-Object { $null -ne $_ })
-    foreach ($c in $cov) { if (@($c.PSObject.Properties.Name) -cnotcontains 'Status') { throw (Get-AtmText 'err.diagFinding' 'coverage') } }
+    # A malformed coverage record is refused, never read as "incomplete" or "complete".
+    foreach ($c in $cov) {
+        $names = @($c.PSObject.Properties.Name)
+        if ($names -cnotcontains 'Status' -or $names -cnotcontains 'Collector') { throw (Get-AtmText 'err.diagFinding' 'coverage') }
+        if ($script:AtmCoverageStatuses -cnotcontains [string]$c.Status) { throw (Get-AtmText 'err.diagFinding' "coverage status '$($c.Status)'") }
+        if ([string]$c.Collector -cnotmatch $script:AtmIdPattern) { throw (Get-AtmText 'err.diagFinding' "coverage collector '$($c.Collector)'") }
+    }
     $incomplete = @($cov | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status } | ForEach-Object { $_.Collector })
     $final = $State
     if ($script:AtmNoDependencyStates -ccontains $State -and ($cov.Count -eq 0 -or $incomplete.Count -gt 0)) { $final = 'UNKNOWN' }
