@@ -1928,6 +1928,133 @@ try {
         $h = Get-AtmProviderRuntimeHints $pv
         Assert-Eq (@($h.Coverage.Reasons) -join ',') 'HINT_MALFORMED_SERVICE_HINTS,HINT_MALFORMED_VIRTUALIZATION_HINTS' 'servico e virtualizacao malformados'
     }
+    $diagIdUser = { [pscustomobject]@{ Name = 'TEST\alice'; Sid = 'S-1-5-21-1-2-3-1001'; IsAdmin = $false; ElevationTypeRaw = 3; IntegrityRid = 0x2000; SessionId = 1 } }
+    $diagIdAdmin = { [pscustomobject]@{ Name = 'TEST\admin'; Sid = 'S-1-5-21-1-2-3-500'; IsAdmin = $true; ElevationTypeRaw = 2; IntegrityRid = 0x3000; SessionId = 1 } }
+    Test-Case 'Diagnose' 'Invoke-AtmDiagnose (fontes injetadas): identidade, providers, inventario e cobertura de processos/perfis; achados das particoes' {
+        $p = New-TestProfile 'diag'
+        $r1 = New-TestRoot -ProfileInfo $p
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser
+        Assert-Eq $d.SchemaVersion 'atm.diagnose/1' 'schema'
+        Assert-Eq (@($d.Coverage | ForEach-Object { $_.Collector }) -join ',') 'identity,inventory,processes,temp-profiles' 'coletores (Claude Code v1: sem dicas de runtime)'
+        foreach ($c in $d.Coverage) { Assert-Eq $c.Status 'COMPLETE' "$($c.Collector) completo" }
+        Assert-True $d.CoverageComplete 'cobertura completa'
+        Assert-True ($null -eq @($d.Coverage | Where-Object { $_.Collector -eq 'inventory' })[0].BudgetMs) 'inventario V0.1 sem orcamento declarado (nao interrompivel)'
+        $f = @($d.Findings | Where-Object { $_.Key -eq $r1 })
+        Assert-Eq $f.Count 1 'achado da particao'
+        Assert-Eq $f[0].State 'RUNTIME_NOT_DIAGNOSED' 'estado'
+        Assert-Eq $f[0].Provider 'claude-code' 'provider'
+        Assert-Eq (@($f[0].Evidence | Where-Object { $_.Code -eq 'AUDIT_CLASS' })[0].Detail) (Find-Part $d.Inventory $r1).Class 'classe da auditoria como evidencia'
+        Assert-Eq (@($f[0].Coverage | ForEach-Object { $_.Collector }) -join ',') 'inventory,processes,temp-profiles' 'cobertura do achado'
+        $procs = New-Procs -Extra @([pscustomobject]@{ ProcessId = 4242; Name = 'other.exe'; ParentProcessId = 1; CommandLine = $null; CreationDate = (Get-Date).AddHours(-1) })
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs) -IdentitySource $diagIdUser
+        $pc = @($d.Coverage | Where-Object { $_.Collector -eq 'processes' })[0]
+        Assert-True ($pc.Status -eq 'PARTIAL' -and $pc.ElevationWouldHelp -eq 'YES' -and $pc.Observed -eq 1 -and $pc.Expected -eq 2) "processos parciais: $($pc.Status)/$($pc.ElevationWouldHelp)/$($pc.Observed)/$($pc.Expected)"
+        Assert-True (-not $d.CoverageComplete) 'cobertura incompleta'
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs) -IdentitySource $diagIdAdmin
+        Assert-Eq (@($d.Coverage | Where-Object { $_.Collector -eq 'processes' })[0].ElevationWouldHelp) 'NO' 'administrador elevado: processos protegidos continuam invisiveis'
+    }
+    Test-Case 'Diagnose' 'Prazo e falhas: TIMEOUT/FAILED, nunca COMPLETE; provider invalido isolado; nada e inventado' {
+        $p = New-TestProfile 'diagdl'
+        $null = New-TestRoot -ProfileInfo $p
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -DeadlineSeconds 0
+        foreach ($c in @('inventory', 'processes', 'temp-profiles')) {
+            $x = @($d.Coverage | Where-Object { $_.Collector -eq $c })[0]
+            Assert-True ($x.Status -eq 'TIMEOUT' -and @($x.Reasons) -contains 'DEADLINE_EXCEEDED') "$c TIMEOUT"
+        }
+        Assert-Eq @($d.Findings).Count 0 'nenhum achado inventado'
+        Assert-True ($null -eq $d.Inventory -and -not $d.CoverageComplete) 'sem inventario e cobertura incompleta'
+        Assert-Eq @($d.Coverage | Where-Object { $_.Collector -eq 'identity' })[0].Status 'COMPLETE' 'identidade sempre lida'
+        $a = Get-InvArgs -Profiles @($p)
+        $a['ConfigDir'] = (Join-Path $sandbox 'config-inexistente')
+        $d = Invoke-AtmDiagnose -InventoryArgs $a -IdentitySource $diagIdUser
+        $x = @($d.Coverage | Where-Object { $_.Collector -eq 'inventory' })[0]
+        Assert-True ($x.Status -eq 'FAILED' -and @($x.Reasons) -contains 'INVENTORY_FAILED') 'falha do inventario'
+        Assert-Eq @($x.Reasons | Where-Object { $_ -like 'EXCEPTION_*' }).Count 1 'somente o tipo da excecao'
+        Assert-Eq @($d.Coverage | Where-Object { $_.Collector -eq 'processes' })[0].Status 'FAILED' 'processos desconhecidos'
+        $badProv = [pscustomobject]@{ Id = 'fake-bad'; DisplayName = 'B'; ContractVersion = 9 }
+        $rt = [pscustomobject]@{ Id = 'fake-runtime'; DisplayName = 'F'; ContractVersion = 2; Capabilities = @('runtime'); GetServiceHints = { @([pscustomobject]@{ Name = 'FakeAgentService' }) } }
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0], $badProv, $rt)
+        Assert-Eq @($d.Coverage | Where-Object { $_.Collector -eq 'provider-fake-bad' })[0].Status 'FAILED' 'contrato invalido isolado'
+        Assert-Eq @($d.Coverage | Where-Object { $_.Collector -eq 'provider-fake-runtime' })[0].Status 'COMPLETE' 'dicas de runtime lidas'
+        Assert-Eq @($d.Coverage | Where-Object { $_.Collector -eq 'inventory' })[0].Status 'COMPLETE' 'inventario segue com o provider temp'
+        Assert-Eq (@($d.Providers | ForEach-Object { $_.Id }) -join ',') 'claude-code,fake-runtime' 'somente providers validos'
+        $threw = $false; try { $null = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -DeadlineSeconds -1 } catch { $threw = $true }
+        Assert-True $threw 'prazo negativo recusado'
+    }
+    Test-Case 'Diagnose' 'JSON atm.diagnose/1: campos iguais ao documento do schema; identico nos dois idiomas (exceto language); horarios ISO UTC; listas sempre arrays' {
+        $p = New-TestProfile 'diagjson'
+        $null = New-TestRoot -ProfileInfo $p
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser
+        $old = Get-AtmLanguage
+        try { Set-AtmLanguage -Requested 'en-US'; $en = ConvertTo-AtmDiagnoseJson -Result $d; Set-AtmLanguage -Requested 'pt-BR'; $pt = ConvertTo-AtmDiagnoseJson -Result $d } finally { Set-AtmLanguage -Requested $old }
+        Assert-Eq ($en -replace '"language":\s*"[^"]*"', '') ($pt -replace '"language":\s*"[^"]*"', '') 'identico exceto language'
+        $j = $en | ConvertFrom-Json
+        $doc = [IO.File]::ReadAllLines((Join-Path (Split-Path -Parent $testsDir) 'docs\DIAGNOSE-SCHEMA.md'))
+        $sections = @{}; $cur = $null
+        foreach ($l in $doc) {
+            if ($l -match '^## (.+)$') { $cur = $Matches[1].Trim(); $sections[$cur] = New-Object System.Collections.Generic.List[string]; continue }
+            if ($cur -and $l -match '^\| `([A-Za-z]+)` \|') { $sections[$cur].Add($Matches[1]) }
+        }
+        $objects = [ordered]@{ 'Top level' = $j; 'identity' = $j.identity; 'providers[]' = $j.providers[0]; 'coverage[]' = $j.coverage[0]; 'findings[]' = $j.findings[0]; 'findings[].evidence[]' = $j.findings[0].evidence[0]; 'inventory' = $j.inventory }
+        foreach ($k in $objects.Keys) {
+            Assert-True $sections.ContainsKey($k) "secao '$k' no documento do schema"
+            Assert-Eq (@($objects[$k].PSObject.Properties.Name | Sort-Object) -join ',') (@($sections[$k] | Sort-Object) -join ',') "campos de '$k'"
+        }
+        Assert-Eq $j.schemaVersion 'atm.diagnose/1' 'versao'
+        foreach ($name in @('startedUtc', 'finishedUtc', 'deadlineUtc', 'observedUtc')) {
+            $ms = @([regex]::Matches($en, '"' + $name + '":\s*"([^"]*)"'))
+            Assert-True ($ms.Count -ge 1) "$name presente"
+            foreach ($m in $ms) { Assert-True ($m.Groups[1].Value -match '^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+Z$') "$name ISO UTC: $($m.Groups[1].Value)" }
+        }
+        Assert-Eq ([regex]::Matches($en, '"reasons":\s*\[').Count) @($j.coverage).Count 'reasons sempre array (inclusive vazio)'
+        Assert-Eq ([regex]::Matches($en, '"capabilities":\s*\[').Count) @($j.providers).Count 'capabilities sempre array'
+        $d0 = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -DeadlineSeconds 0
+        $j0 = (ConvertTo-AtmDiagnoseJson -Result $d0) | ConvertFrom-Json
+        Assert-True ($j0.inventory.collected -eq $false -and $null -eq $j0.inventory.partitions) 'inventario nao coletado: null, nunca 0'
+        Assert-Eq (@($j0.inventory.PSObject.Properties.Name | Sort-Object) -join ',') (@($sections['inventory'] | Sort-Object) -join ',') 'mesmos campos sem inventario'
+    }
+    Test-Case 'Privacidade' 'Diagnose: relatorio e JSON sem linhas de comando, argumentos ou mensagens de excecao plantados' {
+        $p = New-TestProfile 'diagpriv'
+        $r1 = New-TestRoot -ProfileInfo $p
+        $marker = 'ATM' + 'PLANTED' + 'CMDLINE'
+        $boom = 'ATM' + 'PLANTED' + 'EXCEPTION'
+        $procs = New-Procs -Extra @([pscustomobject]@{ ProcessId = 777; Name = 'fake-agent.exe'; ParentProcessId = 1; CommandLine = "fake-agent.exe --secret $marker `"$r1`""; CreationDate = (Get-Date).AddHours(-1) })
+        $rt = [pscustomobject]@{ Id = 'fake-runtime'; DisplayName = 'F'; ContractVersion = 2; Capabilities = @('runtime'); GetProcessMatchers = ([scriptblock]::Create("throw '$boom'")) }
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0], $rt)
+        Assert-Eq (@(@($d.Findings | Where-Object { $_.Key -eq $r1 })[0].Evidence | Where-Object { $_.Code -eq 'AUDIT_CLASS' })[0].Detail) 'ACTIVE_EVIDENCE' 'referencia direta considerada (classe da auditoria)'
+        Assert-True (@(@($d.Coverage | Where-Object { $_.Collector -eq 'provider-fake-runtime' })[0].Reasons) -contains 'HINT_FAILED_PROCESS_MATCHERS') 'falha do provider registrada por codigo'
+        $json = ConvertTo-AtmDiagnoseJson -Result $d
+        $txt = (Show-AtmDiagnose -Result $d 6>&1 | Out-String)
+        foreach ($s in @($json, $txt)) {
+            Assert-True (-not $s.Contains($marker)) 'linha de comando nunca exportada'
+            Assert-True (-not $s.Contains('--secret')) 'argumentos nunca exportados'
+            Assert-True (-not $s.Contains($boom)) 'mensagem de excecao nunca exportada'
+        }
+    }
+    Test-Case 'Diagnose' 'CLI diagnose com prazo 0 (nenhum temporario real e lido): codigo 0 e cobertura TIMEOUT; exportacao sem inventario recusada (codigo 10); ajuda' {
+        $cmd = Join-Path $srcDir 'bin\agent-temp.cmd'
+        $out = (& cmd.exe /c "`"$cmd`" diagnose -DeadlineSeconds 0 -NoProgress -Lang en-US" 2>&1) -join "`n"
+        Assert-Eq $LASTEXITCODE 0 'cobertura parcial nao e erro'
+        Assert-True ($out -match 'inventory\s+TIMEOUT' -and $out -match 'DEADLINE_EXCEEDED' -and $out -match 'Complete coverage: NO') 'cobertura TIMEOUT relatada'
+        Assert-True ($out -match 'identity\s+COMPLETE' -and $out -match 'elevation type: (DEFAULT|FULL|LIMITED)') 'identidade lida no CLI'
+        $target = Join-Path $sandbox 'diag-export.json'
+        $out = (& cmd.exe /c "`"$cmd`" diagnose -DeadlineSeconds 0 -NoProgress -Lang en-US -ExportJson `"$target`"" 2>&1) -join "`n"
+        Assert-Eq $LASTEXITCODE 10 'exportacao recusada'
+        Assert-True ($out -match 'ExportJson refused' -and $out -match 'No deletion was performed') 'mensagem de recusa'
+        Assert-True (-not (Test-Path -LiteralPath $target)) 'nenhum arquivo criado'
+        $out = (& cmd.exe /c "`"$cmd`" help -Lang en-US" 2>&1) -join "`n"
+        Assert-True ($out -match 'agent-temp diagnose' -and $out -match '-DeadlineSeconds') 'ajuda'
+    }
+    Test-Case 'I18n' 'Diagnose: todo status de cobertura tem texto nos dois idiomas; relatorio en-US sem texto pt-BR' {
+        foreach ($st in $script:AtmCoverageStatuses) { foreach ($l in @('en-US', 'pt-BR')) { Assert-True $script:AtmMessages[$l].ContainsKey("coverage.$st") "coverage.$st ($l)" } }
+        $p = New-TestProfile 'diagi18n'
+        $null = New-TestRoot -ProfileInfo $p
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser
+        $old = Get-AtmLanguage
+        try { Set-AtmLanguage -Requested 'en-US'; $txt = (Show-AtmDiagnose -Result $d 6>&1 | Out-String) } finally { Set-AtmLanguage -Requested $old }
+        foreach ($w in @('Cobertura', 'somente leitura', 'Coletor', 'ACHADOS', 'RESUMO')) { Assert-True (-not $txt.Contains($w)) "en-US sem '$w'" }
+        Assert-True ($txt.Contains('COVERAGE BY COLLECTOR') -and $txt.Contains('RUNTIME_NOT_DIAGNOSED')) 'en-US e codigos'
+    }
     Test-Case 'Camadas' 'Motor de diagnostico somente leitura, sem saida no terminal nem controle de processos/servicos/VMs; codigo nativo sem privilegios' {
         $lib = Join-Path $srcDir 'lib'
         $files = @(Get-ChildItem -LiteralPath $lib -File | Where-Object { $_.Name -eq 'Engine.Diagnose.ps1' -or $_.Name -like 'Diagnose.*.ps1' })
@@ -1944,7 +2071,7 @@ try {
         foreach ($pat in @('SeDebugPrivilege', 'AdjustTokenPrivileges', 'RmShutdown', 'RmRestart', 'TerminateProcess', 'WriteProcessMemory')) { Assert-True (-not $native.Contains($pat)) "Native.cs contem '$pat'" }
         foreach ($f in @('Tui.ps1', 'Report.ps1')) {
             $txt = [IO.File]::ReadAllText((Join-Path $lib $f))
-            foreach ($pat in @('Get-AtmIdentityRaw', 'AtmToken]')) { Assert-True (-not $txt.Contains($pat)) "$f chama coletor diretamente: $pat" }
+            foreach ($pat in @('Get-AtmIdentityRaw', 'Get-AtmIdentityState', 'Get-AtmProviderRuntimeHints', 'Get-AtmInventoryCoverage', 'AtmToken]')) { Assert-True (-not $txt.Contains($pat)) "$f chama coletor diretamente: $pat" }
         }
     }
 

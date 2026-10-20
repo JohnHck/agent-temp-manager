@@ -10,6 +10,7 @@ src/
    ├─ Native.cs              scanner / handle probe / deleter (C# 5, compiled in memory by Add-Type)
    ├─ Engine.Audit.ps1       AUDIT ENGINE  - discovery, inventory, evidence, classification (read-only)
    ├─ Engine.Clean.ps1       CLEAN ENGINE  - allowlist, gates, plan, confirmation, revalidation, deletion
+   ├─ Engine.Diagnose.ps1    DIAGNOSE ENGINE (V0.2, read-only) - evidence/coverage/findings, identity, collectors
    ├─ I18n.ps1               message catalog (en-US, pt-BR) and language resolution
    ├─ Report.ps1             presentation: CLI text report
    └─ Tui.ps1                presentation: interactive TUI
@@ -24,6 +25,10 @@ src/
 * `Report.ps1` and `Tui.ps1` never reference deletion APIs. The TUI's cleanup screen only collects an
   allowlist and forwards it to `Invoke-AtmClean`.
 * Providers only read evidence. They never decide eligibility.
+* `Engine.Diagnose.ps1` (and any `Diagnose.*.ps1`) never writes to the terminal, never deletes, never controls
+  processes, services or virtual machines, never writes the registry or ACLs and never uses the clean engine or its
+  handle probe. Presentation calls only `Invoke-AtmDiagnose`, never a collector. Design: [docs/adr](adr/README.md)
+  (ADR-0001, ADR-0003, ADR-0008, ADR-0009).
 
 ## Inventory pipeline (`Invoke-AtmInventory`)
 
