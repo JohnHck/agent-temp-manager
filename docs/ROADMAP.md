@@ -71,6 +71,9 @@ coverage blocks; TUI and reports never call deletion APIs; installer integrity a
 
 ## V0.2 — Windows Runtime Diagnostics
 
+**Status: in progress, P0 (planning).** Plan, phases and acceptance criteria per phase:
+[release/V0.2-PLAN.md](release/V0.2-PLAN.md); architecture decisions: [adr/](adr/README.md).
+
 **Objectives.** Explain *why* space and resources are in use and *what is still running*, so that a later cleanup
 can be based on evidence instead of assumptions. V0.2 is strictly read-only.
 
