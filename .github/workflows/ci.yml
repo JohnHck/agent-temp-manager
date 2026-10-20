@@ -1,24 +1,49 @@
 name: ci
+
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
+
+# Read-only token: the workflow only checks out and runs the test suite.
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
+    # The tests only create and remove their own sandbox under %TEMP%\atm-tests-* and a test key under
+    # HKCU\Software\AgentTempManagerTest. They never touch real agent temporary directories, never delete
+    # outside the sandbox and never change machine PATH or ACLs outside the sandbox.
     runs-on: windows-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         shell: [powershell, pwsh]
+    env:
+      ATM_PWSH: C:\Program Files\PowerShell\7\pwsh.exe
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Environment (${{ matrix.shell }})
+        shell: ${{ matrix.shell }}
+        run: |
+          $PSVersionTable.PSVersion.ToString()
+          $PSVersionTable.PSEdition
       - name: Tests (${{ matrix.shell }})
         shell: ${{ matrix.shell }}
         run: ./tests/Run-Tests.ps1 -SkipHeavy -ReportFile test-results-${{ matrix.shell }}.json
       - name: Upload report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: test-results-${{ matrix.shell }}
           path: test-results-${{ matrix.shell }}.json
+          if-no-files-found: warn
+          retention-days: 14

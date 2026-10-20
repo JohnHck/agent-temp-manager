@@ -1,0 +1,6 @@
+# Every change needs review from the maintainer. Safety-critical areas are listed explicitly.
+*                    @JohnHck
+/src/lib/Native.cs   @JohnHck
+/src/lib/Engine.*    @JohnHck
+/install/            @JohnHck
+/.github/            @JohnHck

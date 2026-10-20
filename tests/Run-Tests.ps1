@@ -30,6 +30,11 @@ $results = New-Object System.Collections.Generic.List[object]
 $cleanupActions = New-Object System.Collections.Generic.List[scriptblock]
 $sandbox = Get-AtmNormalizedPath (Join-Path ([IO.Path]::GetTempPath()) ('atm-tests-' + [guid]::NewGuid().ToString('N').Substring(0, 8)))
 [void][IO.Directory]::CreateDirectory($sandbox)
+# The NTFS owner that new files actually get on this machine: the user SID for a standard account, the
+# Administrators group on an elevated Windows Server runner (CI). Test profiles and the test identity use it, so the
+# engine's owner gate (owner == profile SID) is exercised identically everywhere.
+$testOwnerSid = (Get-Acl -LiteralPath $sandbox).GetOwner([Security.Principal.SecurityIdentifier]).Value
+$testIdentity = [pscustomobject]@{ Sid = $testOwnerSid; Name = $me.Name; IsAdmin = $me.IsAdmin }
 $nowFuture = [datetime]::UtcNow.AddDays(10)      # everything created now looks 10 days old
 $uni = 'Usu' + [char]0x00E1 + 'rio Teste ' + [char]0x00E7 + ' ' + [char]0x65E5 + [char]0x672C
 
@@ -52,7 +57,7 @@ function Test-Case {
 
 $script:profileCounter = 0
 function New-TestProfile {
-    param([string]$Name, [string]$Sid = $me.Sid, [switch]$NoConfig)
+    param([string]$Name, [string]$Sid = $testOwnerSid, [switch]$NoConfig)
     $script:profileCounter++
     $root = Join-Path $sandbox ("Users{0}\{1}" -f $script:profileCounter, $Name)
     $temp = Join-Path $root 'AppData\Local\Temp'
@@ -87,14 +92,14 @@ function New-Procs {
 }
 
 function Inv {
-    param([object[]]$Profiles, $Procs = (New-Procs), $Identity = $me, [string]$OnlyRootPath)
+    param([object[]]$Profiles, $Procs = (New-Procs), $Identity = $testIdentity, [string]$OnlyRootPath)
     $a = Get-InvArgs -Profiles $Profiles -Procs $Procs -Identity $Identity
     if ($OnlyRootPath) { $a['OnlyRootPath'] = $OnlyRootPath }
     return Invoke-AtmInventory @a
 }
 
 function Get-InvArgs {
-    param([object[]]$Profiles, $Procs = (New-Procs), $Identity = $me)
+    param([object[]]$Profiles, $Procs = (New-Procs), $Identity = $testIdentity)
     $a = @{ ProfilesOverride = $Profiles; NowUtc = $nowFuture; IdentityOverride = $Identity; NoProgress = $true; ConfigDir = $cfgDir }
     if ($null -ne $Procs) { $a['ProcessesOverride'] = $Procs }
     return $a
@@ -345,7 +350,7 @@ try {
         $c = Invoke-AtmClean -Entries @([pscustomobject]@{ Source = 't'; Path = $r; Fingerprint = $null }) -PlanPresenter $presenter -ConfirmationReader ${function:Confirm-Correct} -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs)
         Assert-Eq $c.Aborted 'NENHUM_CAMINHO_ELEGIVEL' 'nao-admin bloqueado'
         Assert-True ((@($c.Rejected)[0].Reasons -join ' ') -match 'COBERTURA_DE_PROCESSOS_INCOMPLETA') 'motivo'
-        $adm = [pscustomobject]@{ Sid = $me.Sid; Name = $me.Name; IsAdmin = $true }
+        $adm = [pscustomobject]@{ Sid = $testOwnerSid; Name = $me.Name; IsAdmin = $true }
         $c2 = Invoke-AtmClean -Entries @([pscustomobject]@{ Source = 't'; Path = $r; Fingerprint = $null }) -PlanPresenter $presenter -ConfirmationReader ${function:Confirm-Correct} -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs -Identity $adm)
         Assert-Eq $c2.Aborted 'NENHUM_CAMINHO_ELEGIVEL' 'admin tambem bloqueado'
         $threw = $false; try { $null = Invoke-AtmClean -Entries @() -AcceptProcessCoverageGap } catch { $threw = $true }
@@ -1160,7 +1165,7 @@ try {
             $temp = Join-Path $root 'Temp Redirecionado'
             [void][IO.Directory]::CreateDirectory((Join-Path $temp 'claude'))
             [void][IO.Directory]::CreateDirectory((Join-Path $root '.claude\sessions'))
-            $p = [pscustomobject]@{ Sid = $me.Sid; UserName = 'TEST\carla'; ProfilePath = $root; Loaded = $true; Special = $false; Origin = 'Test'; EnvStatus = 'OK'
+            $p = [pscustomobject]@{ Sid = $testOwnerSid; UserName = 'TEST\carla'; ProfilePath = $root; Loaded = $true; Special = $false; Origin = 'Test'; EnvStatus = 'OK'
                 TempCandidates = @([pscustomobject]@{ TempPath = $temp; Source = 'test' }); EnvValues = @{}; EnvKnown = $true; Notes = @() }
             $r = Join-Path $temp ('claude\' + "$($letter)--Perfis-Dona-Carla\" + [guid]::NewGuid())
             [void][IO.Directory]::CreateDirectory($r); [IO.File]::WriteAllBytes((Join-Path $r 'f.bin'), (New-Object byte[] 11))
