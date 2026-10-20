@@ -20,6 +20,17 @@
   (incomplete coverage) instead of "no agent temp"; path joins never depend on the drive existing.
 * Privacy scanner (`tools/Test-AtmPrivacy.ps1`) gating every release build.
 * Launcher pins `PSModulePath` for the Windows PowerShell child (works when invoked from PowerShell 7).
+* Static analysis: PSScriptAnalyzer 1.25.0 pinned by version and package SHA-512, module signatures verified;
+  0 findings in security and compatibility rules. Remediation: `$Profile` parameters renamed to `$ProfileInfo`
+  (`-Profile` kept as an alias; providers written with `param($Profile)` keep working), unused variables removed,
+  every empty `catch` made explicit with its conservative value; reviewed, narrow exceptions only.
+* The privacy scanner warns when the Windows profile list cannot be read (previously a silently weaker scan).
+* CI: commit identity check (no personal e-mail in author, committer or trailers); real installation, update,
+  rollback, tamper detection, standard-user run and uninstall on disposable Windows Server 2025, Windows Server
+  2022 and Windows 11 ARM64 VMs, installer under PowerShell 5.1 and 7, with one package built once.
+* Documentation: privileges and UAC (`docs/ELEVATION.md`, PRIV-1 to PRIV-11), privilege matrix and runbook with a
+  read-only probe (`tools/privilege-matrix`), roadmap V0.1 to V1.0 including Git worktree diagnostics (V0.2) and
+  safety before deletion (V0.3), release notes and known limitations (`docs/release`).
 
 ## Initial development notes
 

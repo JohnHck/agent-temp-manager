@@ -50,13 +50,26 @@ tokens, not only with the injected test identities the suite uses for gate logic
 
 | Scenario | Expected | Covered today |
 |---|---|---|
-| Standard user, not elevated | audit/preview/TUI work; other profiles inaccessible and other accounts' processes not observable are reported; coverage incomplete; clean blocked; installer scripts refuse | Suite, locally (Windows 10, PS 5.1 and 7) |
+| Standard user, not elevated | audit/preview/TUI work; other profiles inaccessible and other accounts' processes not observable are reported; coverage incomplete; clean blocked; installer scripts refuse | Suite and probe, locally (Windows 10, PS 5.1 and 7); installed product as a real standard user in CI (`install e2e`: Windows Server 2025, Windows Server 2022, Windows 11 ARM64), who also cannot write the install directory |
 | Administrator, not elevated (filtered UAC token) | Same as a standard user (`elevated administrator: NO`) | Not yet (manual) |
-| Administrator, elevated (consent prompt) | Full process coverage where Windows allows; other users' paths need `-IncludeOtherUsers`; installer works | Suite in CI (elevated Windows Server runner, PS 5.1 and 7); real installation: not yet (clean environment) |
+| Administrator, elevated (consent prompt) | Full process coverage where Windows allows; other users' paths need `-IncludeOtherUsers`; installer works | Elevated session (no prompt: CI runners start elevated): suite and real install / update / rollback / uninstall in CI (`install e2e`). The consent prompt itself: not yet (manual) |
 | Elevated with another account's credentials (standard user, or policy requiring credentials) | Process identity = that administrator account (its profile is "own"); the requester's profile is another user's and needs `-IncludeOtherUsers`; installer records the administrator | Not yet (manual) |
 | UAC prompt cancelled | No elevated session, nothing changed | Not yet (manual) |
 | Non-interactive session (SSH, WinRM, scheduled task) | Runs with the caller's token; never waits for a prompt | Not yet (manual) |
-| Windows 11 | Same results as Windows 10 for every row above | Not yet (manual) |
+| Windows 11 | Same results as Windows 10 for every row above | Windows 11 ARM64 in CI (`install e2e`); Windows 11 x64: not yet (manual) |
+
+Manual rows: [docs/release/PRIVILEGE-MATRIX-RUNBOOK.md](release/PRIVILEGE-MATRIX-RUNBOOK.md) and the read-only probe
+`tools/privilege-matrix/Invoke-PrivilegeProbe.ps1`.
+
+## Real installation (CI, disposable VMs)
+
+`tests/e2e/Invoke-InstallE2E.ps1` (job `install e2e`) refuses to run outside a GitHub-hosted runner. A `build package`
+job builds the release once; each `install e2e` job installs that same zip (SHA-256 checked) on Windows Server 2025,
+Windows Server 2022 or Windows 11 ARM64, with the installer under PowerShell 5.1 or 7, and checks: installed release
+gate, CLI from a new process with the machine PATH, clean of an old session root stops without deleting it, update,
+rollback, tamper detection (exit 5) and repair, a real standard user (created only in the VM) running audit, preview
+and verify without write access to the install directory, uninstall (directory and PATH entry removed). Evidence is
+uploaded as artifacts.
 
 Gate logic for administrators and other users is also exercised with injected identities (`IsAdmin`, profile SID
 different from the process SID) in every run, on both shells. Manual rows are recorded in the release notes as

@@ -105,7 +105,10 @@ Deletion itself (`AtmDeleter`) never trusts names between checks:
 * **Unobservable handles**: handles opened with full sharing (including `FILE_SHARE_DELETE`) and no data
   access are not detected by the probe. Process working directories and environment variables are not
   observable without debugging privileges (not used).
-* **Process coverage**: protected processes remain uninspectable even for administrators.
+* **Process coverage**: protected processes remain uninspectable even for administrators. On a real Windows
+  installation there are always some (17 on the CI runners), so the coverage gate blocks every candidate: in V0.1
+  `clean` stops before the release gate is even reached. Enabling real deletion (V0.3) requires a reviewed decision
+  on how known protected system processes are treated; the gate is not relaxed before that.
 * **Allocation** is an estimate (cluster rounding; MFT-resident files overestimated).
 * **Discovery visibility**: if the `ProfilesDirectory` value of the Windows profile list cannot be resolved, folders
   under it that have no profile-list entry (residual profiles) are not listed and no note says so; if a profile's

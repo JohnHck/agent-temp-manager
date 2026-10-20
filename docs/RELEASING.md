@@ -27,7 +27,9 @@ Output: `dist/agent-temp-manager-<version>.zip` (with `src/manifest.json`) and `
 1. Release gate: `$script:AtmRealDeletionEnabled = $false` (V0.1). `Build-Release.ps1` refuses archives without it.
 2. Test suite green on Windows PowerShell 5.1 **and** PowerShell 7 (`NAO_TESTADO` items reviewed and listed in
    the release notes).
-3. Clean-environment run (`tools/clean-env`) on Windows Sandbox or a fresh VM: `summary.json` with `allPassed`.
+3. Clean-environment run (`tools/clean-env`) on Windows Sandbox or a fresh VM: `summary.json` with `allPassed`; and
+   the CI `install e2e` jobs green for the release commit (real installation on disposable VMs). If the
+   maintainer-machine run is not done, the release notes say so.
 4. Privacy: `tools/Test-AtmPrivacy.ps1 -Path .` and on the built zip: no findings (the build enforces it).
 5. Git: public author identity configured per repository (or per commit), `git gc --prune=now`, first commit
    reviewed (`git show --stat`).

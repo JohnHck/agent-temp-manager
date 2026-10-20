@@ -152,6 +152,9 @@ already built in V0.1 and the evidence gathered in V0.2.
 * Race-condition protection: ancestors and directories pinned by handle, deletion by handle, the plan must match the
   validated measurement exactly, writes after confirmation abort that path.
 * Post-cleanup audit and a deletion report (what was deleted, what was preserved and why).
+* **Process coverage decision first:** protected Windows processes are never inspectable, so today the coverage
+  gate blocks every candidate on a real machine. A reviewed design must say which known protected system
+  processes cannot reference an agent's temporary paths, with evidence and tests; until then nothing is deletable.
 * **Elevation model decided first** ([ELEVATION.md](ELEVATION.md), manual vs on demand) and implemented to PRIV-2
   to PRIV-9: elevation only through UAC, cancellation and failure change nothing, requester and elevated identity
   shown, full re-validation and the typed confirmation inside the elevated process.
