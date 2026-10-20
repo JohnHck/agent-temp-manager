@@ -5,6 +5,7 @@ across **every local user profile**, with a safety engine built for a future hum
 
 > **V0.1 scope: audit, preview and the interactive dashboard only. Real deletion is disabled in this release.**
 > `agent-temp clean` runs every safety gate and shows the exact plan, then stops without deleting anything.
+> Real cleanup is planned for V0.3, after the runtime diagnostics of V0.2: see the [roadmap](docs/ROADMAP.md).
 
 * Global command: `agent-temp` (interactive TUI + scriptable subcommands)
 * Agents (providers): **Claude Code** in V0.1; the provider architecture allows others later
@@ -71,6 +72,7 @@ clean-environment test: [docs/INSTALL.md](docs/INSTALL.md).
 * [docs/PROVIDERS.md](docs/PROVIDERS.md) - provider contract (adding an agent)
 * [docs/TESTING.md](docs/TESTING.md) - test suite and coverage
 * [docs/RELEASING.md](docs/RELEASING.md) - versioning, release packaging, publication checklist
+* [docs/ROADMAP.md](docs/ROADMAP.md) - planned versions V0.2 to V1.0, acceptance criteria and safety limits
 * [CONTRIBUTING.md](CONTRIBUTING.md) - contribution rules, translations
 * [SECURITY.md](SECURITY.md) - reporting vulnerabilities
 
