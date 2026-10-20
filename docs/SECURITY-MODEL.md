@@ -107,6 +107,11 @@ Deletion itself (`AtmDeleter`) never trusts names between checks:
   observable without debugging privileges (not used).
 * **Process coverage**: protected processes remain uninspectable even for administrators.
 * **Allocation** is an estimate (cluster rounding; MFT-resident files overestimated).
+* **Discovery visibility**: if the `ProfilesDirectory` value of the Windows profile list cannot be resolved, folders
+  under it that have no profile-list entry (residual profiles) are not listed and no note says so; if a profile's
+  volatile environment cannot be read, `%LOCALAPPDATA%`/`%APPDATA%` fall back to the profile's default folders.
+  Deletion stays safe in both cases (only inventoried paths can be candidates), but the audit can under-report.
+  Planned for V0.2 diagnostics, with injectable registry sources so it can be tested.
 * The agent itself may run its own periodic cleanup independently of this tool.
 
 ## Execution policy

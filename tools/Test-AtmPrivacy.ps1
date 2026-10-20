@@ -29,7 +29,8 @@ if ($NeedlesFile -and (Test-Path -LiteralPath $NeedlesFile)) {
 }
 # The machine running the scan must not leak into what it scans.
 foreach ($n in @($env:USERNAME, $env:COMPUTERNAME, $env:USERDOMAIN)) { if ($n -and $n.Length -ge 3 -and $n -notin @('WORKGROUP')) { $needles.Add($n) } }
-try { $needles.Add(([Security.Principal.WindowsIdentity]::GetCurrent().User.AccountDomainSid.Value)) } catch { }
+# Accounts without a machine or domain SID (e.g. SYSTEM): nothing to add.
+try { $needles.Add(([Security.Principal.WindowsIdentity]::GetCurrent().User.AccountDomainSid.Value)) } catch { $null = $_ }
 try {
     $pl = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList')
     foreach ($s in $pl.GetSubKeyNames()) {
@@ -38,7 +39,8 @@ try {
         if ($img) { $leaf = Split-Path -Leaf $img; if ($leaf.Length -ge 3) { $needles.Add($leaf) } }
     }
     $pl.Close()
-} catch { }
+# Never silent: a weaker scan must be visible.
+} catch { Write-Warning "ProfileList unreadable: this machine's profile names are not added as private identifiers ($($_.Exception.Message))" }
 $needles = @($needles | Select-Object -Unique)
 
 $patterns = @(

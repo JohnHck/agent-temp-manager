@@ -511,7 +511,8 @@ function Start-AtmTui {
     $tuiHeadless = $headless
     $sizeOf = {
         if ($Width -gt 0) { $tuiState.Width = $Width; $tuiState.Height = $Height; return }
-        try { $tuiState.Width = [math]::Max(40, [Console]::WindowWidth); $tuiState.Height = [math]::Max(15, [Console]::WindowHeight) } catch { }
+        # Console size unavailable (redirected output): the previous size is kept; cosmetic only.
+        try { $tuiState.Width = [math]::Max(40, [Console]::WindowWidth); $tuiState.Height = [math]::Max(15, [Console]::WindowHeight) } catch { $null = $_ }
     }
     if (-not $KeySource) { $KeySource = { [Console]::ReadKey($true) } }
     if (-not $LineReader) { $LineReader = { param($prompt) Read-Host $prompt } }
@@ -520,12 +521,14 @@ function Start-AtmTui {
     $tuiAscii = $useAscii
     $tuiState.Draw = { param($frame) $tuiState.Frames++; & $tuiRenderer @($frame | ForEach-Object { $ln = $_; if ($tuiAscii) { $ln = @($ln | ForEach-Object { [pscustomobject]@{ Text = (ConvertTo-AtmAscii $_.Text); Fg = $_.Fg; Bg = $_.Bg } }) }; ,(Limit-AtmTuiLine -Line $ln -Width ($tuiState.Width - 1)) }) }
     $tuiState.ReadLine = $LineReader
-    $tuiState.Leave = { if (-not $tuiHeadless) { try { [Console]::CursorVisible = $true } catch { }; Clear-Host } }
+    # Cursor visibility is cosmetic; consoles without it are fine.
+    $tuiState.Leave = { if (-not $tuiHeadless) { try { [Console]::CursorVisible = $true } catch { $null = $_ }; Clear-Host } }
     $state = $tuiState
     $state.Stack.Add(@{ Name = 'menu'; Title = (Get-AtmText 'menu.title'); Sel = 0; Top = 0; Count = 0; Filter = $null })
 
     $oldCursor = $true
-    if (-not $headless) { try { $oldCursor = [Console]::CursorVisible; [Console]::CursorVisible = $false } catch { }; Clear-Host }
+    # Cursor visibility is cosmetic; consoles without it are fine.
+    if (-not $headless) { try { $oldCursor = [Console]::CursorVisible; [Console]::CursorVisible = $false } catch { $null = $_ }; Clear-Host }
     try {
         & $sizeOf
         if (-not $state.Inventory) { Invoke-AtmTuiAudit -State $state }
@@ -583,7 +586,8 @@ function Start-AtmTui {
                 switch ($push.Name) {
                     'quit' { return $state }
                     'reaudit' { Invoke-AtmTuiAudit -State $state; $state.Message = (Get-AtmText 'tui.reaudited') }
-                    'clean' { Invoke-AtmTuiClean -State $state; if (-not $headless) { try { [Console]::CursorVisible = $false } catch { }; Clear-Host } }
+                    # Cursor visibility is cosmetic; consoles without it are fine.
+                    'clean' { Invoke-AtmTuiClean -State $state; if (-not $headless) { try { [Console]::CursorVisible = $false } catch { $null = $_ }; Clear-Host } }
                     default {
                         $s = @{} + $push
                         foreach ($dk in @('Sel', 'Top', 'Count')) { if (-not $s.ContainsKey($dk)) { $s[$dk] = 0 } }
@@ -595,6 +599,7 @@ function Start-AtmTui {
         }
         return $state
     } finally {
-        if (-not $headless) { try { [Console]::CursorVisible = $oldCursor } catch { }; Clear-Host }
+        # Cursor visibility is cosmetic; consoles without it are fine.
+        if (-not $headless) { try { [Console]::CursorVisible = $oldCursor } catch { $null = $_ }; Clear-Host }
     }
 }

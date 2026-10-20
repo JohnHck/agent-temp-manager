@@ -595,7 +595,8 @@ try {
         $p = New-TestProfile 'symlink'
         $r = New-TestRoot -ProfileInfo $p
         $target = Join-Path $sandbox 'alvo-sym'; [void][IO.Directory]::CreateDirectory($target)
-        try { $null = cmd /c mklink /D "`"$(Join-Path $r 'sym')`"" "`"$target`"" 2>&1 } catch { }
+        # No symlink privilege: the case is reported as NAO_TESTADO below.
+        try { $null = cmd /c mklink /D "`"$(Join-Path $r 'sym')`"" "`"$target`"" 2>&1 } catch { $null = $_ }
         if (-not [IO.Directory]::Exists((Join-Path $r 'sym'))) { $script:caseSkipped = $true; $script:caseNote = 'symlink exige privilegio (SeCreateSymbolicLink) ou modo desenvolvedor; reparse coberto por junctions'; return }
         $cleanupActions.Add([scriptblock]::Create("try { [IO.Directory]::Delete('$(Join-Path $r 'sym')', `$false) } catch { }"))
         Assert-True ((Find-Part (Inv -Profiles @($p)) $r).Flags -contains 'REPARSE_POINT') 'flag'
@@ -1497,7 +1498,8 @@ try {
 
     Test-Case 'Instalacao' 'Ponta a ponta no sandbox: instalar, PATH (REG_EXPAND_SZ), atualizar, rollback, desinstalar' {
         $testKey = 'Software\AgentTempManagerTest\Env'
-        $cleanupActions.Add({ try { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree('Software\AgentTempManagerTest', $false) } catch { } })
+        # Best-effort cleanup of the test registry key.
+        $cleanupActions.Add({ try { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree('Software\AgentTempManagerTest', $false) } catch { $null = $_ } })
         $k = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($testKey)
         $k.SetValue('Path', '%SystemRoot%\system32;C:\Outro\Bin', [Microsoft.Win32.RegistryValueKind]::ExpandString); $k.Close()
         $inst = Join-Path $sandbox 'PF2\AgentTempManager'
@@ -1577,7 +1579,8 @@ try {
         Assert-True $threw 'pai inseguro recusado'
         Assert-True (-not (Test-Path (Join-Path $parent 'AgentTempManager'))) 'nada instalado'
         $testKey = 'Software\AgentTempManagerTest\Env2'
-        $cleanupActions.Add({ try { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree('Software\AgentTempManagerTest', $false) } catch { } })
+        # Best-effort cleanup of the test registry key.
+        $cleanupActions.Add({ try { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree('Software\AgentTempManagerTest', $false) } catch { $null = $_ } })
         $inst = Join-Path $sandbox 'PF5\AgentTempManager'
         [void][IO.Directory]::CreateDirectory((Split-Path -Parent $inst))
         $k = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($testKey)
@@ -1689,7 +1692,8 @@ try {
         }
     }
 } finally {
-    foreach ($a in $cleanupActions) { try { & $a } catch { } }
+    # Best-effort cleanup: one failing action must not skip the others or the sandbox removal.
+    foreach ($a in $cleanupActions) { try { & $a } catch { $null = $_ } }
     # Sandbox removal: rd does not follow junctions (they were already unlinked above).
     cmd /c rd /s /q "`"$sandbox`"" 2>&1 | Out-Null
 }

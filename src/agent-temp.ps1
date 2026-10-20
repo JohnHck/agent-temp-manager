@@ -21,7 +21,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
-try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
+# Cosmetic only: a redirected or legacy console keeps its encoding.
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { $null = $_ }
 
 $here = $PSScriptRoot
 # Installed copies carry manifest.json: before loading ANY code, every listed file must match its SHA-256 and no

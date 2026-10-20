@@ -255,7 +255,8 @@ function Install-AtmProduct {
     $pacl = Test-AtmInstallAcl -Path $parent -AlsoTrustSid $TrustSid -NoRecurse
     if (-not $pacl.Ok) { throw (Get-AtmText 'inst.parentInsecure' $parent ($pacl.Problems -join '; ')) }
     $pathAddedBefore = $false
-    if ($exists) { try { $pathAddedBefore = [bool](Get-Content -LiteralPath (Join-Path $InstallDir 'install-state.json') -Raw | ConvertFrom-Json).pathAddedByInstaller } catch { } }
+    # Unreadable install state: the PATH entry is not proven ours, so it is never removed later.
+    if ($exists) { try { $pathAddedBefore = [bool](Get-Content -LiteralPath (Join-Path $InstallDir 'install-state.json') -Raw | ConvertFrom-Json).pathAddedByInstaller } catch { $pathAddedBefore = $false } }
 
     # 3. Stage: copy, compile native assembly inside the staging dir, manifest, ACL audit.
     $staging = "$InstallDir.staging-" + [guid]::NewGuid().ToString('N').Substring(0, 8)
@@ -323,7 +324,8 @@ function Uninstall-AtmProduct {
     if (-not (Test-Path -LiteralPath (Join-Path $InstallDir 'install-state.json'))) { throw (Get-AtmText 'inst.notInstalled' $InstallDir) }
     # Only remove the PATH entry if this product added it (never an entry that pre-existed).
     $added = $false
-    try { $added = [bool](Get-Content -LiteralPath (Join-Path $InstallDir 'install-state.json') -Raw | ConvertFrom-Json).pathAddedByInstaller } catch { }
+    # Unreadable install state: never remove a PATH entry we cannot prove we added.
+    try { $added = [bool](Get-Content -LiteralPath (Join-Path $InstallDir 'install-state.json') -Raw | ConvertFrom-Json).pathAddedByInstaller } catch { $added = $false }
     $removed = $false
     if ($added) { $removed = Remove-AtmMachinePath -Dir (Join-Path $InstallDir 'bin') -TestKeyPath $TestPathKey }
     Remove-AtmOwnTree -Path $InstallDir -InstallDir $InstallDir

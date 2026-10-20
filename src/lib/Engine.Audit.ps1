@@ -222,7 +222,8 @@ function Get-AtmUserEnvironment {
                 }
                 $v.Close()
             }
-        } catch { }
+        # Volatile environment unreadable: expansion falls back to the profile's default folders (documented limit).
+        } catch { $null = $_ }
     } catch { $res.Status = 'DENIED' }
     return [pscustomobject]$res
 }
@@ -257,10 +258,12 @@ function Get-AtmProfiles {
     param($Identity, [string[]]$VarNames = @())
     $profiles = New-Object System.Collections.Generic.List[object]
     $loaded = @()
-    try { $loaded = [Microsoft.Win32.Registry]::Users.GetSubKeyNames() } catch { }
+    # Loaded hives unknown: no profile is assumed to be loaded.
+    try { $loaded = [Microsoft.Win32.Registry]::Users.GetSubKeyNames() } catch { $loaded = @() }
     $pl = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList')
     $profilesDir = $null
-    try { $profilesDir = [Environment]::ExpandEnvironmentVariables([string]$pl.GetValue('ProfilesDirectory')) } catch { }
+    # Not resolvable: residual profile folders are not listed (documented limit); ProfileList profiles are unaffected.
+    try { $profilesDir = [Environment]::ExpandEnvironmentVariables([string]$pl.GetValue('ProfilesDirectory')) } catch { $profilesDir = $null }
     $known = @{}
 
     foreach ($sidKey in $pl.GetSubKeyNames()) {
@@ -334,7 +337,8 @@ function Get-AtmProfiles {
         try {
             $v = [string]$pl.GetValue($vn)
             if ($v) { $np = Get-AtmNormalizedPath ([Environment]::ExpandEnvironmentVariables($v)); if ($np) { $nonUser[$np.ToLowerInvariant()] = $vn } }
-        } catch { }
+        # Unreadable: the folder is treated as a residual profile, which is more restrictive (other-user and owner gates).
+        } catch { $v = $null }
     }
     $pl.Close()
 
@@ -397,7 +401,8 @@ function Get-AtmProcessSnapshot {
     $list = New-Object System.Collections.Generic.List[object]
     foreach ($p in $raw) {
         $cu = $null
-        if ($p.CreationDate) { try { $cu = ([datetime]$p.CreationDate).ToUniversalTime() } catch { } }
+        # Unparseable start time: no start time, so a session is never considered ended.
+        if ($p.CreationDate) { try { $cu = ([datetime]$p.CreationDate).ToUniversalTime() } catch { $cu = $null } }
         $list.Add([pscustomobject]@{ Pid = [int]$p.ProcessId; Name = [string]$p.Name; ParentPid = [int]$p.ParentProcessId; CommandLine = $p.CommandLine; CreationUtc = $cu })
         if ($p.CommandLine) { $snap.Readable++ }
         else {
@@ -739,7 +744,8 @@ function Find-AtmReferences {
     $variants = New-Object System.Collections.Generic.List[object]
     foreach ($b in $Bases) {
         $forms = @($b.Path)
-        try { $sp = [AgentTempManager.AtmNative]::GetShortPath($b.Path); if ($sp) { $forms += $sp.TrimEnd('\') } } catch { }
+        # GetShortPath returns null on API failure; an exception means the native type is unusable, which already fails initialisation.
+        try { $sp = [AgentTempManager.AtmNative]::GetShortPath($b.Path); if ($sp) { $forms += $sp.TrimEnd('\') } } catch { $sp = $null }
         foreach ($f in ($forms | Select-Object -Unique)) { $variants.Add([pscustomobject]@{ Text = $f.ToLowerInvariant(); Base = $b }) }
     }
     $term = $script:AtmRefTerminators

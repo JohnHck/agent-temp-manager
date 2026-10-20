@@ -66,7 +66,8 @@ function Get-AtmAclProblems {
     $problems = New-Object System.Collections.Generic.List[string]
     try { $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop } catch { $problems.Add("ACL_ILEGIVEL: $Path"); return $problems.ToArray() }
     $owner = $null
-    try { $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value } catch { }
+    # Unreadable owner: reported as OWNER_ILEGIVEL below, which blocks.
+    try { $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value } catch { $owner = $null }
     if (-not $owner) { $problems.Add("OWNER_ILEGIVEL: $Path") }
     elseif ($owner -ne $OwnerSid) { $problems.Add((Get-AtmText 'reason.ownerMismatch' $owner $Path)) }
     $writeMask = [Security.AccessControl.FileSystemRights]'WriteData, AppendData, WriteExtendedAttributes, WriteAttributes, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'
@@ -252,7 +253,8 @@ function Invoke-AtmClean {
         # The deleter re-checks, under its own handle pins, that the tree still matches what was just validated.
         $d = [AgentTempManager.AtmDeleter]::DeleteTree($c.Path, $c.Files, $c.Dirs, $c.Bytes, $c.NewestWriteTimeUtc.Ticks, $null)
         $gone = $false
-        try { [void][IO.File]::GetAttributes($p.Path) } catch [IO.FileNotFoundException] { $gone = $true } catch [IO.DirectoryNotFoundException] { $gone = $true } catch { }
+        # Any other error: removal is not verified (Verified = false), never assumed.
+        try { [void][IO.File]::GetAttributes($p.Path) } catch [IO.FileNotFoundException] { $gone = $true } catch [IO.DirectoryNotFoundException] { $gone = $true } catch { $gone = $false }
         $deleted.Add([pscustomobject]@{ Path = $p.Path; Bytes = $p.Bytes; Completed = $d.Completed; Verified = $gone; FilesDeleted = $d.FilesDeleted; DirsDeleted = $d.DirsDeleted; FilesPlanned = $d.FilesPlanned; DirsPlanned = $d.DirsPlanned; AbortReason = $d.AbortReason; FailedAt = $d.FailedAt })
         if ($LogFile) {
             $rec = [ordered]@{ utc = [datetime]::UtcNow.ToString('o'); user = $inv.Identity.Name; path = $p.Path; bytes = $p.Bytes; fingerprint = $p.Fingerprint; completed = $d.Completed; verifiedGone = $gone; abort = $d.AbortReason }
