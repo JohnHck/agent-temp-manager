@@ -92,8 +92,31 @@ jobs:
   # for real, CLI from a new process, V0.1 clean never deletes, update, rollback, tamper detection, a real standard
   # user (created only in the VM), uninstall. Not a required check. UAC prompts and filtered tokens cannot be
   # tested here (see docs/TESTING.md, privilege matrix).
+  # The package is built once (privacy gate included) and the same zip is installed on every OS.
+  build-package:
+    name: build package
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build release (privacy gate)
+        shell: powershell
+        run: |
+          ./tools/Build-Release.ps1 -SkipTests
+          exit $LASTEXITCODE
+      - name: Upload package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: release-package
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
   install-e2e:
     name: install e2e (${{ matrix.os }}, installer ${{ matrix.installer }})
+    needs: build-package
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -105,12 +128,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: release-package
+          path: ${{ runner.temp }}/release-package
       - name: End-to-end installation
         shell: powershell
         env:
           INSTALLER_SHELL: ${{ matrix.installer }}
         run: |
-          ./tests/e2e/Invoke-InstallE2E.ps1 -OutDir "$env:RUNNER_TEMP\atm-e2e" -InstallerShell $env:INSTALLER_SHELL
+          ./tests/e2e/Invoke-InstallE2E.ps1 -OutDir "$env:RUNNER_TEMP\atm-e2e" -InstallerShell $env:INSTALLER_SHELL -ReleaseDir "$env:RUNNER_TEMP\release-package"
           exit $LASTEXITCODE
       - name: Upload evidence
         if: always()

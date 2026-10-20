@@ -17,6 +17,7 @@
 param(
     [Parameter(Mandatory)][string]$OutDir,
     [ValidateSet('powershell', 'pwsh')][string]$InstallerShell = 'powershell',
+    [string]$ReleaseDir,      # zip + SHA256SUMS.txt built elsewhere (the same package for every OS); default: build here
     [switch]$DisposableMachine
 )
 $ErrorActionPreference = 'Stop'
@@ -66,20 +67,22 @@ function Invoke-Agent([string]$ArgLine, [string]$Tag) {
 function Assert([bool]$Cond, [string]$Msg) { if (-not $Cond) { throw $Msg } }
 
 $pkg = $null
+$releaseDirUsed = $(if ($ReleaseDir) { $ReleaseDir } else { Join-Path $repo 'dist' })
 Step 'build-release' {
+    if ($ReleaseDir) { return "package provided: $((Get-ChildItem -LiteralPath $ReleaseDir -Filter 'agent-temp-manager-*.zip').Name)" }
     & $ps51 -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'tools\Build-Release.ps1') -SkipTests *> (Join-Path $OutDir 'build.txt')
     Assert ($LASTEXITCODE -eq 0) "Build-Release exit $LASTEXITCODE"
     (Get-ChildItem (Join-Path $repo 'dist') -Filter 'agent-temp-manager-*.zip').Name
 }
 Step 'sha256' {
-    $zip = @(Get-ChildItem (Join-Path $repo 'dist') -Filter 'agent-temp-manager-*.zip')[0]
-    $expected = ((Get-Content (Join-Path $repo 'dist\SHA256SUMS.txt') -Raw).Split(' ')[0]).ToUpperInvariant()
+    $zip = @(Get-ChildItem -LiteralPath $releaseDirUsed -Filter 'agent-temp-manager-*.zip')[0]
+    $expected = ((Get-Content (Join-Path $releaseDirUsed 'SHA256SUMS.txt') -Raw).Split(' ')[0]).ToUpperInvariant()
     $h = (Get-FileHash -LiteralPath $zip.FullName -Algorithm SHA256).Hash
     Assert ($h -eq $expected) "hash $h != $expected"
     $h
 }
 Step 'extract-to-admin-only-folder' {
-    $zip = @(Get-ChildItem (Join-Path $repo 'dist') -Filter 'agent-temp-manager-*.zip')[0]
+    $zip = @(Get-ChildItem -LiteralPath $releaseDirUsed -Filter 'agent-temp-manager-*.zip')[0]
     $rel = Join-Path $env:ProgramFiles 'AgentTempManager-release'
     Expand-Archive -LiteralPath $zip.FullName -DestinationPath $rel -Force
     $script:pkg = @(Get-ChildItem -LiteralPath $rel -Directory)[0].FullName
