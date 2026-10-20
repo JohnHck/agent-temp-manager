@@ -10,9 +10,10 @@ never move.
 |---|---|---|
 | [V0.1](#v01--audit-preview-tui-and-internationalization) | Audit, preview, TUI, internationalization | No (real deletion disabled) |
 | [V0.2](#v02--windows-runtime-diagnostics) | Windows Runtime Diagnostics, including Git worktrees | No (read-only) |
+| [V0.2.1](#v021--desktop-gui-and-live-monitoring) | Desktop GUI and live monitoring (while the window is open) | No (read-only presentation) |
 | [V0.3](#v03--selective-real-cleanup) | Selective real cleanup | Yes: deletes approved temporary paths only |
 | [V0.4](#v04--assisted-recovery) | Assisted recovery of services and environments | Yes: reversible operations, each authorized individually |
-| [V0.5](#v05--preventive-monitoring) | Preventive monitoring, alerts, growth trends | No (observes and alerts) |
+| [V0.5](#v05--preventive-monitoring) | Persistent preventive monitoring, alerts, growth trends | No (observes and alerts) |
 | [V1.0](#v10--stabilization-and-multi-agent-support) | Stabilization and extensible multi-agent support | Same limits as V0.3 and V0.4 |
 
 ## Principles that apply to every version
@@ -140,6 +141,43 @@ writes anything (no fetch, no prune, no index refresh that changes files).
 
 ---
 
+## V0.2.1 — Desktop GUI and live monitoring
+
+**Objectives.** Offer the V0.1 audit and preview and the V0.2 diagnostics in a native Windows desktop window, for
+users who do not work in a terminal, and refresh them live while the window is open. V0.2.1 is a new presentation
+layer only: it adds no decision, no gate and no system change.
+
+**Deliverables.**
+* A desktop GUI (technology to be decided in a documented design, with Windows PowerShell 5.1 / .NET Framework
+  compatibility as a constraint) showing the same views as the TUI: dashboard, drill-down by user, project and root,
+  detail, preview, coverage and errors, and the V0.2 diagnostics.
+* **Live monitoring, session-scoped:** while the window is open, the views refresh periodically (or on request)
+  from read-only collections, with the time of the last refresh and its coverage visible. Monitoring stops when the
+  window closes; nothing keeps running, nothing is scheduled and no history is stored beyond the open session.
+* Refresh is bounded (interval, time and memory limits; a slow or failed refresh marks data as stale or unknown,
+  never as clean).
+* en-US and pt-BR through the same catalog; accessible keyboard navigation; the CLI and TUI remain fully supported.
+
+**Acceptance criteria.**
+* The GUI calls the same engines as the CLI/TUI and cannot bypass them ("engines decide, presentation shows"); a test
+  proves it never reaches a deletion, recovery or write API.
+* Runs without elevation (PRIV-1), never requests elevation and shows the process identity and elevation state
+  (PRIV-10).
+* Stale, partial or unknown data is labelled as such; a refresh error never hides a previous finding as resolved.
+* Closing the window leaves no process, scheduled task, service or stored history behind.
+
+**Dependencies.** V0.2 (the diagnostics it displays). The safety prerequisites of V0.3 are unchanged: real deletion
+is not offered in the GUI before V0.3, and when it is, it goes through the same plan, confirmation and re-validation.
+
+**Mandatory tests.** View models fed by mocked engine results (complete, partial, denied, unknown); refresh limits and
+stale marking; read-only assertion over a session with many refreshes; no leftover process after close; both shells
+where applicable and both languages.
+
+**Safety limits.** Read-only. No deletion, recovery, service or process control, ACL changes or network access. No
+persistent monitoring (that is V0.5).
+
+---
+
 ## V0.3 — Selective real cleanup
 
 **Objectives.** Enable real deletion of temporary paths that a human selected and approved, with the protections
@@ -219,10 +257,14 @@ unrelated services, other users' sessions, ACLs or system configuration.
 ## V0.5 — Preventive monitoring
 
 **Objectives.** Notice problems before they cost space or stability: growth of temporary data, leftover worktrees,
-long-running agent virtual machines.
+long-running agent virtual machines. Unlike the live monitoring of V0.2.1, which only runs while the window is open,
+V0.5 monitoring is **persistent**: it keeps collecting after the GUI or terminal is closed and across sign-ins and
+restarts, once the user has opted in.
 
 **Deliverables.**
-* Periodic, read-only collection of the V0.2 metrics with a small local history.
+* Persistent, periodic, read-only collection of the V0.2 metrics with a small local history (for example through a
+  per-user scheduled task; the mechanism is decided in a documented design).
+* The V0.2.1 GUI and the TUI show the stored history and trends.
 * Configurable thresholds and alerts (console/TUI; system notifications if available without extra dependencies).
 * Growth trends per user, project and agent.
 
@@ -233,7 +275,7 @@ long-running agent virtual machines.
 * Monitoring never deletes, recovers or changes anything; it only recommends the V0.3/V0.4 actions.
 * Collected history contains no personal data beyond what the audit already shows locally.
 
-**Dependencies.** V0.2; V0.3 and V0.4 for the recommended actions.
+**Dependencies.** V0.2; V0.2.1 for the GUI views of history and alerts; V0.3 and V0.4 for the recommended actions.
 
 **Mandatory tests.** Threshold and trend calculations; storage limits and removal; read-only assertion; scheduler
 installation and removal in a sandbox.
@@ -257,7 +299,7 @@ installation and removal in a sandbox.
   privilege matrix passes on Windows 10 and 11 with PowerShell 5.1 and 7.
 * A new provider can be added without changing the engines.
 
-**Dependencies.** V0.1–V0.5.
+**Dependencies.** V0.1–V0.5 (including V0.2.1).
 
 **Mandatory tests.** Provider contract conformance suite; compatibility of output formats; full regression on both
 shells.

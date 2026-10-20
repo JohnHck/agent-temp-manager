@@ -74,7 +74,7 @@ clean-environment test: [docs/INSTALL.md](docs/INSTALL.md).
 * [docs/TESTING.md](docs/TESTING.md) - test suite and coverage
 * [docs/STATIC-ANALYSIS.md](docs/STATIC-ANALYSIS.md) - PSScriptAnalyzer in CI, findings and remediation plan
 * [docs/RELEASING.md](docs/RELEASING.md) - versioning, release packaging, publication checklist
-* [docs/ROADMAP.md](docs/ROADMAP.md) - planned versions V0.2 to V1.0, acceptance criteria and safety limits
+* [docs/ROADMAP.md](docs/ROADMAP.md) - planned versions V0.2 to V1.0 (including the V0.2.1 desktop GUI), acceptance criteria and safety limits
 * [CONTRIBUTING.md](CONTRIBUTING.md) - contribution rules, translations
 * [SECURITY.md](SECURITY.md) - reporting vulnerabilities
 
