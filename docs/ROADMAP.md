@@ -41,7 +41,7 @@ never move.
 
 ## V0.1 — Audit, preview, TUI and internationalization
 
-**Status: complete; first release pending.**
+**Status: complete (0.1.0).**
 
 **Objectives.** Show, safely and across every local profile, which temporary directories AI coding agents leave
 behind, how much space they use and why each one is or is not a cleanup candidate, without changing anything.

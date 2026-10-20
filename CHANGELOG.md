@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0
 
 * Initial limited release: audit, preview and TUI. `clean` is **plan only** (release gate); real deletion is
   disabled.
@@ -21,9 +21,11 @@
 * Privacy scanner (`tools/Test-AtmPrivacy.ps1`) gating every release build.
 * Launcher pins `PSModulePath` for the Windows PowerShell child (works when invoked from PowerShell 7).
 * Static analysis: PSScriptAnalyzer 1.25.0 pinned by version and package SHA-512, module signatures verified;
-  0 findings in security and compatibility rules. Remediation: `$Profile` parameters renamed to `$ProfileInfo`
-  (`-Profile` kept as an alias; providers written with `param($Profile)` keep working), unused variables removed,
-  every empty `catch` made explicit with its conservative value; reviewed, narrow exceptions only.
+  0 findings in security and compatibility rules; one reviewed, per-file signature exception for
+  `Newtonsoft.Json.dll` when a runner image resolves it through a Windows catalog (exact path and SHA-256; the signer
+  allow-list is unchanged). Remediation: `$Profile` parameters renamed to `$ProfileInfo` (`-Profile` kept as an
+  alias; providers written with `param($Profile)` keep working), unused variables removed, every empty `catch` made
+  explicit with its conservative value; reviewed, narrow exceptions only.
 * The privacy scanner warns when the Windows profile list cannot be read (previously a silently weaker scan).
 * CI: commit identity check (no personal e-mail in author, committer or trailers); real installation, update,
   rollback, tamper detection, standard-user run and uninstall on disposable Windows Server 2025, Windows Server
