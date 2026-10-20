@@ -9,7 +9,7 @@ never move.
 | Version | Theme | Changes the system? |
 |---|---|---|
 | [V0.1](#v01--audit-preview-tui-and-internationalization) | Audit, preview, TUI, internationalization | No (real deletion disabled) |
-| [V0.2](#v02--windows-runtime-diagnostics) | Windows Runtime Diagnostics | No (read-only) |
+| [V0.2](#v02--windows-runtime-diagnostics) | Windows Runtime Diagnostics, including Git worktrees | No (read-only) |
 | [V0.3](#v03--selective-real-cleanup) | Selective real cleanup | Yes: deletes approved temporary paths only |
 | [V0.4](#v04--assisted-recovery) | Assisted recovery of services and environments | Yes: reversible operations, each authorized individually |
 | [V0.5](#v05--preventive-monitoring) | Preventive monitoring, alerts, growth trends | No (observes and alerts) |
@@ -81,8 +81,7 @@ can be based on evidence instead of assumptions. V0.2 is strictly read-only.
 * **Resource consumption:** CPU, memory, disk and handle counts per agent process tree.
 * **Virtualization:** Hyper-V / virtual machine worker processes such as `vmmem`, and which agent scenario they
   belong to, when that can be established; otherwise reported as unattributed.
-* **Worktrees:** git worktrees created by agents, their size, whether they are still registered and whether a
-  process uses them.
+* **Git worktree diagnostics (read-only)**, see the section below.
 * **Temporary directories:** the V0.1 inventory, extended with the runtime evidence above.
 * **Dependencies:** which temporary paths, worktrees, services and processes depend on each other.
 * A diagnostics view in the TUI and a `diagnose` command (name to be confirmed) with JSON export.
@@ -90,8 +89,37 @@ can be based on evidence instead of assumptions. V0.2 is strictly read-only.
   the process identity and elevation state (PRIV-10). Diagnostics never request elevation.
 * A Claude Desktop provider/scenario, behind the same provider contract.
 
+### Git worktree diagnostics (V0.2, read-only)
+
+Agents often create Git worktrees (an extra working directory attached to a repository). They can hold the only copy
+of someone's work, so they are diagnosed, never treated as ordinary temporary directories.
+
+* **Classification:** distinguish a Git worktree (a `.git` *file* pointing to `<repo>/.git/worktrees/<name>`) and a
+  main working tree from any other temporary directory. A directory is never assumed to be disposable because of its
+  location or name.
+* **Registration:** for each worktree, whether the repository still lists it (`git worktree list --porcelain`), whether
+  it is prunable or locked, and **apparent orphans**: worktree directories whose repository or administrative entry is
+  missing or unreadable. "Apparent" because a missing repository can be a disconnected drive or a permission problem.
+* **Local work:** tracked changes (staged and unstaged), untracked files, ignored files (counted separately; they may
+  be build output or secrets), stashes, and operations in progress (merge, rebase, cherry-pick, bisect).
+* **Unpublished commits:** commits on the worktree's branch or detached `HEAD` that are not proven to exist anywhere
+  else. Remote-tracking references in the local repository (`refs/remotes/...`) are **never** treated as proof that
+  the server has the commits: they can be stale, rewritten or pruned. Without a fresh, explicit check against the
+  server, preservation is reported as **unknown**.
+* **Dependencies:** processes and agent sessions whose working directory, open handles or command line refer to the
+  worktree (the same evidence model as temporary directories), and services or virtual machines that map it.
+* **No network required:** everything above works offline from local data. An optional, explicitly requested
+  check against a remote may be added later; it never runs implicitly and GitHub is never a dependency.
+* **Scale (to be implemented progressively):** results grouped by repository; progressive analysis with partial
+  results; time, memory and process limits per repository (a timeout marks the result **unknown**, never clean);
+  tested with thousands of worktrees.
+* Output: per worktree a state of `CLEAN_AND_PUBLISHED_UNKNOWN`, `LOCAL_WORK`, `UNPUBLISHED_COMMITS`, `IN_USE`,
+  `APPARENT_ORPHAN` or `UNKNOWN` (names to be confirmed), always with the evidence behind it.
+
 **Acceptance criteria.**
 * Every finding states its source and its coverage; unknown is never reported as "not running".
+* A worktree whose state cannot be fully determined (Git missing, repository unreadable, timeout, corrupt metadata)
+  is reported as **unknown**, never as clean or orphaned.
 * Works without Claude Code, Claude Desktop, Hyper-V or any service installed.
 * No diagnostic changes system state; a test proves the sandbox and the services are unchanged after a run.
 * No command lines, environment blocks or tokens are printed or exported.
@@ -99,10 +127,13 @@ can be based on evidence instead of assumptions. V0.2 is strictly read-only.
 **Dependencies.** V0.1.
 
 **Mandatory tests.** Mocked process, service and virtualization sources (present, absent, access denied, partial);
-PID reuse and process start-time checks; worktree detection with and without git available; read-only assertion;
-both shells and both languages.
+PID reuse and process start-time checks; read-only assertion; both shells and both languages. Worktrees: real
+throwaway repositories with registered, locked, prunable and orphaned worktrees; tracked, untracked and ignored
+changes; stashes and in-progress operations; unpublished commits with and without (stale) remote-tracking
+references; Git not installed; unreadable repository; timeouts; thousands of worktrees; proof that no Git command
+writes anything (no fetch, no prune, no index refresh that changes files).
 
-**Safety limits.** Read-only. No service start/stop, no process termination, no VM operations, no ACL changes.
+**Safety limits.** Read-only. No service start/stop, no process termination, no VM operations, no ACL changes. Git is only read: no fetch, pull, prune, gc, checkout, stash or index refresh that writes; no network access unless a future option is explicitly requested.
 
 > **V0.2 is a prerequisite for V0.3.** Real deletion is not enabled until the runtime diagnostics can show, for every
 > candidate, that no process, service, virtual machine or worktree still depends on it.
@@ -124,6 +155,15 @@ already built in V0.1 and the evidence gathered in V0.2.
 * **Elevation model decided first** ([ELEVATION.md](ELEVATION.md), manual vs on demand) and implemented to PRIV-2
   to PRIV-9: elevation only through UAC, cancellation and failure change nothing, requester and elevated identity
   shown, full re-validation and the typed confirmation inside the elevated process.
+* **Safety before deleting anything near Git work:**
+  * any local work that is not proven preserved (changes, untracked or ignored files, stashes, in-progress
+    operations, unpublished commits) or any **unknown** state blocks the deletion of that path;
+  * Git state and dependencies (processes, sessions, services, virtual machines) are re-validated immediately
+    before the operation, not reused from the preview;
+  * directories outside the allowed temporary scope (repositories, main working trees, worktrees outside the
+    agent's temporary area) are always preserved;
+  * the human authorizes the exact paths; no class or state authorizes deletion by itself;
+  * failures and timeouts of any check result in blocking, never in automatic authorization.
 
 **Acceptance criteria.**
 * Any doubt, change, missing coverage or runtime dependency preserves the path (fail-closed), and the test suite
@@ -138,6 +178,8 @@ already built in V0.1 and the evidence gathered in V0.2.
 
 **Mandatory tests.** Junction and symlink swaps during deletion; changes between preview, confirmation and deletion;
 open files; other users' profiles with and without elevation; incomplete coverage; partial failures; both shells.
+Worktrees: a change, untracked file, stash or commit appearing between preview and deletion blocks it; Git missing
+or timing out blocks; a worktree outside the temporary scope is never a candidate.
 
 **Safety limits.** Deletes approved temporary paths only. Never deletes profiles, TEMP roots, bases, projects or
 anything outside an agent's temporary area; no ACL changes, no service or process changes.
