@@ -2267,8 +2267,29 @@ try {
         Assert-Eq $res.Counters.CpuTime100ns.Sum 4000 'tempo de CPU somado'
         Assert-Eq $res.Counters.CpuPercent.Sum 100 'porcentagem da arvore: 4 x 25%'
         Assert-Eq (@($res.Counters.PSObject.Properties.Name) -join ',') ((@($script:AtmTreeCounters) + @('CpuPercent')) -join ',') 'contadores da lista fechada'
+        Assert-True ($cpu.Coverage.Status -eq 'COMPLETE' -and $res.Counters.CpuPercent.Complete -and @($res.Counters.PSObject.Properties | Where-Object { -not $_.Value.Complete }).Count -eq 0) 'controle positivo: CPU completa, todos os contadores completos'
         $res = Get-AtmProcessTreeResources -Collection $a -Tree $tree
         Assert-True (-not $res.Complete -and (@($res.Reasons) -join ',') -eq 'CPU_NOT_SAMPLED' -and $null -eq $res.Counters.CpuPercent.Sum -and $res.Counters.CpuTime100ns.Complete) 'sem amostra de CPU: so o tempo acumulado'
+        Assert-True (-not $res.Counters.CpuPercent.Complete -and $res.Counters.CpuPercent.Known -eq 0) 'sem amostra de CPU: porcentagem incompleta'
+        foreach ($n in $script:AtmTreeCounters) { Assert-True $res.Counters.$n.Complete "sem amostra de CPU: $n continua completo" }
+        # Second sample PARTIAL because of a row outside the tree; every member still has a percentage.
+        $outside = @($r2) + @([pscustomobject]@{ ProcessId = 900; ParentProcessId = 4; Name = 'p900.exe'; CreationDate = $null; KernelModeTime = 1; UserModeTime = 1; WorkingSetSize = 1; PrivatePageCount = 1; HandleCount = 1; ReadTransferCount = 1; WriteTransferCount = 1; OtherTransferCount = 1 })
+        $bp = Get-AtmProcessCollection -Source ({ $outside }.GetNewClosure())
+        Assert-True ($a.Coverage.Status -eq 'COMPLETE' -and $bp.Coverage.Status -eq 'PARTIAL') 'primeira completa, segunda parcial'
+        $cpuP = Measure-AtmProcessCpu -First $a -Second $bp -LogicalProcessors 1 -ElapsedMs 1000
+        Assert-Eq $cpuP.Coverage.Status 'PARTIAL' 'amostra de CPU parcial'
+        Assert-True (@($tree.Members | Where-Object { $null -eq $cpuP.ByKey[$_] }).Count -eq 0) 'todos os membros da arvore com porcentagem'
+        $res = Get-AtmProcessTreeResources -Collection $a -Tree $tree -Cpu $cpuP
+        Assert-True ($res.Counters.CpuPercent.Sum -eq 100 -and $res.Counters.CpuPercent.Known -eq 4) 'soma disponivel preservada como evidencia parcial'
+        Assert-True (-not $res.Counters.CpuPercent.Complete) 'amostra de CPU parcial: CpuPercent nunca completo'
+        Assert-True (-not $res.Complete -and (@($res.Reasons) -join ',') -eq 'CPU_SAMPLE_INCOMPLETE') 'arvore incompleta com o motivo da CPU'
+        foreach ($n in $script:AtmTreeCounters) { Assert-True $res.Counters.$n.Complete "amostra de CPU parcial: $n continua completo" }
+        # CPU unreadable for one member in the second sample.
+        $noUser = @($r2 | ForEach-Object { $x = $_.PSObject.Copy(); if ($x.ProcessId -eq 110) { $x.UserModeTime = $null }; $x })
+        $cpuU = Measure-AtmProcessCpu -First $a -Second (Get-AtmProcessCollection -Source ({ $noUser }.GetNewClosure())) -LogicalProcessors 1 -ElapsedMs 1000
+        $res = Get-AtmProcessTreeResources -Collection $a -Tree $tree -Cpu $cpuU
+        Assert-True ($cpuU.Coverage.Status -eq 'PARTIAL' -and $res.Counters.CpuPercent.Sum -eq 75 -and $res.Counters.CpuPercent.Known -eq 3 -and -not $res.Counters.CpuPercent.Complete) 'CPU ilegivel de um membro: soma parcial, nunca 0'
+        Assert-True (-not $res.Complete -and @($res.Reasons) -ccontains 'CPU_SAMPLE_INCOMPLETE' -and $res.Counters.CpuTime100ns.Complete) 'CPU ilegivel: arvore incompleta; tempo acumulado da coleta indicada completo'
         $holeRows = @($r1 | ForEach-Object { $x = $_.PSObject.Copy(); if ($x.ProcessId -eq 120) { $x.HandleCount = $null }; $x })
         $h = Get-AtmProcessCollection -Source ({ $holeRows }.GetNewClosure())
         $res = Get-AtmProcessTreeResources -Collection $h -Tree (Get-AtmProcessTree -Collection $h -RootKey $root) -Cpu $cpu

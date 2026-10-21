@@ -738,8 +738,9 @@ function Get-AtmProcessTreeResources {
     <#
       Sums over the members of one verified tree (Get-AtmProcessTree) for each counter of AtmTreeCounters and, with
       -Cpu (Measure-AtmProcessCpu), CpuPercent. For each: Sum of the values that were read ($null when none was),
-      Known (members read) and Complete. Complete only when the tree is complete and every member was read; otherwise
-      Sum is a lower bound and Reasons says why. Unread values are never counted as 0.
+      Known (members read) and Complete. Complete only when the tree is complete and every member was read, and for
+      CpuPercent also only when the CPU sample is COMPLETE; otherwise Sum is a lower bound and Reasons says why. Unread
+      values are never counted as 0.
     #>
     param($Collection, $Tree, $Cpu = $null)
     $reasons = New-Object System.Collections.Generic.List[string]
@@ -749,6 +750,9 @@ function Get-AtmProcessTreeResources {
         $p = Get-AtmCollectedProcess -Collection $Collection -Key $k
         if ($null -eq $p) { $reasons.Add('TREE_MEMBER_NOT_COLLECTED') } else { $members.Add($p) }
     }
+    # A partial CPU sample makes CpuPercent incomplete even when every member has a value; the other counters come
+    # from the collection itself and do not depend on it.
+    $cpuConclusive = ($null -ne $Cpu -and $Cpu.Coverage.Status -ceq 'COMPLETE')
     $names = @($script:AtmTreeCounters) + @('CpuPercent')
     $counters = [ordered]@{}
     foreach ($n in $names) {
@@ -762,7 +766,7 @@ function Get-AtmProcessTreeResources {
             $known++
             $sum = $(if ($n -ceq 'CpuPercent') { [double]$(if ($null -eq $sum) { 0 } else { $sum }) + [double]$v } else { [long]$(if ($null -eq $sum) { 0 } else { $sum }) + [long]$v })
         }
-        $complete = ($known -eq $members.Count -and $members.Count -gt 0 -and $reasons.Count -eq 0)
+        $complete = ($known -eq $members.Count -and $members.Count -gt 0 -and $reasons.Count -eq 0 -and ($n -cne 'CpuPercent' -or $cpuConclusive))
         $counters[$n] = [pscustomobject]@{ Sum = $sum; Known = $known; Complete = $complete }
     }
     if ($null -eq $Cpu) { $reasons.Add('CPU_NOT_SAMPLED') }
