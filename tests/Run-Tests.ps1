@@ -1968,6 +1968,7 @@ try {
         Assert-Eq (Resolve-AtmProcessReference -Collection $partial -ProcessId 999 -CreationUtc $t1).Result 'IDENTITY_UNVERIFIED' 'ausente em coleta parcial nao e NOT_FOUND'
         Assert-Eq (Resolve-AtmProcessReference -Collection $partial -ProcessId 100 -CreationUtc $t1).Result 'MATCH' 'presente em coleta parcial ainda casa'
         $odd = Get-AtmProcessCollection -Source ({ @($base) + @([pscustomobject]@{ ProcessId = 300; ParentProcessId = 4; Name = 'a.exe'; CreationDate = $t0 }, [pscustomobject]@{ ProcessId = 300; ParentProcessId = 4; Name = 'b.exe'; CreationDate = $t1 }, [pscustomobject]@{ ProcessId = 200; ParentProcessId = 4; Name = 'c.exe'; CreationDate = $null }) }.GetNewClosure())
+        Assert-True ($odd.Coverage.Status -eq 'PARTIAL' -and $odd.ByPid[[long]200].IdentityStatus -eq 'CREATION_TIME_UNKNOWN' -and $odd.Duplicates.ContainsKey([long]300)) 'coleta lida (nao falha): duplicado e sem horario'
         foreach ($t in @($t0, $t1)) { Assert-Eq (Resolve-AtmProcessReference -Collection $odd -ProcessId 300 -CreationUtc $t).Result 'IDENTITY_UNVERIFIED' 'PID duplicado nunca casa' }
         Assert-Eq (Resolve-AtmProcessReference -Collection $odd -ProcessId 200 -CreationUtc $t0).Result 'IDENTITY_UNVERIFIED' 'PID coletado sem horario nao casa'
         Assert-Eq (Resolve-AtmProcessReference -Collection $null -ProcessId 100 -CreationUtc $t1).Result 'IDENTITY_UNVERIFIED' 'sem coleta'
