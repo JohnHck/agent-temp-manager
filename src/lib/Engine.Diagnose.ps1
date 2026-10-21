@@ -352,7 +352,7 @@ function Get-AtmProcessCollection {
     if ($MaxRecords -lt 1) { throw (Get-AtmText 'err.diagProcess' "MaxRecords $MaxRecords") }
     if ($TimeoutSec -lt 1) { throw (Get-AtmText 'err.diagProcess' "TimeoutSec $TimeoutSec") }
     $collector = 'process-snapshot'
-    $empty = @{ Collector = $collector; Failed = $true; CollectedUtc = $null; Processes = @(); ByPid = @{} }
+    $empty = @{ Collector = $collector; Failed = $true; CollectedUtc = $null; Processes = @(); ByPid = @{}; Duplicates = @{} }
     if ($null -ne $Deadline -and [datetime]::UtcNow -ge $Deadline) {
         $empty.Coverage = New-AtmDeadlineCoverage $collector
         return [pscustomobject]$empty
@@ -392,9 +392,10 @@ function Get-AtmProcessCollection {
     }
     if ($malformed -gt 0) { $reasons.Add('MALFORMED_PROCESS_RECORDS') }
     $byPid = @{}
+    $dups = @{}
     $verified = 0
     foreach ($p in $list) {
-        if ($countByPid[$p.Pid] -gt 1) { $p.IdentityStatus = 'DUPLICATE_PID'; $reasons.Add('DUPLICATE_PID'); continue }
+        if ($countByPid[$p.Pid] -gt 1) { $p.IdentityStatus = 'DUPLICATE_PID'; $dups[$p.Pid] = $true; $reasons.Add('DUPLICATE_PID'); continue }
         $byPid[$p.Pid] = $p
         if ($null -eq $p.CreationUtc) { $p.IdentityStatus = 'CREATION_TIME_UNKNOWN'; continue }
         $p.IdentityStatus = 'VERIFIED'
@@ -405,7 +406,7 @@ function Get-AtmProcessCollection {
     # Win32_Process lists every process with its creation time for any account; elevation would not add rows.
     $help = $(if ($status -eq 'COMPLETE') { 'NO' } else { 'UNKNOWN' })
     $cov = New-AtmCoverage -Collector $collector -Status $status -Reasons $reasons.ToArray() -ElevationWouldHelp $help -Observed $verified -Expected @($raw | Where-Object { $null -ne $_ }).Count -StartedUtc $started -ElapsedMs $sw.ElapsedMilliseconds -BudgetMs $budgetMs
-    [pscustomobject]@{ Collector = $collector; Failed = $false; CollectedUtc = $started; Processes = $list.ToArray(); ByPid = $byPid; Coverage = $cov }
+    [pscustomobject]@{ Collector = $collector; Failed = $false; CollectedUtc = $started; Processes = $list.ToArray(); ByPid = $byPid; Duplicates = $dups; Coverage = $cov }
 }
 
 function Resolve-AtmProcessReference {
@@ -421,8 +422,7 @@ function Resolve-AtmProcessReference {
     $id = ConvertTo-AtmProcessId $ProcessId
     $created = ConvertTo-AtmProcessCreationUtc $CreationUtc
     if ($null -ne $id -and $null -ne $Collection -and -not $Collection.Failed) {
-        $dup = @($Collection.Processes | Where-Object { $_.Pid -eq $id -and $_.IdentityStatus -eq 'DUPLICATE_PID' }).Count -gt 0
-        if (-not $dup) {
+        if (-not $Collection.Duplicates.ContainsKey($id)) {
             if ($Collection.ByPid.ContainsKey($id)) {
                 $proc = $Collection.ByPid[$id]
                 if ($null -ne $created -and $proc.IdentityStatus -eq 'VERIFIED') {
@@ -433,6 +433,156 @@ function Resolve-AtmProcessReference {
         }
     }
     [pscustomobject]@{ Result = $result; Process = $proc }
+}
+
+# ---------------------------------------------------------------------------------------------
+# Process trees, run consistency and self-exclusion (ADR-0003 rules 2-4, P1-B2). Not yet part of Invoke-AtmDiagnose.
+# ---------------------------------------------------------------------------------------------
+
+$script:AtmParentLinkResults = @('VERIFIED', 'ROOT', 'PARENT_EXITED_OR_REUSED', 'UNVERIFIED')
+$script:AtmProcessRunStates = @('PRESENT', 'EXITED_DURING_RUN', 'UNVERIFIED')
+$script:AtmProcessTreeMaxMembers = 4096
+$script:AtmProcessTreeMaxDepth = 256
+
+function Get-AtmProcessParentLink {
+    <#
+      Link from a collected process to its parent in the same collection (ADR-0003 rule 2). ParentProcessId survives
+      the parent's exit and may point to a later process with the same PID, so the link is VERIFIED only when both
+      identities are verified and the parent was created no later than the child. A parent created after the child,
+      or absent from a COMPLETE collection, is PARENT_EXITED_OR_REUSED: the chain stops there. Anything else that
+      cannot be checked is UNVERIFIED. ROOT: the process is its own parent (the idle process).
+    #>
+    param($Collection, $Process)
+    $result = 'UNVERIFIED'; $parent = $null
+    if ($null -ne $Collection -and -not $Collection.Failed -and $null -ne $Process -and $Process.IdentityStatus -ceq 'VERIFIED' -and $null -ne $Process.ParentPid) {
+        if ($Process.ParentPid -eq $Process.Pid) { $result = 'ROOT' }
+        elseif ($Collection.Duplicates.ContainsKey($Process.ParentPid)) { $result = 'UNVERIFIED' }
+        elseif ($Collection.ByPid.ContainsKey($Process.ParentPid)) {
+            $cand = $Collection.ByPid[$Process.ParentPid]
+            if ($cand.IdentityStatus -ceq 'VERIFIED') {
+                if ($cand.CreationUtc -le $Process.CreationUtc) { $result = 'VERIFIED'; $parent = $cand } else { $result = 'PARENT_EXITED_OR_REUSED' }
+            }
+        } elseif ($Collection.Coverage.Status -ceq 'COMPLETE') { $result = 'PARENT_EXITED_OR_REUSED' }
+    }
+    [pscustomobject]@{ Result = $result; Parent = $parent }
+}
+
+function Get-AtmProcessTree {
+    <#
+      The verified descendants of one process, root first (breadth-first), by Key. A child is followed only through a
+      VERIFIED parent link. Complete is $true only when the collection is COMPLETE, every process naming a member as
+      parent has a decided link, and no limit was reached; otherwise Reasons says why. A process whose link to a member
+      is PARENT_EXITED_OR_REUSED is not a descendant (it only reuses the PID of an exited parent).
+    #>
+    param($Collection, [string]$RootKey, [int]$MaxMembers = $script:AtmProcessTreeMaxMembers, [int]$MaxDepth = $script:AtmProcessTreeMaxDepth)
+    if ($MaxMembers -lt 1 -or $MaxDepth -lt 1) { throw (Get-AtmText 'err.diagProcess' "MaxMembers $MaxMembers / MaxDepth $MaxDepth") }
+    $reasons = New-Object System.Collections.Generic.List[string]
+    $members = New-Object System.Collections.Generic.List[string]
+    $root = $null
+    $parsed = ConvertFrom-AtmProcessKey $RootKey
+    if ($null -ne $Collection -and -not $Collection.Failed -and $null -ne $parsed -and $Collection.ByPid.ContainsKey($parsed.ProcessId)) {
+        $cand = $Collection.ByPid[$parsed.ProcessId]
+        if ($cand.Key -ceq $RootKey) { $root = $cand }
+    }
+    if ($null -eq $root) {
+        return [pscustomobject]@{ RootKey = $RootKey; Members = @(); Complete = $false; Reasons = @('ROOT_NOT_VERIFIED') }
+    }
+    if ($Collection.Coverage.Status -cne 'COMPLETE') { $reasons.Add('COLLECTION_INCOMPLETE') }
+    $children = @{}
+    foreach ($p in $Collection.Processes) {
+        if ($null -eq $p.ParentPid -or $p.ParentPid -eq $p.Pid) { continue }
+        if (-not $children.ContainsKey($p.ParentPid)) { $children[$p.ParentPid] = New-Object System.Collections.Generic.List[object] }
+        $children[$p.ParentPid].Add($p)
+    }
+    $seen = @{ $root.Key = $true }
+    $members.Add($root.Key)
+    $level = @($root)
+    $depth = 0
+    while ($level.Count -gt 0) {
+        $next = New-Object System.Collections.Generic.List[object]
+        foreach ($node in $level) {
+            if (-not $children.ContainsKey($node.Pid)) { continue }
+            foreach ($ch in $children[$node.Pid]) {
+                $link = Get-AtmProcessParentLink -Collection $Collection -Process $ch
+                if ($link.Result -ceq 'PARENT_EXITED_OR_REUSED') { continue }
+                if ($link.Result -cne 'VERIFIED' -or $link.Parent.Key -cne $node.Key) { $reasons.Add('UNVERIFIED_CHILD_LINKS'); continue }
+                if ($seen.ContainsKey($ch.Key)) { continue }
+                if ($members.Count -ge $MaxMembers) { $reasons.Add('TREE_LIMIT_EXCEEDED'); break }
+                $seen[$ch.Key] = $true
+                $members.Add($ch.Key)
+                $next.Add($ch)
+            }
+        }
+        $depth++
+        # Stop at MaxDepth levels below the root; it is a limit only if there was more to read.
+        if ($depth -ge $MaxDepth) {
+            if (@($next | Where-Object { $children.ContainsKey($_.Pid) }).Count -gt 0) { $reasons.Add('TREE_LIMIT_EXCEEDED') }
+            break
+        }
+        $level = $next.ToArray()
+    }
+    [pscustomobject]@{ RootKey = $RootKey; Members = $members.ToArray(); Complete = ($reasons.Count -eq 0); Reasons = @($reasons | Select-Object -Unique) }
+}
+
+function Compare-AtmProcessCollections {
+    <#
+      Run consistency (ADR-0003 rule 3): for every VERIFIED process of the first collection, PRESENT when the same
+      Key is in the second, EXITED_DURING_RUN when its PID is absent from a COMPLETE second collection or now has
+      another verified creation time, UNVERIFIED otherwise. Returns a hashtable Key -> state.
+    #>
+    param($First, $Second)
+    $out = @{}
+    if ($null -eq $First -or $First.Failed) { return $out }
+    foreach ($p in @($First.Processes | Where-Object { $_.IdentityStatus -ceq 'VERIFIED' })) {
+        $r = Resolve-AtmProcessReference -Collection $Second -ProcessId $p.Pid -CreationUtc $p.CreationUtc
+        $out[$p.Key] = $(switch ($r.Result) { 'MATCH' { 'PRESENT' } 'PID_REUSED' { 'EXITED_DURING_RUN' } 'NOT_FOUND' { 'EXITED_DURING_RUN' } default { 'UNVERIFIED' } })
+    }
+    return $out
+}
+
+function Get-AtmSelfProcessKeys {
+    <#
+      Keys to mark SELF (ADR-0003 rule 4): this process, every verified descendant of it (children the engine
+      started) and the launcher references the caller passes (Pid and CreationUtc of the V0.1 self chain) that are
+      verified ancestors of it; a launcher's other children are not ours. Self and launchers come from other sources
+      than CIM, so they are matched with a bounded tolerance. A reference that cannot be verified is listed in Unverified and is NOT excluded: an
+      unverifiable process is never hidden from the diagnostics.
+    #>
+    param($Collection, $SelfPid = $PID, $SelfCreationUtc = $null, $LauncherReferences = @(), [int]$ToleranceMs = 1000)
+    if ($null -eq $SelfCreationUtc) {
+        # Unreadable start time: the reference stays unverified and nothing is excluded.
+        try { $SelfCreationUtc = [Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime() } catch { $SelfCreationUtc = $null }
+    }
+    $keys = New-Object System.Collections.Generic.List[string]
+    $unverified = New-Object System.Collections.Generic.List[object]
+    $self = Resolve-AtmProcessReference -Collection $Collection -ProcessId $SelfPid -CreationUtc $SelfCreationUtc -ToleranceMs $ToleranceMs
+    if ($self.Result -cne 'MATCH') {
+        $unverified.Add([pscustomobject]@{ Pid = $SelfPid; Result = $self.Result })
+        return [pscustomobject]@{ Keys = @(); Unverified = $unverified.ToArray() }
+    }
+    # Ancestors of this process through verified links only.
+    $ancestors = @{}
+    $cur = $self.Process; $guard = 0
+    while ($guard -lt $script:AtmProcessTreeMaxDepth) {
+        $guard++
+        $l = Get-AtmProcessParentLink -Collection $Collection -Process $cur
+        if ($l.Result -cne 'VERIFIED') { break }
+        $ancestors[$l.Parent.Key] = $true
+        $cur = $l.Parent
+    }
+    $roots = New-Object System.Collections.Generic.List[string]
+    $roots.Add($self.Process.Key)
+    foreach ($ref in @($LauncherReferences | Where-Object { $null -ne $_ })) {
+        $rp = Get-AtmHintProperty -Item $ref -Name 'Pid'
+        $r = Resolve-AtmProcessReference -Collection $Collection -ProcessId $rp -CreationUtc (Get-AtmHintProperty -Item $ref -Name 'CreationUtc') -ToleranceMs $ToleranceMs
+        if ($r.Result -ceq 'MATCH' -and $ancestors.ContainsKey($r.Process.Key)) { $roots.Add($r.Process.Key) }
+        elseif ($r.Result -ceq 'MATCH' -and $r.Process.Key -ceq $self.Process.Key) { continue }
+        else { $unverified.Add([pscustomobject]@{ Pid = $rp; Result = $(if ($r.Result -ceq 'MATCH') { 'NOT_AN_ANCESTOR' } else { $r.Result }) }) }
+    }
+    # Descendants of this process only; a launcher's other children (the user's shell siblings) are not ours.
+    foreach ($k in (Get-AtmProcessTree -Collection $Collection -RootKey $self.Process.Key).Members) { if (-not $keys.Contains($k)) { $keys.Add($k) } }
+    foreach ($k in $roots) { if (-not $keys.Contains($k)) { $keys.Add($k) } }
+    [pscustomobject]@{ Keys = $keys.ToArray(); Unverified = $unverified.ToArray() }
 }
 
 # ---------------------------------------------------------------------------------------------

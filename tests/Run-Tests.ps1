@@ -2018,6 +2018,148 @@ try {
         Assert-Eq (Resolve-AtmProcessReference -Collection $c -ProcessId $self.Id -CreationUtc $self.StartTime.ToUniversalTime().AddMinutes(-10) -ToleranceMs 1000).Result 'PID_REUSED' 'mesmo PID com outro horario nunca e o mesmo processo'
         $script:caseNote = "$($c.Coverage.Status), $($c.Coverage.Observed)/$($c.Coverage.Expected), $($c.Coverage.ElapsedMs) ms"
     }
+    Test-Case 'Diagnose' 'Arvores de processos (P1-B2): vinculo com pai so verificado por identidade e horario; PID reutilizado e pai encerrado cortam a cadeia; limites e ciclos' {
+        $t0 = New-Object DateTime(2026, 1, 1, 8, 0, 0, [DateTimeKind]::Utc)
+        function New-Row { param($Id, $Parent, $Created) [pscustomobject]@{ ProcessId = $Id; ParentProcessId = $Parent; Name = "p$Id.exe"; CreationDate = $Created } }
+        $rows = @((New-Row 0 0 $t0), (New-Row 4 0 $t0), (New-Row 100 4 $t0.AddMinutes(1)), (New-Row 110 100 $t0.AddMinutes(2)), (New-Row 120 100 $t0.AddMinutes(2)),
+            (New-Row 111 110 $t0.AddMinutes(3)), (New-Row 200 999 $t0.AddMinutes(5)), (New-Row 300 100 $t0.AddSeconds(30)))
+        $c = Get-AtmProcessCollection -Source ({ $rows }.GetNewClosure())
+        Assert-Eq $c.Coverage.Status 'COMPLETE' 'coleta completa'
+        $expect = @{ 0 = 'ROOT'; 4 = 'VERIFIED'; 100 = 'VERIFIED'; 110 = 'VERIFIED'; 111 = 'VERIFIED'; 120 = 'VERIFIED'; 200 = 'PARENT_EXITED_OR_REUSED'; 300 = 'PARENT_EXITED_OR_REUSED' }
+        foreach ($id in $expect.Keys) {
+            $l = Get-AtmProcessParentLink -Collection $c -Process $c.ByPid[[long]$id]
+            Assert-Eq $l.Result $expect[$id] "vinculo do PID $id"
+            Assert-Eq ($null -ne $l.Parent) ($l.Result -ceq 'VERIFIED') "pai devolvido so quando verificado ($id)"
+            Assert-True ($script:AtmParentLinkResults -ccontains $l.Result) 'resultado da lista fechada'
+        }
+        $k = { param($id) $c.ByPid[[long]$id].Key }
+        $tr = Get-AtmProcessTree -Collection $c -RootKey (& $k 100)
+        Assert-Eq ($tr.Members -join ',') ((@(100, 110, 120, 111) | ForEach-Object { & $k $_ }) -join ',') 'descendentes verificados, raiz primeiro, em largura'
+        Assert-True ($tr.Complete -and @($tr.Reasons).Count -eq 0) 'arvore completa'
+        Assert-True ($tr.Members -cnotcontains (& $k 300)) 'processo mais antigo que o "pai" nao e descendente (PID do pai reutilizado)'
+        Assert-Eq (@((Get-AtmProcessTree -Collection $c -RootKey (& $k 4)).Members).Count) 5 'arvore a partir do System'
+        foreach ($bad in @(('100@' + $t0.Ticks), '100', '', 'x@y', ('999@' + $t0.Ticks))) {
+            $t = Get-AtmProcessTree -Collection $c -RootKey $bad
+            Assert-True (-not $t.Complete -and @($t.Members).Count -eq 0 -and (@($t.Reasons) -join ',') -eq 'ROOT_NOT_VERIFIED') "raiz nao verificada: '$bad'"
+        }
+        $odd = @($rows) + @((New-Row 130 100 $null), (New-Row 140 100 $t0.AddMinutes(4)), (New-Row 140 100 $t0.AddMinutes(6)), (New-Row 150 888 $t0.AddMinutes(4)), [pscustomobject]@{ ProcessId = 'x' })
+        $o = Get-AtmProcessCollection -Source ({ $odd }.GetNewClosure())
+        Assert-Eq $o.Coverage.Status 'PARTIAL' 'coleta parcial'
+        $t = Get-AtmProcessTree -Collection $o -RootKey (& $k 100)
+        Assert-Eq (@($t.Reasons | Sort-Object) -join ',') 'COLLECTION_INCOMPLETE,UNVERIFIED_CHILD_LINKS' 'filhos sem horario ou com PID duplicado deixam a arvore incompleta'
+        Assert-Eq (@($t.Members).Count) 4 'so membros verificados'
+        Assert-Eq (Get-AtmProcessParentLink -Collection $o -Process $o.ByPid[[long]150]).Result 'UNVERIFIED' 'pai ausente em coleta parcial: nao verificado, nunca "encerrado"'
+        Assert-Eq (Get-AtmProcessParentLink -Collection $o -Process $o.ByPid[[long]130]).Result 'UNVERIFIED' 'filho sem horario'
+        Assert-Eq (Get-AtmProcessParentLink -Collection $o -Process @($o.Processes | Where-Object { $_.Pid -eq 140 })[0]).Result 'UNVERIFIED' 'filho com PID duplicado'
+        $dupRows = @((New-Row 4 0 $t0), (New-Row 50 4 $t0), (New-Row 50 4 $t0.AddMinutes(1)), (New-Row 60 50 $t0.AddMinutes(2)))
+        $dupParent = Get-AtmProcessCollection -Source ({ $dupRows }.GetNewClosure())
+        Assert-Eq $dupParent.ByPid[[long]60].IdentityStatus 'VERIFIED' 'filho do PID duplicado verificado'
+        Assert-Eq (Get-AtmProcessParentLink -Collection $dupParent -Process $dupParent.ByPid[[long]60]).Result 'UNVERIFIED' 'pai com PID duplicado'
+        Assert-Eq (Get-AtmProcessParentLink -Collection $null -Process $c.ByPid[[long]110]).Result 'UNVERIFIED' 'sem coleta'
+        $t = Get-AtmProcessTree -Collection $c -RootKey (& $k 100) -MaxMembers 2
+        Assert-True (@($t.Members).Count -eq 2 -and (@($t.Reasons) -join ',') -eq 'TREE_LIMIT_EXCEEDED' -and -not $t.Complete) 'limite de membros'
+        $t = Get-AtmProcessTree -Collection $c -RootKey (& $k 100) -MaxDepth 1
+        Assert-True (@($t.Members).Count -eq 3 -and (@($t.Reasons) -join ',') -eq 'TREE_LIMIT_EXCEEDED') 'limite de profundidade com mais a ler'
+        $t = Get-AtmProcessTree -Collection $c -RootKey (& $k 100) -MaxDepth 2
+        Assert-True (@($t.Members).Count -eq 4 -and $t.Complete) 'profundidade suficiente: completa'
+        foreach ($b in @({ Get-AtmProcessTree -Collection $c -RootKey 'x' -MaxMembers 0 }, { Get-AtmProcessTree -Collection $c -RootKey 'x' -MaxDepth 0 })) {
+            $threw = $false; try { $null = & $b } catch { $threw = $true }
+            Assert-True $threw "limite recusado: $b"
+        }
+        $cycRows = @((New-Row 500 501 $t0), (New-Row 501 500 $t0))
+        $cyc = Get-AtmProcessCollection -Source ({ $cycRows }.GetNewClosure())
+        Assert-Eq $cyc.Coverage.Status 'COMPLETE' 'coleta do ciclo'
+        $t = Get-AtmProcessTree -Collection $cyc -RootKey $cyc.ByPid[[long]500].Key
+        Assert-Eq (@($t.Members).Count) 2 'ciclo termina'
+        # Scale: 2,000 processes, five levels; linear in the number of processes.
+        $big = New-Object System.Collections.Generic.List[object]
+        $big.Add((New-Row 10 4 $t0))
+        $n = 11
+        $lvl = @(10)
+        for ($d = 1; $d -le 5; $d++) {
+            $nl = @()
+            foreach ($par in $lvl) { for ($i = 0; $i -lt 5 -and $n -lt 2010; $i++) { $big.Add((New-Row $n $par $t0.AddMinutes($d))); $nl += $n; $n++ } }
+            $lvl = $nl
+        }
+        while ($n -lt 2010) { $big.Add((New-Row $n 10 $t0.AddMinutes(9))); $n++ }
+        $bigArr = $big.ToArray()
+        $bc = Get-AtmProcessCollection -Source ({ $bigArr }.GetNewClosure())
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $t = Get-AtmProcessTree -Collection $bc -RootKey $bc.ByPid[[long]10].Key
+        $sw.Stop()
+        Assert-True ($t.Complete -and @($t.Members).Count -eq 2000) "2.000 membros: $(@($t.Members).Count)"
+        Assert-True ($sw.Elapsed.TotalSeconds -lt 30) "tempo limitado: $([int]$sw.Elapsed.TotalMilliseconds) ms"
+        $script:caseNote = "2.000 membros em $([int]$sw.Elapsed.TotalMilliseconds) ms"
+    }
+    Test-Case 'Diagnose' 'Processos encerrados durante a coleta e exclusao do proprio diagnostico (P1-B2): EXITED_DURING_RUN so com prova; SELF so verificado; nada desconhecido e escondido' {
+        $t0 = New-Object DateTime(2026, 1, 1, 8, 0, 0, [DateTimeKind]::Utc)
+        function New-Row { param($Id, $Parent, $Created) [pscustomobject]@{ ProcessId = $Id; ParentProcessId = $Parent; Name = "p$Id.exe"; CreationDate = $Created } }
+        $first = @((New-Row 4 0 $t0), (New-Row 100 4 $t0.AddMinutes(1)), (New-Row 110 100 $t0.AddMinutes(2)), (New-Row 120 100 $t0.AddMinutes(2)), (New-Row 130 100 $null))
+        $a = Get-AtmProcessCollection -Source ({ $first }.GetNewClosure())
+        $secondRows = @((New-Row 4 0 $t0), (New-Row 100 4 $t0.AddMinutes(1)), (New-Row 120 100 $t0.AddMinutes(7)))
+        $b = Get-AtmProcessCollection -Source ({ $secondRows }.GetNewClosure())
+        Assert-Eq $b.Coverage.Status 'COMPLETE' 'segunda coleta completa'
+        $cmp = Compare-AtmProcessCollections -First $a -Second $b
+        Assert-Eq $cmp[$a.ByPid[[long]100].Key] 'PRESENT' 'mesmo processo nas duas coletas'
+        Assert-Eq $cmp[$a.ByPid[[long]110].Key] 'EXITED_DURING_RUN' 'ausente de coleta completa'
+        Assert-Eq $cmp[$a.ByPid[[long]120].Key] 'EXITED_DURING_RUN' 'PID reutilizado por outro processo'
+        Assert-Eq $cmp[$a.ByPid[[long]4].Key] 'PRESENT' 'System presente'
+        Assert-Eq $cmp.Count 4 'so identidades verificadas sao comparadas (sem o PID sem horario)'
+        foreach ($v in $cmp.Values) { Assert-True ($script:AtmProcessRunStates -ccontains $v) 'estado da lista fechada' }
+        $partialRows = @($secondRows) + @([pscustomobject]@{ ProcessId = 'x' }, (New-Row 110 100 $null))
+        $p = Get-AtmProcessCollection -Source ({ $partialRows }.GetNewClosure())
+        Assert-Eq $p.Coverage.Status 'PARTIAL' 'coleta parcial com PID sem horario'
+        $cmp = Compare-AtmProcessCollections -First $a -Second $p
+        Assert-Eq $cmp[$a.ByPid[[long]110].Key] 'UNVERIFIED' 'PID presente sem horario: nao verificavel'
+        $p2Rows = @((New-Row 4 0 $t0), [pscustomobject]@{ ProcessId = 'x' })
+        $p2 = Get-AtmProcessCollection -Source ({ $p2Rows }.GetNewClosure())
+        Assert-Eq $p2.Coverage.Status 'PARTIAL' 'segunda coleta parcial'
+        $cmp = Compare-AtmProcessCollections -First $a -Second $p2
+        Assert-Eq $cmp[$a.ByPid[[long]110].Key] 'UNVERIFIED' 'ausente de coleta parcial: nunca "encerrado"'
+        $f = Get-AtmProcessCollection -Source { throw (New-Object InvalidOperationException('x')) }
+        $cmp = Compare-AtmProcessCollections -First $a -Second $f
+        Assert-True (@($cmp.Values | Where-Object { $_ -ne 'UNVERIFIED' }).Count -eq 0 -and $cmp.Count -eq 4) 'segunda coleta falhou: tudo nao verificado'
+        Assert-Eq (Compare-AtmProcessCollections -First $f -Second $a).Count 0 'primeira coleta falhou: nada comparado'
+
+        $selfT = $t0.AddMinutes(3)
+        $rows = @((New-Row 4 0 $t0), (New-Row 100 4 $t0.AddMinutes(1)), (New-Row 120 100 $t0.AddMinutes(2)), (New-Row 150 100 $selfT),
+            (New-Row 151 150 $t0.AddMinutes(4)), (New-Row 152 151 $t0.AddMinutes(5)), (New-Row 160 150 $t0.AddMinutes(1)))
+        $c = Get-AtmProcessCollection -Source ({ $rows }.GetNewClosure())
+        Assert-Eq $c.Coverage.Status 'COMPLETE' 'coleta do proprio diagnostico'
+        $k = { param($id) $c.ByPid[[long]$id].Key }
+        $launcher =[pscustomobject]@{ Pid = 100; CreationUtc = $t0.AddMinutes(1).AddTicks(3000) }
+        $s = Get-AtmSelfProcessKeys -Collection $c -SelfPid 150 -SelfCreationUtc $selfT.AddTicks(4000) -LauncherReferences @($launcher)
+        Assert-Eq (@($s.Keys | Sort-Object) -join ',') (@(100, 150, 151, 152 | ForEach-Object { & $k $_ } | Sort-Object) -join ',') 'proprio processo, filhos verificados e lancador verificado'
+        Assert-Eq @($s.Unverified).Count 0 'nada pendente'
+        Assert-True ($s.Keys -cnotcontains (& $k 120) -and $s.Keys -cnotcontains (& $k 4)) 'outros filhos do lancador e o sistema nao sao do diagnostico'
+        Assert-True ($s.Keys -cnotcontains (& $k 160)) 'processo anterior que so reutiliza o PID nao e filho'
+        $refs = @(
+            @{ Ref = [pscustomobject]@{ Pid = 120; CreationUtc = $t0.AddMinutes(2) }; Result = 'NOT_AN_ANCESTOR' },
+            @{ Ref = [pscustomobject]@{ Pid = 100; CreationUtc = $t0.AddMinutes(9) }; Result = 'PID_REUSED' },
+            @{ Ref = @{ Pid = 999; CreationUtc = $t0 }; Result = 'NOT_FOUND' },
+            @{ Ref = 'not a reference'; Result = 'IDENTITY_UNVERIFIED' })
+        foreach ($r in $refs) {
+            $s = Get-AtmSelfProcessKeys -Collection $c -SelfPid 150 -SelfCreationUtc $selfT -LauncherReferences @($r.Ref)
+            Assert-Eq (@($s.Unverified | ForEach-Object { $_.Result }) -join ',') $r.Result "lancador: $($r.Result)"
+            Assert-Eq (@($s.Keys | Sort-Object) -join ',') (@(150, 151, 152 | ForEach-Object { & $k $_ } | Sort-Object) -join ',') "lancador nao verificado nao e excluido ($($r.Result))"
+        }
+        Assert-Eq @((Get-AtmSelfProcessKeys -Collection $c -SelfPid 150 -SelfCreationUtc $selfT -LauncherReferences @([pscustomobject]@{ Pid = 150; CreationUtc = $selfT })).Unverified).Count 0 'o proprio processo como lancador e ignorado'
+        foreach ($cs in @(@(150, $selfT.AddMinutes(10), 'PID_REUSED'), @(777, $selfT, 'NOT_FOUND'))) {
+            $s = Get-AtmSelfProcessKeys -Collection $c -SelfPid $cs[0] -SelfCreationUtc $cs[1] -LauncherReferences @($launcher)
+            Assert-True (@($s.Keys).Count -eq 0 -and @($s.Unverified)[0].Result -eq $cs[2]) "proprio processo nao verificado ($($cs[2])): nada excluido"
+        }
+        foreach ($st in @($script:AtmParentLinkResults) + @($script:AtmProcessRunStates) + @('SELF')) {
+            $threw = $false; try { $null = New-AtmFinding -Kind 'Process' -Key 'k' -State $st -Coverage @($c.Coverage) } catch { $threw = $true }
+            Assert-True $threw "$st nao e estado de achado (T-1)"
+        }
+        # Real, read-only: this process is identified and marked SELF; two collections agree on it.
+        $r1 = Get-AtmProcessCollection
+        $s = Get-AtmSelfProcessKeys -Collection $r1
+        $mine = Resolve-AtmProcessReference -Collection $r1 -ProcessId $PID -CreationUtc ([Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime()) -ToleranceMs 1000
+        Assert-True ($mine.Result -eq 'MATCH' -and $s.Keys -ccontains $mine.Process.Key -and @($s.Unverified).Count -eq 0) 'proprio processo real marcado como SELF'
+        $r2 = Get-AtmProcessCollection
+        Assert-Eq (Compare-AtmProcessCollections -First $r1 -Second $r2)[$mine.Process.Key] 'PRESENT' 'proprio processo presente nas duas coletas reais'
+    }
     Test-Case 'Diagnose' 'CLI version mostra identidade, tipo de elevacao e integridade (PRIV-10) nos dois idiomas' {
         $cmd = Join-Path $srcDir 'bin\agent-temp.cmd'
         $out = (& cmd.exe /c "`"$cmd`" version -Lang en-US" 2>&1) -join "`n"
@@ -2329,7 +2471,7 @@ try {
         foreach ($pat in @('SeDebugPrivilege', 'AdjustTokenPrivileges', 'RmShutdown', 'RmRestart', 'TerminateProcess', 'WriteProcessMemory')) { Assert-True (-not $native.Contains($pat)) "Native.cs contem '$pat'" }
         foreach ($f in @('Tui.ps1', 'Report.ps1')) {
             $txt = [IO.File]::ReadAllText((Join-Path $lib $f))
-            foreach ($pat in @('Get-AtmIdentityRaw', 'Get-AtmIdentityState', 'Get-AtmProviderRuntimeHints', 'Get-AtmInventoryCoverage', 'AtmToken]', 'Get-AtmProcessRaw', 'Get-AtmProcessCollection', 'Resolve-AtmProcessReference')) { Assert-True (-not $txt.Contains($pat)) "$f chama coletor diretamente: $pat" }
+            foreach ($pat in @('Get-AtmIdentityRaw', 'Get-AtmIdentityState', 'Get-AtmProviderRuntimeHints', 'Get-AtmInventoryCoverage', 'AtmToken]', 'Get-AtmProcessRaw', 'Get-AtmProcessCollection', 'Resolve-AtmProcessReference', 'Get-AtmProcessParentLink', 'Get-AtmProcessTree', 'Compare-AtmProcessCollections', 'Get-AtmSelfProcessKeys')) { Assert-True (-not $txt.Contains($pat)) "$f chama coletor diretamente: $pat" }
         }
     }
 
