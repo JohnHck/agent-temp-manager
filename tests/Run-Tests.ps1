@@ -1915,7 +1915,7 @@ try {
         Assert-Eq $c.Coverage.BudgetMs 30000 'orcamento declarado'
         Assert-Eq (@($c.Processes).Count) 10 'linhas sem PID valido descartadas'
         foreach ($p in $c.Processes) {
-            Assert-Eq (@($p.PSObject.Properties.Name) -join ',') 'Pid,ParentPid,Name,CreationUtc,Key,IdentityStatus' "propriedades de $($p.Pid)"
+            Assert-Eq (@($p.PSObject.Properties.Name) -join ',') 'Pid,ParentPid,Name,CreationUtc,Key,IdentityStatus,Resources' "propriedades de $($p.Pid)"
             Assert-True ($script:AtmProcessIdentityStatuses -ccontains $p.IdentityStatus) "estado de identidade fechado: $($p.IdentityStatus)"
             Assert-Eq ($null -ne $p.Key) ($p.IdentityStatus -ceq 'VERIFIED') "so identidade verificada tem chave ($($p.Pid))"
         }
@@ -2004,13 +2004,13 @@ try {
         Assert-True (-not $flag.Called) 'prazo esgotado: a fonte nem e chamada'
     }
     Test-Case 'Diagnose' 'Processos reais (somente leitura, P1-B1): o proprio processo identificado por PID e horario de criacao; sem linha de comando nem caminho' {
-        Assert-Eq ($script:AtmProcessCimProperties -join ',') 'ProcessId,ParentProcessId,Name,CreationDate' 'propriedades pedidas ao CIM'
+        Assert-Eq ($script:AtmProcessCimProperties -join ',') 'ProcessId,ParentProcessId,Name,CreationDate,KernelModeTime,UserModeTime,WorkingSetSize,PrivatePageCount,HandleCount,ReadTransferCount,WriteTransferCount,OtherTransferCount' 'propriedades pedidas ao CIM'
         $fn = ${function:Get-AtmProcessRaw}.ToString()
         foreach ($pat in @('CommandLine', 'ExecutablePath', 'Get-Process', 'Invoke-CimMethod')) { Assert-True (-not $fn.Contains($pat)) "coletor bruto contem '$pat'" }
         $c = Get-AtmProcessCollection
         Assert-True (@('COMPLETE', 'PARTIAL') -ccontains $c.Coverage.Status) "coleta real: $($c.Coverage.Status) $(@($c.Coverage.Reasons) -join ',')"
         Assert-True ($c.Coverage.Observed -gt 0 -and $c.Coverage.ElapsedMs -le $c.Coverage.BudgetMs) 'processos observados dentro do orcamento'
-        foreach ($p in $c.Processes) { Assert-Eq (@($p.PSObject.Properties.Name) -join ',') 'Pid,ParentPid,Name,CreationUtc,Key,IdentityStatus' 'nenhuma outra propriedade guardada' }
+        foreach ($p in $c.Processes) { Assert-Eq (@($p.PSObject.Properties.Name) -join ',') 'Pid,ParentPid,Name,CreationUtc,Key,IdentityStatus,Resources' 'nenhuma outra propriedade guardada'; Assert-Eq (@($p.Resources.PSObject.Properties.Name) -join ',') 'KernelTime100ns,UserTime100ns,WorkingSetBytes,PrivateBytes,HandleCount,ReadTransferBytes,WriteTransferBytes,OtherTransferBytes' 'contadores guardados' }
         $self = [Diagnostics.Process]::GetCurrentProcess()
         # Process.StartTime (100 ns) and CIM CreationDate (1 us) are different sources: a bounded tolerance.
         $r = Resolve-AtmProcessReference -Collection $c -ProcessId $self.Id -CreationUtc $self.StartTime.ToUniversalTime() -ToleranceMs 1000
@@ -2160,6 +2160,136 @@ try {
         Assert-True ($mine.Result -eq 'MATCH' -and $s.Keys -ccontains $mine.Process.Key -and @($s.Unverified).Count -eq 0) 'proprio processo real marcado como SELF'
         $r2 = Get-AtmProcessCollection
         Assert-Eq (Compare-AtmProcessCollections -First $r1 -Second $r2)[$mine.Process.Key] 'PRESENT' 'proprio processo presente nas duas coletas reais'
+    }
+    Test-Case 'Diagnose' 'Recursos (P1-B3): contadores lidos como inteiros; ilegivel vira nulo com cobertura PARTIAL, nunca 0; cobertura da identidade nao muda' {
+        $t0 = New-Object DateTime(2026, 1, 1, 8, 0, 0, [DateTimeKind]::Utc)
+        function New-RRow { param($Id, $Parent, $Created, $K = 10, $U = 20, $Ws = 4096, $Priv = 8192, $H = 7, $R = 1, $W = 2, $O = 3)
+            [pscustomobject]@{ ProcessId = $Id; ParentProcessId = $Parent; Name = "p$Id.exe"; CreationDate = $Created; KernelModeTime = $K; UserModeTime = $U; WorkingSetSize = $Ws; PrivatePageCount = $Priv; HandleCount = $H; ReadTransferCount = $R; WriteTransferCount = $W; OtherTransferCount = $O } }
+        $rows = @((New-RRow 0 0 $t0 -K ([uint64]25781994218750) -U ([uint64]0) -H ([uint32]0)), (New-RRow 4 0 $t0),
+            (New-RRow 200 4 $t0.AddMinutes(1) -Ws 'abc' -Priv (-5) -H $null -R 1.5 -W $true -O ([uint64]::MaxValue)),
+            [pscustomobject]@{ ProcessId = 300; ParentProcessId = 4; Name = 'old.exe'; CreationDate = $t0.AddMinutes(2) })
+        $c = Get-AtmProcessCollection -Source ({ $rows }.GetNewClosure())
+        Assert-Eq $c.Coverage.Status 'COMPLETE' 'identidade completa mesmo com contadores ilegiveis'
+        Assert-Eq $c.ResourceCoverage.Collector 'process-resources' 'coletor de recursos'
+        Assert-Eq $c.ResourceCoverage.Status 'PARTIAL' 'contadores ilegiveis -> parcial'
+        Assert-Eq (@($c.ResourceCoverage.Reasons) -join ',') 'RESOURCE_COUNTERS_UNREADABLE' 'motivo'
+        Assert-True ($c.ResourceCoverage.Observed -eq 2 -and $c.ResourceCoverage.Expected -eq 4) 'contagens dos recursos'
+        $idle = $c.ByPid[[long]0].Resources
+        Assert-True ($idle.KernelTime100ns -eq 25781994218750 -and $idle.UserTime100ns -eq 0 -and $idle.HandleCount -eq 0) 'zero informado pela fonte e mantido como 0'
+        Assert-True ($idle.UserTime100ns -is [long] -and $idle.HandleCount -is [long]) 'inteiros de 64 bits'
+        $bad = $c.ByPid[[long]200].Resources
+        foreach ($n in @('WorkingSetBytes', 'PrivateBytes', 'HandleCount', 'ReadTransferBytes', 'WriteTransferBytes', 'OtherTransferBytes')) { Assert-True ($null -eq $bad.$n) "$n ilegivel e nulo, nunca 0" }
+        Assert-True ($bad.KernelTime100ns -eq 10 -and $bad.UserTime100ns -eq 20) 'contadores legiveis da mesma linha mantidos'
+        foreach ($n in @($c.ByPid[[long]300].Resources.PSObject.Properties.Name)) { Assert-True ($null -eq $c.ByPid[[long]300].Resources.$n) "linha sem contadores: $n nulo" }
+        Assert-True ($null -eq (Get-AtmProcessCpuTime $c.ByPid[[long]300]) -and (Get-AtmProcessCpuTime $c.ByPid[[long]4]) -eq 30) 'tempo de CPU so com os dois contadores'
+        $okRows = @($rows[0], $rows[1])
+        $c = Get-AtmProcessCollection -Source ({ $okRows }.GetNewClosure())
+        Assert-True ($c.ResourceCoverage.Status -eq 'COMPLETE' -and $c.ResourceCoverage.ElevationWouldHelp -eq 'NO' -and @($c.ResourceCoverage.Reasons).Count -eq 0) 'todos os contadores lidos -> completa'
+        $c = Get-AtmProcessCollection -Source ({ $okRows }.GetNewClosure()) -MaxRecords 1
+        Assert-Eq (@($c.ResourceCoverage.Reasons) -join ',') 'PROCESS_ROWS_NOT_READ' 'limite de linhas: recursos parciais'
+        $malRows = @($okRows) + @([pscustomobject]@{ ProcessId = 'x' })
+        $c = Get-AtmProcessCollection -Source ({ $malRows }.GetNewClosure())
+        Assert-Eq (@($c.ResourceCoverage.Reasons) -join ',') 'PROCESS_ROWS_NOT_READ' 'linha invalida: recursos parciais'
+        $f = Get-AtmProcessCollection -Source { throw (New-Object InvalidOperationException('texto-que-nao-pode-aparecer')) }
+        Assert-True ($f.ResourceCoverage.Status -eq 'FAILED' -and $f.ResourceCoverage.Collector -eq 'process-resources') 'falha da coleta: recursos FAILED'
+        $d = Get-AtmProcessCollection -Source { $okRows } -Deadline ([datetime]::UtcNow)
+        Assert-True ($d.ResourceCoverage.Status -eq 'TIMEOUT' -and (@($d.ResourceCoverage.Reasons) -join ',') -eq 'DEADLINE_EXCEEDED') 'prazo: recursos TIMEOUT'
+    }
+    Test-Case 'Diagnose' 'CPU (P1-B3): porcentagem entre duas amostras sobre intervalo declarado e processadores logicos; ilegivel, contador que diminui ou identidade incerta nunca viram 0' {
+        $t0 = New-Object DateTime(2026, 1, 1, 8, 0, 0, [DateTimeKind]::Utc)
+        function New-RRow { param($Id, $Created, $K, $U)
+            [pscustomobject]@{ ProcessId = $Id; ParentProcessId = 4; Name = "p$Id.exe"; CreationDate = $Created; KernelModeTime = $K; UserModeTime = $U; WorkingSetSize = 1; PrivatePageCount = 1; HandleCount = 1; ReadTransferCount = 1; WriteTransferCount = 1; OtherTransferCount = 1 } }
+        $r1 = @((New-RRow 100 $t0 10000000 10000000), (New-RRow 110 $t0 0 0), (New-RRow 120 $t0 1000000 $null), (New-RRow 130 $t0 5 5), (New-RRow 140 $t0 5 5), (New-RRow 150 $t0 900 900))
+        $r2 = @((New-RRow 100 $t0 15000000 15000000), (New-RRow 110 $t0 1000000 1000000), (New-RRow 120 $t0 2000000 $null), (New-RRow 140 $t0.AddMinutes(1) 5 5), (New-RRow 150 $t0 100 100))
+        $a = Get-AtmProcessCollection -Source ({ $r1 }.GetNewClosure())
+        $b = Get-AtmProcessCollection -Source ({ $r2 }.GetNewClosure())
+        $m = Measure-AtmProcessCpu -First $a -Second $b -LogicalProcessors 4 -ElapsedMs 1000
+        $key = { param($id) $a.ByPid[[long]$id].Key }
+        Assert-Eq $m.ByKey[(& $key 100)] 25 '1 s de CPU em 1 s com 4 processadores logicos = 25%'
+        Assert-Eq $m.ByKey[(& $key 110)] 5 '0,2 s em 1 s com 4 processadores = 5%'
+        Assert-True ($m.ByKey.ContainsKey((& $key 120)) -and $null -eq $m.ByKey[(& $key 120)]) 'contador ilegivel: nulo'
+        Assert-True ($null -eq $m.ByKey[(& $key 150)]) 'contador que diminui: nulo'
+        Assert-Eq $m.Exited 2 'encerrado e PID reutilizado nao tem porcentagem'
+        Assert-True ($m.IntervalMs -eq 1000 -and $m.LogicalProcessors -eq 4) 'intervalo e processadores declarados'
+        Assert-Eq $m.Coverage.Collector 'process-cpu' 'coletor'
+        Assert-Eq $m.Coverage.Status 'PARTIAL' 'parcial'
+        Assert-Eq (@($m.Coverage.Reasons | Sort-Object) -join ',') 'CPU_COUNTER_DECREASED,CPU_COUNTERS_UNREADABLE' 'motivos'
+        Assert-True ($m.Coverage.Observed -eq 2 -and $m.Coverage.Expected -eq 4) 'contagens'
+        $clean1 = @($r1[0], $r1[1]); $clean2 = @($r2[0], $r2[1])
+        $m = Measure-AtmProcessCpu -First (Get-AtmProcessCollection -Source ({ $clean1 }.GetNewClosure())) -Second (Get-AtmProcessCollection -Source ({ $clean2 }.GetNewClosure())) -LogicalProcessors 1 -ElapsedMs 2000
+        Assert-True ($m.Coverage.Status -eq 'COMPLETE' -and $m.ByKey[(& $key 100)] -eq 50) 'completa; 1 s em 2 s com 1 processador = 50%'
+        $partial2 = @($clean2) + @([pscustomobject]@{ ProcessId = 'x' })
+        $m = Measure-AtmProcessCpu -First (Get-AtmProcessCollection -Source ({ $r1 }.GetNewClosure())) -Second (Get-AtmProcessCollection -Source ({ $partial2 }.GetNewClosure())) -LogicalProcessors 4 -ElapsedMs 1000
+        Assert-True (@($m.Coverage.Reasons) -ccontains 'CPU_SAMPLE_INCOMPLETE' -and @($m.Coverage.Reasons) -ccontains 'CPU_SAMPLE_IDENTITY_UNVERIFIED') 'segunda amostra parcial: ausentes nao verificados'
+        Assert-Eq $m.Exited 0 'ausente de amostra parcial nunca e encerrado'
+        $fail = Get-AtmProcessCollection -Source { throw (New-Object InvalidOperationException('x')) }
+        $late = Get-AtmProcessCollection -Source { $r2 } -Deadline ([datetime]::UtcNow)
+        foreach ($cs in @(@($fail, $b, 'FAILED', 'CPU_SAMPLE_UNAVAILABLE'), @($a, $null, 'FAILED', 'CPU_SAMPLE_UNAVAILABLE'), @($a, $late, 'TIMEOUT', 'CPU_SAMPLE_TIMEOUT'))) {
+            $m = Measure-AtmProcessCpu -First $cs[0] -Second $cs[1] -ElapsedMs 1000
+            Assert-True ($m.Coverage.Status -eq $cs[2] -and (@($m.Coverage.Reasons) -join ',') -eq $cs[3] -and $m.ByKey.Count -eq 0) "sem amostra: $($cs[3])"
+        }
+        $m = Measure-AtmProcessCpu -First $a -Second $b -ElapsedMs 0
+        Assert-True ($m.Coverage.Status -eq 'FAILED' -and (@($m.Coverage.Reasons) -join ',') -eq 'CPU_INTERVAL_INVALID' -and $m.ByKey.Count -eq 0) 'intervalo invalido'
+        $threw = $false; try { $null = Measure-AtmProcessCpu -First $a -Second $b -LogicalProcessors 0 } catch { $threw = $true }
+        Assert-True $threw 'zero processadores recusado'
+        foreach ($iv in @(99, 5001)) {
+            $threw = $false; try { $null = Invoke-AtmProcessCpuSampling -Source { $r1 } -IntervalMs $iv } catch { $threw = $true }
+            Assert-True $threw "intervalo $iv ms recusado (100 a 5000)"
+        }
+        $seq = @{ N = 0 }
+        $s = Invoke-AtmProcessCpuSampling -Source ({ $seq.N++; if ($seq.N -eq 1) { $r1 } else { $r2 } }.GetNewClosure()) -IntervalMs 100 -LogicalProcessors 4
+        Assert-True ($seq.N -eq 2 -and $null -ne $s.Second -and $s.Cpu.IntervalMs -ge 90) "duas amostras com o intervalo medido: $($s.Cpu.IntervalMs) ms"
+        Assert-True ($s.Cpu.ByKey[(& $key 100)] -gt 0) 'porcentagem calculada com o intervalo medido'
+        $seq.N = 0
+        $s = Invoke-AtmProcessCpuSampling -Source ({ $seq.N++; $r1 }.GetNewClosure()) -IntervalMs 1000 -Deadline ([datetime]::UtcNow.AddMilliseconds(500))
+        Assert-True ($seq.N -eq 1 -and $null -eq $s.Second -and $s.Cpu.Coverage.Status -eq 'TIMEOUT' -and (@($s.Cpu.Coverage.Reasons) -join ',') -eq 'DEADLINE_EXCEEDED') 'prazo antes do fim do intervalo: so a primeira amostra'
+        Assert-Eq (Get-AtmProcessCpuTime $s.First.ByPid[[long]100]) 20000000 'tempo de CPU acumulado da primeira amostra disponivel'
+        $seq.N = 0
+        $s = Invoke-AtmProcessCpuSampling -Source ({ $seq.N++; throw (New-Object InvalidOperationException('x')) }.GetNewClosure()) -IntervalMs 1000
+        Assert-True ($seq.N -eq 1 -and $null -eq $s.Second -and $s.Cpu.Coverage.Status -eq 'FAILED') 'primeira amostra falhou: sem espera nem segunda amostra'
+    }
+    Test-Case 'Diagnose' 'Recursos por arvore verificada (P1-B3): soma dos membros; ilegivel, arvore incompleta ou CPU nao amostrada deixam a soma parcial; PID reutilizado nao soma' {
+        $t0 = New-Object DateTime(2026, 1, 1, 8, 0, 0, [DateTimeKind]::Utc)
+        function New-RRow { param($Id, $Parent, $Created, $K, $H = 10)
+            [pscustomobject]@{ ProcessId = $Id; ParentProcessId = $Parent; Name = "p$Id.exe"; CreationDate = $Created; KernelModeTime = $K; UserModeTime = 0; WorkingSetSize = 1000 * $Id; PrivatePageCount = 2000; HandleCount = $H; ReadTransferCount = 1; WriteTransferCount = 2; OtherTransferCount = 3 } }
+        $r1 = @((New-RRow 4 0 $t0 1), (New-RRow 100 4 $t0.AddMinutes(1) 1000), (New-RRow 110 100 $t0.AddMinutes(2) 1000), (New-RRow 120 100 $t0.AddMinutes(2) 1000),
+            (New-RRow 111 110 $t0.AddMinutes(3) 1000), (New-RRow 300 100 $t0.AddSeconds(30) 999999 -H 50000))
+        $r2 = @($r1 | ForEach-Object { $x = $_.PSObject.Copy(); $x.KernelModeTime = $_.KernelModeTime + 2500000; $x })
+        $a = Get-AtmProcessCollection -Source ({ $r1 }.GetNewClosure())
+        $b = Get-AtmProcessCollection -Source ({ $r2 }.GetNewClosure())
+        $cpu = Measure-AtmProcessCpu -First $a -Second $b -LogicalProcessors 1 -ElapsedMs 1000
+        $root = $a.ByPid[[long]100].Key
+        $tree = Get-AtmProcessTree -Collection $a -RootKey $root
+        $res = Get-AtmProcessTreeResources -Collection $a -Tree $tree -Cpu $cpu
+        Assert-True ($res.Complete -and @($res.Reasons).Count -eq 0 -and $res.Members -eq 4) 'arvore completa com todos os contadores'
+        Assert-Eq $res.Counters.WorkingSetBytes.Sum (1000 * (100 + 110 + 120 + 111)) 'working set somado dos membros'
+        Assert-Eq $res.Counters.HandleCount.Sum 40 'handles: o processo que so reutiliza o PID nao soma'
+        Assert-Eq $res.Counters.CpuTime100ns.Sum 4000 'tempo de CPU somado'
+        Assert-Eq $res.Counters.CpuPercent.Sum 100 'porcentagem da arvore: 4 x 25%'
+        Assert-Eq (@($res.Counters.PSObject.Properties.Name) -join ',') ((@($script:AtmTreeCounters) + @('CpuPercent')) -join ',') 'contadores da lista fechada'
+        $res = Get-AtmProcessTreeResources -Collection $a -Tree $tree
+        Assert-True (-not $res.Complete -and (@($res.Reasons) -join ',') -eq 'CPU_NOT_SAMPLED' -and $null -eq $res.Counters.CpuPercent.Sum -and $res.Counters.CpuTime100ns.Complete) 'sem amostra de CPU: so o tempo acumulado'
+        $holeRows = @($r1 | ForEach-Object { $x = $_.PSObject.Copy(); if ($x.ProcessId -eq 120) { $x.HandleCount = $null }; $x })
+        $h = Get-AtmProcessCollection -Source ({ $holeRows }.GetNewClosure())
+        $res = Get-AtmProcessTreeResources -Collection $h -Tree (Get-AtmProcessTree -Collection $h -RootKey $root) -Cpu $cpu
+        Assert-True ($res.Counters.HandleCount.Sum -eq 30 -and $res.Counters.HandleCount.Known -eq 3 -and -not $res.Counters.HandleCount.Complete) 'contador ilegivel: soma parcial (limite inferior), nunca 0'
+        Assert-True (-not $res.Complete -and @($res.Reasons) -ccontains 'COUNTERS_UNREADABLE' -and $res.Counters.WorkingSetBytes.Complete) 'so o contador afetado fica incompleto'
+        $res = Get-AtmProcessTreeResources -Collection $a -Tree (Get-AtmProcessTree -Collection $a -RootKey $root -MaxMembers 2) -Cpu $cpu
+        Assert-True (-not $res.Complete -and @($res.Reasons) -ccontains 'TREE_INCOMPLETE' -and @($res.Counters.PSObject.Properties | Where-Object { $_.Value.Complete }).Count -eq 0) 'arvore incompleta: nenhuma soma completa'
+        $res = Get-AtmProcessTreeResources -Collection $a -Tree (Get-AtmProcessTree -Collection $a -RootKey ('100@' + $t0.Ticks)) -Cpu $cpu
+        Assert-True ($res.Members -eq 0 -and -not $res.Complete -and @($res.Counters.PSObject.Properties | Where-Object { $null -ne $_.Value.Sum }).Count -eq 0) 'raiz nao verificada: somas nulas'
+        $res = Get-AtmProcessTreeResources -Collection $b -Tree $tree -Cpu $cpu
+        Assert-True ($res.Complete -and $res.Counters.CpuTime100ns.Sum -eq 10004000) 'membros procurados pela chave na coleta indicada'
+        # Real, read-only: this process sampled twice; its counters and percentage are read, never invented.
+        $s = Invoke-AtmProcessCpuSampling -IntervalMs 200
+        $mine = Resolve-AtmProcessReference -Collection $s.First -ProcessId $PID -CreationUtc ([Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime()) -ToleranceMs 1000
+        Assert-Eq $mine.Result 'MATCH' 'proprio processo'
+        foreach ($n in @($mine.Process.Resources.PSObject.Properties.Name)) { Assert-True ($null -ne $mine.Process.Resources.$n) "proprio processo: $n lido" }
+        Assert-True ($null -ne $s.Cpu.ByKey[$mine.Process.Key] -and $s.Cpu.ByKey[$mine.Process.Key] -ge 0 -and $s.Cpu.IntervalMs -ge 180) "porcentagem real: $($s.Cpu.ByKey[$mine.Process.Key]) em $([int]$s.Cpu.IntervalMs) ms"
+        $own = Get-AtmProcessTreeResources -Collection $s.First -Tree (Get-AtmProcessTree -Collection $s.First -RootKey $mine.Process.Key) -Cpu $s.Cpu
+        Assert-True ($own.Members -ge 1 -and $own.Counters.WorkingSetBytes.Sum -gt 0) 'arvore do proprio processo'
+        $unread = @($s.First.Processes | Where-Object { $p = $_; @($p.Resources.PSObject.Properties | Where-Object { $null -eq $_.Value }).Count -gt 0 }).Count
+        $script:caseNote = "recursos $($s.First.ResourceCoverage.Status) ($unread com contador ilegivel de $(@($s.First.Processes).Count)), CPU $($s.Cpu.Coverage.Status), admin=$($me.IsAdmin)"
     }
     Test-Case 'Diagnose' 'CLI version mostra identidade, tipo de elevacao e integridade (PRIV-10) nos dois idiomas' {
         $cmd = Join-Path $srcDir 'bin\agent-temp.cmd'
@@ -2472,7 +2602,7 @@ try {
         foreach ($pat in @('SeDebugPrivilege', 'AdjustTokenPrivileges', 'RmShutdown', 'RmRestart', 'TerminateProcess', 'WriteProcessMemory')) { Assert-True (-not $native.Contains($pat)) "Native.cs contem '$pat'" }
         foreach ($f in @('Tui.ps1', 'Report.ps1')) {
             $txt = [IO.File]::ReadAllText((Join-Path $lib $f))
-            foreach ($pat in @('Get-AtmIdentityRaw', 'Get-AtmIdentityState', 'Get-AtmProviderRuntimeHints', 'Get-AtmInventoryCoverage', 'AtmToken]', 'Get-AtmProcessRaw', 'Get-AtmProcessCollection', 'Resolve-AtmProcessReference', 'Get-AtmProcessParentLink', 'Get-AtmProcessTree', 'Compare-AtmProcessCollections', 'Get-AtmSelfProcessKeys')) { Assert-True (-not $txt.Contains($pat)) "$f chama coletor diretamente: $pat" }
+            foreach ($pat in @('Get-AtmIdentityRaw', 'Get-AtmIdentityState', 'Get-AtmProviderRuntimeHints', 'Get-AtmInventoryCoverage', 'AtmToken]', 'Get-AtmProcessRaw', 'Get-AtmProcessCollection', 'Resolve-AtmProcessReference', 'Get-AtmProcessParentLink', 'Get-AtmProcessTree', 'Compare-AtmProcessCollections', 'Get-AtmSelfProcessKeys', 'Measure-AtmProcessCpu', 'Invoke-AtmProcessCpuSampling', 'Get-AtmProcessTreeResources')) { Assert-True (-not $txt.Contains($pat)) "$f chama coletor diretamente: $pat" }
         }
     }
 

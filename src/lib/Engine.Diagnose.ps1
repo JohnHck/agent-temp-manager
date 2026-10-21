@@ -276,11 +276,25 @@ function Get-AtmProviderRuntimeHints {
 }
 
 # ---------------------------------------------------------------------------------------------
-# Process collection and identity (ADR-0003 rule 1, P1-B1). Not yet part of Invoke-AtmDiagnose: trees, resources and
-# the findings that use them come in later increments. Command lines and executable paths are never requested.
+# Process collection and identity (ADR-0003 rule 1, P1-B1) with resource counters (rule 6, P1-B3). Not yet part of
+# Invoke-AtmDiagnose: the findings that use them come in a later increment. Command lines and executable paths are
+# never requested.
 # ---------------------------------------------------------------------------------------------
 
-$script:AtmProcessCimProperties = @('ProcessId', 'ParentProcessId', 'Name', 'CreationDate')
+$script:AtmProcessIdentityProperties = @('ProcessId', 'ParentProcessId', 'Name', 'CreationDate')
+# Win32_Process counter -> Resources member. Times are in 100 ns units; the others are bytes or a count. Values are
+# as Win32_Process reports them (minimal and secure system processes may report 0); an unreadable value is $null.
+$script:AtmProcessCounterMap = [ordered]@{
+    KernelModeTime     = 'KernelTime100ns'
+    UserModeTime       = 'UserTime100ns'
+    WorkingSetSize     = 'WorkingSetBytes'
+    PrivatePageCount   = 'PrivateBytes'
+    HandleCount        = 'HandleCount'
+    ReadTransferCount  = 'ReadTransferBytes'
+    WriteTransferCount = 'WriteTransferBytes'
+    OtherTransferCount = 'OtherTransferBytes'
+}
+$script:AtmProcessCimProperties = @($script:AtmProcessIdentityProperties) + @($script:AtmProcessCounterMap.Keys)
 $script:AtmProcessMaxRecords = 65536
 $script:AtmProcessTimeoutSec = 30
 $script:AtmProcessNameMax = 260
@@ -332,29 +346,48 @@ function ConvertTo-AtmProcessCreationUtc {
     return $dt
 }
 
+function ConvertTo-AtmProcessCounter {
+    # A counter is an integer from 0 to Int64.MaxValue; anything else is $null (never 0).
+    param($Value)
+    if ($null -eq $Value -or $Value -is [bool]) { return $null }
+    $n = 0L
+    if (-not [long]::TryParse([string]$Value, [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$n)) { return $null }
+    return $n
+}
+
 function Get-AtmProcessRaw {
-    # One CIM pass, identity properties only, bounded by the CIM operation timeout.
+    # One CIM pass, identity properties and resource counters only, bounded by the CIM operation timeout.
     param([int]$TimeoutSec)
     @(Get-CimInstance -ClassName Win32_Process -Property $script:AtmProcessCimProperties -OperationTimeoutSec $TimeoutSec -ErrorAction Stop |
-        ForEach-Object { [pscustomobject]@{ ProcessId = $_.ProcessId; ParentProcessId = $_.ParentProcessId; Name = $_.Name; CreationDate = $_.CreationDate } })
+        ForEach-Object {
+            $row = [ordered]@{}
+            foreach ($n in $script:AtmProcessCimProperties) { $row[$n] = $_.$n }
+            [pscustomobject]$row
+        })
 }
 
 function Get-AtmProcessCollection {
     <#
-      Process collector 'process-snapshot'. -Source: test override returning rows with ProcessId, ParentProcessId,
-      Name and CreationDate (or throwing). -MaxRecords: rows beyond it are not read (PARTIAL). -TimeoutSec: CIM
-      operation timeout. -Deadline: a collection not started before it is TIMEOUT.
+      Process collector 'process-snapshot'. -Source: test override returning rows with the properties of
+      AtmProcessCimProperties (or throwing). -MaxRecords: rows beyond it are not read (PARTIAL). -TimeoutSec: CIM
+      operation timeout. -Deadline: a collection not started before it is TIMEOUT. The row cap bounds the rows
+      processed, and the timeout bounds the CIM operation; neither bounds the memory of the answer or the total time
+      of a run.
       Every process gets IdentityStatus VERIFIED (Key = pid@creationTicksUtc), CREATION_TIME_UNKNOWN or DUPLICATE_PID
       (the same PID twice in one snapshot: the enumeration is not atomic). Only VERIFIED processes have a Key.
       An empty answer is FAILED: it never means "no processes".
+      Resource counters have their own coverage record ('process-resources'), so an unreadable counter never changes
+      what the identity coverage says. Timestamp: Stopwatch timestamp taken when the answer was complete (for
+      CPU sampling).
     #>
     param([scriptblock]$Source, [int]$MaxRecords = $script:AtmProcessMaxRecords, [int]$TimeoutSec = $script:AtmProcessTimeoutSec, $Deadline = $null)
     if ($MaxRecords -lt 1) { throw (Get-AtmText 'err.diagProcess' "MaxRecords $MaxRecords") }
     if ($TimeoutSec -lt 1) { throw (Get-AtmText 'err.diagProcess' "TimeoutSec $TimeoutSec") }
     $collector = 'process-snapshot'
-    $empty = @{ Collector = $collector; Failed = $true; CollectedUtc = $null; Processes = @(); ByPid = @{}; Duplicates = @{} }
+    $empty = @{ Collector = $collector; Failed = $true; CollectedUtc = $null; Timestamp = $null; Processes = @(); ByPid = @{}; Duplicates = @{} }
     if ($null -ne $Deadline -and [datetime]::UtcNow -ge $Deadline) {
         $empty.Coverage = New-AtmDeadlineCoverage $collector
+        $empty.ResourceCoverage = New-AtmDeadlineCoverage 'process-resources'
         return [pscustomobject]$empty
     }
     $started = [datetime]::UtcNow
@@ -363,6 +396,7 @@ function Get-AtmProcessCollection {
     $raw = $null; $err = $null
     try { $raw = @(if ($Source) { & $Source } else { Get-AtmProcessRaw -TimeoutSec $TimeoutSec }) } catch { $err = $_.Exception.GetType().Name }
     $sw.Stop()
+    $stamp = [Diagnostics.Stopwatch]::GetTimestamp()
     $rows = @($raw | Where-Object { $null -ne $_ })
     if ($null -ne $err -or $rows.Count -eq 0) {
         # Exception type only, never its message. A failure after the whole budget is a timeout.
@@ -370,6 +404,7 @@ function Get-AtmProcessCollection {
         elseif ($null -ne $err) { $status = 'FAILED'; $reasons = @('PROCESS_SNAPSHOT_FAILED', (ConvertTo-AtmExceptionCode $err)) }
         else { $status = 'FAILED'; $reasons = @('PROCESS_SNAPSHOT_EMPTY') }
         $empty.Coverage = New-AtmCoverage -Collector $collector -Status $status -Reasons $reasons -StartedUtc $started -ElapsedMs $sw.ElapsedMilliseconds -BudgetMs $budgetMs
+        $empty.ResourceCoverage = New-AtmCoverage -Collector 'process-resources' -Status $status -Reasons $reasons -StartedUtc $started -ElapsedMs $sw.ElapsedMilliseconds -BudgetMs $budgetMs
         return [pscustomobject]$empty
     }
     $reasons = New-Object System.Collections.Generic.List[string]
@@ -377,6 +412,7 @@ function Get-AtmProcessCollection {
     $list = New-Object System.Collections.Generic.List[object]
     $countByPid = @{}
     $malformed = 0
+    $countersRead = 0
     foreach ($r in $rows) {
         $id = ConvertTo-AtmProcessId (Get-AtmHintProperty -Item $r -Name 'ProcessId')
         if ($null -eq $id) { $malformed++; continue }
@@ -388,7 +424,15 @@ function Get-AtmProcessCollection {
         $created = ConvertTo-AtmProcessCreationUtc (Get-AtmHintProperty -Item $r -Name 'CreationDate')
         if ($null -eq $created) { $reasons.Add('CREATION_TIME_UNREADABLE') }
         $countByPid[$id] = 1 + $(if ($countByPid.ContainsKey($id)) { $countByPid[$id] } else { 0 })
-        $list.Add([pscustomobject]@{ Pid = $id; ParentPid = $parent; Name = $name; CreationUtc = $created; Key = $null; IdentityStatus = $null })
+        $res = [ordered]@{}
+        $allRead = $true
+        foreach ($cn in $script:AtmProcessCounterMap.Keys) {
+            $v = ConvertTo-AtmProcessCounter (Get-AtmHintProperty -Item $r -Name $cn)
+            if ($null -eq $v) { $allRead = $false }
+            $res[$script:AtmProcessCounterMap[$cn]] = $v
+        }
+        if ($allRead) { $countersRead++ }
+        $list.Add([pscustomobject]@{ Pid = $id; ParentPid = $parent; Name = $name; CreationUtc = $created; Key = $null; IdentityStatus = $null; Resources = [pscustomobject]$res })
     }
     if ($malformed -gt 0) { $reasons.Add('MALFORMED_PROCESS_RECORDS') }
     $byPid = @{}
@@ -406,7 +450,13 @@ function Get-AtmProcessCollection {
     # Win32_Process lists every process with its creation time for any account; elevation would not add rows.
     $help = $(if ($status -eq 'COMPLETE') { 'NO' } else { 'UNKNOWN' })
     $cov = New-AtmCoverage -Collector $collector -Status $status -Reasons $reasons.ToArray() -ElevationWouldHelp $help -Observed $verified -Expected @($raw | Where-Object { $null -ne $_ }).Count -StartedUtc $started -ElapsedMs $sw.ElapsedMilliseconds -BudgetMs $budgetMs
-    [pscustomobject]@{ Collector = $collector; Failed = $false; CollectedUtc = $started; Processes = $list.ToArray(); ByPid = $byPid; Duplicates = $dups; Coverage = $cov }
+    # Counters: complete only when every collected process has all of them and no row was left out.
+    $rr = @()
+    if ($countersRead -lt $list.Count) { $rr += 'RESOURCE_COUNTERS_UNREADABLE' }
+    if ($reasons -ccontains 'PROCESS_LIMIT_EXCEEDED' -or $malformed -gt 0) { $rr += 'PROCESS_ROWS_NOT_READ' }
+    $rst = $(if ($rr.Count -gt 0) { 'PARTIAL' } else { 'COMPLETE' })
+    $resCov = New-AtmCoverage -Collector 'process-resources' -Status $rst -Reasons $rr -ElevationWouldHelp $(if ($rst -eq 'COMPLETE') { 'NO' } else { 'UNKNOWN' }) -Observed $countersRead -Expected $list.Count -StartedUtc $started -ElapsedMs $sw.ElapsedMilliseconds -BudgetMs $budgetMs
+    [pscustomobject]@{ Collector = $collector; Failed = $false; CollectedUtc = $started; Timestamp = $stamp; Processes = $list.ToArray(); ByPid = $byPid; Duplicates = $dups; Coverage = $cov; ResourceCoverage = $resCov }
 }
 
 function Resolve-AtmProcessReference {
@@ -583,6 +633,149 @@ function Get-AtmSelfProcessKeys {
     foreach ($k in (Get-AtmProcessTree -Collection $Collection -RootKey $self.Process.Key).Members) { if (-not $keys.Contains($k)) { $keys.Add($k) } }
     foreach ($k in $roots) { if (-not $keys.Contains($k)) { $keys.Add($k) } }
     [pscustomobject]@{ Keys = $keys.ToArray(); Unverified = $unverified.ToArray() }
+}
+
+# ---------------------------------------------------------------------------------------------
+# Resources: CPU sampling and per-tree sums (ADR-0003 rules 6-8, P1-B3). Not yet part of Invoke-AtmDiagnose.
+# "Disk" here is only process I/O transfer counts; space used by paths is the inventory's (rule 8).
+# ---------------------------------------------------------------------------------------------
+
+$script:AtmCpuSampleDefaultMs = 1000
+$script:AtmCpuSampleMinMs = 100
+$script:AtmCpuSampleMaxMs = 5000
+$script:AtmTreeCounters = @('CpuTime100ns', 'KernelTime100ns', 'UserTime100ns', 'WorkingSetBytes', 'PrivateBytes', 'HandleCount', 'ReadTransferBytes', 'WriteTransferBytes', 'OtherTransferBytes')
+
+function Get-AtmProcessCpuTime {
+    # Kernel + user time in 100 ns units; $null unless both were read.
+    param($Process)
+    if ($null -eq $Process -or $null -eq $Process.Resources) { return $null }
+    $k = $Process.Resources.KernelTime100ns; $u = $Process.Resources.UserTime100ns
+    if ($null -eq $k -or $null -eq $u) { return $null }
+    return ([long]$k + [long]$u)
+}
+
+function Get-AtmCollectedProcess {
+    # The VERIFIED process of a collection with exactly this Key, or $null.
+    param($Collection, [string]$Key)
+    $parsed = ConvertFrom-AtmProcessKey $Key
+    if ($null -eq $Collection -or $Collection.Failed -or $null -eq $parsed -or -not $Collection.ByPid.ContainsKey($parsed.ProcessId)) { return $null }
+    $p = $Collection.ByPid[$parsed.ProcessId]
+    if ($p.Key -ceq $Key) { return $p }
+    return $null
+}
+
+function Measure-AtmProcessCpu {
+    <#
+      CPU percentage of every process present in both collections (same Key):
+      delta(kernel + user) / (interval x logical processors) x 100 (ADR-0003 rule 7). The interval is the time between
+      the two answers (Stopwatch); -ElapsedMs overrides it (tests). A process with an unreadable counter, a counter
+      that went down or an identity that cannot be compared has $null, never 0; a process that exited between the
+      samples has no percentage and is counted in Exited. Coverage record 'process-cpu'.
+    #>
+    param($First, $Second, [int]$LogicalProcessors = [Environment]::ProcessorCount, $ElapsedMs = $null)
+    if ($LogicalProcessors -lt 1) { throw (Get-AtmText 'err.diagProcess' "LogicalProcessors $LogicalProcessors") }
+    $collector = 'process-cpu'
+    $byKey = @{}
+    $out = @{ IntervalMs = $null; LogicalProcessors = $LogicalProcessors; ByKey = $byKey; Exited = 0 }
+    if ($null -eq $First -or $null -eq $Second -or $First.Failed -or $Second.Failed) {
+        $timedOut = @(@($First, $Second) | Where-Object { $null -ne $_ -and $_.Coverage.Status -ceq 'TIMEOUT' }).Count -gt 0
+        $out.Coverage = $(if ($timedOut) { New-AtmCoverage -Collector $collector -Status 'TIMEOUT' -Reasons @('CPU_SAMPLE_TIMEOUT') } else { New-AtmCoverage -Collector $collector -Status 'FAILED' -Reasons @('CPU_SAMPLE_UNAVAILABLE') })
+        return [pscustomobject]$out
+    }
+    $interval = $null
+    if ($null -ne $ElapsedMs) { $interval = [double]$ElapsedMs }
+    elseif ($null -ne $First.Timestamp -and $null -ne $Second.Timestamp) { $interval = ([double]($Second.Timestamp - $First.Timestamp)) * 1000 / [Diagnostics.Stopwatch]::Frequency }
+    if ($null -eq $interval -or $interval -le 0) {
+        $out.Coverage = New-AtmCoverage -Collector $collector -Status 'FAILED' -Reasons @('CPU_INTERVAL_INVALID')
+        return [pscustomobject]$out
+    }
+    $out.IntervalMs = $interval
+    $capacity = $interval * [TimeSpan]::TicksPerMillisecond * $LogicalProcessors
+    $reasons = New-Object System.Collections.Generic.List[string]
+    if ($First.Coverage.Status -cne 'COMPLETE' -or $Second.Coverage.Status -cne 'COMPLETE') { $reasons.Add('CPU_SAMPLE_INCOMPLETE') }
+    $observed = 0; $expected = 0
+    $states = Compare-AtmProcessCollections -First $First -Second $Second
+    foreach ($key in $states.Keys) {
+        $byKey[$key] = $null
+        if ($states[$key] -ceq 'EXITED_DURING_RUN') { $out.Exited++; continue }
+        $expected++
+        if ($states[$key] -cne 'PRESENT') { $reasons.Add('CPU_SAMPLE_IDENTITY_UNVERIFIED'); continue }
+        $c1 = Get-AtmProcessCpuTime (Get-AtmCollectedProcess -Collection $First -Key $key)
+        $c2 = Get-AtmProcessCpuTime (Get-AtmCollectedProcess -Collection $Second -Key $key)
+        if ($null -eq $c1 -or $null -eq $c2) { $reasons.Add('CPU_COUNTERS_UNREADABLE'); continue }
+        if ($c2 -lt $c1) { $reasons.Add('CPU_COUNTER_DECREASED'); continue }
+        $byKey[$key] = [double]($c2 - $c1) * 100 / $capacity
+        $observed++
+    }
+    $status = $(if ($reasons.Count -gt 0) { 'PARTIAL' } else { 'COMPLETE' })
+    $out.Coverage = New-AtmCoverage -Collector $collector -Status $status -Reasons $reasons.ToArray() -ElevationWouldHelp $(if ($status -eq 'COMPLETE') { 'NO' } else { 'UNKNOWN' }) -Observed $observed -Expected $expected -ElapsedMs ([long]$interval)
+    return [pscustomobject]$out
+}
+
+function Invoke-AtmProcessCpuSampling {
+    <#
+      Two collections -IntervalMs apart (100 to 5000 ms, default 1000) and their CPU percentages. When the interval
+      would end at or after -Deadline, only the first collection is taken: its cumulative CPU times stand and the CPU
+      record is TIMEOUT. Waiting is the only cost: nothing is started or changed.
+    #>
+    param([scriptblock]$Source, [int]$IntervalMs = $script:AtmCpuSampleDefaultMs, $Deadline = $null, [int]$LogicalProcessors = [Environment]::ProcessorCount, [int]$MaxRecords = $script:AtmProcessMaxRecords, [int]$TimeoutSec = $script:AtmProcessTimeoutSec)
+    if ($IntervalMs -lt $script:AtmCpuSampleMinMs -or $IntervalMs -gt $script:AtmCpuSampleMaxMs) { throw (Get-AtmText 'err.diagProcess' "IntervalMs $IntervalMs") }
+    if ($LogicalProcessors -lt 1) { throw (Get-AtmText 'err.diagProcess' "LogicalProcessors $LogicalProcessors") }
+    $first = Get-AtmProcessCollection -Source $Source -MaxRecords $MaxRecords -TimeoutSec $TimeoutSec -Deadline $Deadline
+    if ($null -ne $Deadline -and [datetime]::UtcNow.AddMilliseconds($IntervalMs) -ge $Deadline) {
+        $cpu = [pscustomobject]@{ IntervalMs = $null; LogicalProcessors = $LogicalProcessors; ByKey = @{}; Exited = 0; Coverage = (New-AtmDeadlineCoverage 'process-cpu') }
+        return [pscustomobject]@{ First = $first; Second = $null; Cpu = $cpu }
+    }
+    $second = $null
+    if (-not $first.Failed) {
+        Start-Sleep -Milliseconds $IntervalMs
+        $second = Get-AtmProcessCollection -Source $Source -MaxRecords $MaxRecords -TimeoutSec $TimeoutSec -Deadline $Deadline
+    }
+    [pscustomobject]@{ First = $first; Second = $second; Cpu = (Measure-AtmProcessCpu -First $first -Second $second -LogicalProcessors $LogicalProcessors) }
+}
+
+function Get-AtmProcessTreeResources {
+    <#
+      Sums over the members of one verified tree (Get-AtmProcessTree) for each counter of AtmTreeCounters and, with
+      -Cpu (Measure-AtmProcessCpu), CpuPercent. For each: Sum of the values that were read ($null when none was),
+      Known (members read) and Complete. Complete only when the tree is complete and every member was read; otherwise
+      Sum is a lower bound and Reasons says why. Unread values are never counted as 0.
+    #>
+    param($Collection, $Tree, $Cpu = $null)
+    $reasons = New-Object System.Collections.Generic.List[string]
+    $members = New-Object System.Collections.Generic.List[object]
+    if ($null -eq $Tree -or -not $Tree.Complete) { $reasons.Add('TREE_INCOMPLETE') }
+    foreach ($k in @(if ($null -ne $Tree) { $Tree.Members })) {
+        $p = Get-AtmCollectedProcess -Collection $Collection -Key $k
+        if ($null -eq $p) { $reasons.Add('TREE_MEMBER_NOT_COLLECTED') } else { $members.Add($p) }
+    }
+    $names = @($script:AtmTreeCounters) + @('CpuPercent')
+    $counters = [ordered]@{}
+    foreach ($n in $names) {
+        $sum = $null; $known = 0
+        foreach ($p in $members) {
+            $v = $null
+            if ($n -ceq 'CpuTime100ns') { $v = Get-AtmProcessCpuTime $p }
+            elseif ($n -ceq 'CpuPercent') { if ($null -ne $Cpu -and $Cpu.ByKey.ContainsKey($p.Key)) { $v = $Cpu.ByKey[$p.Key] } }
+            elseif ($null -ne $p.Resources) { $v = $p.Resources.$n }
+            if ($null -eq $v) { continue }
+            $known++
+            $sum = $(if ($n -ceq 'CpuPercent') { [double]$(if ($null -eq $sum) { 0 } else { $sum }) + [double]$v } else { [long]$(if ($null -eq $sum) { 0 } else { $sum }) + [long]$v })
+        }
+        $complete = ($known -eq $members.Count -and $members.Count -gt 0 -and $reasons.Count -eq 0)
+        $counters[$n] = [pscustomobject]@{ Sum = $sum; Known = $known; Complete = $complete }
+    }
+    if ($null -eq $Cpu) { $reasons.Add('CPU_NOT_SAMPLED') }
+    elseif ($Cpu.Coverage.Status -cne 'COMPLETE') { $reasons.Add('CPU_SAMPLE_INCOMPLETE') }
+    if (@($script:AtmTreeCounters | Where-Object { $counters[$_].Known -lt $members.Count }).Count -gt 0) { $reasons.Add('COUNTERS_UNREADABLE') }
+    $all = @($counters.Values | Where-Object { -not $_.Complete }).Count -eq 0
+    [pscustomobject]@{
+        RootKey  = $(if ($null -ne $Tree) { $Tree.RootKey } else { $null })
+        Members  = $members.Count
+        Counters = [pscustomobject]$counters
+        Complete = ($all -and $reasons.Count -eq 0)
+        Reasons  = @($reasons | Select-Object -Unique)
+    }
 }
 
 # ---------------------------------------------------------------------------------------------
