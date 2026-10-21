@@ -301,6 +301,9 @@ $script:AtmProcessNameMax = 260
 # Same-source references compare exact ticks; another source (a session registry, Process.StartTime) states its own
 # precision with -ToleranceMs, never more than this.
 $script:AtmProcessToleranceMaxMs = 2000
+# Resolution of Win32_Process.CreationDate (DMTF, microseconds): 10 ticks. Verified against Process.StartTime by the
+# real-process test of the suite (truncation, never rounding).
+$script:AtmCimCreationResolutionTicks = 10
 $script:AtmProcessIdentityStatuses = @('VERIFIED', 'CREATION_TIME_UNKNOWN', 'DUPLICATE_PID')
 # Results of matching a reference; not finding states. NOT_FOUND only against a COMPLETE collection.
 $script:AtmProcessReferenceResults = @('MATCH', 'PID_REUSED', 'IDENTITY_UNVERIFIED', 'NOT_FOUND')
@@ -465,10 +468,15 @@ function Resolve-AtmProcessReference {
       (AtmProcessReferenceResults) and the collected Process, if any. A PID alone never identifies a process:
       without both creation times the result is IDENTITY_UNVERIFIED. NOT_FOUND only when the collection is COMPLETE;
       otherwise an absent PID is IDENTITY_UNVERIFIED (it may be among the rows that were not read).
+      Default: exact ticks (same source). -CimPrecision: the reference has 100 ns precision (Process.StartTime) and
+      is truncated to the CIM resolution (1 us) before an exact comparison; a collected time that is not on that
+      resolution is IDENTITY_UNVERIFIED. -ToleranceMs: another source with its own precision (a session registry);
+      Approximate is then $true for a MATCH that differs, and such a match never confirms SELF.
     #>
-    param($Collection, $ProcessId, $CreationUtc, [int]$ToleranceMs = 0)
+    param($Collection, $ProcessId, $CreationUtc, [int]$ToleranceMs = 0, [switch]$CimPrecision)
     if ($ToleranceMs -lt 0 -or $ToleranceMs -gt $script:AtmProcessToleranceMaxMs) { throw (Get-AtmText 'err.diagProcess' "ToleranceMs $ToleranceMs") }
-    $result = 'IDENTITY_UNVERIFIED'; $proc = $null
+    if ($CimPrecision -and $ToleranceMs -ne 0) { throw (Get-AtmText 'err.diagProcess' 'CimPrecision with ToleranceMs') }
+    $result = 'IDENTITY_UNVERIFIED'; $proc = $null; $approx = $false
     $id = ConvertTo-AtmProcessId $ProcessId
     $created = ConvertTo-AtmProcessCreationUtc $CreationUtc
     if ($null -ne $id -and $null -ne $Collection -and -not $Collection.Failed) {
@@ -476,13 +484,19 @@ function Resolve-AtmProcessReference {
             if ($Collection.ByPid.ContainsKey($id)) {
                 $proc = $Collection.ByPid[$id]
                 if ($null -ne $created -and $proc.IdentityStatus -eq 'VERIFIED') {
-                    $diff = [math]::Abs(($created - $proc.CreationUtc).Ticks)
-                    $result = $(if ($diff -le [long]$ToleranceMs * [TimeSpan]::TicksPerMillisecond) { 'MATCH' } else { 'PID_REUSED' })
+                    $res = $script:AtmCimCreationResolutionTicks
+                    if ($CimPrecision -and ($proc.CreationUtc.Ticks % $res) -ne 0) { $result = 'IDENTITY_UNVERIFIED' }
+                    elseif ($CimPrecision) { $result = $(if (($created.Ticks - ($created.Ticks % $res)) -eq $proc.CreationUtc.Ticks) { 'MATCH' } else { 'PID_REUSED' }) }
+                    else {
+                        $diff = [math]::Abs(($created - $proc.CreationUtc).Ticks)
+                        $result = $(if ($diff -le [long]$ToleranceMs * [TimeSpan]::TicksPerMillisecond) { 'MATCH' } else { 'PID_REUSED' })
+                        $approx = ($result -ceq 'MATCH' -and $diff -ne 0)
+                    }
                 }
             } elseif ($Collection.Coverage.Status -ceq 'COMPLETE') { $result = 'NOT_FOUND' }
         }
     }
-    [pscustomobject]@{ Result = $result; Process = $proc }
+    [pscustomobject]@{ Result = $result; Process = $proc; Approximate = $approx }
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -594,18 +608,20 @@ function Get-AtmSelfProcessKeys {
     <#
       Keys to mark SELF (ADR-0003 rule 4): this process, every verified descendant of it (children the engine
       started) and the launcher references the caller passes (Pid and CreationUtc of the V0.1 self chain) that are
-      verified ancestors of it; a launcher's other children are not ours. Self and launchers come from other sources
-      than CIM, so they are matched with a bounded tolerance. A reference that cannot be verified is listed in Unverified and is NOT excluded: an
-      unverifiable process is never hidden from the diagnostics.
+      verified ancestors of it; a launcher's other children are not ours. No tolerance is used (R-B1): this process is
+      matched with -CimPrecision (its 100 ns start time truncated to the CIM resolution, then compared exactly) and
+      launchers, which come from the V0.1 CIM snapshot, the same way (already on that resolution). A reference that
+      cannot be verified is listed in Unverified and is NOT excluded: an unverifiable process is never hidden from the
+      diagnostics.
     #>
-    param($Collection, $SelfPid = $PID, $SelfCreationUtc = $null, $LauncherReferences = @(), [int]$ToleranceMs = 1000)
+    param($Collection, $SelfPid = $PID, $SelfCreationUtc = $null, $LauncherReferences = @())
     if ($null -eq $SelfCreationUtc) {
         # Unreadable start time: the reference stays unverified and nothing is excluded.
         try { $SelfCreationUtc = [Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime() } catch { $SelfCreationUtc = $null }
     }
     $keys = New-Object System.Collections.Generic.List[string]
     $unverified = New-Object System.Collections.Generic.List[object]
-    $self = Resolve-AtmProcessReference -Collection $Collection -ProcessId $SelfPid -CreationUtc $SelfCreationUtc -ToleranceMs $ToleranceMs
+    $self = Resolve-AtmProcessReference -Collection $Collection -ProcessId $SelfPid -CreationUtc $SelfCreationUtc -CimPrecision
     if ($self.Result -cne 'MATCH') {
         $unverified.Add([pscustomobject]@{ Pid = $SelfPid; Result = $self.Result })
         return [pscustomobject]@{ Keys = @(); Unverified = $unverified.ToArray() }
@@ -624,7 +640,7 @@ function Get-AtmSelfProcessKeys {
     $roots.Add($self.Process.Key)
     foreach ($ref in @($LauncherReferences | Where-Object { $null -ne $_ })) {
         $rp = Get-AtmHintProperty -Item $ref -Name 'Pid'
-        $r = Resolve-AtmProcessReference -Collection $Collection -ProcessId $rp -CreationUtc (Get-AtmHintProperty -Item $ref -Name 'CreationUtc') -ToleranceMs $ToleranceMs
+        $r = Resolve-AtmProcessReference -Collection $Collection -ProcessId $rp -CreationUtc (Get-AtmHintProperty -Item $ref -Name 'CreationUtc') -CimPrecision
         if ($r.Result -ceq 'MATCH' -and $ancestors.ContainsKey($r.Process.Key)) { $roots.Add($r.Process.Key) }
         elseif ($r.Result -ceq 'MATCH' -and $r.Process.Key -ceq $self.Process.Key) { continue }
         else { $unverified.Add([pscustomobject]@{ Pid = $rp; Result = $(if ($r.Result -ceq 'MATCH') { 'NOT_AN_ANCESTOR' } else { $r.Result }) }) }

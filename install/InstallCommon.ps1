@@ -5,7 +5,7 @@ Set-StrictMode -Version 2.0
 $atmI18n = Join-Path (Split-Path -Parent $PSScriptRoot) 'src\lib\I18n.ps1'
 if (Test-Path -LiteralPath $atmI18n -PathType Leaf) { . $atmI18n } else { function Get-AtmText { return "[$($args[0])]" } }
 
-$script:AtmRequiredFiles = @('agent-temp.ps1', 'bin\agent-temp.cmd', 'lib\Engine.Audit.ps1', 'lib\I18n.ps1', 'lib\Engine.Clean.ps1', 'lib\Report.ps1', 'lib\Tui.ps1', 'lib\Native.cs', 'providers\ClaudeCode.ps1', 'config\projects.json')
+$script:AtmRequiredFiles = @('agent-temp.ps1', 'bin\agent-temp.cmd', 'lib\Engine.Audit.ps1', 'lib\I18n.ps1', 'lib\Engine.Clean.ps1', 'lib\Engine.Diagnose.ps1', 'lib\Report.ps1', 'lib\Tui.ps1', 'lib\Native.cs', 'providers\ClaudeCode.ps1', 'config\projects.json')
 # Principals that must never hold write-type rights on the install directory.
 $script:AtmUntrustedSids = @('S-1-1-0', 'S-1-5-11', 'S-1-5-32-545', 'S-1-5-4', 'S-1-5-2', 'S-1-5-7')
 

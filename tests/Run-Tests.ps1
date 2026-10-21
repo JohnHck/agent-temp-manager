@@ -1467,6 +1467,62 @@ try {
         [IO.File]::AppendAllText((Join-Path $inst 'lib\AgentTempManager.Native.dll'), 'x')
         $out = & cmd.exe /c "`"$cmd`" version" 2>&1; Assert-Eq $LASTEXITCODE 5 'DLL adulterada: execucao recusada na verificacao de integridade (exit 5)'
     }
+    Test-Case 'Instalacao' 'Arquivos obrigatorios (R-B3): Engine.Diagnose.ps1 exigido na origem; ausente recusado antes de copiar; adulterado ou removido detectado pelo manifesto' {
+        Assert-True ($script:AtmRequiredFiles -contains 'lib\Engine.Diagnose.ps1') 'motor de diagnostico na lista de obrigatorios'
+        foreach ($rel in $script:AtmRequiredFiles) { Assert-True (Test-Path -LiteralPath (Join-Path $srcDir $rel) -PathType Leaf) "obrigatorio presente na origem: $rel" }
+        # Every library the launcher loads is required (a missing one would only fail at run time).
+        $launcher = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        $loaded = @([regex]::Matches($launcher, "Join-Path \`$here '(lib\\[^']+\.ps1)'") | ForEach-Object { $_.Groups[1].Value })
+        Assert-True ($loaded.Count -ge 5 -and $loaded -contains 'lib\Engine.Diagnose.ps1') "bibliotecas carregadas pelo lancador: $($loaded -join ', ')"
+        foreach ($rel in $loaded) { Assert-True ($script:AtmRequiredFiles -contains $rel) "carregado pelo lancador e obrigatorio: $rel" }
+        # Source without the file: refused at the first step, nothing created.
+        $srcM = Join-Path $sandbox 'src-sem-diagnose'
+        [void][IO.Directory]::CreateDirectory($srcM)
+        Copy-AtmTree -From $srcDir -To $srcM
+        [IO.File]::Delete((Join-Path $srcM 'lib\Engine.Diagnose.ps1'))
+        $instM = Join-Path $sandbox 'PF6\AgentTempManager'
+        $msg = $null; try { $null = Install-AtmProduct -SourceDir $srcM -InstallDir $instM -TrustSid $me.Sid -SkipPath -SourceWithoutManifest } catch { $msg = $_.Exception.Message }
+        Assert-True ($null -ne $msg -and $msg -match 'Engine\.Diagnose\.ps1') "origem sem o motor de diagnostico recusada: $msg"
+        Assert-True (-not (Test-Path -LiteralPath (Split-Path -Parent $instM))) 'nada criado no destino'
+        # Release source (with manifest): missing or altered file refused.
+        $rel = Join-Path $sandbox 'release-diag'
+        [void][IO.Directory]::CreateDirectory($rel)
+        Copy-AtmTree -From $srcDir -To $rel
+        Write-AtmManifest -Root $rel -Version (Get-AtmSourceVersion -SourceDir $rel)
+        $m = Get-Content -LiteralPath (Join-Path $rel 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-True (@($m.files | Where-Object { $_.path -eq 'lib\Engine.Diagnose.ps1' -and $_.sha256 -match '^[0-9A-F]{64}$' }).Count -eq 1) 'manifesto lista o motor de diagnostico com SHA-256'
+        Test-AtmSourceIntegrity -SourceDir $rel
+        $diag = Join-Path $rel 'lib\Engine.Diagnose.ps1'
+        $orig = [IO.File]::ReadAllBytes($diag)
+        Add-Content -LiteralPath $diag -Value '#x'
+        $threw = $false; try { Test-AtmSourceIntegrity -SourceDir $rel } catch { $threw = ($_.Exception.Message -match 'hash divergente') }
+        Assert-True $threw 'motor de diagnostico alterado na origem recusado'
+        [IO.File]::Delete($diag)
+        $threw = $false; try { Test-AtmSourceIntegrity -SourceDir $rel } catch { $threw = $true }
+        Assert-True $threw 'motor de diagnostico ausente da origem com manifesto recusado'
+        [IO.File]::WriteAllBytes($diag, $orig)
+        Test-AtmSourceIntegrity -SourceDir $rel
+        # Installed copy: verify and every command refuse an altered or removed file.
+        $inst = Join-Path $sandbox 'PF7\AgentTempManager'
+        [void][IO.Directory]::CreateDirectory($inst)
+        Copy-AtmTree -From $srcDir -To $inst
+        New-AtmNativeAssembly -Root $inst
+        Write-AtmManifest -Root $inst -Version (Get-AtmSourceVersion -SourceDir $srcDir)
+        $cmd = Join-Path $inst 'bin\agent-temp.cmd'
+        $out = & cmd.exe /c "`"$cmd`" verify" 2>&1; Assert-Eq $LASTEXITCODE 0 "verify integro: $out"
+        $idiag = Join-Path $inst 'lib\Engine.Diagnose.ps1'
+        $iorig = [IO.File]::ReadAllBytes($idiag)
+        Add-Content -LiteralPath $idiag -Value '# adulterado'
+        $out = & cmd.exe /c "`"$cmd`" verify" 2>&1; Assert-Eq $LASTEXITCODE 5 'motor de diagnostico adulterado: verify (exit 5)'
+        $out = & cmd.exe /c "`"$cmd`" diagnose -DeadlineSeconds 0" 2>&1; Assert-Eq $LASTEXITCODE 5 'motor de diagnostico adulterado: execucao recusada (exit 5)'
+        [IO.File]::Delete($idiag)
+        # verify itself loads the libraries before checking (V0.1 launcher), so a removed library is checked here
+        # through the startup integrity check of every other command.
+        $out = & cmd.exe /c "`"$cmd`" version" 2>&1; Assert-Eq $LASTEXITCODE 5 'motor de diagnostico removido: execucao recusada (exit 5)'
+        Assert-True (($out -join ' ') -match 'ausente: lib\\engine\.diagnose\.ps1') "motivo: ausente ($out)"
+        [IO.File]::WriteAllBytes($idiag, $iorig)
+        $out = & cmd.exe /c "`"$cmd`" verify" 2>&1; Assert-Eq $LASTEXITCODE 0 "restaurado: verify integro ($out)"
+    }
     Test-Case 'Instalacao' 'Auditoria de ACL: escrita por Users/Everyone e detectada; Program Files padrao e aceito' {
         $d = Join-Path $sandbox 'aclcheck'; [void][IO.Directory]::CreateDirectory($d); [IO.File]::WriteAllText((Join-Path $d 'x.ps1'), '#')
         # The scenario needs an ordinary-user write entry; in an elevated session the sandbox only grants SYSTEM and
@@ -2128,8 +2184,10 @@ try {
         $c = Get-AtmProcessCollection -Source ({ $rows }.GetNewClosure())
         Assert-Eq $c.Coverage.Status 'COMPLETE' 'coleta do proprio diagnostico'
         $k = { param($id) $c.ByPid[[long]$id].Key }
-        $launcher =[pscustomobject]@{ Pid = 100; CreationUtc = $t0.AddMinutes(1).AddTicks(3000) }
-        $s = Get-AtmSelfProcessKeys -Collection $c -SelfPid 150 -SelfCreationUtc $selfT.AddTicks(4000) -LauncherReferences @($launcher)
+        # Launchers come from the V0.1 CIM snapshot (same resolution); this process from Process.StartTime (100 ns,
+        # truncated to 1 us before the exact comparison).
+        $launcher =[pscustomobject]@{ Pid = 100; CreationUtc = $t0.AddMinutes(1) }
+        $s = Get-AtmSelfProcessKeys -Collection $c -SelfPid 150 -SelfCreationUtc $selfT.AddTicks(7) -LauncherReferences @($launcher)
         Assert-Eq (@($s.Keys | Sort-Object) -join ',') (@(100, 150, 151, 152 | ForEach-Object { & $k $_ } | Sort-Object) -join ',') 'proprio processo, filhos verificados e lancador verificado'
         Assert-Eq @($s.Unverified).Count 0 'nada pendente'
         Assert-True ($s.Keys -cnotcontains (& $k 120) -and $s.Keys -cnotcontains (& $k 4)) 'outros filhos do lancador e o sistema nao sao do diagnostico'
@@ -2153,13 +2211,89 @@ try {
             $threw = $false; try { $null = New-AtmFinding -Kind 'Process' -Key 'k' -State $st -Coverage @($c.Coverage) } catch { $threw = $true }
             Assert-True $threw "$st nao e estado de achado (T-1)"
         }
-        # Real, read-only: this process is identified and marked SELF; two collections agree on it.
+        # Real, read-only: this process is marked SELF only where the CIM resolution is proven on this machine; two
+        # collections agree on it.
         $r1 = Get-AtmProcessCollection
         $s = Get-AtmSelfProcessKeys -Collection $r1
+        $st = [Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime().Ticks
         $mine = Resolve-AtmProcessReference -Collection $r1 -ProcessId $PID -CreationUtc ([Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime()) -ToleranceMs 1000
-        Assert-True ($mine.Result -eq 'MATCH' -and $s.Keys -ccontains $mine.Process.Key -and @($s.Unverified).Count -eq 0) 'proprio processo real marcado como SELF'
+        Assert-Eq $mine.Result 'MATCH' 'proprio processo coletado'
+        $proven = ($mine.Process.CreationUtc.Ticks % 10 -eq 0 -and $mine.Process.CreationUtc.Ticks -eq ($st - ($st % 10)))
+        if ($proven) { Assert-True ($s.Keys -ccontains $mine.Process.Key -and @($s.Unverified).Count -eq 0) 'proprio processo real marcado como SELF' }
+        else { Assert-True (@($s.Keys).Count -eq 0 -and @($s.Unverified).Count -eq 1) 'precisao nao comprovada: nada marcado como SELF' }
         $r2 = Get-AtmProcessCollection
         Assert-Eq (Compare-AtmProcessCollections -First $r1 -Second $r2)[$mine.Process.Key] 'PRESENT' 'proprio processo presente nas duas coletas reais'
+    }
+    Test-Case 'Diagnose' 'SELF sem tolerancia (R-B1): igual na precisao do CIM; 1 us de diferenca, PID reutilizado na janela antiga ou referencia aproximada nunca marcam SELF; resolucao incompativel nao verificada' {
+        $t0 = New-Object DateTime(2026, 1, 1, 8, 0, 0, [DateTimeKind]::Utc)
+        function New-Row { param($Id, $Parent, $Created) [pscustomobject]@{ ProcessId = $Id; ParentProcessId = $Parent; Name = "p$Id.exe"; CreationDate = $Created } }
+        $selfT = $t0.AddMinutes(3).AddTicks(1234560)   # on the CIM resolution (1 us = 10 ticks)
+        $launchT = $t0.AddMinutes(1)
+        $rows = @((New-Row 4 0 $t0), (New-Row 100 4 $launchT), (New-Row 120 100 $t0.AddMinutes(2)), (New-Row 150 100 $selfT), (New-Row 151 150 $t0.AddMinutes(4)))
+        $c = Get-AtmProcessCollection -Source ({ $rows }.GetNewClosure())
+        Assert-Eq $c.Coverage.Status 'COMPLETE' 'coleta completa'
+        $k = { param($id) $c.ByPid[[long]$id].Key }
+        $launcher = [pscustomobject]@{ Pid = 100; CreationUtc = $launchT }
+        $selfKeys = (@(100, 150, 151 | ForEach-Object { & $k $_ } | Sort-Object) -join ',')
+        # Same process: the 100 ns time truncates to the collected microsecond.
+        foreach ($ticks in @(0, 1, 9)) {
+            $s = Get-AtmSelfProcessKeys -Collection $c -SelfPid 150 -SelfCreationUtc $selfT.AddTicks($ticks) -LauncherReferences @($launcher)
+            Assert-Eq (@($s.Keys | Sort-Object) -join ',') $selfKeys "mesmo processo (+$ticks x 100 ns): SELF, filhos e lancador"
+            Assert-True ($s.Keys -cnotcontains (& $k 120) -and $s.Keys -cnotcontains (& $k 4) -and @($s.Unverified).Count -eq 0) "irmao do lancador e sistema nao excluidos (+$ticks)"
+        }
+        # A different microsecond, either side, is another process.
+        foreach ($ticks in @(10, -1, -10)) {
+            $s = Get-AtmSelfProcessKeys -Collection $c -SelfPid 150 -SelfCreationUtc $selfT.AddTicks($ticks) -LauncherReferences @($launcher)
+            Assert-True (@($s.Keys).Count -eq 0 -and (@($s.Unverified | ForEach-Object { $_.Result }) -join ',') -eq 'PID_REUSED') "horario diferente em 1 us ($ticks x 100 ns): nada marcado como SELF"
+        }
+        # PID reused inside the former 1 s window: the old tolerance would have matched, SELF does not.
+        foreach ($ms in @(1, 500, 999)) {
+            $old = Resolve-AtmProcessReference -Collection $c -ProcessId 150 -CreationUtc $selfT.AddMilliseconds($ms) -ToleranceMs 1000
+            Assert-True ($old.Result -eq 'MATCH' -and $old.Approximate) "tolerancia de 1 s casaria ($ms ms) e e marcada como aproximada"
+            $s = Get-AtmSelfProcessKeys -Collection $c -SelfPid 150 -SelfCreationUtc $selfT.AddMilliseconds($ms) -LauncherReferences @($launcher)
+            Assert-True (@($s.Keys).Count -eq 0) "PID reutilizado $ms ms depois: o outro processo nao e escondido como SELF"
+        }
+        # External reference inside the 2 s tolerance: never enough for SELF.
+        $ext = [pscustomobject]@{ Pid = 100; CreationUtc = $launchT.AddMilliseconds(1500) }
+        $r = Resolve-AtmProcessReference -Collection $c -ProcessId 100 -CreationUtc $ext.CreationUtc -ToleranceMs 2000
+        Assert-True ($r.Result -eq 'MATCH' -and $r.Approximate) 'referencia externa casa so de forma aproximada'
+        $s = Get-AtmSelfProcessKeys -Collection $c -SelfPid 150 -SelfCreationUtc $selfT -LauncherReferences @($ext)
+        Assert-True ($s.Keys -cnotcontains (& $k 100) -and (@($s.Unverified | ForEach-Object { $_.Result }) -join ',') -eq 'PID_REUSED') 'lancador aproximado nao e excluido'
+        Assert-True (-not (Get-Command Get-AtmSelfProcessKeys).Parameters.ContainsKey('ToleranceMs')) 'SELF nao aceita tolerancia'
+        Assert-True (-not ${function:Get-AtmSelfProcessKeys}.ToString().Contains('-ToleranceMs')) 'SELF nunca chama a comparacao com tolerancia'
+        $threw = $false; try { $null = Resolve-AtmProcessReference -Collection $c -ProcessId 150 -CreationUtc $selfT -ToleranceMs 5 -CimPrecision } catch { $threw = $true }
+        Assert-True $threw 'precisao do CIM e tolerancia sao exclusivas'
+        $exact = Resolve-AtmProcessReference -Collection $c -ProcessId 150 -CreationUtc $selfT
+        Assert-True ($exact.Result -eq 'MATCH' -and -not $exact.Approximate) 'mesma fonte: exata, nao aproximada'
+        # Missing, invalid or incompatible time: not verified, nothing excluded.
+        foreach ($bad in @('garbage', '', [datetime]::UtcNow.AddDays(5), '1999-01-01T00:00:00Z')) {
+            $s = Get-AtmSelfProcessKeys -Collection $c -SelfPid 150 -SelfCreationUtc $bad -LauncherReferences @($launcher)
+            Assert-True (@($s.Keys).Count -eq 0 -and (@($s.Unverified | ForEach-Object { $_.Result }) -join ',') -eq 'IDENTITY_UNVERIFIED') "horario '$bad': nao verificado"
+        }
+        $offRows = @((New-Row 4 0 $t0), (New-Row 100 4 $launchT.AddTicks(3)), (New-Row 150 100 $selfT.AddTicks(3)), (New-Row 151 150 $t0.AddMinutes(4)))
+        $off = Get-AtmProcessCollection -Source ({ $offRows }.GetNewClosure())
+        Assert-Eq $off.Coverage.Status 'COMPLETE' 'coleta lida'
+        $s = Get-AtmSelfProcessKeys -Collection $off -SelfPid 150 -SelfCreationUtc $selfT.AddTicks(3)
+        Assert-True (@($s.Keys).Count -eq 0 -and (@($s.Unverified | ForEach-Object { $_.Result }) -join ',') -eq 'IDENTITY_UNVERIFIED') 'horario coletado fora da resolucao do CIM: nao verificado, mesmo igual'
+        $s = Get-AtmSelfProcessKeys -Collection $c -SelfPid 150 -SelfCreationUtc $selfT -LauncherReferences @([pscustomobject]@{ Pid = 100; CreationUtc = $launchT })
+        Assert-Eq @($s.Unverified).Count 0 'controle: lancador exato verificado'
+        $s2 = Get-AtmSelfProcessKeys -Collection $off -SelfPid 151 -SelfCreationUtc $t0.AddMinutes(4) -LauncherReferences @([pscustomobject]@{ Pid = 100; CreationUtc = $launchT.AddTicks(3) })
+        Assert-True ($s2.Keys -cnotcontains $off.ByPid[[long]100].Key -and @($s2.Unverified | ForEach-Object { $_.Result }) -ccontains 'IDENTITY_UNVERIFIED') 'lancador fora da resolucao: nao verificado'
+        # Real, read-only evidence of the CIM resolution on this machine; recorded, not assumed.
+        # Processes of this session only (start times of other accounts' processes are not readable without elevation).
+        $col = Get-AtmProcessCollection
+        $session = [Diagnostics.Process]::GetCurrentProcess().SessionId
+        $cmp = 0; $trunc = 0; $other = 0
+        foreach ($pr in @([Diagnostics.Process]::GetProcesses() | Where-Object { $_.SessionId -eq $session } | Select-Object -First 300)) {
+            $stp = $null
+            try { $stp = $pr.StartTime.ToUniversalTime().Ticks } catch { continue }
+            $p = $col.ByPid[[long]$pr.Id]
+            if ($null -eq $p -or $p.IdentityStatus -ne 'VERIFIED') { continue }
+            $cmp++
+            if ($p.CreationUtc.Ticks -eq ($stp - ($stp % 10))) { $trunc++ } else { $other++ }
+        }
+        $script:caseNote = "CIM x StartTime: $trunc de $cmp iguais apos truncar a 1 us, $other diferentes (processos encerrados ou reutilizados entre as leituras contam aqui)"
+        Assert-True ($cmp -gt 0) 'horarios comparados'
     }
     Test-Case 'Diagnose' 'Recursos (P1-B3): contadores lidos como inteiros; ilegivel vira nulo com cobertura PARTIAL, nunca 0; cobertura da identidade nao muda' {
         $t0 = New-Object DateTime(2026, 1, 1, 8, 0, 0, [DateTimeKind]::Utc)
