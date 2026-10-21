@@ -1876,6 +1876,148 @@ try {
         Assert-Eq $s.SessionId ([Diagnostics.Process]::GetCurrentProcess().SessionId) 'sessao'
         $script:caseNote = "$($s.ElevationType)/$($s.IntegrityLevel)"
     }
+    Test-Case 'Diagnose' 'Processos (P1-B1): identidade pid@creationTicksUtc; linha invalida, PID duplicado, horario ausente/ilegivel/futuro e limite de linhas nunca viram identidade verificada' {
+        $t0 = New-Object DateTime(2026, 1, 1, 8, 0, 0, [DateTimeKind]::Utc)
+        $k = ConvertTo-AtmProcessKey -ProcessId 4321 -CreationUtc $t0
+        Assert-Eq $k ('4321@' + $t0.Ticks) 'formato da chave'
+        $back = ConvertFrom-AtmProcessKey $k
+        Assert-True ($back.ProcessId -eq 4321 -and $back.CreationUtc -eq $t0 -and $back.CreationUtc.Kind -eq [DateTimeKind]::Utc) 'ida e volta da chave'
+        Assert-Eq (ConvertTo-AtmProcessKey -ProcessId 0 -CreationUtc $t0) ('0@' + $t0.Ticks) 'PID 0'
+        Assert-True ($null -eq (ConvertTo-AtmProcessKey -ProcessId 7 -CreationUtc $null)) 'sem horario de criacao, sem chave'
+        foreach ($bad in @('', '4321', '4321@', '@1', '-1@5', '4321@-5', '4321@1.5', '4321 @5', '4294967296@5', ('1@' + ('9' * 19)), '4321@5x', '4321@5@6')) {
+            Assert-True ($null -eq (ConvertFrom-AtmProcessKey $bad)) "chave invalida: '$bad'"
+        }
+        $rows = @(
+            [pscustomobject]@{ ProcessId = 0; ParentProcessId = 0; Name = 'System Idle Process'; CreationDate = $t0 },
+            [pscustomobject]@{ ProcessId = 4; ParentProcessId = 0; Name = 'System'; CreationDate = $t0 },
+            @{ ProcessId = [uint32]100; ParentProcessId = 4; Name = 'app.exe'; CreationDate = '2026-01-01T09:00:00.1234567Z' },
+            [pscustomobject]@{ ProcessId = 200; ParentProcessId = 100; Name = 'tool.exe'; CreationDate = $null },
+            [pscustomobject]@{ ProcessId = 201; ParentProcessId = 100; Name = 'late.exe'; CreationDate = [datetime]::UtcNow.AddDays(3) },
+            [pscustomobject]@{ ProcessId = 202; ParentProcessId = 100; Name = 'old.exe'; CreationDate = '1999-12-31T00:00:00Z' },
+            [pscustomobject]@{ ProcessId = 203; ParentProcessId = 100; Name = 'garbled.exe'; CreationDate = 'yesterday' },
+            [pscustomobject]@{ ProcessId = 300; ParentProcessId = 4; Name = 'first.exe'; CreationDate = $t0.AddMinutes(1) },
+            [pscustomobject]@{ ProcessId = 300; ParentProcessId = 4; Name = 'second.exe'; CreationDate = $t0.AddMinutes(2) },
+            [pscustomobject]@{ ProcessId = 400; ParentProcessId = 'x'; Name = "bad`nname.exe"; CreationDate = $t0 },
+            [pscustomobject]@{ ProcessId = -1; ParentProcessId = 4; Name = 'negative.exe'; CreationDate = $t0 },
+            [pscustomobject]@{ ProcessId = '12a'; ParentProcessId = 4; Name = 'text.exe'; CreationDate = $t0 },
+            [pscustomobject]@{ ProcessId = 1.5; ParentProcessId = 4; Name = 'fraction.exe'; CreationDate = $t0 },
+            [pscustomobject]@{ ProcessId = $true; ParentProcessId = 4; Name = 'bool.exe'; CreationDate = $t0 },
+            [pscustomobject]@{ ProcessId = 4294967296; ParentProcessId = 4; Name = 'big.exe'; CreationDate = $t0 },
+            [pscustomobject]@{ ParentProcessId = 4; Name = 'noid.exe'; CreationDate = $t0 },
+            'not a row')
+        $c = Get-AtmProcessCollection -Source ({ $rows }.GetNewClosure())
+        Assert-Eq $c.Coverage.Collector 'process-snapshot' 'coletor'
+        Assert-Eq $c.Coverage.Status 'PARTIAL' 'linhas com problemas -> parcial'
+        Assert-Eq (@($c.Coverage.Reasons | Sort-Object) -join ',') 'CREATION_TIME_UNREADABLE,DUPLICATE_PID,MALFORMED_PROCESS_RECORDS,PARENT_ID_UNREADABLE,PROCESS_NAME_UNREADABLE' 'motivos'
+        Assert-Eq $c.Coverage.ElevationWouldHelp 'UNKNOWN' 'elevacao: desconhecido'
+        Assert-Eq $c.Coverage.Expected $rows.Count 'linhas recebidas'
+        Assert-Eq $c.Coverage.Observed 4 'identidades verificadas'
+        Assert-Eq $c.Coverage.BudgetMs 30000 'orcamento declarado'
+        Assert-Eq (@($c.Processes).Count) 10 'linhas sem PID valido descartadas'
+        foreach ($p in $c.Processes) {
+            Assert-Eq (@($p.PSObject.Properties.Name) -join ',') 'Pid,ParentPid,Name,CreationUtc,Key,IdentityStatus' "propriedades de $($p.Pid)"
+            Assert-True ($script:AtmProcessIdentityStatuses -ccontains $p.IdentityStatus) "estado de identidade fechado: $($p.IdentityStatus)"
+            Assert-Eq ($null -ne $p.Key) ($p.IdentityStatus -ceq 'VERIFIED') "so identidade verificada tem chave ($($p.Pid))"
+        }
+        foreach ($id in @(0, 4, 100, 400)) { Assert-Eq $c.ByPid[[long]$id].IdentityStatus 'VERIFIED' "PID $id verificado" }
+        Assert-Eq $c.ByPid[[long]100].CreationUtc.Ticks ([datetime]::Parse('2026-01-01T09:00:00.1234567Z', [Globalization.CultureInfo]::InvariantCulture).ToUniversalTime().Ticks) 'horario ISO preciso ao tick'
+        Assert-Eq $c.ByPid[[long]100].Key ('100@' + $c.ByPid[[long]100].CreationUtc.Ticks) 'chave do PID 100'
+        Assert-True ($null -eq $c.ByPid[[long]400].Name -and $null -eq $c.ByPid[[long]400].ParentPid) 'nome e pai ilegiveis ficam nulos'
+        foreach ($id in @(200, 201, 202, 203)) {
+            Assert-Eq $c.ByPid[[long]$id].IdentityStatus 'CREATION_TIME_UNKNOWN' "PID $id sem horario confiavel"
+            Assert-True ($null -eq $c.ByPid[[long]$id].CreationUtc) "PID $id sem horario inventado"
+        }
+        Assert-True (-not $c.ByPid.ContainsKey([long]300)) 'PID duplicado fora do indice'
+        Assert-Eq (@($c.Processes | Where-Object { $_.IdentityStatus -eq 'DUPLICATE_PID' }).Count) 2 'as duas linhas do PID duplicado marcadas'
+        $ok = @($rows[0], $rows[1], $rows[2])
+        $c = Get-AtmProcessCollection -Source ({ $ok }.GetNewClosure())
+        Assert-True ($c.Coverage.Status -eq 'COMPLETE' -and @($c.Coverage.Reasons).Count -eq 0 -and $c.Coverage.ElevationWouldHelp -eq 'NO') 'linhas validas -> completa'
+        Assert-True ($c.Coverage.Observed -eq 3 -and $c.Coverage.Expected -eq 3) 'contagens'
+        $many = @(1..5 | ForEach-Object { [pscustomobject]@{ ProcessId = 1000 + $_; ParentProcessId = 4; Name = 'n.exe'; CreationDate = $t0.AddSeconds($_) } })
+        $c = Get-AtmProcessCollection -Source ({ $many }.GetNewClosure()) -MaxRecords 3
+        Assert-Eq $c.Coverage.Status 'PARTIAL' 'acima do limite -> parcial'
+        Assert-Eq (@($c.Coverage.Reasons) -join ',') 'PROCESS_LIMIT_EXCEEDED' 'motivo do limite'
+        Assert-True (@($c.Processes).Count -eq 3 -and $c.Coverage.Expected -eq 5 -and $c.Coverage.Observed -eq 3) 'linhas alem do limite nao lidas'
+        foreach ($b in @({ Get-AtmProcessCollection -Source { $ok } -MaxRecords 0 }, { Get-AtmProcessCollection -Source { $ok } -TimeoutSec 0 })) {
+            $threw = $false; try { $null = & $b } catch { $threw = $true }
+            Assert-True $threw "parametro recusado: $b"
+        }
+    }
+    Test-Case 'Diagnose' 'Processos (P1-B1): referencia por PID e horario de criacao; PID reutilizado; NOT_FOUND so com coleta completa; tolerancia limitada' {
+        $t0 = New-Object DateTime(2026, 1, 1, 8, 0, 0, [DateTimeKind]::Utc)
+        $t1 = $t0.AddHours(1)
+        $base = @(
+            [pscustomobject]@{ ProcessId = 4; ParentProcessId = 0; Name = 'System'; CreationDate = $t0 },
+            [pscustomobject]@{ ProcessId = 100; ParentProcessId = 4; Name = 'app.exe'; CreationDate = $t1 })
+        $full = Get-AtmProcessCollection -Source ({ $base }.GetNewClosure())
+        Assert-Eq $full.Coverage.Status 'COMPLETE' 'coleta completa'
+        $cases = @(
+            @(100, $t1, 0, 'MATCH'), @('100', $t1, 0, 'MATCH'), @([int]100, $t1.ToString('o'), 0, 'MATCH'),
+            @(100, $t1.AddTicks(1), 0, 'PID_REUSED'), @(100, $t1.AddMilliseconds(1), 1, 'MATCH'), @(100, $t1.AddMilliseconds(2), 1, 'PID_REUSED'),
+            @(100, $t1.AddMilliseconds(-2000), 2000, 'MATCH'), @(100, $t0, 0, 'PID_REUSED'), @(100, $t1.AddDays(-1), 2000, 'PID_REUSED'),
+            @(100, $null, 0, 'IDENTITY_UNVERIFIED'), @(100, 'garbage', 0, 'IDENTITY_UNVERIFIED'), @(100, [datetime]::UtcNow.AddDays(5), 0, 'IDENTITY_UNVERIFIED'),
+            @(999, $t1, 0, 'NOT_FOUND'), @(-1, $t1, 0, 'IDENTITY_UNVERIFIED'), @('abc', $t1, 0, 'IDENTITY_UNVERIFIED'), @($null, $t1, 0, 'IDENTITY_UNVERIFIED'))
+        foreach ($cs in $cases) {
+            $r = Resolve-AtmProcessReference -Collection $full -ProcessId $cs[0] -CreationUtc $cs[1] -ToleranceMs $cs[2]
+            Assert-Eq $r.Result $cs[3] "PID '$($cs[0])', horario '$($cs[1])', tolerancia $($cs[2])"
+            Assert-True ($script:AtmProcessReferenceResults -ccontains $r.Result) 'resultado da lista fechada'
+            Assert-Eq ($null -ne $r.Process) (@('MATCH', 'PID_REUSED') -ccontains $r.Result -or ($r.Result -eq 'IDENTITY_UNVERIFIED' -and $cs[0] -eq 100)) "processo devolvido so quando o PID foi coletado ($($cs[0]))"
+        }
+        $partial = Get-AtmProcessCollection -Source ({ @($base) + @([pscustomobject]@{ ProcessId = 'x'; CreationDate = $t0 }) }.GetNewClosure())
+        Assert-Eq $partial.Coverage.Status 'PARTIAL' 'coleta parcial'
+        Assert-Eq (Resolve-AtmProcessReference -Collection $partial -ProcessId 999 -CreationUtc $t1).Result 'IDENTITY_UNVERIFIED' 'ausente em coleta parcial nao e NOT_FOUND'
+        Assert-Eq (Resolve-AtmProcessReference -Collection $partial -ProcessId 100 -CreationUtc $t1).Result 'MATCH' 'presente em coleta parcial ainda casa'
+        $odd = Get-AtmProcessCollection -Source ({ @($base) + @([pscustomobject]@{ ProcessId = 300; ParentProcessId = 4; Name = 'a.exe'; CreationDate = $t0 }, [pscustomobject]@{ ProcessId = 300; ParentProcessId = 4; Name = 'b.exe'; CreationDate = $t1 }, [pscustomobject]@{ ProcessId = 200; ParentProcessId = 4; Name = 'c.exe'; CreationDate = $null }) }.GetNewClosure())
+        foreach ($t in @($t0, $t1)) { Assert-Eq (Resolve-AtmProcessReference -Collection $odd -ProcessId 300 -CreationUtc $t).Result 'IDENTITY_UNVERIFIED' 'PID duplicado nunca casa' }
+        Assert-Eq (Resolve-AtmProcessReference -Collection $odd -ProcessId 200 -CreationUtc $t0).Result 'IDENTITY_UNVERIFIED' 'PID coletado sem horario nao casa'
+        Assert-Eq (Resolve-AtmProcessReference -Collection $null -ProcessId 100 -CreationUtc $t1).Result 'IDENTITY_UNVERIFIED' 'sem coleta'
+        foreach ($tol in @(-1, 2001)) {
+            $threw = $false; try { $null = Resolve-AtmProcessReference -Collection $full -ProcessId 100 -CreationUtc $t1 -ToleranceMs $tol } catch { $threw = $true }
+            Assert-True $threw "tolerancia $tol recusada"
+        }
+        # Reference results and identity statuses are not finding states (T-1): a Process finding still accepts only UNKNOWN.
+        foreach ($s in @($script:AtmProcessReferenceResults) + @($script:AtmProcessIdentityStatuses)) {
+            $threw = $false; try { $null = New-AtmFinding -Kind 'Process' -Key 'k' -State $s -Coverage @($full.Coverage) } catch { $threw = $true }
+            Assert-True $threw "$s nao e estado de achado"
+        }
+    }
+    Test-Case 'Diagnose' 'Processos (P1-B1): falha, resposta vazia, tempo esgotado e prazo nunca viram "nenhum processo"; excecao so pelo tipo' {
+        $t0 = New-Object DateTime(2026, 1, 1, 8, 0, 0, [DateTimeKind]::Utc)
+        $flag = @{ Called = $false }
+        $cases = @(
+            @{ Name = 'excecao'; Args = @{ Source = { throw (New-Object UnauthorizedAccessException('texto-que-nao-pode-aparecer')) } }; Status = 'FAILED'; Reasons = 'PROCESS_SNAPSHOT_FAILED,EXCEPTION_UNAUTHORIZEDACCESSEXCEPTION' },
+            @{ Name = 'nulo'; Args = @{ Source = { $null } }; Status = 'FAILED'; Reasons = 'PROCESS_SNAPSHOT_EMPTY' },
+            @{ Name = 'vazio'; Args = @{ Source = { @() } }; Status = 'FAILED'; Reasons = 'PROCESS_SNAPSHOT_EMPTY' },
+            @{ Name = 'so nulos'; Args = @{ Source = { @($null, $null) } }; Status = 'FAILED'; Reasons = 'PROCESS_SNAPSHOT_EMPTY' },
+            @{ Name = 'tempo esgotado'; Args = @{ TimeoutSec = 1; Source = { Start-Sleep -Milliseconds 1100; throw (New-Object TimeoutException('texto-que-nao-pode-aparecer')) } }; Status = 'TIMEOUT'; Reasons = 'PROCESS_SNAPSHOT_TIMEOUT,EXCEPTION_TIMEOUTEXCEPTION' },
+            @{ Name = 'prazo'; Args = @{ Deadline = [datetime]::UtcNow; Source = ({ $flag.Called = $true; @([pscustomobject]@{ ProcessId = 4; ParentProcessId = 0; Name = 'System'; CreationDate = $t0 }) }.GetNewClosure()) }; Status = 'TIMEOUT'; Reasons = 'DEADLINE_EXCEEDED' })
+        foreach ($cs in $cases) {
+            $a = $cs.Args
+            $c = Get-AtmProcessCollection @a
+            Assert-Eq $c.Coverage.Status $cs.Status "$($cs.Name): status"
+            Assert-Eq (@($c.Coverage.Reasons) -join ',') $cs.Reasons "$($cs.Name): motivos"
+            Assert-True ($c.Failed -and @($c.Processes).Count -eq 0 -and $c.ByPid.Count -eq 0) "$($cs.Name): nada inventado"
+            Assert-True (-not ($c | ConvertTo-Json -Depth 6).Contains('texto-que-nao-pode-aparecer')) "$($cs.Name): mensagem da excecao nunca guardada"
+            foreach ($id in @(4, 999)) { Assert-Eq (Resolve-AtmProcessReference -Collection $c -ProcessId $id -CreationUtc $t0).Result 'IDENTITY_UNVERIFIED' "$($cs.Name): PID $id nao verificavel, nunca NOT_FOUND" }
+        }
+        Assert-True (-not $flag.Called) 'prazo esgotado: a fonte nem e chamada'
+    }
+    Test-Case 'Diagnose' 'Processos reais (somente leitura, P1-B1): o proprio processo identificado por PID e horario de criacao; sem linha de comando nem caminho' {
+        Assert-Eq ($script:AtmProcessCimProperties -join ',') 'ProcessId,ParentProcessId,Name,CreationDate' 'propriedades pedidas ao CIM'
+        $fn = ${function:Get-AtmProcessRaw}.ToString()
+        foreach ($pat in @('CommandLine', 'ExecutablePath', 'Get-Process', 'Invoke-CimMethod')) { Assert-True (-not $fn.Contains($pat)) "coletor bruto contem '$pat'" }
+        $c = Get-AtmProcessCollection
+        Assert-True (@('COMPLETE', 'PARTIAL') -ccontains $c.Coverage.Status) "coleta real: $($c.Coverage.Status) $(@($c.Coverage.Reasons) -join ',')"
+        Assert-True ($c.Coverage.Observed -gt 0 -and $c.Coverage.ElapsedMs -le $c.Coverage.BudgetMs) 'processos observados dentro do orcamento'
+        foreach ($p in $c.Processes) { Assert-Eq (@($p.PSObject.Properties.Name) -join ',') 'Pid,ParentPid,Name,CreationUtc,Key,IdentityStatus' 'nenhuma outra propriedade guardada' }
+        $self = [Diagnostics.Process]::GetCurrentProcess()
+        # Process.StartTime (100 ns) and CIM CreationDate (1 us) are different sources: a bounded tolerance.
+        $r = Resolve-AtmProcessReference -Collection $c -ProcessId $self.Id -CreationUtc $self.StartTime.ToUniversalTime() -ToleranceMs 1000
+        Assert-Eq $r.Result 'MATCH' 'proprio processo identificado'
+        Assert-Eq $r.Process.Key (ConvertTo-AtmProcessKey -ProcessId $self.Id -CreationUtc $r.Process.CreationUtc) 'chave pid@creationTicksUtc'
+        Assert-Eq (Resolve-AtmProcessReference -Collection $c -ProcessId $self.Id -CreationUtc $self.StartTime.ToUniversalTime().AddMinutes(-10) -ToleranceMs 1000).Result 'PID_REUSED' 'mesmo PID com outro horario nunca e o mesmo processo'
+        $script:caseNote = "$($c.Coverage.Status), $($c.Coverage.Observed)/$($c.Coverage.Expected), $($c.Coverage.ElapsedMs) ms"
+    }
     Test-Case 'Diagnose' 'CLI version mostra identidade, tipo de elevacao e integridade (PRIV-10) nos dois idiomas' {
         $cmd = Join-Path $srcDir 'bin\agent-temp.cmd'
         $out = (& cmd.exe /c "`"$cmd`" version -Lang en-US" 2>&1) -join "`n"
@@ -2187,7 +2329,7 @@ try {
         foreach ($pat in @('SeDebugPrivilege', 'AdjustTokenPrivileges', 'RmShutdown', 'RmRestart', 'TerminateProcess', 'WriteProcessMemory')) { Assert-True (-not $native.Contains($pat)) "Native.cs contem '$pat'" }
         foreach ($f in @('Tui.ps1', 'Report.ps1')) {
             $txt = [IO.File]::ReadAllText((Join-Path $lib $f))
-            foreach ($pat in @('Get-AtmIdentityRaw', 'Get-AtmIdentityState', 'Get-AtmProviderRuntimeHints', 'Get-AtmInventoryCoverage', 'AtmToken]')) { Assert-True (-not $txt.Contains($pat)) "$f chama coletor diretamente: $pat" }
+            foreach ($pat in @('Get-AtmIdentityRaw', 'Get-AtmIdentityState', 'Get-AtmProviderRuntimeHints', 'Get-AtmInventoryCoverage', 'AtmToken]', 'Get-AtmProcessRaw', 'Get-AtmProcessCollection', 'Resolve-AtmProcessReference')) { Assert-True (-not $txt.Contains($pat)) "$f chama coletor diretamente: $pat" }
         }
     }
 

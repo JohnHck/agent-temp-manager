@@ -276,6 +276,166 @@ function Get-AtmProviderRuntimeHints {
 }
 
 # ---------------------------------------------------------------------------------------------
+# Process collection and identity (ADR-0003 rule 1, P1-B1). Not yet part of Invoke-AtmDiagnose: trees, resources and
+# the findings that use them come in later increments. Command lines and executable paths are never requested.
+# ---------------------------------------------------------------------------------------------
+
+$script:AtmProcessCimProperties = @('ProcessId', 'ParentProcessId', 'Name', 'CreationDate')
+$script:AtmProcessMaxRecords = 65536
+$script:AtmProcessTimeoutSec = 30
+$script:AtmProcessNameMax = 260
+# Same-source references compare exact ticks; another source (a session registry, Process.StartTime) states its own
+# precision with -ToleranceMs, never more than this.
+$script:AtmProcessToleranceMaxMs = 2000
+$script:AtmProcessIdentityStatuses = @('VERIFIED', 'CREATION_TIME_UNKNOWN', 'DUPLICATE_PID')
+# Results of matching a reference; not finding states. NOT_FOUND only against a COMPLETE collection.
+$script:AtmProcessReferenceResults = @('MATCH', 'PID_REUSED', 'IDENTITY_UNVERIFIED', 'NOT_FOUND')
+
+function ConvertTo-AtmProcessKey {
+    # pid@creationTicksUtc. $null when the creation time is unknown: such a process has no identity.
+    param([long]$ProcessId, $CreationUtc)
+    if ($null -eq $CreationUtc) { return $null }
+    return ('{0}@{1}' -f $ProcessId, ([datetime]$CreationUtc).ToUniversalTime().Ticks)
+}
+
+function ConvertFrom-AtmProcessKey {
+    # $null for anything that is not a well-formed key.
+    param([string]$Key)
+    if (-not ($Key -cmatch '^(\d{1,10})@(\d{1,19})$')) { return $null }
+    $p = 0L; $t = 0L
+    if (-not [long]::TryParse($Matches[1], [ref]$p) -or $p -gt [uint32]::MaxValue) { return $null }
+    if (-not [long]::TryParse($Matches[2], [ref]$t) -or $t -gt [datetime]::MaxValue.Ticks) { return $null }
+    return [pscustomobject]@{ ProcessId = $p; CreationUtc = (New-Object DateTime($t, [DateTimeKind]::Utc)) }
+}
+
+function ConvertTo-AtmProcessId {
+    # A PID is an integer from 0 to 2^32-1; anything else is $null.
+    param($Value)
+    if ($null -eq $Value -or $Value -is [bool]) { return $null }
+    $n = 0L
+    if (-not [long]::TryParse([string]$Value, [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$n)) { return $null }
+    if ($n -gt [uint32]::MaxValue) { return $null }
+    return $n
+}
+
+function ConvertTo-AtmProcessCreationUtc {
+    # A [datetime] or an ISO 8601 string between 2000-01-01 and one day from now; anything else is $null.
+    param($Value)
+    $dt = $null
+    if ($Value -is [datetime]) { $dt = $Value.ToUniversalTime() }
+    elseif ($Value -is [string] -and $Value) {
+        $parsed = [datetime]::MinValue
+        $styles = [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal
+        if ([datetime]::TryParse($Value, [Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$parsed)) { $dt = [datetime]::SpecifyKind($parsed, [DateTimeKind]::Utc) }
+    }
+    if ($null -eq $dt -or $dt -lt [datetime]'2000-01-01' -or $dt -gt [datetime]::UtcNow.AddDays(1)) { return $null }
+    return $dt
+}
+
+function Get-AtmProcessRaw {
+    # One CIM pass, identity properties only, bounded by the CIM operation timeout.
+    param([int]$TimeoutSec)
+    @(Get-CimInstance -ClassName Win32_Process -Property $script:AtmProcessCimProperties -OperationTimeoutSec $TimeoutSec -ErrorAction Stop |
+        ForEach-Object { [pscustomobject]@{ ProcessId = $_.ProcessId; ParentProcessId = $_.ParentProcessId; Name = $_.Name; CreationDate = $_.CreationDate } })
+}
+
+function Get-AtmProcessCollection {
+    <#
+      Process collector 'process-snapshot'. -Source: test override returning rows with ProcessId, ParentProcessId,
+      Name and CreationDate (or throwing). -MaxRecords: rows beyond it are not read (PARTIAL). -TimeoutSec: CIM
+      operation timeout. -Deadline: a collection not started before it is TIMEOUT.
+      Every process gets IdentityStatus VERIFIED (Key = pid@creationTicksUtc), CREATION_TIME_UNKNOWN or DUPLICATE_PID
+      (the same PID twice in one snapshot: the enumeration is not atomic). Only VERIFIED processes have a Key.
+      An empty answer is FAILED: it never means "no processes".
+    #>
+    param([scriptblock]$Source, [int]$MaxRecords = $script:AtmProcessMaxRecords, [int]$TimeoutSec = $script:AtmProcessTimeoutSec, $Deadline = $null)
+    if ($MaxRecords -lt 1) { throw (Get-AtmText 'err.diagProcess' "MaxRecords $MaxRecords") }
+    if ($TimeoutSec -lt 1) { throw (Get-AtmText 'err.diagProcess' "TimeoutSec $TimeoutSec") }
+    $collector = 'process-snapshot'
+    $empty = @{ Collector = $collector; Failed = $true; CollectedUtc = $null; Processes = @(); ByPid = @{} }
+    if ($null -ne $Deadline -and [datetime]::UtcNow -ge $Deadline) {
+        $empty.Coverage = New-AtmDeadlineCoverage $collector
+        return [pscustomobject]$empty
+    }
+    $started = [datetime]::UtcNow
+    $budgetMs = [long]$TimeoutSec * 1000
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $raw = $null; $err = $null
+    try { $raw = @(if ($Source) { & $Source } else { Get-AtmProcessRaw -TimeoutSec $TimeoutSec }) } catch { $err = $_.Exception.GetType().Name }
+    $sw.Stop()
+    $rows = @($raw | Where-Object { $null -ne $_ })
+    if ($null -ne $err -or $rows.Count -eq 0) {
+        # Exception type only, never its message. A failure after the whole budget is a timeout.
+        if ($null -ne $err -and $sw.ElapsedMilliseconds -ge $budgetMs) { $status = 'TIMEOUT'; $reasons = @('PROCESS_SNAPSHOT_TIMEOUT', (ConvertTo-AtmExceptionCode $err)) }
+        elseif ($null -ne $err) { $status = 'FAILED'; $reasons = @('PROCESS_SNAPSHOT_FAILED', (ConvertTo-AtmExceptionCode $err)) }
+        else { $status = 'FAILED'; $reasons = @('PROCESS_SNAPSHOT_EMPTY') }
+        $empty.Coverage = New-AtmCoverage -Collector $collector -Status $status -Reasons $reasons -StartedUtc $started -ElapsedMs $sw.ElapsedMilliseconds -BudgetMs $budgetMs
+        return [pscustomobject]$empty
+    }
+    $reasons = New-Object System.Collections.Generic.List[string]
+    if ($rows.Count -gt $MaxRecords) { $reasons.Add('PROCESS_LIMIT_EXCEEDED'); $rows = @($rows[0..($MaxRecords - 1)]) }
+    $list = New-Object System.Collections.Generic.List[object]
+    $countByPid = @{}
+    $malformed = 0
+    foreach ($r in $rows) {
+        $id = ConvertTo-AtmProcessId (Get-AtmHintProperty -Item $r -Name 'ProcessId')
+        if ($null -eq $id) { $malformed++; continue }
+        $parentRaw = Get-AtmHintProperty -Item $r -Name 'ParentProcessId'
+        $parent = ConvertTo-AtmProcessId $parentRaw
+        if ($null -eq $parent) { $reasons.Add('PARENT_ID_UNREADABLE') }
+        $name = Get-AtmHintProperty -Item $r -Name 'Name'
+        if (-not (Test-AtmHintText -Value $name -Max $script:AtmProcessNameMax)) { $name = $null; $reasons.Add('PROCESS_NAME_UNREADABLE') }
+        $created = ConvertTo-AtmProcessCreationUtc (Get-AtmHintProperty -Item $r -Name 'CreationDate')
+        if ($null -eq $created) { $reasons.Add('CREATION_TIME_UNREADABLE') }
+        $countByPid[$id] = 1 + $(if ($countByPid.ContainsKey($id)) { $countByPid[$id] } else { 0 })
+        $list.Add([pscustomobject]@{ Pid = $id; ParentPid = $parent; Name = $name; CreationUtc = $created; Key = $null; IdentityStatus = $null })
+    }
+    if ($malformed -gt 0) { $reasons.Add('MALFORMED_PROCESS_RECORDS') }
+    $byPid = @{}
+    $verified = 0
+    foreach ($p in $list) {
+        if ($countByPid[$p.Pid] -gt 1) { $p.IdentityStatus = 'DUPLICATE_PID'; $reasons.Add('DUPLICATE_PID'); continue }
+        $byPid[$p.Pid] = $p
+        if ($null -eq $p.CreationUtc) { $p.IdentityStatus = 'CREATION_TIME_UNKNOWN'; continue }
+        $p.IdentityStatus = 'VERIFIED'
+        $p.Key = ConvertTo-AtmProcessKey -ProcessId $p.Pid -CreationUtc $p.CreationUtc
+        $verified++
+    }
+    $status = $(if ($reasons.Count -gt 0) { 'PARTIAL' } else { 'COMPLETE' })
+    # Win32_Process lists every process with its creation time for any account; elevation would not add rows.
+    $help = $(if ($status -eq 'COMPLETE') { 'NO' } else { 'UNKNOWN' })
+    $cov = New-AtmCoverage -Collector $collector -Status $status -Reasons $reasons.ToArray() -ElevationWouldHelp $help -Observed $verified -Expected @($raw | Where-Object { $null -ne $_ }).Count -StartedUtc $started -ElapsedMs $sw.ElapsedMilliseconds -BudgetMs $budgetMs
+    [pscustomobject]@{ Collector = $collector; Failed = $false; CollectedUtc = $started; Processes = $list.ToArray(); ByPid = $byPid; Coverage = $cov }
+}
+
+function Resolve-AtmProcessReference {
+    <#
+      Matches a reference (a PID and the creation time the referrer recorded) against one collection. Returns Result
+      (AtmProcessReferenceResults) and the collected Process, if any. A PID alone never identifies a process:
+      without both creation times the result is IDENTITY_UNVERIFIED. NOT_FOUND only when the collection is COMPLETE;
+      otherwise an absent PID is IDENTITY_UNVERIFIED (it may be among the rows that were not read).
+    #>
+    param($Collection, $ProcessId, $CreationUtc, [int]$ToleranceMs = 0)
+    if ($ToleranceMs -lt 0 -or $ToleranceMs -gt $script:AtmProcessToleranceMaxMs) { throw (Get-AtmText 'err.diagProcess' "ToleranceMs $ToleranceMs") }
+    $result = 'IDENTITY_UNVERIFIED'; $proc = $null
+    $id = ConvertTo-AtmProcessId $ProcessId
+    $created = ConvertTo-AtmProcessCreationUtc $CreationUtc
+    if ($null -ne $id -and $null -ne $Collection -and -not $Collection.Failed) {
+        $dup = @($Collection.Processes | Where-Object { $_.Pid -eq $id -and $_.IdentityStatus -eq 'DUPLICATE_PID' }).Count -gt 0
+        if (-not $dup) {
+            if ($Collection.ByPid.ContainsKey($id)) {
+                $proc = $Collection.ByPid[$id]
+                if ($null -ne $created -and $proc.IdentityStatus -eq 'VERIFIED') {
+                    $diff = [math]::Abs(($created - $proc.CreationUtc).Ticks)
+                    $result = $(if ($diff -le [long]$ToleranceMs * [TimeSpan]::TicksPerMillisecond) { 'MATCH' } else { 'PID_REUSED' })
+                }
+            } elseif ($Collection.Coverage.Status -ceq 'COMPLETE') { $result = 'NOT_FOUND' }
+        }
+    }
+    [pscustomobject]@{ Result = $result; Process = $proc }
+}
+
+# ---------------------------------------------------------------------------------------------
 # Invoke-AtmDiagnose (ADR-0009). P1-A collectors: identity, provider runtime hints, the V0.1 temporary-directory
 # inventory and the coverage it implies (processes, temp-profiles). Runtime collectors of later phases (process
 # trees, services, virtualization, Git worktrees) add coverage records and findings here.
