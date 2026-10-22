@@ -1578,6 +1578,23 @@ function global:Get-FileHash { param([string]$LiteralPath, [string]$Algorithm)
         Assert-True (-not (Test-Path -LiteralPath $marker)) 'provider plantado nunca executou'
         [IO.File]::Move($planted, (Join-Path $inst 'Plantado.ps1.aside'))
         $r = Invoke-Rb5Cli $cmd 'verify'; Assert-Eq $r.Exit 0 "restaurado ($($r.Text))"
+        # Hidden attribute (not an ACL): a hidden unlisted provider is still refused; a hidden listed one is still loaded,
+        # never silently left out of the provider set.
+        [IO.File]::WriteAllText($planted, $mark)
+        [IO.File]::SetAttributes($planted, [IO.FileAttributes]::Hidden)
+        foreach ($a in @('verify', 'version')) {
+            $r = Invoke-Rb5Cli $cmd $a
+            Assert-Eq $r.Exit 5 "provider plantado oculto: $a recusado ($($r.Text))"
+            Assert-True (-not (Test-Path -LiteralPath $marker)) "provider plantado oculto nunca executou ($a)"
+        }
+        [IO.File]::SetAttributes($planted, [IO.FileAttributes]::Normal)
+        [IO.File]::Move($planted, (Join-Path $inst 'Plantado-oculto.ps1.aside'))
+        $claude = Join-Path $inst 'providers\ClaudeCode.ps1'
+        [IO.File]::SetAttributes($claude, [IO.FileAttributes]::Hidden)
+        $r = Invoke-Rb5Cli $cmd 'verify'; Assert-Eq $r.Exit 0 "provider listado oculto: integro ($($r.Text))"
+        $r = Invoke-Rb5Cli $cmd 'version'
+        Assert-True ($r.Exit -eq 0 -and $r.Text -match 'providers: Claude Code') "provider listado oculto: carregado, conjunto completo ($($r.Text))"
+        [IO.File]::SetAttributes($claude, [IO.FileAttributes]::Normal)
         # Invalid manifest: explicit refusal (exit 5) for verify and every other command; an unlisted library is never loaded.
         $mfp = Join-Path $inst 'manifest.json'
         $mfOrig = [IO.File]::ReadAllBytes($mfp)

@@ -102,8 +102,9 @@ function Test-AtmLauncherIntegrity {
         }
     }
     # A providers directory that is missing or cannot be listed is refused: the provider set would be incomplete.
+    # -Force: hidden or system files are listed too, so none escapes the check or is silently left out.
     $found = $null
-    try { $found = @(Get-ChildItem -LiteralPath $providersDir -Filter '*.ps1' -File -ErrorAction Stop | Sort-Object Name) } catch { $found = $null }
+    try { $found = @(Get-ChildItem -LiteralPath $providersDir -Filter '*.ps1' -File -Force -ErrorAction Stop | Sort-Object Name) } catch { $found = $null }
     if ($null -eq $found) {
         $r.Problems.Add('providers directory missing or unreadable / diretorio de providers ausente ou ilegivel: providers')
         $r.Lines.Add(@('FAIL', 'providers (missing or unreadable / ausente ou ilegivel)'))
@@ -116,6 +117,14 @@ function Test-AtmLauncherIntegrity {
         }
     }
     $r.Providers = @($found | Where-Object { $r.Listed.ContainsKey(('providers\' + $_.Name).ToLowerInvariant()) })
+    # Every listed provider that exists must be among those loaded: never run with an incomplete provider set.
+    $loadedKeys = @($r.Providers | ForEach-Object { ('providers\' + $_.Name).ToLowerInvariant() })
+    foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.ps1$' })) {
+        if ($loadedKeys -notcontains $k -and (Test-Path -LiteralPath (Join-Path $here $k) -PathType Leaf)) {
+            $r.Problems.Add("provider not enumerated / provider nao enumerado: $k")
+            $r.Lines.Add(@('FAIL', "$k (not enumerated / nao enumerado)"))
+        }
+    }
     return $r
 }
 
