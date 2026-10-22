@@ -1607,6 +1607,45 @@ function global:Get-FileHash { param([string]$LiteralPath, [string]$Algorithm)
             [IO.File]::WriteAllBytes($report, $reportOrig)
         }
         [IO.File]::WriteAllBytes($mfp, $mfOrig)
+        # Unreadable files and directories: exit 5, nothing loaded, reasons by relative name only (no absolute path, no
+        # exception text). The manifest is rewritten to match a library carrying the marker, so any code loaded after
+        # the failure would leave it. Files are made unreadable by an exclusive handle of this process (no ACL change).
+        [IO.File]::AppendAllText($report, "`r`n$mark`r`n")
+        Write-AtmManifest -Root $inst -Version (Get-AtmSourceVersion -SourceDir $srcDir)
+        $readCases = [ordered]@{
+            'diretorio de providers ausente'   = @{ Kind = 'move'; Target = 'providers'; Fail = 'providers' }
+            'diretorio de providers quebrado'  = @{ Kind = 'junction'; Target = 'providers'; Fail = 'providers' }
+            'biblioteca ilegivel'              = @{ Kind = 'lock'; Target = 'lib\Engine.Clean.ps1'; Fail = 'lib\Engine.Clean.ps1' }
+            'provider ilegivel'                = @{ Kind = 'lock'; Target = 'providers\ClaudeCode.ps1'; Fail = 'providers\ClaudeCode.ps1' }
+            'manifesto ilegivel'               = @{ Kind = 'lock'; Target = 'manifest.json'; Fail = 'manifest.json' }
+        }
+        foreach ($c in $readCases.Keys) {
+            $rc = $readCases[$c]
+            $tp = Join-Path $inst $rc.Target
+            $lock = $null
+            if ($rc.Kind -eq 'lock') { $lock = [IO.File]::Open($tp, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None) }
+            else {
+                [IO.Directory]::Move($tp, "$tp.aside")
+                if ($rc.Kind -eq 'junction') { $o = & cmd.exe /c "mklink /J `"$tp`" `"$tp.nao-existe`"" 2>&1; Assert-Eq $LASTEXITCODE 0 "juncao para destino inexistente criada ($o)" }
+            }
+            try {
+                foreach ($a in @('verify', 'version', 'help', 'diagnose -DeadlineSeconds 0')) {
+                    $r = Invoke-Rb5Cli $cmd $a
+                    Assert-Eq $r.Exit 5 "$($c): $a recusado com exit 5, nao erro do PowerShell ($($r.Text))"
+                    Assert-True (-not (Test-Path -LiteralPath $marker)) "$($c): nenhum codigo executado por $a"
+                    Assert-True ($r.Text -notmatch '[A-Za-z]:\\' -and $r.Text -notmatch 'Exception') "$($c): motivo sem caminho absoluto nem texto de excecao ($($r.Text))"
+                }
+                $r = Invoke-Rb5Cli $cmd 'verify'
+                Assert-True ($r.Text -match ('FAIL\s+' + [regex]::Escape($rc.Fail))) "$($c): listado como FAIL ($($r.Text))"
+            } finally {
+                if ($null -ne $lock) { $lock.Dispose() }
+                if ($rc.Kind -eq 'junction') { [IO.Directory]::Move($tp, "$tp.juncao") }
+                if ($rc.Kind -ne 'lock') { [IO.Directory]::Move("$tp.aside", $tp) }
+            }
+        }
+        [IO.File]::WriteAllBytes($report, $reportOrig)
+        [IO.File]::WriteAllBytes($mfp, $mfOrig)
+        $r = Invoke-Rb5Cli $cmd 'verify'; Assert-Eq $r.Exit 0 "restaurado apos os casos de leitura ($($r.Text))"
         # Installed copy (install-state.json) without a manifest: refused, never loaded as a source checkout.
         $state = Join-Path $inst 'install-state.json'
         [IO.File]::WriteAllText($state, '{ "product": "Agent Temp Manager", "version": "0.1.0" }')
@@ -1746,6 +1785,53 @@ try { Test-AtmSourceIntegrity -SourceDir $Source; 'INTEGRITY=OK' } catch { 'INTE
         $r = Invoke-Rb5Cli (Join-Path $cur 'bin\agent-temp.cmd') 'verify'; Assert-Eq $r.Exit 0 "instalacao atual de volta e integra ($($r.Text))"
         Assert-True ((Test-Path -LiteralPath $prev) -and ([Convert]::ToBase64String([IO.File]::ReadAllBytes($prevReport)) -eq [Convert]::ToBase64String($prevReportOrig))) '.previous de volta, inalterado'
         Assert-Eq @(Get-ChildItem -LiteralPath (Split-Path -Parent $cur) -Directory -Filter 'AgentTempManager.staging-*').Count 0 'nenhum diretorio intermediario deixado (desfeito)'
+        # The verify throws instead of failing: the same undo. Each copy is tagged in install-state.json (outside the
+        # integrity check) to tell them apart.
+        $pf10 = Split-Path -Parent $cur
+        $tagOf = { param([string]$Dir) [string](Get-Content -LiteralPath (Join-Path $Dir 'install-state.json') -Raw | ConvertFrom-Json).tag }
+        [IO.File]::WriteAllText((Join-Path $cur 'install-state.json'), $stateJson.Replace(' }', ', "tag": "atual" }'))
+        [IO.File]::WriteAllText((Join-Path $prev 'install-state.json'), $stateJson.Replace(' }', ', "tag": "anterior" }'))
+        $script:rb5UndoMsg = $null
+        & {
+            function Invoke-AtmVerifyInstalled { param([string]$InstallDir) throw 'simulated exception' }
+            try { $null = Restore-AtmPrevious -InstallDir $cur } catch { $script:rb5UndoMsg = $_.Exception.Message }
+        }
+        $msg = $script:rb5UndoMsg
+        Assert-True ($null -ne $msg -and $msg -match 'simulated exception' -and $msg -match 'voltaram para onde estavam') "verify lancou excecao apos a troca: rollback desfeito ($msg)"
+        Assert-True ((& $tagOf $cur) -eq 'atual' -and (& $tagOf $prev) -eq 'anterior') 'excecao: instalacao atual e .previous de volta as posicoes originais'
+        Assert-True ([Convert]::ToBase64String([IO.File]::ReadAllBytes($prevReport)) -eq [Convert]::ToBase64String($prevReportOrig)) 'excecao: .previous inalterado'
+        $r = Invoke-Rb5Cli (Join-Path $cur 'bin\agent-temp.cmd') 'verify'; Assert-Eq $r.Exit 0 "excecao: instalacao atual integra ($($r.Text))"
+        Assert-Eq @(Get-ChildItem -LiteralPath $pf10 -Directory -Filter 'AgentTempManager.staging-*').Count 0 'excecao: nenhum diretorio intermediario deixado'
+        # The undo itself fails (an open file blocks a rename, no ACL change): nothing more is moved or deleted and the
+        # error says where each copy is. 'restaurada' blocks the first undo step, 'retirada' the second.
+        foreach ($which in @('restaurada', 'retirada')) {
+            $script:rb5LockWhich = $which; $script:rb5Lock = $null; $script:rb5UndoMsg = $null
+            & {
+                function Invoke-AtmVerifyInstalled {
+                    param([string]$InstallDir)
+                    $dir = $InstallDir
+                    if ($script:rb5LockWhich -eq 'retirada') { $dir = @(Get-ChildItem -LiteralPath (Split-Path -Parent $InstallDir) -Directory -Filter 'AgentTempManager.staging-*')[0].FullName }
+                    $script:rb5Lock = [IO.File]::Open((Join-Path $dir 'agent-temp.ps1'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+                    throw 'simulated exception'
+                }
+                try { $null = Restore-AtmPrevious -InstallDir $cur } catch { $script:rb5UndoMsg = $_.Exception.Message }
+            }
+            if ($null -ne $script:rb5Lock) { $script:rb5Lock.Dispose() }
+            $msg = $script:rb5UndoMsg
+            $staging = @(Get-ChildItem -LiteralPath $pf10 -Directory -Filter 'AgentTempManager.staging-*')
+            Assert-Eq $staging.Count 1 "desfazer falhou ($which): a copia que estava em uso ficou no diretorio intermediario, nao foi apagada ($msg)"
+            Assert-True ($staging.Count -eq 1 -and (& $tagOf $staging[0].FullName) -eq 'atual') "desfazer falhou ($which): copia em uso preservada"
+            $prevAt = $(if ($which -eq 'restaurada') { $cur } else { $prev })
+            Assert-True ((Test-Path -LiteralPath (Join-Path $prevAt 'install-state.json')) -and (& $tagOf $prevAt) -eq 'anterior') "desfazer falhou ($which): versao anterior preservada em $prevAt"
+            Assert-True ($null -ne $msg -and $msg -match 'simulated exception' -and $msg -match 'Nada foi apagado' -and
+                $staging.Count -eq 1 -and $msg.Contains($staging[0].FullName) -and $msg.Contains($prevAt)) "desfazer falhou ($which): erro claro com a posicao de cada copia ($msg)"
+            if ($which -eq 'retirada') { Assert-True (-not (Test-Path -LiteralPath $cur)) 'desfazer falhou (retirada): nada foi colocado no lugar da instalacao' }
+            # Manual recovery by rename only, as the message instructs.
+            if ($which -eq 'restaurada') { Rename-Item -LiteralPath $cur -NewName (Split-Path -Leaf $prev) }
+            Rename-Item -LiteralPath $staging[0].FullName -NewName (Split-Path -Leaf $cur)
+            Assert-True ((& $tagOf $cur) -eq 'atual' -and (& $tagOf $prev) -eq 'anterior') "recuperacao manual ($which): posicoes originais"
+            $r = Invoke-Rb5Cli (Join-Path $cur 'bin\agent-temp.cmd') 'verify'; Assert-Eq $r.Exit 0 "recuperacao manual ($which): instalacao atual integra ($($r.Text))"
+        }
         Assert-Eq (Restore-AtmPrevious -InstallDir $cur) $ver 'rollback integro conclui'
         Assert-True (-not (Test-Path -LiteralPath $prev)) '.previous consumido pelo rollback'
         $r = Invoke-Rb5Cli (Join-Path $cur 'bin\agent-temp.cmd') 'verify'; Assert-Eq $r.Exit 0 "versao restaurada integra ($($r.Text))"

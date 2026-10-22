@@ -136,7 +136,8 @@ Integrity at install and at every run:
   modified file); a source without a manifest needs the explicit `-SourceWithoutManifest` switch. The parent
   of the install directory must not be writable by standard users.
 * Every installed run, `verify` included, first checks every file listed in `manifest.json` (SHA-256, computed
-  with .NET) before any product code is loaded, and refuses to start (exit code 5) if anything differs, if a
+  with .NET) before any product code is loaded, and refuses to start (exit code 5) if anything differs or cannot be
+  read (a file, or the `providers` directory; reported by relative name only), if a
   library the launcher loads or a provider file is not listed, if the manifest cannot be read or has an invalid
   entry (absolute path, `..`, duplicate, malformed hash), or if an installed copy (`install-state.json`) has no
   manifest; only listed providers are loaded. `verify` reports every problem and loads nothing when one exists; it
@@ -148,7 +149,8 @@ Integrity at install and at every run:
   built-in texts are shown. `install\*.ps1` themselves are covered by the release `SHA256SUMS`, not by
   `src\manifest.json`.
 * Rollback checks `<InstallDir>.previous` (manifest, SHA-256, exact file set) before moving anything, and keeps the
-  current copy until the restored one passes `verify`; on failure both copies are put back.
+  current copy until the restored one passes `verify`; on failure (or an exception) both copies are put back. If
+  putting them back fails too, nothing is deleted and the error names where each copy is.
 * Limits: the local manifest proves integrity against the release, not authenticity against an administrator who
   can also change the launcher and the manifest. A file could change between its hash check and its load; both
   happen inside the administrator-only install directory. Source checkouts have no integrity guarantee.

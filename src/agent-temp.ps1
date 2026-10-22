@@ -30,9 +30,10 @@ $here = $PSScriptRoot
 # listed file must match its SHA-256, every library loaded below must be listed and no unlisted provider may exist
 # (fail closed). A manifest that cannot be read, or an installed copy (install-state.json) without one, is refused.
 # Source checkouts (neither file) load as-is. Hashes are computed with .NET and messages are printed in both
-# languages, because no code (not even the message catalog) is loaded before the check passes.
+# languages, because no code (not even the message catalog) is loaded before the check passes. A file or directory
+# that cannot be read is a problem too, reported by its relative name only (no exception text, no absolute path).
 $loadedLibs = @('lib\Engine.Audit.ps1', 'lib\I18n.ps1', 'lib\Engine.Clean.ps1', 'lib\Engine.Diagnose.ps1', 'lib\Report.ps1', 'lib\Tui.ps1')
-$providerFiles = @(Get-ChildItem -LiteralPath (Join-Path $here 'providers') -Filter '*.ps1' -File | Sort-Object Name)
+$providersDir = Join-Path $here 'providers'
 
 function Get-AtmLauncherSha256 {
     param([string]$File)
@@ -45,7 +46,8 @@ function Get-AtmLauncherSha256 {
 
 function Test-AtmLauncherIntegrity {
     # Installed: a manifest or install-state.json exists. Lines: one (OK|FAIL, label) per checked item, for verify.
-    $r = [pscustomobject]@{ Installed = $false; Version = '?'; Listed = @{}; Lines = (New-Object System.Collections.Generic.List[object]); Problems = (New-Object System.Collections.Generic.List[string]) }
+    # Providers: the listed provider files to load (installed copies only).
+    $r = [pscustomobject]@{ Installed = $false; Version = '?'; Listed = @{}; Providers = @(); Lines = (New-Object System.Collections.Generic.List[object]); Problems = (New-Object System.Collections.Generic.List[string]) }
     $mfPath = Join-Path $here 'manifest.json'
     if (-not (Test-Path -LiteralPath $mfPath -PathType Leaf)) {
         if (Test-Path -LiteralPath (Join-Path $here 'install-state.json') -PathType Leaf) {
@@ -82,10 +84,16 @@ function Test-AtmLauncherIntegrity {
         $r.Listed[$k] = $h
         $fp = Join-Path $here $p
         $ok = $false
+        $label = $p
         if (-not (Test-Path -LiteralPath $fp -PathType Leaf)) { $r.Problems.Add("missing/ausente: $k") }
-        elseif ((Get-AtmLauncherSha256 $fp) -ne $h) { $r.Problems.Add("modified/alterado: $k") }
-        else { $ok = $true }
-        $r.Lines.Add(@($(if ($ok) { 'OK' } else { 'FAIL' }), $p))
+        else {
+            $actual = $null
+            try { $actual = Get-AtmLauncherSha256 $fp } catch { $actual = $null }
+            if ($null -eq $actual) { $r.Problems.Add("unreadable/ilegivel: $k"); $label = "$p (unreadable / ilegivel)" }
+            elseif ($actual -ne $h) { $r.Problems.Add("modified/alterado: $k") }
+            else { $ok = $true }
+        }
+        $r.Lines.Add(@($(if ($ok) { 'OK' } else { 'FAIL' }), $label))
     }
     foreach ($lib in $loadedLibs) {
         if (-not $r.Listed.ContainsKey($lib.ToLowerInvariant())) {
@@ -93,16 +101,34 @@ function Test-AtmLauncherIntegrity {
             $r.Lines.Add(@('FAIL', "$lib (not in manifest / fora do manifesto)"))
         }
     }
-    foreach ($pf in $providerFiles) {
+    # A providers directory that is missing or cannot be listed is refused: the provider set would be incomplete.
+    $found = $null
+    try { $found = @(Get-ChildItem -LiteralPath $providersDir -Filter '*.ps1' -File -ErrorAction Stop | Sort-Object Name) } catch { $found = $null }
+    if ($null -eq $found) {
+        $r.Problems.Add('providers directory missing or unreadable / diretorio de providers ausente ou ilegivel: providers')
+        $r.Lines.Add(@('FAIL', 'providers (missing or unreadable / ausente ou ilegivel)'))
+        return $r
+    }
+    foreach ($pf in $found) {
         if (-not $r.Listed.ContainsKey(('providers\' + $pf.Name).ToLowerInvariant())) {
             $r.Problems.Add("provider not in manifest / provider fora do manifesto: $($pf.Name)")
             $r.Lines.Add(@('FAIL', "providers\$($pf.Name) (not in manifest / fora do manifesto)"))
         }
     }
+    $r.Providers = @($found | Where-Object { $r.Listed.ContainsKey(('providers\' + $_.Name).ToLowerInvariant()) })
     return $r
 }
 
-$integrity = Test-AtmLauncherIntegrity
+try { $integrity = Test-AtmLauncherIntegrity }
+catch {
+    # Unexpected failure of the check itself: an installation is refused (exit 5, no exception text); a source
+    # checkout fails as before.
+    if ((Test-Path -LiteralPath (Join-Path $here 'manifest.json')) -or (Test-Path -LiteralPath (Join-Path $here 'install-state.json'))) {
+        Write-Host 'Installation integrity could not be checked; nothing was loaded or run. / Nao foi possivel verificar a integridade da instalacao; nada foi carregado nem executado.' -ForegroundColor Red
+        exit 5
+    }
+    throw
+}
 if ($Command -eq 'verify') {
     # Decided before anything is loaded; on failure nothing is loaded at all.
     if (-not $integrity.Installed) { Write-Host 'manifest.json missing (not running from an installation). / manifest.json ausente (execucao fora de uma instalacao).' -ForegroundColor Yellow; exit 4 }
@@ -122,7 +148,9 @@ if ($integrity.Problems.Count -gt 0) {
     Write-Host 'Run "agent-temp verify" and reinstall from a verified release. / Execute "agent-temp verify" e reinstale a partir de um release verificado.' -ForegroundColor Yellow
     exit 5
 }
-if ($integrity.Installed) { $providerFiles = @($providerFiles | Where-Object { $integrity.Listed.ContainsKey(('providers\' + $_.Name).ToLowerInvariant()) }) }
+# Installed: only the verified, listed providers. Source checkout: every provider file, as before.
+if ($integrity.Installed) { $providerFiles = $integrity.Providers }
+else { $providerFiles = @(Get-ChildItem -LiteralPath $providersDir -Filter '*.ps1' -File | Sort-Object Name) }
 . (Join-Path $here 'lib\Engine.Audit.ps1')     # also loads lib\I18n.ps1
 Set-AtmLanguage -Requested $Lang
 foreach ($providerFile in $providerFiles) { . $providerFile.FullName }

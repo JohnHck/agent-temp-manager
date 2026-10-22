@@ -46,6 +46,8 @@ elseif (-not $atmCatalog) {
         'inst.requiredMissing'    = 'Required file missing in the source / Arquivo obrigatorio ausente na origem: {0}'
         'inst.syntax'             = 'Syntax error / Erro de sintaxe: {0}: {1}'
         'inst.previousIntegrity'  = 'The previous version failed its integrity check; nothing was changed. / A versao anterior falhou na verificacao de integridade; nada foi alterado. {0}'
+        'inst.rollbackVerifyFailed' = 'Verification after rollback failed; both versions were put back where they were. / Verificacao apos rollback falhou; as duas versoes voltaram para onde estavam. {0}'
+        'inst.rollbackUndoFailed' = 'Verification after rollback failed ({0}) and putting the versions back also failed ({1}). Nothing was deleted. The version that was current is in {2}; the previous version is in {3}. Rename them back by hand (the previous version to {4}.previous, then {2} to {4}) before running uninstall, which removes {2}. / A verificacao apos rollback falhou ({0}) e devolver as versoes tambem falhou ({1}). Nada foi apagado. A versao que estava em uso esta em {2}; a versao anterior esta em {3}. Renomeie-as de volta manualmente (a versao anterior para {4}.previous e depois {2} para {4}) antes de executar a desinstalacao, que remove {2}.'
     }
     function Get-AtmText {
         $key = [string]$args[0]
@@ -370,12 +372,26 @@ function Restore-AtmPrevious {
     Rename-Item -LiteralPath $InstallDir -NewName (Split-Path -Leaf $retired)
     try { Rename-Item -LiteralPath $previous -NewName (Split-Path -Leaf $InstallDir) }
     catch { Rename-Item -LiteralPath $retired -NewName (Split-Path -Leaf $InstallDir); throw }
-    $v = Invoke-AtmVerifyInstalled -InstallDir $InstallDir
-    if (-not $v.Ok) {
-        # Both copies go back where they were; the current one is removed only after the restored one verified.
-        Rename-Item -LiteralPath $InstallDir -NewName (Split-Path -Leaf $previous)
-        Rename-Item -LiteralPath $retired -NewName (Split-Path -Leaf $InstallDir)
-        throw (Get-AtmText 'inst.rollbackVerifyFailed' $v.Output)
+    # A verify that fails or throws is the same failure: both copies go back where they were. The current copy is
+    # removed only after the restored one verified; no failure path removes anything.
+    $failure = $null
+    try {
+        $v = Invoke-AtmVerifyInstalled -InstallDir $InstallDir
+        if (-not $v.Ok) { $failure = [string]$v.Output }
+    } catch { $failure = $_.Exception.Message }
+    if ($null -ne $failure) {
+        $undo = $null
+        try { Rename-Item -LiteralPath $InstallDir -NewName (Split-Path -Leaf $previous) } catch { $undo = $_.Exception.Message }
+        if ($null -eq $undo) {
+            try { Rename-Item -LiteralPath $retired -NewName (Split-Path -Leaf $InstallDir) } catch { $undo = $_.Exception.Message }
+        }
+        if ($null -ne $undo) {
+            # Where each copy is now (the first rename either happened or not); nothing more is moved or deleted.
+            $curAt = $retired
+            $prevAt = $(if (Test-Path -LiteralPath $previous) { $previous } else { $InstallDir })
+            throw (Get-AtmText 'inst.rollbackUndoFailed' $failure $undo $curAt $prevAt $InstallDir)
+        }
+        throw (Get-AtmText 'inst.rollbackVerifyFailed' $failure)
     }
     Remove-AtmOwnTree -Path $retired -InstallDir $InstallDir
     return (Get-Content -LiteralPath (Join-Path $InstallDir 'install-state.json') -Raw | ConvertFrom-Json).version
