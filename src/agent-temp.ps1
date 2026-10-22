@@ -26,31 +26,103 @@ Set-StrictMode -Version 2.0
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { $null = $_ }
 
 $here = $PSScriptRoot
-# Installed copies carry manifest.json: before loading ANY code, every listed file must match its SHA-256 and no
-# unlisted provider may exist (fail closed). Source checkouts (no manifest) load as-is. This message is printed in
-# both languages because no code (not even the message catalog) is loaded before the check passes.
-$manifestPath = Join-Path $here 'manifest.json'
+# Installed copies carry manifest.json: before loading ANY code, for every command including verify (R-B5), every
+# listed file must match its SHA-256, every library loaded below must be listed and no unlisted provider may exist
+# (fail closed). A manifest that cannot be read, or an installed copy (install-state.json) without one, is refused.
+# Source checkouts (neither file) load as-is. Hashes are computed with .NET and messages are printed in both
+# languages, because no code (not even the message catalog) is loaded before the check passes.
+$loadedLibs = @('lib\Engine.Audit.ps1', 'lib\I18n.ps1', 'lib\Engine.Clean.ps1', 'lib\Engine.Diagnose.ps1', 'lib\Report.ps1', 'lib\Tui.ps1')
 $providerFiles = @(Get-ChildItem -LiteralPath (Join-Path $here 'providers') -Filter '*.ps1' -File | Sort-Object Name)
-if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
-    $atmManifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    $listed = @{}
-    foreach ($mfEntry in $atmManifest.files) { $listed[$mfEntry.path.ToLowerInvariant()] = $mfEntry.sha256 }
-    $integrityProblems = @()
-    if ($Command -ne 'verify') {
-        foreach ($k in $listed.Keys) {
-            $fp = Join-Path $here $k
-            if (-not (Test-Path -LiteralPath $fp -PathType Leaf)) { $integrityProblems += "missing/ausente: $k"; continue }
-            if ((Get-FileHash -LiteralPath $fp -Algorithm SHA256).Hash -ne $listed[$k]) { $integrityProblems += "modified/alterado: $k" }
+
+function Get-AtmLauncherSha256 {
+    param([string]$File)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [IO.File]::OpenRead($File)
+        try { return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '') } finally { $stream.Dispose() }
+    } finally { $sha.Dispose() }
+}
+
+function Test-AtmLauncherIntegrity {
+    # Installed: a manifest or install-state.json exists. Lines: one (OK|FAIL, label) per checked item, for verify.
+    $r = [pscustomobject]@{ Installed = $false; Version = '?'; Listed = @{}; Lines = (New-Object System.Collections.Generic.List[object]); Problems = (New-Object System.Collections.Generic.List[string]) }
+    $mfPath = Join-Path $here 'manifest.json'
+    if (-not (Test-Path -LiteralPath $mfPath -PathType Leaf)) {
+        if (Test-Path -LiteralPath (Join-Path $here 'install-state.json') -PathType Leaf) {
+            $r.Installed = $true
+            $r.Problems.Add('manifest missing in an installed copy / manifesto ausente em uma instalacao: manifest.json')
+            $r.Lines.Add(@('FAIL', 'manifest.json'))
         }
-        foreach ($pf in $providerFiles) { if (-not $listed.ContainsKey(('providers\' + $pf.Name).ToLowerInvariant())) { $integrityProblems += "provider not in manifest / provider fora do manifesto: $($pf.Name)" } }
-        if ($integrityProblems.Count -gt 0) {
-            Write-Host ('Installation integrity violated; nothing was loaded or run. / Integridade da instalacao violada; nada foi carregado nem executado: ' + ($integrityProblems -join '; ')) -ForegroundColor Red
-            Write-Host 'Run "agent-temp verify" and reinstall from a verified release. / Execute "agent-temp verify" e reinstale a partir de um release verificado.' -ForegroundColor Yellow
-            exit 5
+        return $r
+    }
+    $r.Installed = $true
+    $entries = $null
+    try {
+        $doc = [IO.File]::ReadAllText($mfPath) | ConvertFrom-Json
+        $entries = @($doc.files)
+    } catch { $entries = $null }
+    try { $r.Version = [string]$doc.version } catch { $r.Version = '?' }
+    if ($null -eq $entries -or $entries.Count -eq 0) {
+        $r.Problems.Add('manifest unreadable or empty / manifesto ilegivel ou vazio: manifest.json')
+        $r.Lines.Add(@('FAIL', 'manifest.json'))
+        return $r
+    }
+    foreach ($e in $entries) {
+        $p = ''; $h = ''
+        try { $p = [string]$e.path; $h = [string]$e.sha256 } catch { $p = ''; $h = '' }
+        $k = $p.ToLowerInvariant()
+        $segments = @($p -split '\\')
+        # Relative product paths only: no drive, no root, no . or .. segment, no duplicate, a SHA-256 in hex.
+        if ($p -notmatch '^[A-Za-z0-9_. -]+(\\[A-Za-z0-9_. -]+)*$' -or $segments -contains '.' -or $segments -contains '..' -or
+            $h -notmatch '^[0-9A-Fa-f]{64}$' -or $r.Listed.ContainsKey($k)) {
+            $r.Problems.Add("invalid manifest entry / entrada invalida no manifesto: $p")
+            $r.Lines.Add(@('FAIL', "manifest.json: $p"))
+            continue
+        }
+        $r.Listed[$k] = $h
+        $fp = Join-Path $here $p
+        $ok = $false
+        if (-not (Test-Path -LiteralPath $fp -PathType Leaf)) { $r.Problems.Add("missing/ausente: $k") }
+        elseif ((Get-AtmLauncherSha256 $fp) -ne $h) { $r.Problems.Add("modified/alterado: $k") }
+        else { $ok = $true }
+        $r.Lines.Add(@($(if ($ok) { 'OK' } else { 'FAIL' }), $p))
+    }
+    foreach ($lib in $loadedLibs) {
+        if (-not $r.Listed.ContainsKey($lib.ToLowerInvariant())) {
+            $r.Problems.Add("not in manifest / fora do manifesto: $lib")
+            $r.Lines.Add(@('FAIL', "$lib (not in manifest / fora do manifesto)"))
         }
     }
-    $providerFiles = @($providerFiles | Where-Object { $listed.ContainsKey(('providers\' + $_.Name).ToLowerInvariant()) })
+    foreach ($pf in $providerFiles) {
+        if (-not $r.Listed.ContainsKey(('providers\' + $pf.Name).ToLowerInvariant())) {
+            $r.Problems.Add("provider not in manifest / provider fora do manifesto: $($pf.Name)")
+            $r.Lines.Add(@('FAIL', "providers\$($pf.Name) (not in manifest / fora do manifesto)"))
+        }
+    }
+    return $r
 }
+
+$integrity = Test-AtmLauncherIntegrity
+if ($Command -eq 'verify') {
+    # Decided before anything is loaded; on failure nothing is loaded at all.
+    if (-not $integrity.Installed) { Write-Host 'manifest.json missing (not running from an installation). / manifest.json ausente (execucao fora de uma instalacao).' -ForegroundColor Yellow; exit 4 }
+    foreach ($line in $integrity.Lines) { Write-Host ("  {0,-4} {1}" -f $line[0], $line[1]) -ForegroundColor $(if ($line[0] -eq 'OK') { 'Green' } else { 'Red' }) }
+    if ($integrity.Problems.Count -gt 0) {
+        Write-Host ('Version {0}; {1} problem(s); nothing was loaded or run. / Versao {0}; {1} problema(s); nada foi carregado nem executado.' -f $integrity.Version, $integrity.Problems.Count) -ForegroundColor Red
+        exit 5
+    }
+    # Every file matched its SHA-256: the message catalog is verified and only it is loaded, for the summary.
+    . (Join-Path $here 'lib\I18n.ps1')
+    Set-AtmLanguage -Requested $Lang
+    Write-Host (Get-AtmText 'cli.verifySummary' $integrity.Version 0)
+    exit 0
+}
+if ($integrity.Problems.Count -gt 0) {
+    Write-Host ('Installation integrity violated; nothing was loaded or run. / Integridade da instalacao violada; nada foi carregado nem executado: ' + ($integrity.Problems -join '; ')) -ForegroundColor Red
+    Write-Host 'Run "agent-temp verify" and reinstall from a verified release. / Execute "agent-temp verify" e reinstale a partir de um release verificado.' -ForegroundColor Yellow
+    exit 5
+}
+if ($integrity.Installed) { $providerFiles = @($providerFiles | Where-Object { $integrity.Listed.ContainsKey(('providers\' + $_.Name).ToLowerInvariant()) }) }
 . (Join-Path $here 'lib\Engine.Audit.ps1')     # also loads lib\I18n.ps1
 Set-AtmLanguage -Requested $Lang
 foreach ($providerFile in $providerFiles) { . $providerFile.FullName }
@@ -142,21 +214,6 @@ try {
                 Show-AtmAudit -Inventory $res.PostInventory
             }
             exit $(if ($res.Aborted) { 3 } else { 0 })
-        }
-        'verify' {
-            $manifest = Join-Path $here 'manifest.json'
-            if (-not (Test-Path -LiteralPath $manifest)) { Write-Host (Get-AtmText 'cli.noManifest') -ForegroundColor Yellow; exit 4 }
-            $m = Get-Content -LiteralPath $manifest -Raw -Encoding UTF8 | ConvertFrom-Json
-            $bad = 0
-            foreach ($f in $m.files) {
-                $fp = Join-Path $here $f.path
-                $h = $(if (Test-Path -LiteralPath $fp) { (Get-FileHash -LiteralPath $fp -Algorithm SHA256).Hash } else { 'MISSING' })
-                $ok = $h -eq $f.sha256
-                if (-not $ok) { $bad++ }
-                Write-Host ("  {0,-4} {1}" -f $(if ($ok) { 'OK' } else { 'FAIL' }), $f.path) -ForegroundColor $(if ($ok) { 'Green' } else { 'Red' })
-            }
-            Write-Host (Get-AtmText 'cli.verifySummary' $m.version $bad)
-            exit $(if ($bad -eq 0) { 0 } else { 5 })
         }
         'version' {
             Initialize-AtmNative -LibDir (Join-Path $here 'lib')

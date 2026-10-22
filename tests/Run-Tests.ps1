@@ -1516,12 +1516,228 @@ try {
         $out = & cmd.exe /c "`"$cmd`" verify" 2>&1; Assert-Eq $LASTEXITCODE 5 'motor de diagnostico adulterado: verify (exit 5)'
         $out = & cmd.exe /c "`"$cmd`" diagnose -DeadlineSeconds 0" 2>&1; Assert-Eq $LASTEXITCODE 5 'motor de diagnostico adulterado: execucao recusada (exit 5)'
         [IO.File]::Delete($idiag)
-        # verify itself loads the libraries before checking (V0.1 launcher), so a removed library is checked here
-        # through the startup integrity check of every other command.
+        # Removed: verify (R-B5 test below) and every other command refuse it before loading any code.
+        $out = & cmd.exe /c "`"$cmd`" verify" 2>&1; Assert-Eq $LASTEXITCODE 5 'motor de diagnostico removido: verify (exit 5)'
         $out = & cmd.exe /c "`"$cmd`" version" 2>&1; Assert-Eq $LASTEXITCODE 5 'motor de diagnostico removido: execucao recusada (exit 5)'
         Assert-True (($out -join ' ') -match 'ausente: lib\\engine\.diagnose\.ps1') "motivo: ausente ($out)"
         [IO.File]::WriteAllBytes($idiag, $iorig)
         $out = & cmd.exe /c "`"$cmd`" verify" 2>&1; Assert-Eq $LASTEXITCODE 0 "restaurado: verify integro ($out)"
+    }
+    # R-B5 payloads: harmless only. The marker line appends to a file next to the altered code (relative to it, so the
+    # path stays ASCII); the shadow answers the manifest's own hash for every file, which forged verify before R-B5.
+    $rb5Mark = { param([string]$Up) "[IO.File]::AppendAllText((Join-Path `$PSScriptRoot '$Up\atm-marker.txt'), 'executed;')" }
+    $rb5Shadow = @'
+function global:Get-FileHash { param([string]$LiteralPath, [string]$Algorithm)
+    $root = Split-Path -Parent $PSScriptRoot
+    $e = @((Get-Content -LiteralPath (Join-Path $root 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json).files | Where-Object { (Join-Path $root $_.path) -eq $LiteralPath })
+    [pscustomobject]@{ Hash = $(if ($e.Count -gt 0) { $e[0].sha256 } else { '' }) } }
+'@
+    function Invoke-Rb5Cli { param([string]$Cmd, [string]$Arguments) $ErrorActionPreference = 'Continue'; $o = & cmd.exe /c "`"$Cmd`" $Arguments" 2>&1; [pscustomobject]@{ Exit = $LASTEXITCODE; Text = (@($o | ForEach-Object { "$_" }) -join ' ') } }
+    Test-Case 'Instalacao' 'R-B5 verify: nenhum codigo carregado antes da verificacao; biblioteca removida, adulterada ou que sombreia Get-FileHash e provider plantado nunca executam nem forjam sucesso; manifesto invalido ou ausente recusado' {
+        $inst = Join-Path $sandbox 'PF8\AgentTempManager'
+        [void][IO.Directory]::CreateDirectory($inst)
+        Copy-AtmTree -From $srcDir -To $inst
+        New-AtmNativeAssembly -Root $inst
+        Write-AtmManifest -Root $inst -Version (Get-AtmSourceVersion -SourceDir $srcDir)
+        $cmd = Join-Path $inst 'bin\agent-temp.cmd'
+        $marker = Join-Path $inst 'atm-marker.txt'
+        $r = Invoke-Rb5Cli $cmd 'verify'; Assert-Eq $r.Exit 0 "verify integro ($($r.Text))"
+        Assert-True ($r.Text -match 'Vers.o \d+\.\d+\.\d+; 0 arquivo') "resumo localizado quando tudo confere ($($r.Text))"
+        $mark = & $rb5Mark '..'
+        foreach ($t in @('lib\Engine.Audit.ps1', 'lib\I18n.ps1', 'lib\Engine.Clean.ps1', 'lib\Engine.Diagnose.ps1', 'lib\Report.ps1', 'lib\Tui.ps1', 'providers\ClaudeCode.ps1')) {
+            $fp = Join-Path $inst $t
+            $orig = [IO.File]::ReadAllBytes($fp)
+            [IO.File]::Move($fp, "$fp.aside")
+            $r = Invoke-Rb5Cli $cmd 'verify'
+            Assert-Eq $r.Exit 5 "$t removido: verify recusa com exit 5, nao erro do PowerShell ($($r.Text))"
+            Assert-True ($r.Text -match ('FAIL\s+' + [regex]::Escape($t))) "$t removido: listado como FAIL"
+            foreach ($a in @('version', 'diagnose -DeadlineSeconds 0')) { $r = Invoke-Rb5Cli $cmd $a; Assert-Eq $r.Exit 5 "$t removido: $a recusado (exit 5)" }
+            [IO.File]::Move("$fp.aside", $fp)
+            foreach ($payload in @($mark, ($mark + "`r`n" + $rb5Shadow))) {
+                [IO.File]::WriteAllBytes($fp, $orig)
+                [IO.File]::AppendAllText($fp, "`r`n$payload`r`n")
+                $r = Invoke-Rb5Cli $cmd 'verify'
+                Assert-Eq $r.Exit 5 "$t adulterado: verify recusa, sem sucesso forjado ($($r.Text))"
+                Assert-True ($r.Text -match ('FAIL\s+' + [regex]::Escape($t))) "$t adulterado: listado como FAIL ($($r.Text))"
+                Assert-True (-not (Test-Path -LiteralPath $marker)) "$t adulterado: nenhum codigo executado por verify"
+                foreach ($a in @('version', 'help', 'diagnose -DeadlineSeconds 0')) {
+                    $r = Invoke-Rb5Cli $cmd $a
+                    Assert-Eq $r.Exit 5 "$t adulterado: $a recusado (exit 5)"
+                    Assert-True (-not (Test-Path -LiteralPath $marker)) "$t adulterado: nenhum codigo executado por $a"
+                }
+            }
+            [IO.File]::WriteAllBytes($fp, $orig)
+        }
+        # Planted provider: verify reports it, as every other command refuses it.
+        $planted = Join-Path $inst 'providers\Plantado.ps1'
+        [IO.File]::WriteAllText($planted, $mark)
+        $r = Invoke-Rb5Cli $cmd 'verify'
+        Assert-Eq $r.Exit 5 "provider plantado: verify recusa ($($r.Text))"
+        Assert-True ($r.Text -match 'FAIL\s+providers\\Plantado\.ps1') 'provider plantado listado como FAIL'
+        $r = Invoke-Rb5Cli $cmd 'version'; Assert-Eq $r.Exit 5 'provider plantado: version recusado'
+        Assert-True (-not (Test-Path -LiteralPath $marker)) 'provider plantado nunca executou'
+        [IO.File]::Move($planted, (Join-Path $inst 'Plantado.ps1.aside'))
+        $r = Invoke-Rb5Cli $cmd 'verify'; Assert-Eq $r.Exit 0 "restaurado ($($r.Text))"
+        # Invalid manifest: explicit refusal (exit 5) for verify and every other command; an unlisted library is never loaded.
+        $mfp = Join-Path $inst 'manifest.json'
+        $mfOrig = [IO.File]::ReadAllBytes($mfp)
+        $m = [IO.File]::ReadAllText($mfp) | ConvertFrom-Json
+        $files = @($m.files)
+        $hex = ('A' * 64)
+        $report = Join-Path $inst 'lib\Report.ps1'
+        $reportOrig = [IO.File]::ReadAllBytes($report)
+        $cases = [ordered]@{
+            'malformado'            = '{ "files": [ '
+            'sem lista de arquivos' = ([pscustomobject]@{ product = $m.product; version = $m.version } | ConvertTo-Json)
+            'lista vazia'           = ([pscustomobject]@{ product = $m.product; version = $m.version; files = @() } | ConvertTo-Json)
+            'biblioteca fora'       = ([pscustomobject]@{ product = $m.product; version = $m.version; files = @($files | Where-Object { $_.path -ne 'lib\Report.ps1' }) } | ConvertTo-Json -Depth 4)
+            'entrada duplicada'     = ([pscustomobject]@{ product = $m.product; version = $m.version; files = @($files + $files[0]) } | ConvertTo-Json -Depth 4)
+            'caminho com ..'        = ([pscustomobject]@{ product = $m.product; version = $m.version; files = @($files + [pscustomobject]@{ path = '..\fora.ps1'; sha256 = $hex; bytes = 1 }) } | ConvertTo-Json -Depth 4)
+            'caminho absoluto'      = ([pscustomobject]@{ product = $m.product; version = $m.version; files = @($files + [pscustomobject]@{ path = 'C:\Windows\win.ini'; sha256 = $hex; bytes = 1 }) } | ConvertTo-Json -Depth 4)
+            'sha256 invalido'       = ([pscustomobject]@{ product = $m.product; version = $m.version; files = @(@($files | Select-Object -Skip 1) + [pscustomobject]@{ path = $files[0].path; sha256 = 'zz'; bytes = 1 }) } | ConvertTo-Json -Depth 4)
+        }
+        foreach ($c in $cases.Keys) {
+            [IO.File]::WriteAllText($mfp, $cases[$c], (New-Object Text.UTF8Encoding($false)))
+            if ($c -eq 'biblioteca fora') { [IO.File]::AppendAllText($report, "`r`n$mark`r`n") }
+            foreach ($a in @('verify', 'version', 'help')) {
+                $r = Invoke-Rb5Cli $cmd $a
+                Assert-Eq $r.Exit 5 "manifesto $($c): $a recusado com exit 5 ($($r.Text))"
+                Assert-True (-not (Test-Path -LiteralPath $marker)) "manifesto $($c): nenhum codigo executado por $a"
+            }
+            [IO.File]::WriteAllBytes($report, $reportOrig)
+        }
+        [IO.File]::WriteAllBytes($mfp, $mfOrig)
+        # Installed copy (install-state.json) without a manifest: refused, never loaded as a source checkout.
+        $state = Join-Path $inst 'install-state.json'
+        [IO.File]::WriteAllText($state, '{ "product": "Agent Temp Manager", "version": "0.1.0" }')
+        $r = Invoke-Rb5Cli $cmd 'verify'; Assert-Eq $r.Exit 0 "instalacao com estado e manifesto integros ($($r.Text))"
+        [IO.File]::Move($mfp, "$mfp.aside")
+        [IO.File]::AppendAllText($report, "`r`n$mark`r`n")
+        foreach ($a in @('verify', 'version', 'help')) {
+            $r = Invoke-Rb5Cli $cmd $a
+            Assert-Eq $r.Exit 5 "instalacao sem manifesto: $a recusado com exit 5 ($($r.Text))"
+            Assert-True (-not (Test-Path -LiteralPath $marker)) "instalacao sem manifesto: nenhum codigo executado por $a"
+        }
+        [IO.File]::WriteAllBytes($report, $reportOrig)
+        # Source checkout (neither file): verify keeps exit 4 and loads nothing; the other commands load as before.
+        [IO.File]::Move($state, "$state.aside")
+        $r = Invoke-Rb5Cli $cmd 'verify'; Assert-Eq $r.Exit 4 "origem sem manifesto: verify exit 4 ($($r.Text))"
+        $r = Invoke-Rb5Cli $cmd 'help'; Assert-Eq $r.Exit 0 "origem sem manifesto: help carrega como antes ($($r.Text))"
+        [IO.File]::Move("$mfp.aside", $mfp)
+        $r = Invoke-Rb5Cli $cmd 'verify'; Assert-Eq $r.Exit 0 "restaurado ($($r.Text))"
+        Assert-True (-not (Test-Path -LiteralPath $marker)) 'nenhum marcador em todo o teste'
+    }
+    Test-Case 'Instalacao' 'R-B5 bootstrap: I18n.ps1 do pacote so executa depois de verificado (Install, Uninstall, Restore; -SourceDir diferente; Get-FileHash sombreado; pacote sem manifesto so com autorizacao explicita)' {
+        $repoDir = Split-Path -Parent $testsDir
+        $pkg = Join-Path $sandbox 'pkg-rb5'
+        foreach ($d in @('src', 'install')) { $t = Join-Path $pkg $d; [void][IO.Directory]::CreateDirectory($t); Copy-AtmTree -From (Join-Path $repoDir $d) -To $t }
+        $ver = Get-AtmSourceVersion -SourceDir $srcDir
+        Write-AtmManifest -Root (Join-Path $pkg 'src') -Version $ver
+        $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $common = Join-Path $pkg 'install\InstallCommon.ps1'
+        $marker = Join-Path $pkg 'atm-marker.txt'
+        $i18n = Join-Path $pkg 'src\lib\I18n.ps1'
+        $i18nOrig = [IO.File]::ReadAllBytes($i18n)
+        $pkgReport = Join-Path $pkg 'src\lib\Report.ps1'
+        $pkgReportOrig = [IO.File]::ReadAllBytes($pkgReport)
+        # Child process: the caller's variables, then the package's InstallCommon, then a source check.
+        $probe = Join-Path $sandbox 'rb5-probe.ps1'
+        [IO.File]::WriteAllText($probe, @'
+param([string]$Common, [string]$Source, [switch]$Trust, [string]$InstallDir)
+$ErrorActionPreference = 'Stop'
+if ($Trust) { $script:AtmCatalogTrustUnverified = $true }
+if ($InstallDir) { $script:AtmCatalogInstallDir = $InstallDir }
+. $Common
+'CATALOG=' + (Get-AtmText 'inst.incomplete') + ' NOMANIFEST=' + (Get-AtmText 'inst.noManifest')
+try { Test-AtmSourceIntegrity -SourceDir $Source; 'INTEGRITY=OK' } catch { 'INTEGRITY=REFUSED ' + $_.Exception.Message }
+'@)
+        $probeRun = { param([string]$Source, [string[]]$Extra = @()) $ErrorActionPreference = 'Continue'; $o = & $ps -NoProfile -ExecutionPolicy Bypass -File $probe -Common $common -Source $Source @Extra 2>&1; (@($o | ForEach-Object { "$_" }) -join ' ') }
+        $t = & $probeRun (Join-Path $pkg 'src')
+        Assert-True ($t -match 'CATALOG=Origem incompleta' -and $t -match 'INTEGRITY=OK') "pacote integro: catalogo verificado carregado, origem aceita ($t)"
+        # Altered catalog (harmless marker + Get-FileHash shadow) and altered library: refused, catalog never executed.
+        [IO.File]::AppendAllText($i18n, "`r`n$(& $rb5Mark '..\..')`r`n$rb5Shadow`r`n")
+        [IO.File]::AppendAllText($pkgReport, "`r`n# altered`r`n")
+        $t = & $probeRun (Join-Path $pkg 'src')
+        Assert-True ($t -match 'INTEGRITY=REFUSED') "catalogo e biblioteca adulterados: origem recusada, sem sucesso forjado ($t)"
+        Assert-True (-not (Test-Path -LiteralPath $marker)) "I18n.ps1 adulterado nao executou antes da validacao ($t)"
+        Assert-True ($t -notmatch 'CATALOG=\[') "recusa legivel sem o catalogo ($t)"
+        # The three administrative scripts. Not elevated: they stop at the elevation check. Elevated (CI): at the source
+        # check or the missing installation. Either way the altered catalog never runs and nothing is installed.
+        $target = Join-Path $sandbox 'PF9\AgentTempManager'
+        foreach ($s in @(@{ N = 'Install-AgentTempManager.ps1'; X = @('-SkipPath') }, @{ N = 'Uninstall-AgentTempManager.ps1'; X = @() }, @{ N = 'Restore-AgentTempManagerPrevious.ps1'; X = @() })) {
+            $sa = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $pkg "install\$($s.N)"), '-InstallDir', $target) + $s.X
+            $ErrorActionPreference = 'Continue'; $o = & $ps @sa 2>&1; $code = $LASTEXITCODE; $ErrorActionPreference = 'Stop'
+            Assert-True ($code -ne 0) "$($s.N) com pacote adulterado nao conclui ($o)"
+            Assert-True (-not (Test-Path -LiteralPath $marker)) "$($s.N): I18n.ps1 adulterado nao executou"
+            Assert-True (-not (Test-Path -LiteralPath $target)) "$($s.N): nada instalado"
+        }
+        [IO.File]::WriteAllBytes($i18n, $i18nOrig)
+        [IO.File]::WriteAllBytes($pkgReport, $pkgReportOrig)
+        # A different -SourceDir: the bootstrap loads only the package's verified catalog; the other source is checked.
+        $other = Join-Path $sandbox 'other-src'
+        [void][IO.Directory]::CreateDirectory($other)
+        Copy-AtmTree -From $srcDir -To $other
+        Write-AtmManifest -Root $other -Version $ver
+        $otherMarker = Join-Path $sandbox 'atm-marker.txt'
+        [IO.File]::AppendAllText((Join-Path $other 'lib\I18n.ps1'), "`r`n$(& $rb5Mark '..\..')`r`n")
+        $t = & $probeRun $other
+        Assert-True ($t -match 'CATALOG=Origem incompleta' -and $t -match 'INTEGRITY=REFUSED') "outra origem adulterada recusada com o catalogo verificado do pacote ($t)"
+        Assert-True (-not (Test-Path -LiteralPath $otherMarker)) 'I18n.ps1 da outra origem nao executou'
+        $ErrorActionPreference = 'Continue'; $o = & $ps -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pkg 'install\Install-AgentTempManager.ps1') -SourceDir $other -InstallDir $target -SkipPath 2>&1; $code = $LASTEXITCODE; $ErrorActionPreference = 'Stop'
+        Assert-True ($code -ne 0 -and -not (Test-Path -LiteralPath $target)) "instalador com -SourceDir adulterado nao instala ($o)"
+        Assert-True (-not (Test-Path -LiteralPath $otherMarker)) 'instalador: I18n.ps1 da outra origem nao executou'
+        # Uninstall/rollback: the installed copy's catalog, verified against its own manifest, when the package has none.
+        $instCopy = Join-Path $sandbox 'PF11\AgentTempManager'
+        [void][IO.Directory]::CreateDirectory($instCopy)
+        Copy-AtmTree -From $srcDir -To $instCopy
+        Write-AtmManifest -Root $instCopy -Version $ver
+        # Package without a manifest (git checkout): its catalog is code that nothing verified.
+        [IO.File]::Move((Join-Path $pkg 'src\manifest.json'), (Join-Path $pkg 'src\manifest.json.aside'))
+        $t = & $probeRun (Join-Path $pkg 'src')
+        Assert-True ($t -notmatch 'CATALOG=Origem incompleta' -and $t -notmatch 'CATALOG=\[') "sem manifesto e sem autorizacao: catalogo nao carregado, textos internos legiveis ($t)"
+        Assert-True ($t -match 'INTEGRITY=REFUSED .*SourceWithoutManifest') "sem manifesto: recusa orienta -SourceWithoutManifest ($t)"
+        $t = & $probeRun (Join-Path $pkg 'src') @('-Trust')
+        Assert-True ($t -match 'CATALOG=Origem incompleta') "sem manifesto, com autorizacao explicita: catalogo carregado ($t)"
+        $t = & $probeRun (Join-Path $pkg 'src') @('-InstallDir', $instCopy)
+        Assert-True ($t -match 'CATALOG=Origem incompleta') "sem manifesto no pacote: catalogo da instalacao verificado carregado ($t)"
+        [IO.File]::AppendAllText((Join-Path $instCopy 'lib\I18n.ps1'), "`r`n$(& $rb5Mark '..')`r`n")
+        $t = & $probeRun (Join-Path $pkg 'src') @('-InstallDir', $instCopy)
+        Assert-True ($t -notmatch 'CATALOG=Origem incompleta') "catalogo da instalacao adulterado nao carregado ($t)"
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $instCopy 'atm-marker.txt'))) 'catalogo da instalacao adulterado nao executou'
+        [IO.File]::AppendAllText($i18n, "`r`n$(& $rb5Mark '..\..')`r`n")
+        $t = & $probeRun (Join-Path $pkg 'src')
+        Assert-True (-not (Test-Path -LiteralPath $marker)) "sem manifesto e sem autorizacao: I18n.ps1 do pacote nao executou ($t)"
+        [IO.File]::WriteAllBytes($i18n, $i18nOrig)
+        [IO.File]::Move((Join-Path $pkg 'src\manifest.json.aside'), (Join-Path $pkg 'src\manifest.json'))
+    }
+    Test-Case 'Instalacao' 'R-B5 rollback: .previous adulterado recusado antes da troca; instalacao atual e .previous preservados; rollback integro conclui' {
+        $cur = Join-Path $sandbox 'PF10\AgentTempManager'
+        $prev = "$cur.previous"
+        $ver = Get-AtmSourceVersion -SourceDir $srcDir
+        $stateJson = '{ "product": "Agent Temp Manager", "version": "' + $ver + '", "pathAddedByInstaller": false }'
+        [void][IO.Directory]::CreateDirectory($cur)
+        Copy-AtmTree -From $srcDir -To $cur
+        New-AtmNativeAssembly -Root $cur
+        Write-AtmManifest -Root $cur -Version $ver
+        [IO.File]::WriteAllText((Join-Path $cur 'install-state.json'), $stateJson)
+        [void][IO.Directory]::CreateDirectory($prev)
+        Copy-AtmTree -From $cur -To $prev
+        Write-AtmManifest -Root $prev -Version $ver
+        [IO.File]::WriteAllText((Join-Path $prev 'install-state.json'), $stateJson)
+        $prevReport = Join-Path $prev 'lib\Report.ps1'
+        $prevReportOrig = [IO.File]::ReadAllBytes($prevReport)
+        [IO.File]::AppendAllText($prevReport, "`r`n$(& $rb5Mark '..')`r`n")
+        $msg = $null; try { $null = Restore-AtmPrevious -InstallDir $cur } catch { $msg = $_.Exception.Message }
+        Assert-True ($null -ne $msg) 'rollback para uma copia adulterada recusado'
+        $r = Invoke-Rb5Cli (Join-Path $cur 'bin\agent-temp.cmd') 'verify'
+        Assert-Eq $r.Exit 0 "instalacao atual preservada e integra ($msg / $($r.Text))"
+        Assert-True ((Test-Path -LiteralPath $prev) -and ([IO.File]::ReadAllBytes($prevReport).Length -gt $prevReportOrig.Length)) '.previous preservado como estava'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $cur 'atm-marker.txt')) -and -not (Test-Path -LiteralPath (Join-Path $prev 'atm-marker.txt'))) 'codigo da copia adulterada nunca executou'
+        Assert-Eq @(Get-ChildItem -LiteralPath (Split-Path -Parent $cur) -Directory -Filter 'AgentTempManager.staging-*').Count 0 'nenhum diretorio intermediario deixado'
+        [IO.File]::WriteAllBytes($prevReport, $prevReportOrig)
+        Assert-Eq (Restore-AtmPrevious -InstallDir $cur) $ver 'rollback integro conclui'
+        Assert-True (-not (Test-Path -LiteralPath $prev)) '.previous consumido pelo rollback'
+        $r = Invoke-Rb5Cli (Join-Path $cur 'bin\agent-temp.cmd') 'verify'; Assert-Eq $r.Exit 0 "versao restaurada integra ($($r.Text))"
     }
     Test-Case 'Instalacao' 'Auditoria de ACL: escrita por Users/Everyone e detectada; Program Files padrao e aceito' {
         $d = Join-Path $sandbox 'aclcheck'; [void][IO.Directory]::CreateDirectory($d); [IO.File]::WriteAllText((Join-Path $d 'x.ps1'), '#')

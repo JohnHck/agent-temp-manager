@@ -42,6 +42,8 @@ verified against their manifest automatically.
 
 What it does:
 
+* loads its message catalog only after it matches the release manifest (from a git checkout, only with
+  `-SourceWithoutManifest`; otherwise built-in texts are shown);
 * validates the source (required files, PowerShell syntax);
 * stages a copy in `%ProgramFiles%\AgentTempManager.staging-*`, compiles
   `lib\AgentTempManager.Native.dll` there (compiler temp files kept inside the staging directory), writes

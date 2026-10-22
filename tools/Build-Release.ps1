@@ -7,6 +7,8 @@
 param([switch]$SkipTests)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+# The repository being released is the trusted source of its own message catalog (InstallCommon, R-B5).
+$script:AtmCatalogTrustUnverified = $true
 . (Join-Path $repo 'install\InstallCommon.ps1')
 $version = Get-AtmSourceVersion -SourceDir (Join-Path $repo 'src')
 if (-not $SkipTests) {

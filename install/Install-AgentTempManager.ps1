@@ -36,6 +36,9 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 if (-not $SourceDir) { $SourceDir = Join-Path (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)) 'src' }
+# Message catalog: verified against a manifest, or trusted only by the explicit -SourceWithoutManifest (InstallCommon).
+$script:AtmCatalogTrustUnverified = [bool]$SourceWithoutManifest
+$script:AtmCatalogInstallDir = $InstallDir
 . (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'InstallCommon.ps1')
 
 Assert-AtmElevated

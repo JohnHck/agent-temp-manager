@@ -135,9 +135,23 @@ Integrity at install and at every run:
 * The installer requires the source to match the release's `src\manifest.json` exactly (no extra, missing or
   modified file); a source without a manifest needs the explicit `-SourceWithoutManifest` switch. The parent
   of the install directory must not be writable by standard users.
-* Every installed run first checks every file listed in `manifest.json` (SHA-256) and refuses to start if
-  anything differs or if a provider file is not listed; only listed providers are loaded. An installation
+* Every installed run, `verify` included, first checks every file listed in `manifest.json` (SHA-256, computed
+  with .NET) before any product code is loaded, and refuses to start (exit code 5) if anything differs, if a
+  library the launcher loads or a provider file is not listed, if the manifest cannot be read or has an invalid
+  entry (absolute path, `..`, duplicate, malformed hash), or if an installed copy (`install-state.json`) has no
+  manifest; only listed providers are loaded. `verify` reports every problem and loads nothing when one exists; it
+  loads only the verified message catalog for its summary when every file matches (R-B5). An installation
   without its precompiled DLL refuses to compile at run time.
+* The administrative scripts load the message catalog (`lib\I18n.ps1`, code) only after its SHA-256 matches the
+  package's `src\manifest.json` or, for uninstall and rollback, the installed copy's manifest. A package without a
+  manifest (a git checkout) is loaded unverified only with the explicit `-SourceWithoutManifest`; otherwise
+  built-in texts are shown. `install\*.ps1` themselves are covered by the release `SHA256SUMS`, not by
+  `src\manifest.json`.
+* Rollback checks `<InstallDir>.previous` (manifest, SHA-256, exact file set) before moving anything, and keeps the
+  current copy until the restored one passes `verify`; on failure both copies are put back.
+* Limits: the local manifest proves integrity against the release, not authenticity against an administrator who
+  can also change the launcher and the manifest. A file could change between its hash check and its load; both
+  happen inside the administrator-only install directory. Source checkouts have no integrity guarantee.
 * Uninstall removes the PATH entry only if the installer added it.
 
 Operational advice:

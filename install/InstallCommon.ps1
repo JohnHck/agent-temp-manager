@@ -1,9 +1,63 @@
 ﻿# Shared helpers for install / uninstall / release. Only touch the product's own directories and the
 # product's own PATH entry. Never touch agent temporary directories.
 Set-StrictMode -Version 2.0
-# Message catalog shipped with the product (same release, same trust level as this file).
-$atmI18n = Join-Path (Split-Path -Parent $PSScriptRoot) 'src\lib\I18n.ps1'
-if (Test-Path -LiteralPath $atmI18n -PathType Leaf) { . $atmI18n } else { function Get-AtmText { return "[$($args[0])]" } }
+# Message catalog (lib\I18n.ps1) of the product. It is code, so it is dot-sourced only once its SHA-256 matches a
+# manifest, checked here with .NET before anything else runs (R-B5): the package's src\manifest.json or, when the
+# package has none, the installed copy's (the caller sets $script:AtmCatalogInstallDir). A package without a manifest
+# (git checkout) is loaded unverified only when the caller trusts it explicitly ($script:AtmCatalogTrustUnverified:
+# -SourceWithoutManifest, the release build). Otherwise the built-in bilingual texts below are used. A catalog
+# already loaded in this session (the test suite) is kept.
+function Test-AtmCatalogVerified {
+    param([string]$Root)
+    $mf = Join-Path $Root 'manifest.json'
+    $cat = Join-Path $Root 'lib\I18n.ps1'
+    if (-not ([IO.File]::Exists($mf) -and [IO.File]::Exists($cat))) { return $false }
+    try {
+        $e = @(([IO.File]::ReadAllText($mf) | ConvertFrom-Json).files | Where-Object { [string]$_.path -eq 'lib\I18n.ps1' })
+        if ($e.Count -ne 1) { return $false }
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            $stream = [IO.File]::OpenRead($cat)
+            try { $h = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '') } finally { $stream.Dispose() }
+        } finally { $sha.Dispose() }
+        return ($h -eq [string]$e[0].sha256)
+    } catch { return $false }
+}
+$atmPackageSrc = Join-Path (Split-Path -Parent $PSScriptRoot) 'src'
+$atmCatalogInstallDir = [string](Get-Variable -Name AtmCatalogInstallDir -Scope Script -ValueOnly -ErrorAction SilentlyContinue)
+$atmCatalog = $null
+if ((Test-Path -LiteralPath 'variable:script:AtmMessages') -and (Get-Command -Name Get-AtmText -CommandType Function -ErrorAction SilentlyContinue)) { $atmCatalog = 'loaded' }
+elseif (Test-AtmCatalogVerified -Root $atmPackageSrc) { $atmCatalog = Join-Path $atmPackageSrc 'lib\I18n.ps1' }
+elseif ($atmCatalogInstallDir -and (Test-AtmCatalogVerified -Root $atmCatalogInstallDir)) { $atmCatalog = Join-Path $atmCatalogInstallDir 'lib\I18n.ps1' }
+elseif ((Get-Variable -Name AtmCatalogTrustUnverified -Scope Script -ValueOnly -ErrorAction SilentlyContinue) -and
+    -not (Test-Path -LiteralPath (Join-Path $atmPackageSrc 'manifest.json')) -and (Test-Path -LiteralPath (Join-Path $atmPackageSrc 'lib\I18n.ps1') -PathType Leaf)) {
+    $atmCatalog = Join-Path $atmPackageSrc 'lib\I18n.ps1'
+}
+if ($atmCatalog -and $atmCatalog -ne 'loaded') { . $atmCatalog }
+elseif (-not $atmCatalog) {
+    # Texts of the refusals that can happen before a catalog is available; any other key prints with its arguments.
+    $script:AtmInstallerTexts = @{
+        'inst.needAdmin'          = 'This operation requires PowerShell run as Administrator (no automatic elevation is performed). / Esta operacao exige um PowerShell executado como Administrador (nenhuma elevacao automatica e feita).'
+        'inst.noManifest'         = 'Source without manifest.json. Use a verified release (SHA256SUMS) or, deliberately, -SourceWithoutManifest. / Origem sem manifest.json. Use um release verificado (SHA256SUMS) ou, conscientemente, -SourceWithoutManifest.'
+        'inst.noManifestWarn'     = 'Source without manifest.json: source integrity NOT verified (explicit use of -SourceWithoutManifest). / Origem sem manifest.json: integridade da origem NAO verificada (uso explicito de -SourceWithoutManifest).'
+        'inst.extraFile'          = 'Source contains a file not listed in the manifest / Origem contem arquivo fora do manifesto: {0}'
+        'inst.hashMismatch'       = 'Source modified (hash mismatch) / Origem alterada (hash divergente): {0}'
+        'inst.incomplete'         = 'Source incomplete compared to the manifest. / Origem incompleta em relacao ao manifesto.'
+        'inst.requiredMissing'    = 'Required file missing in the source / Arquivo obrigatorio ausente na origem: {0}'
+        'inst.syntax'             = 'Syntax error / Erro de sintaxe: {0}: {1}'
+        'inst.previousIntegrity'  = 'The previous version failed its integrity check; nothing was changed. / A versao anterior falhou na verificacao de integridade; nada foi alterado. {0}'
+    }
+    function Get-AtmText {
+        $key = [string]$args[0]
+        $fmtArgs = @()
+        if ($args.Count -gt 1) { $fmtArgs = @($args[1..($args.Count - 1)]) }
+        $tpl = $script:AtmInstallerTexts[$key]
+        if ($null -eq $tpl) { return ("[$key] " + (@($fmtArgs | ForEach-Object { "$_" }) -join ' | ')).TrimEnd() }
+        if ($fmtArgs.Count -eq 0) { return $tpl }
+        try { return ($tpl -f $fmtArgs) } catch { return ($tpl + ' ' + ($fmtArgs -join ' ')) }
+    }
+    Write-Warning 'Message catalog not verified (no matching manifest): built-in texts are shown. / Catalogo de mensagens nao verificado (sem manifesto correspondente): textos internos sao exibidos.'
+}
 
 $script:AtmRequiredFiles = @('agent-temp.ps1', 'bin\agent-temp.cmd', 'lib\Engine.Audit.ps1', 'lib\I18n.ps1', 'lib\Engine.Clean.ps1', 'lib\Engine.Diagnose.ps1', 'lib\Report.ps1', 'lib\Tui.ps1', 'lib\Native.cs', 'providers\ClaudeCode.ps1', 'config\projects.json')
 # Principals that must never hold write-type rights on the install directory.
@@ -58,7 +112,8 @@ function Copy-AtmTree {
 function Test-AtmSourceIntegrity {
     # A release ships src\manifest.json. The source must match it exactly: same file set (nothing extra, e.g. a
     # planted provider), same SHA-256. Sources without a manifest (a git checkout) need an explicit switch.
-    param([string]$SourceDir, [switch]$AllowNoManifest)
+    # -InstalledCopy: an installed directory, which also holds install-state.json (written after the manifest).
+    param([string]$SourceDir, [switch]$AllowNoManifest, [switch]$InstalledCopy)
     $mf = Join-Path $SourceDir 'manifest.json'
     if (-not (Test-Path -LiteralPath $mf -PathType Leaf)) {
         if ($AllowNoManifest) { Write-Warning (Get-AtmText 'inst.noManifestWarn'); return }
@@ -67,7 +122,7 @@ function Test-AtmSourceIntegrity {
     $m = Get-Content -LiteralPath $mf -Raw -Encoding UTF8 | ConvertFrom-Json
     $expected = @{}
     foreach ($e in $m.files) { $expected[$e.path.ToLowerInvariant()] = $e.sha256 }
-    $actual = @(Get-AtmTreeEntries -Root $SourceDir | Where-Object { -not $_.IsDir -and $_.Rel -ne 'manifest.json' } | ForEach-Object { $_.Rel })
+    $actual = @(Get-AtmTreeEntries -Root $SourceDir | Where-Object { -not $_.IsDir -and $_.Rel -ne 'manifest.json' -and -not ($InstalledCopy -and $_.Rel -eq 'install-state.json') } | ForEach-Object { $_.Rel })
     foreach ($rel in $actual) {
         $k = $rel.ToLowerInvariant()
         if (-not $expected.ContainsKey($k)) { throw (Get-AtmText 'inst.extraFile' $rel) }
@@ -308,13 +363,21 @@ function Restore-AtmPrevious {
     $previous = "$InstallDir.previous"
     if (-not (Test-Path -LiteralPath (Join-Path $previous 'install-state.json'))) { throw (Get-AtmText 'inst.noPrevious' $previous) }
     if (-not (Test-Path -LiteralPath (Join-Path $InstallDir 'install-state.json'))) { throw (Get-AtmText 'inst.noCurrent' $InstallDir) }
+    # The previous copy is checked in this process (manifest, SHA-256, exact file set) before anything moves: an
+    # altered or damaged copy never replaces the current one and none of its code runs (R-B5).
+    try { Test-AtmSourceIntegrity -SourceDir $previous -InstalledCopy } catch { throw (Get-AtmText 'inst.previousIntegrity' $_.Exception.Message) }
     $retired = "$InstallDir.staging-" + [guid]::NewGuid().ToString('N').Substring(0, 8)
     Rename-Item -LiteralPath $InstallDir -NewName (Split-Path -Leaf $retired)
     try { Rename-Item -LiteralPath $previous -NewName (Split-Path -Leaf $InstallDir) }
     catch { Rename-Item -LiteralPath $retired -NewName (Split-Path -Leaf $InstallDir); throw }
-    Remove-AtmOwnTree -Path $retired -InstallDir $InstallDir
     $v = Invoke-AtmVerifyInstalled -InstallDir $InstallDir
-    if (-not $v.Ok) { throw (Get-AtmText 'inst.rollbackVerifyFailed' $v.Output) }
+    if (-not $v.Ok) {
+        # Both copies go back where they were; the current one is removed only after the restored one verified.
+        Rename-Item -LiteralPath $InstallDir -NewName (Split-Path -Leaf $previous)
+        Rename-Item -LiteralPath $retired -NewName (Split-Path -Leaf $InstallDir)
+        throw (Get-AtmText 'inst.rollbackVerifyFailed' $v.Output)
+    }
+    Remove-AtmOwnTree -Path $retired -InstallDir $InstallDir
     return (Get-Content -LiteralPath (Join-Path $InstallDir 'install-state.json') -Raw | ConvertFrom-Json).version
 }
 

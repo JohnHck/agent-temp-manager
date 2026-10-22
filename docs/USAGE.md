@@ -102,7 +102,9 @@ Administrator-only switch: `-IncludeOtherUsers`. Incomplete process coverage can
 ## Exit codes
 
 `0` ok · `1` unknown command · `2` invalid clean invocation · `3` clean aborted (nothing deleted) ·
-`4` no manifest · `5` integrity mismatch · `6` TUI needs an interactive console · `10` unexpected error
+`4` no manifest (source checkout, `verify` only) · `5` integrity mismatch (a listed file missing or altered, an
+unlisted library or provider, an unreadable or invalid manifest, or an installed copy without one; nothing is
+loaded) · `6` TUI needs an interactive console · `10` unexpected error
 (nothing deleted because of it).
 
 ## Project names

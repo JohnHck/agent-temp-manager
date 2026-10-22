@@ -7,6 +7,8 @@
 param([string]$InstallDir = (Join-Path $env:ProgramFiles 'AgentTempManager'))
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
+# Message catalog: the package's, or the installed copy's, verified against its manifest (InstallCommon).
+$script:AtmCatalogInstallDir = $InstallDir
 . (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'InstallCommon.ps1')
 
 Assert-AtmElevated
