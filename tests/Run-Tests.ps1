@@ -1735,9 +1735,32 @@ try { Test-AtmSourceIntegrity -SourceDir $Source; 'INTEGRITY=OK' } catch { 'INTE
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $cur 'atm-marker.txt')) -and -not (Test-Path -LiteralPath (Join-Path $prev 'atm-marker.txt'))) 'codigo da copia adulterada nunca executou'
         Assert-Eq @(Get-ChildItem -LiteralPath (Split-Path -Parent $cur) -Directory -Filter 'AgentTempManager.staging-*').Count 0 'nenhum diretorio intermediario deixado'
         [IO.File]::WriteAllBytes($prevReport, $prevReportOrig)
+        # The restored copy fails its verify after the swap: both copies go back, nothing is deleted.
+        $script:rb5UndoMsg = $null
+        & {
+            function Invoke-AtmVerifyInstalled { param([string]$InstallDir) [pscustomobject]@{ Ok = $false; Output = 'simulated failure' } }
+            try { $null = Restore-AtmPrevious -InstallDir $cur } catch { $script:rb5UndoMsg = $_.Exception.Message }
+        }
+        $msg = $script:rb5UndoMsg
+        Assert-True ($null -ne $msg -and $msg -match 'simulated failure') "verify apos a troca falhou: rollback desfeito ($msg)"
+        $r = Invoke-Rb5Cli (Join-Path $cur 'bin\agent-temp.cmd') 'verify'; Assert-Eq $r.Exit 0 "instalacao atual de volta e integra ($($r.Text))"
+        Assert-True ((Test-Path -LiteralPath $prev) -and ([Convert]::ToBase64String([IO.File]::ReadAllBytes($prevReport)) -eq [Convert]::ToBase64String($prevReportOrig))) '.previous de volta, inalterado'
+        Assert-Eq @(Get-ChildItem -LiteralPath (Split-Path -Parent $cur) -Directory -Filter 'AgentTempManager.staging-*').Count 0 'nenhum diretorio intermediario deixado (desfeito)'
         Assert-Eq (Restore-AtmPrevious -InstallDir $cur) $ver 'rollback integro conclui'
         Assert-True (-not (Test-Path -LiteralPath $prev)) '.previous consumido pelo rollback'
         $r = Invoke-Rb5Cli (Join-Path $cur 'bin\agent-temp.cmd') 'verify'; Assert-Eq $r.Exit 0 "versao restaurada integra ($($r.Text))"
+        # Update from an altered release source: refused at the source check, the current installation untouched.
+        $relSrc = Join-Path $sandbox 'release-rb5'
+        [void][IO.Directory]::CreateDirectory($relSrc)
+        Copy-AtmTree -From $srcDir -To $relSrc
+        Write-AtmManifest -Root $relSrc -Version $ver
+        [IO.File]::AppendAllText((Join-Path $relSrc 'lib\Report.ps1'), "`r`n$(& $rb5Mark '..')`r`n")
+        $msg = $null; try { $null = Install-AtmProduct -SourceDir $relSrc -InstallDir $cur -Update -TrustSid $me.Sid -SkipPath } catch { $msg = $_.Exception.Message }
+        Assert-True ($null -ne $msg -and $msg -match 'hash divergente') "atualizacao com origem adulterada recusada ($msg)"
+        Assert-True (-not (Test-Path -LiteralPath $prev)) 'nenhuma .previous criada pela atualizacao recusada'
+        Assert-Eq @(Get-ChildItem -LiteralPath (Split-Path -Parent $cur) -Directory -Filter 'AgentTempManager.staging-*').Count 0 'nenhum diretorio intermediario (atualizacao recusada)'
+        $r = Invoke-Rb5Cli (Join-Path $cur 'bin\agent-temp.cmd') 'verify'; Assert-Eq $r.Exit 0 "instalacao atual intacta apos atualizacao recusada ($($r.Text))"
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $relSrc 'atm-marker.txt')) -and -not (Test-Path -LiteralPath (Join-Path $cur 'atm-marker.txt'))) 'codigo da origem adulterada nunca executou'
     }
     Test-Case 'Instalacao' 'Auditoria de ACL: escrita por Users/Everyone e detectada; Program Files padrao e aceito' {
         $d = Join-Path $sandbox 'aclcheck'; [void][IO.Directory]::CreateDirectory($d); [IO.File]::WriteAllText((Join-Path $d 'x.ps1'), '#')
