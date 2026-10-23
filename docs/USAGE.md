@@ -1,4 +1,4 @@
-# Usage
+﻿# Usage
 
 ## Language
 
@@ -56,7 +56,7 @@ review). Eligible paths are printed as allowlist lines `path|fingerprint`.
 
 ```powershell
 agent-temp diagnose
-agent-temp diagnose -ExportJson D:\reports\diagnose.json   # schema atm.diagnose/1, new file outside audited dirs
+agent-temp diagnose -ExportJson D:\reports\diagnose.json   # schema atm.diagnose/2, new file outside audited dirs
 agent-temp diagnose -DeadlineSeconds 60                     # global deadline (default 300 s), see below
 ```
 
@@ -75,12 +75,27 @@ The agent runtime section lists the processes and sessions related to agents, fo
 providers' process matchers, their session registries (every profile; the inventory's own reading is reused), path
 references of the V0.1 audit and descendants through verified parent links. This run, its launcher and its own children
 are `SELF` and are left out of the totals. A process related to several providers is shown as ambiguous: no provider is
-chosen. Resource totals count each process once, even when agent processes are nested; the CPU is sampled over about
-500 ms of the remaining time limit, and values that could not be read are shown as unknown or partial, never as 0.
-Processes that exited during the run are marked, and their evidence is stale. `COMPLETE` covers only the observed
-sources: it never means that no other agent exists. No runtime state frees, authorizes or blocks the deletion of a
-temporary directory. Session keys are pseudonyms (`<provider>/s-<32 hex>`), not anonymization; the paths of temporary
-partitions can still contain session identifiers.
+chosen. Resource totals count each process once, even when agent processes are nested, and are a lower bound of agent
+activity (only the processes identified by the observed sources). The CPU is sampled with a 500 ms wait inside the
+remaining time limit; the interval shown is the one measured between the two process queries, and values that could
+not be read are shown as unknown or partial, never as 0. Processes that exited during the run are marked, and their
+evidence is stale. `COMPLETE` covers only the observed sources: it never means that no other agent exists. No runtime
+state frees, authorizes or blocks the deletion of a temporary directory.
+
+**Pseudonyms (ADR-0010).** Temporary partitions and agent sessions appear only as keyed pseudonyms
+(`<provider>/p-<32 hex>`, `<provider>/s-<32 hex>`): no path and no session identifier is shown or exported. By default
+the key exists for one run only, so two runs cannot be compared item by item. To correlate runs, keep a key file of
+32 to 4096 random bytes that only you can read and pass it every time:
+
+```powershell
+agent-temp diagnose -PseudonymKeyFile D:\private\atm-pseudonym.key -ExportJson D:\reports\diagnose.json
+```
+
+The file is only read, never created or changed; it is refused (exit code `2`, nothing run) when the path is not
+absolute, it is not a regular file, its size is out of range or Everyone, Users, Authenticated Users, Guests or
+Anonymous can read it. Exports made with the same key show the same `keyId`. Anyone holding the key file can compute
+the pseudonyms from known identifiers: protect it like a password. Process keys, counts and coverage are not
+pseudonymized.
 
 Coverage statuses: `COMPLETE`, `PARTIAL`, `DENIED`, `TIMEOUT`, `NOT_PRESENT`, `NOT_OBSERVABLE`, `UNAVAILABLE`, `FAILED`.
 Only `COMPLETE` and `NOT_PRESENT` are conclusive; anything else means **unknown** and is never reported as absent,

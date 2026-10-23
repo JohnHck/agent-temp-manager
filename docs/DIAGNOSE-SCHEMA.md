@@ -1,9 +1,10 @@
-# Diagnose JSON schema (`atm.diagnose/1`)
+﻿# Diagnose JSON schema (`atm.diagnose/2`)
 
 Written by `agent-temp diagnose -ExportJson <new file>` (V0.2, in development). Decision record:
 [ADR-0009](adr/ADR-0009-diagnose-engine-command-schema.md); evidence and coverage model:
-[ADR-0001](adr/ADR-0001-evidence-coverage-findings.md). The V0.1 audit export (`agent-temp audit -ExportJson`) is a
-different document and is unchanged.
+[ADR-0001](adr/ADR-0001-evidence-coverage-findings.md); pseudonyms of exported identifiers:
+[ADR-0010](adr/ADR-0010-pseudonymization-of-exported-identifiers.md). The V0.1 audit export (`agent-temp audit
+-ExportJson`) is a different document and is unchanged.
 
 Rules:
 
@@ -14,13 +15,24 @@ Rules:
   configuration values, file contents.
 * Compatibility: new fields may be added without changing `schemaVersion`; removing a field or changing its meaning
   requires a new version. The suite checks that every field below, and no other, is exported.
-* Privacy: the export contains the machine name, the user name and SID, the token elevation state and the paths of
-  temporary partitions. The name of a session root in those paths can be the identifier of an agent session (for
-  Claude Code it is). Agent session keys are pseudonyms (see `findings[]`), not anonymization: whoever holds the same
-  inputs can compute them. Review the export before sharing.
+* Privacy: no path and no session identifier is exported. Temporary partitions and agent sessions are identified by
+  keyed pseudonyms (HMAC-SHA256, 128 bits, see `pseudonymization`): without the key nobody can compute or check them,
+  the export included. The key is ephemeral (one run) unless the operator supplies a key file
+  (`-PseudonymKeyFile`); only then are the pseudonyms of two exports comparable (same `keyId`). The export still
+  contains the machine name, the user name and SID and the token elevation state; process keys, counts and coverage
+  are not pseudonymized and stay linkable between runs. Review the export before sharing.
 * Order: temporary partitions keep the order of the V0.1 inventory; runtime findings (`Process`, `AgentSession`)
   follow, ordered by `kind` and then `key` (ordinal), so the order of providers, registries or partitions never
-  changes the document.
+  changes the document for one key. With an ephemeral key the order of `AgentSession` findings differs between runs
+  (their keys do).
+
+Changes from `atm.diagnose/1` (P1-B4-d):
+
+* `schemaVersion` is `atm.diagnose/2`.
+* `findings[].key` of a `TempPartition` is `<provider>/p-<32 hex>` (it was the partition path) and of an
+  `AgentSession` `<provider>/s-<32 hex>` computed with a key (it was an unkeyed hash).
+* New top-level object `pseudonymization`.
+* Everything else is unchanged; version 1 is no longer written.
 
 A coverage status other than `COMPLETE` or `NOT_PRESENT` means **unknown**: it is never a statement that something is
 absent, stopped or unused.
@@ -29,7 +41,7 @@ absent, stopped or unused.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schemaVersion` | string | `atm.diagnose/1`. |
+| `schemaVersion` | string | `atm.diagnose/2`. |
 | `toolVersion` | string | Version of Agent Temp Manager that produced the file. |
 | `language` | string | Language of the run (`en-US`, `pt-BR`); does not affect any other field. |
 | `machine` | string | Machine name. |
@@ -43,6 +55,7 @@ absent, stopped or unused.
 | `coverage` | array | One record per collector. |
 | `findings` | array | Findings with their evidence. |
 | `agentResources` | object | Resource totals of the agent processes, each process counted once. |
+| `pseudonymization` | object | How the keys of partitions and sessions were pseudonymized. |
 | `inventory` | object | Summary of the V0.1 temporary-directory inventory the run was built on. |
 
 ## identity
@@ -84,7 +97,7 @@ absent, stopped or unused.
 | Field | Type | Meaning |
 |---|---|---|
 | `kind` | string | `Process`, `Service`, `VirtualMachine`, `Worktree`, `Repository`, `AgentSession` or `TempPartition`. |
-| `key` | string | Stable identity of the item. Temporary partition: its path. Process: `<pid>@<creation ticks UTC>`, or `pid:<pid>` when the identity could not be verified (never an identity). Agent session: `<provider>/s-<32 hex>`, the first 128 bits of SHA-256 over the provider, the profile (SID and path) and the session id: the same session of the same profile has the same key in every run, the same session id in another profile has another key; the session id itself is never exported. |
+| `key` | string | Identity of the item. Temporary partition: `<provider>/p-<32 hex>`, the keyed pseudonym of the provider and the partition path (the path is never exported). Process: `<pid>@<creation ticks UTC>`, or `pid:<pid>` when the identity could not be verified (never an identity); not pseudonymized. Agent session: `<provider>/s-<32 hex>`, the keyed pseudonym of the provider, the profile (SID and path) and the session id: with the same key, the same session of the same profile has the same pseudonym and the same session id in another profile has another one; the session id is never exported. Two partitions or sessions with the same pseudonym are one `UNKNOWN` finding (`PARTITION_KEY_COLLISION`, `SESSION_KEY_COLLISION`). |
 | `state` | string | State code from the closed list of the finding's kind (any other is refused). Temporary partitions: `RUNTIME_NOT_DIAGNOSED`. `Process`: `SELF` (this run, its launcher or its own children), `AGENT_PROCESS`, `AGENT_DESCENDANT`, `IDENTITY_UNVERIFIED`, `UNKNOWN`. `AgentSession`: `LIVE` (exact identity), `PID_REUSED` (not proof that the session ended), `IDENTITY_UNVERIFIED`, `SESSION_PROCESS_NOT_FOUND`, `UNKNOWN`. A "no dependency" or an absence state (`SESSION_PROCESS_NOT_FOUND`) becomes `UNKNOWN` unless every coverage record of the finding is conclusive. No state frees or authorizes the deletion of a temporary directory. |
 | `requestedState` | string | State before that rule was applied. |
 | `provider` | string or null | Provider that contributed the item. `null` for a process related to several providers (the evidence `PROVIDER_ATTRIBUTION_AMBIGUOUS` lists them; none is chosen) or to none. |
@@ -96,7 +109,7 @@ absent, stopped or unused.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `code` | string | Evidence code: `AUDIT_CLASS`, `AUDIT_FLAG`; `PROCESS_MATCHER_IMAGE`, `PROCESS_MATCHER_MARKER` (checked in memory, never exported), `COMMAND_LINE_MARKER_UNAVAILABLE`, `SESSION_REGISTRY`, `SESSION_PROCESS`, `SESSION_PROCESS_MATCH`, `PATH_REFERENCE`, `SELF_EXCLUSION`, `PARENT_LINK_VERIFIED`, `PROVIDER_ATTRIBUTION_AMBIGUOUS`, `PROCESS_EXITED_DURING_RUN` (the process exited between the two process collections of the run, both complete: the rest of the evidence is stale), `SESSION_KEY_COLLISION`, `SESSION_ENTRIES_CONFLICT`; later phases add more. |
+| `code` | string | Evidence code: `AUDIT_CLASS`, `AUDIT_FLAG`; `PROCESS_MATCHER_IMAGE`, `PROCESS_MATCHER_MARKER` (checked in memory, never exported), `COMMAND_LINE_MARKER_UNAVAILABLE`, `SESSION_REGISTRY`, `SESSION_PROCESS`, `SESSION_PROCESS_MATCH`, `PATH_REFERENCE`, `SELF_EXCLUSION`, `PARENT_LINK_VERIFIED`, `PROVIDER_ATTRIBUTION_AMBIGUOUS`, `PROCESS_EXITED_DURING_RUN` (the process exited between the two process collections of the run, both complete: the rest of the evidence is stale), `SESSION_KEY_COLLISION`, `SESSION_ENTRIES_CONFLICT`, `PARTITION_KEY_COLLISION` (detail: how many partitions); later phases add more. |
 | `source` | string | Where it comes from (`audit`, `process-matcher`, `session-registry`, `path-reference`, `diagnose`). |
 | `collector` | string | Collector that produced it. |
 | `observedUtc` | string | When it was observed. |
@@ -141,6 +154,14 @@ never `0`.
 | `sum` | number or null | Sum of the values read; a lower bound when `complete` is `false`; `null` when none was read. |
 | `known` | number | Processes whose value was read. |
 | `complete` | boolean | Every counted process was read (and, for `cpuPercent`, the CPU was sampled). |
+
+## pseudonymization
+
+| Field | Type | Meaning |
+|---|---|---|
+| `scheme` | string | `HMAC-SHA256-128/1`. |
+| `keySource` | string | `EPHEMERAL` (a random key for this run only; pseudonyms are not comparable with another run) or `OPERATOR_KEY_FILE` (the key file given with `-PseudonymKeyFile`). |
+| `keyId` | string or null | Identifier of an operator key (32 hex, its own HMAC domain): two exports with the same `keyId` used the same key. `null` for an ephemeral key. It does not reveal the key. |
 
 ## inventory
 
