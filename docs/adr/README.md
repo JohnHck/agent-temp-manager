@@ -18,7 +18,7 @@ open decisions are listed in [V0.2-PLAN.md](../release/V0.2-PLAN.md#open-decisio
 | [ADR-0007](ADR-0007-worktree-discovery-scale.md) | Worktree discovery scope and scale limits | PARTIALLY ACCEPTED (D-5 paths: privacy review before P3-B) | P3 |
 | [ADR-0008](ADR-0008-provider-contract-v2.md) | Provider contract v2 and the Claude Desktop scenario | ACCEPTED | P1, P2 |
 | [ADR-0009](ADR-0009-diagnose-engine-command-schema.md) | Diagnose engine, command, JSON schema and layering | ACCEPTED (D-6 accepted) | P1, P5 |
-| [ADR-0010](ADR-0010-pseudonymization-of-exported-identifiers.md) | Pseudonymization of exported identifiers | PROPOSED (D-7 open: persistent key) | P1 |
+| [ADR-0010](ADR-0010-pseudonymization-of-exported-identifiers.md) | Pseudonymization of exported identifiers | PROPOSED (D-7 open: persistent key; D-8 open: order of partition findings) | P1 |
 
 ## Template
 

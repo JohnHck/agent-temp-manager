@@ -1,4 +1,4 @@
-﻿# Diagnose JSON schema (`atm.diagnose/2`)
+# Diagnose JSON schema (`atm.diagnose/2`)
 
 Written by `agent-temp diagnose -ExportJson <new file>` (V0.2, in development). Decision record:
 [ADR-0009](adr/ADR-0009-diagnose-engine-command-schema.md); evidence and coverage model:
@@ -67,7 +67,7 @@ absent, stopped or unused.
 | `elevatedAdministrator` | boolean or null | The token is in the Administrators role (elevated). |
 | `elevationType` | string | `DEFAULT`, `FULL`, `LIMITED` or `UNKNOWN` (token elevation type). |
 | `integrityLevel` | string | `UNTRUSTED`, `LOW`, `MEDIUM`, `MEDIUM_PLUS`, `HIGH`, `SYSTEM`, `PROTECTED` or `UNKNOWN`. |
-| `sessionId` | number or null | Windows session of the process. |
+| `sessionId` | number or null | Windows logon session of the process (not an agent session). |
 
 ## providers[]
 

@@ -1,4 +1,4 @@
-﻿# Usage
+# Usage
 
 ## Language
 
@@ -85,15 +85,17 @@ state frees, authorizes or blocks the deletion of a temporary directory.
 **Pseudonyms (ADR-0010).** Temporary partitions and agent sessions appear only as keyed pseudonyms
 (`<provider>/p-<32 hex>`, `<provider>/s-<32 hex>`): no path and no session identifier is shown or exported. By default
 the key exists for one run only, so two runs cannot be compared item by item. To correlate runs, keep a key file of
-32 to 4096 random bytes that only you can read and pass it every time:
+32 to 4096 bytes from a random generator (not a passphrase: the exported `keyId` lets anyone test guesses of a weak
+key offline) that only you, SYSTEM and Administrators can read or change, and pass it every time:
 
 ```powershell
 agent-temp diagnose -PseudonymKeyFile D:\private\atm-pseudonym.key -ExportJson D:\reports\diagnose.json
 ```
 
-The file is only read, never created or changed; it is refused (exit code `2`, nothing run) when the path is not
-absolute, it is not a regular file, its size is out of range or Everyone, Users, Authenticated Users, Guests or
-Anonymous can read it. Exports made with the same key show the same `keyId`. Anyone holding the key file can compute
+The file is only read, never created or changed; it is refused (exit code `2`, nothing run, only a code is shown) when
+the path is not a drive-absolute path on a fixed drive, a folder in the path or the file is a reparse point, it is not a
+regular file, its size is out of range, its owner is not you, SYSTEM or Administrators, or any other account may read
+or change it. While `diagnose` runs, the progress line shows no path. Exports made with the same key show the same `keyId`. Anyone holding the key file can compute
 the pseudonyms from known identifiers: protect it like a password. Process keys, counts and coverage are not
 pseudonymized.
 

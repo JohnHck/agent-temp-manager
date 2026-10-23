@@ -1,6 +1,6 @@
 # ADR-0010: Pseudonymization of exported identifiers
 
-Status: PROPOSED (maintainer gate after P1-B4-d; D-7 open)
+Status: PROPOSED (maintainer gate after P1-B4-d; D-7 and D-8 open)
 Date: 2026-10-23
 Phase: P1 (P1-B4-d)
 
@@ -30,11 +30,13 @@ ADR-0009 makes `diagnose` read-only, so it cannot create or store a secret on it
    * **Operator key:** correlation between runs is possible only through a key file the operator provides
      (`diagnose -PseudonymKeyFile <file>`). The file is read only and is refused, with nothing run, unless all of these
      hold:
-     * it is an absolute path to a regular file;
-     * it is not a reparse point;
-     * it holds 32 to 4096 bytes;
-     * Everyone, Anonymous, Authenticated Users, Users and Guests cannot read it.
-     The refusal shows a code only, never the path or the content.
+     * it is a drive-absolute path on a fixed drive (`Test-AtmPathChain`);
+     * no folder in the path and not the file itself is a reparse point;
+     * it is a regular file of 32 to 4096 bytes;
+     * its owner is the current user, SYSTEM or Administrators;
+     * no other account may read or change it (generic rights included).
+     The file is opened once, without write or delete sharing, so the file checked is the file read. The refusal shows
+     a code only, never the path or the content.
    * **Key id:** an operator key has an identifier (`keyId`, the HMAC of its own domain label) so two exports can be
      known to be comparable. An ephemeral key has no identifier.
 3. **Handling the key.** The key lives only inside one `Invoke-AtmDiagnose` call. When the call returns or throws, the
@@ -70,6 +72,11 @@ every run" property of the earlier D1 unless the operator supplies a key file. O
 `diagnose` behaves the same under K1 and K2: it uses a supplied key when there is one and an ephemeral key otherwise.
 Nothing beyond K1 is built until the maintainer decides D-7.
 
+**D-8, order of partition findings.** D6 keeps temporary partitions in the V0.1 order, which links pseudonyms to paths
+by position for whoever can list the temporary bases (see the boundary below). Options: keep D6 (implemented; the link
+is documented), or order partition findings by pseudonym (the position link is gone; with an ephemeral key the order
+then changes between runs). Recommendation: order by pseudonym. Not built until decided.
+
 ## Boundary (not changed by this ADR)
 
 * **V0.1 governed outputs keep their paths**, because the operator needs them to review and select what to clean:
@@ -89,6 +96,20 @@ Nothing beyond K1 is built until the maintainer decides D-7.
   They stay linkable between runs.
 * **Order of `AgentSession` findings:** runtime findings are ordered by key, so with an ephemeral key the order of
   `AgentSession` findings differs between runs. The content does not change; the order is the same for one key.
+* **Linkage by position and evidence (independent review):** partition findings keep the V0.1 order (D6), which is the
+  file-system enumeration order, and keep the audit class and flags. Whoever can list the temporary bases, or holds a
+  V0.1 `audit -ExportJson` of the same moment (which already carries the paths), can relate partition pseudonyms to
+  paths by position. A process key (`pid@ticks`) with `SESSION_PROCESS_MATCH` can be tied to a session file by whoever
+  can read the session directory. The HMAC prevents computing or checking a pseudonym; it does not make the findings
+  unlinkable for someone with that local access. Ordering partition findings by pseudonym would remove the position
+  link but changes the approved D6: open decision D-8.
+* **Weak operator keys:** any 32 bytes are accepted. A key that is not random (a passphrase) can be guessed offline
+  from the exported `keyId`, and then every pseudonym computed for candidate identifiers. The documentation asks for
+  bytes from a random generator; the tool cannot measure a key's entropy.
+* **In memory:** the result object keeps the V0.1 inventory the run was built on (`Inventory`, with paths and the
+  session registries), as before. It is never exported nor printed by `diagnose`.
+* **Progress and errors:** while `diagnose` runs, the progress line shows no path; an unexpected failure is reported by
+  its exception type only.
 
 ## Rejected alternatives
 
@@ -113,8 +134,8 @@ Nothing beyond K1 is built until the maintainer decides D-7.
   * with the ephemeral default, partition and session keys differ between runs, while process keys stay comparable;
   * the same key file gives the same keys and key id, and another file gives others;
   * the caller's key is not changed;
-  * the JSON, the report and the in-memory result contain none of these: the session id, paths, root names, the key
-    in hex or base64, or the key file path;
+  * the JSON, the report and the in-memory result apart from its `Inventory` contain none of these: the session id,
+    paths, root names, the key in hex or base64, or the key file path;
   * a closed pseudonymizer is disposed and its key copy cleared.
 * **Test "Reconstrucao adversarial (P1-B4-d)":** starting from the export, none of these rebuilds a pseudonym:
   * the P1-B4-c unkeyed formula;
@@ -123,7 +144,8 @@ Nothing beyond K1 is built until the maintainer decides D-7.
   * an all-zero key.
   A control computation with the real key does match.
 * **Test "Arquivo de chave do operador (P1-B4-d)":**
-  * a relative, missing, directory, short, long or world-readable key file is refused;
+  * relative, drive-relative or rooted-without-drive paths, missing files, directories, short or long files, and files
+    readable or writable by another account (Everyone, INTERACTIVE, Users, generic read) are refused;
   * the CLI fails closed with exit code 2 and shows only the code.
 * **Test "Colisao de chave de particao (P1-B4-d)":** a forced collision gives one `UNKNOWN` finding, with nothing
   overwritten.
