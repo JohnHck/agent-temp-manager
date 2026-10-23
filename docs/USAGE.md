@@ -67,8 +67,20 @@ process identity.
 
 Shows the identity of the process (user, elevated administrator, token elevation type, integrity level, session),
 the providers, one **coverage** record per collector and the findings. In this development stage the collectors are
-the token identity, provider runtime hints and the V0.1 temporary-directory inventory; processes, services,
-virtualization and Git worktrees are added by later V0.2 phases.
+the token identity, provider runtime hints, the V0.1 temporary-directory inventory and the **agent runtime**
+(`process-snapshot`, `sessions-<provider>`, `agent-processes`, `agent-resources`); services, virtualization and Git
+worktrees are added by later V0.2 phases.
+
+The agent runtime section lists the processes and sessions related to agents, found only through evidence: the
+providers' process matchers, their session registries (every profile; the inventory's own reading is reused), path
+references of the V0.1 audit and descendants through verified parent links. This run, its launcher and its own children
+are `SELF` and are left out of the totals. A process related to several providers is shown as ambiguous: no provider is
+chosen. Resource totals count each process once, even when agent processes are nested; the CPU is sampled over about
+500 ms of the remaining time limit, and values that could not be read are shown as unknown or partial, never as 0.
+Processes that exited during the run are marked, and their evidence is stale. `COMPLETE` covers only the observed
+sources: it never means that no other agent exists. No runtime state frees, authorizes or blocks the deletion of a
+temporary directory. Session keys are pseudonyms (`<provider>/s-<32 hex>`), not anonymization; the paths of temporary
+partitions can still contain session identifiers.
 
 Coverage statuses: `COMPLETE`, `PARTIAL`, `DENIED`, `TIMEOUT`, `NOT_PRESENT`, `NOT_OBSERVABLE`, `UNAVAILABLE`, `FAILED`.
 Only `COMPLETE` and `NOT_PRESENT` are conclusive; anything else means **unknown** and is never reported as absent,

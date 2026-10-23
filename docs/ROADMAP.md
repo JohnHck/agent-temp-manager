@@ -71,7 +71,10 @@ coverage blocks; TUI and reports never call deletion APIs; installer integrity a
 
 ## V0.2 — Windows Runtime Diagnostics
 
-**Status: in progress, P0 (planning).** Plan, phases and acceptance criteria per phase:
+**Status: in progress.** The `diagnose` command (identity, coverage, the V0.1 inventory) and the agent runtime
+(Claude Code processes and sessions found through evidence, their verified trees and resource totals) are in place in
+development builds; services, virtualization, Git worktrees, dependencies, the TUI view and the Claude Desktop
+scenario are not yet. Plan, phases and acceptance criteria per phase:
 [release/V0.2-PLAN.md](release/V0.2-PLAN.md); architecture decisions: [adr/](adr/README.md).
 
 **Objectives.** Explain *why* space and resources are in use and *what is still running*, so that a later cleanup
