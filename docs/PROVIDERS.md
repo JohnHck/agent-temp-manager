@@ -54,13 +54,24 @@ A v2 provider declares:
 | `GetVirtualizationHints` | `{ }` | `@({ Kind; Value })` with `Kind` `ServiceOwner` (a service that owns a VM) or `VmName`. |
 | `GetWorktreeHints` | `{ param($ProfileInfo, $Registry) }` | `{ Readable; Dirs }`: absolute local starting directories (used from V0.2-P3). |
 
+Session evidence (v2, optional and additive): each `GetSessionEvidence` entry may also carry `StartUtc`, the process
+creation time the agent recorded for the session (UTC, with the agent's own precision). The diagnose engine matches it
+against the collected process with an exact identity rule (`LIVE` only when equal at the CIM resolution of 1 us; a
+difference within 2 s that is not exact is inconclusive; beyond 2 s the PID belongs to another process). The V0.1
+`State` of each entry and its 2 s tolerance are unchanged and keep feeding the audit and its gates.
+
 Hint results are validated when diagnose reads them. A member that throws or returns a malformed value gives that
 provider's coverage record (`provider-<id>`) the status `FAILED` (`HINT_FAILED` / `HINT_MALFORMED`); diagnostics
 continue with the other providers. The same rules as v1 apply: providers only read, never decide, never open
 credential or token files, and can never weaken a gate or a coverage status.
 
-## V1: Claude Code
+## Claude Code (contract v2: `temp` and `runtime`)
 
+* Runtime (V0.2-P1-B4-b): process matcher `claude.exe`, without a command-line marker. Observed read-only on Windows
+  on 2026-10-23 with Claude Code 2.1.307 (entrypoint `cli`) and 2.1.308 (entrypoint `claude-desktop`): both run as
+  `claude.exe`, and the `procStart` each session records (a 100 ns FILETIME) equals the CIM creation time once
+  truncated to 1 us. Installations that run through another host (for example `node.exe`) are not declared: a generic
+  image name would need a validated marker. Session entries carry `StartUtc` (the parsed `procStart`).
 * Base: `<TEMP>\claude` (also `<CLAUDE_CODE_TMPDIR>\claude` when set).
 * Scopes: project slugs (`[^A-Za-z0-9]` -> `-`). Roots: session UUIDs.
 * Live sessions: `<config>\sessions\<pid>.json` (`pid`, `sessionId`, `procStart`); a PID counts as live

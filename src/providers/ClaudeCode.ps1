@@ -14,6 +14,8 @@
 #                          session's working directory; used only to name projects, never for safety decisions.
 #   GetActivityEvidence  { param($ProfileInfo, $Scope, $RootName) } -> [pscustomobject]@{ Readable; LastWriteUtc }
 #   GetProjectKey        { param($Scope, $ProfilePath) } -> [pscustomobject]@{ IsHome; Key }
+# Contract v2 (ADR-0008, V0.2): ContractVersion 2, Capabilities temp + runtime, GetProcessMatchers; session entries
+# also carry StartUtc (optional, additive).
 # Providers only READ. They never decide eligibility and never delete.
 Set-StrictMode -Version 2.0
 
@@ -57,19 +59,19 @@ function Get-AtmClaudeSessionEvidence {
             if (-not $o -or -not ($o.PSObject.Properties.Name -contains 'sessionId') -or -not ($o.PSObject.Properties.Name -contains 'pid')) { $r.Unparseable++; continue }
             $pidVal = 0
             if (-not [int]::TryParse([string]$o.pid, [ref]$pidVal)) { $r.Unparseable++; continue }
+            # procStart is a FILETIME (100 ns). A value that does not look like one (other unit, future format) must
+            # never be read as "process ended": it becomes LIVE_UNVERIFIED (investigate) instead.
+            $ps = $null
+            if ($o.PSObject.Properties.Name -contains 'procStart') { $ps = [string]$o.procStart }
+            $ft = 0L; $started = $null
+            if ($ps -and [long]::TryParse($ps, [ref]$ft) -and $ft -gt 0) {
+                try { $started = [datetime]::FromFileTimeUtc($ft) } catch { $started = $null }
+                if ($started -and ($started -lt [datetime]'2000-01-01' -or $started -gt [datetime]::UtcNow.AddDays(1))) { $started = $null }
+            }
             $state = 'DEAD'
             if ($Snapshot.Failed) { $state = 'UNVERIFIABLE' }
             elseif ($byPid.ContainsKey($pidVal)) {
                 $proc = $byPid[$pidVal]
-                $ps = $null
-                if ($o.PSObject.Properties.Name -contains 'procStart') { $ps = [string]$o.procStart }
-                # procStart is a FILETIME. A value that does not look like one (other unit, future format) must
-                # never be read as "process ended": it becomes LIVE_UNVERIFIED (investigate) instead.
-                $ft = 0L; $started = $null
-                if ($ps -and [long]::TryParse($ps, [ref]$ft) -and $ft -gt 0) {
-                    try { $started = [datetime]::FromFileTimeUtc($ft) } catch { $started = $null }
-                    if ($started -and ($started -lt [datetime]'2000-01-01' -or $started -gt [datetime]::UtcNow.AddDays(1))) { $started = $null }
-                }
                 if ($started -and $proc.CreationUtc) {
                     $diff = [math]::Abs(($started - $proc.CreationUtc).TotalSeconds)
                     if ($diff -lt 2) { $state = 'LIVE' } else { $state = 'PID_REUSED' }
@@ -82,7 +84,9 @@ function Get-AtmClaudeSessionEvidence {
                 $cwd = ([string]$o.cwd).TrimEnd('\', '/')
                 if ($cwd) { $scope = ConvertTo-AtmClaudeSlug $cwd; $projName = Split-Path -Leaf $cwd }
             }
-            $entries.Add([pscustomobject]@{ SessionId = ([string]$o.sessionId).ToLowerInvariant(); Pid = $pidVal; State = $state; Scope = $scope; ProjectName = $projName })
+            # StartUtc (contract v2, optional): the process creation time the session recorded, 100 ns precision, for
+            # the diagnose engine's exact identity check (V0.2-P1-B4-b). State above is the V0.1 rule, unchanged.
+            $entries.Add([pscustomobject]@{ SessionId = ([string]$o.sessionId).ToLowerInvariant(); Pid = $pidVal; State = $state; Scope = $scope; ProjectName = $projName; StartUtc = $started })
         }
     }
     $r.Entries = $entries.ToArray()
@@ -109,9 +113,18 @@ function Get-AtmClaudeActivityEvidence {
     return [pscustomobject]$res
 }
 
+# Contract v2 (ADR-0008): capabilities temp (the members above, unchanged) and runtime.
+# Process signature, from read-only observation on Windows, 2026-10-23: Claude Code 2.1.307 (entrypoint cli) and
+# 2.1.308 (entrypoint claude-desktop) run as the image claude.exe, and the creation time each session records
+# (procStart, a 100 ns FILETIME) equals the process creation time read through CIM once truncated to its 1 us
+# resolution (differences of 4 and 8 ticks). No command-line marker is declared: none was observed or validated,
+# and command lines are not read for this. Installations that run through another host (node.exe) are not declared.
 Register-AtmProvider ([pscustomobject]@{
         Id                  = 'claude-code'
         DisplayName         = 'Claude Code'
+        ContractVersion     = 2
+        Capabilities        = @('temp', 'runtime')
+        GetProcessMatchers  = { @([pscustomobject]@{ ImageName = 'claude.exe'; CommandLineMarker = $null }) }
         TempSubdir          = 'claude'
         ScopePattern        = '^[A-Za-z0-9-]+$'
         RootPattern         = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
