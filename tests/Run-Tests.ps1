@@ -2223,14 +2223,14 @@ foreach ($op in $(if ($Mode -eq 'undo') { @('restore') } else { @('uninstall', '
         $txt = $out -join ' '
         Assert-True ($txt -match 'CATALOG=Nenhuma' -and $txt -match 'RECOVERYKEY=\[inst\.recoveryPending\]') "catalogo antigo carregado e sem as chaves de recuperacao ($txt)"
         foreach ($op in @('uninstall', 'restore', 'update')) {
-            $line = @($out | Where-Object { $_ -like "MSG[$op]=*" }) -join ' '
+            $line = @($out | Where-Object { $_.StartsWith("MSG[$op]=") }) -join ' '
             Assert-True ($line.Contains($rc) -and $line -match 'pendente' -and $line -match 'pending' -and $line -match 'Nao desinstale' -and $line -notmatch '\[inst\.') "$($op): mensagem completa sem depender do catalogo ($line)"
         }
         Assert-True ((& $rb6Tag $cur) -eq 'atual' -and (& $rb6Tag $prev) -eq 'anterior' -and (Test-Path -LiteralPath $rc)) 'recusas com catalogo antigo: nada alterado'
         # A rollback whose swap and reversal fail: the message names every copy and the pending marker.
         Rename-Item -LiteralPath $rc -NewName 'AgentTempManager.staging-0000000e'
         $out = & $runProbe 'undo'
-        $line = @($out | Where-Object { $_ -like 'MSG[restore]=*' }) -join ' '
+        $line = @($out | Where-Object { $_.StartsWith('MSG[restore]=') }) -join ' '
         $retired = @(Get-ChildItem -LiteralPath $pf15 -Directory -Filter 'AgentTempManager.recovery-*')
         Assert-True ($retired.Count -eq 1 -and $line.Contains($retired[0].FullName) -and $line.Contains($prev) -and $line.Contains("$cur.transaction.json")) "rollback que nao reverte: posicoes e marcador na mensagem ($line)"
         Assert-True ($line -match 'simulated rename failure' -and $line -match 'Nada foi apagado' -and $line -match 'Nao desinstale' -and $line -notmatch '\[inst\.') "rollback que nao reverte: motivo e orientacao sem o catalogo ($line)"

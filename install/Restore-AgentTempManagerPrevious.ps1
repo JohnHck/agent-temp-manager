@@ -12,6 +12,8 @@ $script:AtmCatalogInstallDir = $InstallDir
 . (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'InstallCommon.ps1')
 
 Assert-AtmElevated
+# A pending recovery (R-B6) is refused before anything is created, the private TEMP included.
+Assert-AtmNoRecoveryPending -InstallDir ([IO.Path]::GetFullPath($InstallDir).TrimEnd('\'))
 $privateTemp = Enter-AtmPrivateTemp -InstallDir $InstallDir
 try { $v = Restore-AtmPrevious -InstallDir $InstallDir } finally { Exit-AtmPrivateTemp -State $privateTemp -InstallDir $InstallDir }
 Write-Host (Get-AtmText 'inst.rollbackDone' $v $InstallDir) -ForegroundColor Green

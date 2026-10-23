@@ -76,10 +76,15 @@ version passed `verify`. If anything fails after the swap (PATH, state, ACL chec
 and its `.previous` are put back and the update reports the failure. If putting them back fails too, nothing is
 deleted and the message says where each copy is and how to rename them back.
 
-`AgentTempManager.recovery-*` directories may hold the only intact installation. While one exists, update and
-rollback refuse to run and list it: put the intact version back by renaming, remove what you no longer need, and
-run again. Uninstall leaves them in place. A run killed abruptly (power loss, terminated process) is not recovered
-automatically; the next run detects it and refuses.
+An update or rollback in progress is recorded in `%ProgramFiles%\AgentTempManager.transaction.json`, written before
+the first directory is moved and removed only when the operation completed or every copy is back.
+`AgentTempManager.recovery-*` directories may hold the only intact installation. While the transaction file or a
+recovery directory exists, **update, rollback and uninstall refuse to run** and list what they found: **do not
+uninstall**; check each copy with `<copy>\bin\agent-temp.cmd verify`, put the intact one back as
+`AgentTempManager` by renaming, remove what you no longer need, delete the transaction file, and run again. A run
+killed abruptly (power loss, terminated process) is not recovered automatically; the next run finds the transaction
+file and refuses. These recovery messages are built into the installer, so they are complete whatever message
+catalog the installed copy has.
 
 ## Rollback
 
@@ -100,7 +105,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install\Uninstall-AgentTem
 ```
 
 Removes the PATH entry and the product directories only. Agent temporary directories, allowlists, logs and
-exported reports are left untouched. `AgentTempManager.recovery-*` directories are kept and reported.
+exported reports are left untouched. With a pending update or rollback (a transaction file or an
+`AgentTempManager.recovery-*` directory) it refuses before changing anything: resolve the recovery first.
 
 ## Clean-environment test (Windows Sandbox)
 
