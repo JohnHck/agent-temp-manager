@@ -1962,7 +1962,8 @@ try { Test-AtmSourceIntegrity -SourceDir $Source; 'INTEGRITY=OK' } catch { 'INTE
             try {
                 $msg = $script:rb6Msg
                 $rec = @(Get-ChildItem -LiteralPath $pf12 -Directory -Filter 'AgentTempManager.recovery-*')
-                $stg = @(Get-ChildItem -LiteralPath $pf12 -Directory -Filter 'AgentTempManager.staging-*')
+                # (staging-0000000a: the failed copy that the manual recovery of the 'nova' case set aside)
+                $stg = @(Get-ChildItem -LiteralPath $pf12 -Directory -Filter 'AgentTempManager.staging-*' | Where-Object { $_.Name -ne 'AgentTempManager.staging-0000000a' })
                 Assert-True ($null -ne $msg -and $msg -match 'simulated exception' -and $msg -match 'Nada foi apagado') "recuperacao falhou ($which): erro claro ($msg)"
                 Assert-Eq $rec.Count 1 "recuperacao falhou ($which): .previous antiga guardada num diretorio de recuperacao"
                 Assert-True ((& $rb6Tag $rec[0].FullName) -eq 'v2' -and $msg.Contains($rec[0].FullName)) "recuperacao falhou ($which): posicao da .previous antiga informada"

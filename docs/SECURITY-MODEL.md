@@ -151,6 +151,11 @@ Integrity at install and at every run:
 * Rollback checks `<InstallDir>.previous` (manifest, SHA-256, exact file set) before moving anything, and keeps the
   current copy until the restored one passes `verify`; on failure (or an exception) both copies are put back. If
   putting them back fails too, nothing is deleted and the error names where each copy is.
+* Update (R-B6) deletes nothing before the new version verified: the staged copy verifies itself first, an older
+  `.previous` is set aside in `<InstallDir>.recovery-*`, and a failure or exception after the swap puts the installed
+  copy and the older `.previous` back. Recovery directories are never swept by uninstall; update and rollback refuse
+  to run while one exists. A run killed abruptly is detected at the next run, not recovered: no atomicity across an
+  interruption is promised.
 * Limits: the local manifest proves integrity against the release, not authenticity against an administrator who
   can also change the launcher and the manifest. A file could change between its hash check and its load; both
   happen inside the administrator-only install directory. Source checkouts have no integrity guarantee.

@@ -70,6 +70,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install\Install-AgentTempM
 The previous version is kept in `%ProgramFiles%\AgentTempManager.previous` (one generation) for rollback.
 `projects.local.json` is carried over unless `-ProjectsFile` is given.
 
+Nothing is deleted before the new version verified. The new copy verifies itself before it replaces anything; an
+older `.previous` is set aside in `%ProgramFiles%\AgentTempManager.recovery-<id>` and discarded only after the new
+version passed `verify`. If anything fails after the swap (PATH, state, ACL check, `verify`), the installed version
+and its `.previous` are put back and the update reports the failure. If putting them back fails too, nothing is
+deleted and the message says where each copy is and how to rename them back.
+
+`AgentTempManager.recovery-*` directories may hold the only intact installation. While one exists, update and
+rollback refuse to run and list it: put the intact version back by renaming, remove what you no longer need, and
+run again. Uninstall leaves them in place. A run killed abruptly (power loss, terminated process) is not recovered
+automatically; the next run detects it and refuses.
+
 ## Rollback
 
 After an `-Update`, the previous version is in `%ProgramFiles%\AgentTempManager.previous`:
@@ -78,8 +89,9 @@ After an `-Update`, the previous version is in `%ProgramFiles%\AgentTempManager.
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install\Restore-AgentTempManagerPrevious.ps1
 ```
 
-It swaps the previous version back, removes the retired one and runs `agent-temp verify`. The PATH entry is
-unchanged. To roll back a first installation, uninstall.
+It checks the previous version (manifest, SHA-256), swaps it back and runs `agent-temp verify`; the retired version
+is removed only after that verify passed, and both are put back otherwise. The PATH entry is unchanged. To roll
+back a first installation, uninstall.
 
 ## Uninstall
 
@@ -88,7 +100,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install\Uninstall-AgentTem
 ```
 
 Removes the PATH entry and the product directories only. Agent temporary directories, allowlists, logs and
-exported reports are left untouched.
+exported reports are left untouched. `AgentTempManager.recovery-*` directories are kept and reported.
 
 ## Clean-environment test (Windows Sandbox)
 
