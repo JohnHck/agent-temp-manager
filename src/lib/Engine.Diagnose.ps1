@@ -878,14 +878,18 @@ function Get-AtmAgentRuntimeFindings {
       the reference, through the V0.1 snapshot, to an exact identity), and verified descendants of those processes.
       -Collection: Get-AtmProcessCollection. -ProviderHints: Get-AtmProviderRuntimeHints results.
       -SessionRegistries: @({ ProviderId; Registry (GetSessionEvidence result); Error (exception type or $null) }).
-      -LegacySnapshot: the V0.1 snapshot. -Partitions: V0.1 partitions. -SelfKeys: Get-AtmSelfProcessKeys.
+      -LegacySnapshot: the V0.1 snapshot. -Partitions: V0.1 partitions. -InventoryCoverage: the coverage records of the
+      V0.1 inventory (Get-AtmInventoryCoverage), carried by path-reference findings. -SelfKeys: Get-AtmSelfProcessKeys.
       -Cpu: Measure-AtmProcessCpu (optional, for the tree resources).
+      Evidence Source is a fixed code (process-matcher, session-registry, path-reference, diagnose); the provider Id is
+      only in Finding.Provider, and collector names use it in lower case (a V0.1 Id may be upper case). Each finding
+      carries the coverage of the process collection, of agent-processes and of the source of each evidence item.
       Precedence per process: SELF, then AGENT_PROCESS, then AGENT_DESCENDANT, then UNKNOWN (a matcher that could not
       be checked). A process without a verified identity is IDENTITY_UNVERIFIED with the key pid:<n>. Returns Findings,
       Coverage (agent-processes, sessions-<provider>, agent-resources) and Trees (Get-AtmProcessTreeResources per agent
       process).
     #>
-    param($Collection, $ProviderHints = @(), $SessionRegistries = @(), $LegacySnapshot = $null, $Partitions = @(), $SelfKeys = $null, $Cpu = $null)
+    param($Collection, $ProviderHints = @(), $SessionRegistries = @(), $LegacySnapshot = $null, $Partitions = @(), $InventoryCoverage = @(), $SelfKeys = $null, $Cpu = $null)
     if ($null -eq $Collection) { throw (Get-AtmText 'err.diagProcess' 'Collection') }
     $findings = New-Object System.Collections.Generic.List[object]
     $coverage = New-Object System.Collections.Generic.List[object]
@@ -893,16 +897,19 @@ function Get-AtmAgentRuntimeFindings {
     $snapCov = $Collection.Coverage
     $reasons = New-Object System.Collections.Generic.List[string]
     $now = [datetime]::UtcNow
-    # Candidates by key: Process (or $null for pid:<n>), Evidence, Provider, Kind (AGENT | UNVERIFIED | UNCHECKED).
+    # Candidates by key: Process (or $null for pid:<n>), Evidence, Provider, Kind (AGENT | UNVERIFIED | UNCHECKED) and
+    # SourceCoverage (the coverage records of the sources of the evidence, one per collector).
     $cand = [ordered]@{}
     $addCand = {
-        param([string]$Key, $Process, [string]$Kind, $Evidence, [string]$Provider)
-        if (-not $cand.Contains($Key)) { $cand[$Key] = [pscustomobject]@{ Process = $Process; Kind = $Kind; Evidence = (New-Object System.Collections.Generic.List[object]); Provider = $Provider } }
+        param([string]$Key, $Process, [string]$Kind, $Evidence, [string]$Provider, $SourceCoverage = @())
+        if (-not $cand.Contains($Key)) { $cand[$Key] = [pscustomobject]@{ Process = $Process; Kind = $Kind; Evidence = (New-Object System.Collections.Generic.List[object]); Provider = $Provider; SourceCoverage = [ordered]@{} } }
         $c = $cand[$Key]
         # AGENT outranks UNCHECKED; UNVERIFIED keys (pid:<n>) never collide with verified ones.
         if ($Kind -ceq 'AGENT') { $c.Kind = 'AGENT'; if (-not $c.Provider) { $c.Provider = $Provider } }
         $c.Evidence.Add($Evidence)
+        foreach ($sc in @($SourceCoverage | Where-Object { $null -ne $_ })) { if (-not $c.SourceCoverage.Contains($sc.Collector)) { $c.SourceCoverage[$sc.Collector] = $sc } }
     }
+    $matcherCount = 0
 
     $runtimeProviders = @($ProviderHints | Where-Object { $null -ne $_ })
     $registries = @($SessionRegistries | Where-Object { $null -ne $_ })
@@ -914,23 +921,25 @@ function Get-AtmAgentRuntimeFindings {
     # 1. Provider process matchers.
     if (-not $Collection.Failed) {
         foreach ($h in $runtimeProviders) {
+            $hc = @($h.Coverage)
             foreach ($m in @($h.ProcessMatchers)) {
+                $matcherCount++
                 foreach ($p in @($Collection.Processes | Where-Object { $null -ne $_.Name -and [string]::Equals($_.Name, $m.ImageName, [StringComparison]::OrdinalIgnoreCase) })) {
                     if ($p.IdentityStatus -cne 'VERIFIED') {
                         $reasons.Add('IDENTITY_UNVERIFIED_CANDIDATES')
-                        & $addCand ($script:AtmUnverifiedKeyPrefix + $p.Pid) $null 'UNVERIFIED' (New-AtmEvidence -Code 'PROCESS_MATCHER_IMAGE' -Source $h.ProviderId -Collector 'agent-processes' -ObservedUtc $now -Detail $p.IdentityStatus) $h.ProviderId
+                        & $addCand ($script:AtmUnverifiedKeyPrefix + $p.Pid) $null 'UNVERIFIED' (New-AtmEvidence -Code 'PROCESS_MATCHER_IMAGE' -Source 'process-matcher' -Collector 'agent-processes' -ObservedUtc $now -Detail $p.IdentityStatus) $h.ProviderId $hc
                         continue
                     }
                     if ($null -eq $m.CommandLineMarker) {
-                        & $addCand $p.Key $p 'AGENT' (New-AtmEvidence -Code 'PROCESS_MATCHER_IMAGE' -Source $h.ProviderId -Collector 'agent-processes' -ObservedUtc $now) $h.ProviderId
+                        & $addCand $p.Key $p 'AGENT' (New-AtmEvidence -Code 'PROCESS_MATCHER_IMAGE' -Source 'process-matcher' -Collector 'agent-processes' -ObservedUtc $now) $h.ProviderId $hc
                         continue
                     }
                     $cl = Get-AtmLegacyCommandLine -LegacySnapshot $LegacySnapshot -Process $p
                     if ($null -eq $cl) {
                         $reasons.Add('COMMAND_LINE_MARKER_UNAVAILABLE')
-                        & $addCand $p.Key $p 'UNCHECKED' (New-AtmEvidence -Code 'COMMAND_LINE_MARKER_UNAVAILABLE' -Source $h.ProviderId -Collector 'agent-processes' -ObservedUtc $now) $h.ProviderId
+                        & $addCand $p.Key $p 'UNCHECKED' (New-AtmEvidence -Code 'COMMAND_LINE_MARKER_UNAVAILABLE' -Source 'process-matcher' -Collector 'agent-processes' -ObservedUtc $now) $h.ProviderId $hc
                     } elseif ($cl.IndexOf([string]$m.CommandLineMarker, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                        & $addCand $p.Key $p 'AGENT' (New-AtmEvidence -Code 'PROCESS_MATCHER_MARKER' -Source $h.ProviderId -Collector 'agent-processes' -ObservedUtc $now) $h.ProviderId
+                        & $addCand $p.Key $p 'AGENT' (New-AtmEvidence -Code 'PROCESS_MATCHER_MARKER' -Source 'process-matcher' -Collector 'agent-processes' -ObservedUtc $now) $h.ProviderId $hc
                     }
                     $cl = $null
                 }
@@ -941,8 +950,9 @@ function Get-AtmAgentRuntimeFindings {
     # 2. Session registries.
     foreach ($reg in $registries) {
         $prov = [string](Get-AtmHintProperty -Item $reg -Name 'ProviderId')
-        if ($prov -cnotmatch $script:AtmIdPattern) { $coverage.Add((New-AtmCoverage -Collector 'sessions-invalid' -Status 'FAILED' -Reasons @('SESSION_REGISTRY_PROVIDER_INVALID') -ElevationWouldHelp 'NO')); continue }
-        $collector = 'sessions-' + $prov
+        # Same Id rule as the registration (a V0.1 Id may be upper case); the collector name is only lower-cased.
+        if ($prov -notmatch '^[A-Za-z0-9-]+$') { $coverage.Add((New-AtmCoverage -Collector 'sessions-invalid' -Status 'FAILED' -Reasons @('SESSION_REGISTRY_PROVIDER_INVALID') -ElevationWouldHelp 'NO')); continue }
+        $collector = 'sessions-' + $prov.ToLowerInvariant()
         $r = Get-AtmHintProperty -Item $reg -Name 'Registry'
         $err = Get-AtmHintProperty -Item $reg -Name 'Error'
         if ($null -ne $err -or $null -eq $r) {
@@ -968,12 +978,12 @@ function Get-AtmAgentRuntimeFindings {
             $seen["$key|$epid"] = $true
             $res = Resolve-AtmSessionProcess -Collection $Collection -ProcessId $epid -StartUtc (Get-AtmHintProperty -Item $e -Name 'StartUtc')
             $ev = @(
-                (New-AtmEvidence -Code 'SESSION_REGISTRY' -Source $prov -Collector $collector -ObservedUtc $now),
-                (New-AtmEvidence -Code 'SESSION_PROCESS' -Source $prov -Collector 'process-snapshot' -ObservedUtc $now -Detail $res.Reason)
+                (New-AtmEvidence -Code 'SESSION_REGISTRY' -Source 'session-registry' -Collector $collector -ObservedUtc $now),
+                (New-AtmEvidence -Code 'SESSION_PROCESS' -Source 'session-registry' -Collector 'process-snapshot' -ObservedUtc $now -Detail $res.Reason)
             )
             $findings.Add((New-AtmFinding -Kind 'AgentSession' -Key $key -State $res.State -Evidence $ev -Coverage @($snapCov, $regCov) -Provider $prov))
             if ($res.State -ceq 'LIVE') {
-                & $addCand $res.Process.Key $res.Process 'AGENT' (New-AtmEvidence -Code 'SESSION_PROCESS_MATCH' -Source $prov -Collector $collector -ObservedUtc $now) $prov
+                & $addCand $res.Process.Key $res.Process 'AGENT' (New-AtmEvidence -Code 'SESSION_PROCESS_MATCH' -Source 'session-registry' -Collector $collector -ObservedUtc $now) $prov @($regCov)
             }
         }
     }
@@ -988,16 +998,17 @@ function Get-AtmAgentRuntimeFindings {
     if ($refPids.Count -gt 0 -and -not $Collection.Failed) {
         if ($null -eq $LegacySnapshot -or $LegacySnapshot.Failed) { $reasons.Add('LEGACY_SNAPSHOT_UNAVAILABLE') }
         else {
+            $invCov = @($InventoryCoverage | Where-Object { $null -ne $_ })
             foreach ($rp in $refPids.Keys) {
-                $lp = @($LegacySnapshot.Processes | Where-Object { [long]$_.Pid -eq $rp }) | Select-Object -First 1
+                # The same PID twice in the V0.1 snapshot: the reference cannot be attributed to one process.
+                $lps = @($LegacySnapshot.Processes | Where-Object { [long]$_.Pid -eq $rp })
                 $prov = $refPids[$rp]; if (-not $prov) { $prov = $null }
-                $src = $(if ($prov) { $prov } else { 'audit' })
-                $res = $(if ($null -ne $lp) { Resolve-AtmProcessReference -Collection $Collection -ProcessId $rp -CreationUtc $lp.CreationUtc } else { $null })
+                $res = $(if ($lps.Count -eq 1) { Resolve-AtmProcessReference -Collection $Collection -ProcessId $rp -CreationUtc $lps[0].CreationUtc } else { $null })
                 if ($null -ne $res -and $res.Result -ceq 'MATCH') {
-                    & $addCand $res.Process.Key $res.Process 'AGENT' (New-AtmEvidence -Code 'PATH_REFERENCE' -Source $src -Collector 'inventory' -ObservedUtc $now) $prov
+                    & $addCand $res.Process.Key $res.Process 'AGENT' (New-AtmEvidence -Code 'PATH_REFERENCE' -Source 'path-reference' -Collector 'inventory' -ObservedUtc $now) $prov $invCov
                 } elseif ($null -ne $res -and $res.Result -ceq 'IDENTITY_UNVERIFIED' -and ($Collection.ByPid.ContainsKey($rp) -or $Collection.Duplicates.ContainsKey($rp))) {
                     $reasons.Add('IDENTITY_UNVERIFIED_CANDIDATES')
-                    & $addCand ($script:AtmUnverifiedKeyPrefix + $rp) $null 'UNVERIFIED' (New-AtmEvidence -Code 'PATH_REFERENCE' -Source $src -Collector 'inventory' -ObservedUtc $now) $prov
+                    & $addCand ($script:AtmUnverifiedKeyPrefix + $rp) $null 'UNVERIFIED' (New-AtmEvidence -Code 'PATH_REFERENCE' -Source 'path-reference' -Collector 'inventory' -ObservedUtc $now) $prov $invCov
                 } else { $reasons.Add('PATH_REFERENCE_UNVERIFIED') }
             }
         }
@@ -1016,7 +1027,7 @@ function Get-AtmAgentRuntimeFindings {
         if (-not $tree.Complete) { $reasons.Add('TREE_INCOMPLETE') }
         foreach ($m in @($tree.Members | Select-Object -Skip 1)) {
             if ($selfSet.ContainsKey($m) -or ($cand.Contains($m) -and $cand[$m].Kind -ceq 'AGENT') -or $descendants.Contains($m)) { continue }
-            $descendants[$m] = [pscustomobject]@{ Root = $k; Provider = $cand[$k].Provider }
+            $descendants[$m] = [pscustomobject]@{ Root = $k; Provider = $cand[$k].Provider; SourceCoverage = @($cand[$k].SourceCoverage.Values) }
         }
         $tr = Get-AtmProcessTreeResources -Collection $Collection -Tree $tree -Cpu $Cpu
         if (-not $tr.Complete) { foreach ($x in $tr.Reasons) { $resReasons.Add($x) } }
@@ -1027,7 +1038,8 @@ function Get-AtmAgentRuntimeFindings {
     if (-not $Collection.Failed) {
         if ($snapCov.Status -cne 'COMPLETE') { $reasons.Add('PROCESS_SNAPSHOT_INCOMPLETE') }
         $rs = @($reasons | Select-Object -Unique)
-        if ($runtimeProviders.Count -eq 0 -and $registries.Count -eq 0) { $agentCov = New-AtmCoverage -Collector 'agent-processes' -Status 'NOT_OBSERVABLE' -Reasons @('NO_RUNTIME_EVIDENCE_SOURCE') -ElevationWouldHelp 'NO' }
+        # Nothing was searched (no matcher, no session registry, no path reference): not observable, never "no agent".
+        if ($matcherCount -eq 0 -and $registries.Count -eq 0 -and $refPids.Count -eq 0) { $agentCov = New-AtmCoverage -Collector 'agent-processes' -Status 'NOT_OBSERVABLE' -Reasons (@('NO_RUNTIME_EVIDENCE_SOURCE') + $rs) -ElevationWouldHelp 'NO' }
         else { $agentCov = New-AtmCoverage -Collector 'agent-processes' -Status $(if ($rs.Count -gt 0) { 'PARTIAL' } else { 'COMPLETE' }) -Reasons $rs -ElevationWouldHelp $(if ($rs.Count -eq 0) { 'NO' } else { 'UNKNOWN' }) -Observed $agentKeys.Count }
         $coverage.Add($agentCov)
         $pcov = @($snapCov, $agentCov)
@@ -1041,11 +1053,11 @@ function Get-AtmAgentRuntimeFindings {
             $state = $(switch ($c.Kind) { 'AGENT' { 'AGENT_PROCESS' } 'UNVERIFIED' { 'IDENTITY_UNVERIFIED' } default { 'UNKNOWN' } })
             # A process seen by a matcher that could not be checked, but under a verified agent process, is a descendant.
             if ($state -ceq 'UNKNOWN' -and $descendants.Contains($k)) { continue }
-            $findings.Add((New-AtmFinding -Kind 'Process' -Key $k -State $state -Evidence $c.Evidence.ToArray() -Coverage $pcov -Provider $c.Provider))
+            $findings.Add((New-AtmFinding -Kind 'Process' -Key $k -State $state -Evidence $c.Evidence.ToArray() -Coverage (@($pcov) + @($c.SourceCoverage.Values)) -Provider $c.Provider))
         }
         foreach ($k in $descendants.Keys) {
             $d = $descendants[$k]
-            $findings.Add((New-AtmFinding -Kind 'Process' -Key $k -State 'AGENT_DESCENDANT' -Evidence @(New-AtmEvidence -Code 'PARENT_LINK_VERIFIED' -Source 'diagnose' -Collector 'process-snapshot' -ObservedUtc $now -Detail $d.Root) -Coverage $pcov -Provider $d.Provider))
+            $findings.Add((New-AtmFinding -Kind 'Process' -Key $k -State 'AGENT_DESCENDANT' -Evidence @(New-AtmEvidence -Code 'PARENT_LINK_VERIFIED' -Source 'diagnose' -Collector 'process-snapshot' -ObservedUtc $now -Detail $d.Root) -Coverage (@($pcov) + @($d.SourceCoverage)) -Provider $d.Provider))
         }
         $rr = @($resReasons | Select-Object -Unique)
         $coverage.Add((New-AtmCoverage -Collector 'agent-resources' -Status $(if ($rr.Count -gt 0) { 'PARTIAL' } else { 'COMPLETE' }) -Reasons $rr -ElevationWouldHelp $(if ($rr.Count -eq 0) { 'NO' } else { 'UNKNOWN' }) -Observed $trees.Count -Expected $trees.Count))

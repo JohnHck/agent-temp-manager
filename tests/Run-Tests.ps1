@@ -3477,7 +3477,8 @@ try {
             $r = Resolve-AtmSessionProcess -Collection $c -ProcessId $v[0] -StartUtc $v[1]
             Assert-True ($r.State -ceq $v[2] -and $r.Reason -ceq $v[3]) "$($n): $($r.State)/$($r.Reason) (esperado $($v[2])/$($v[3]))"
         }
-        $complete = Get-AtmProcessCollection -Source ({ @((& $b4Row 4 0 'System' $b4T0.AddHours(-1)), (& $b4Row 500 4 'claude.exe' $b4T0), (& $b4Row 502 4 'x.exe' $b4T0)) }.GetNewClosure())
+        $completeRows = @((& $b4Row 4 0 'System' $b4T0.AddHours(-1)), (& $b4Row 500 4 'claude.exe' $b4T0), (& $b4Row 502 4 'x.exe' $b4T0))
+        $complete = Get-AtmProcessCollection -Source ({ $completeRows }.GetNewClosure())
         Assert-Eq $complete.Coverage.Status 'COMPLETE' 'coleta completa'
         $r = Resolve-AtmSessionProcess -Collection $complete -ProcessId 7777 -StartUtc $b4T0
         Assert-True ($r.State -ceq 'SESSION_PROCESS_NOT_FOUND' -and $r.Reason -ceq 'PID_NOT_IN_COMPLETE_SNAPSHOT') "ausente com coleta COMPLETE: $($r.State)"
@@ -3511,7 +3512,10 @@ try {
             (& $b4Row 2001 2000 'bash.exe' $b4T0.AddMinutes(1) -Without @('HandleCount')),
             (& $b4Row 2002 2001 'node.exe' $b4T0.AddMinutes(2)),
             (& $b4Row 2003 2000 'git.exe' $b4T0.AddMinutes(-1)),
-            (& $b4Row 3000 2000 'powershell.exe' $b4T0.AddMinutes(5)),
+            (& $b4Row 2500 2000 'cmd.exe' $b4T0.AddMinutes(4)),
+            (& $b4Row 2501 2500 'sibling.exe' $b4T0.AddMinutes(4).AddSeconds(30)),
+            (& $b4Row 2700 2000 'tool.exe' $b4T0.AddMinutes(6)),
+            (& $b4Row 3000 2500 'powershell.exe' $b4T0.AddMinutes(5)),
             (& $b4Row 3001 3000 'conhost.exe' $b4T0.AddMinutes(5).AddSeconds(1)),
             (& $b4Row 5000 1000 'helper.exe' $b4T0.AddMinutes(10)),
             (& $b4Row 5001 1000 'other.exe' $b4T0.AddMinutes(11)),
@@ -3537,16 +3541,26 @@ try {
                 [pscustomobject]@{ Pid = 6001; Name = 'fakeagent.exe'; ParentPid = 1000; CommandLine = 'fakeagent.exe --other'; CreationUtc = $b4T0.AddMinutes(13) },
                 [pscustomobject]@{ Pid = 6002; Name = 'fakeagent.exe'; ParentPid = 1000; CommandLine = $null; CreationUtc = $b4T0.AddMinutes(14) }) }
         $parts = @([pscustomobject]@{ Provider = 'claude-code'; DirectRefs = @('PID 5000 (helper.exe)'); AncestorRefs = @('PID 5001 (other.exe) -> projeto') })
-        $self = [pscustomobject]@{ Keys = @($k[3000], $k[3001]); Unverified = @() }
-        $res = Get-AtmAgentRuntimeFindings -Collection $c -ProviderHints $hints -SessionRegistries $regs -LegacySnapshot $legacy -Partitions $parts -SelfKeys $self
+        # SELF through the R-B1 rules: this process (3000), its launcher (2500, a verified ancestor) and its own child; a
+        # launcher reference whose PID was reused (2700 recorded with another time) is not excluded.
+        $self = Get-AtmSelfProcessKeys -Collection $c -SelfPid 3000 -SelfCreationUtc $b4T0.AddMinutes(5) -LauncherReferences @([pscustomobject]@{ Pid = 2500; CreationUtc = $b4T0.AddMinutes(4) }, [pscustomobject]@{ Pid = 2700; CreationUtc = $b4T0.AddMinutes(7) })
+        Assert-Eq (@($self.Keys | Sort-Object) -join ',') ((@($k[2500], $k[3000], $k[3001]) | Sort-Object) -join ',') 'SELF: o proprio processo, o launcher verificado e o filho proprio'
+        Assert-True (@($self.Unverified | Where-Object { $_.Pid -eq 2700 -and $_.Result -eq 'PID_REUSED' }).Count -eq 1) 'launcher com PID reutilizado nao verificado'
+        $invCov = @(New-AtmCoverage -Collector 'inventory' -Status 'COMPLETE')
+        $res = Get-AtmAgentRuntimeFindings -Collection $c -ProviderHints $hints -SessionRegistries $regs -LegacySnapshot $legacy -Partitions $parts -InventoryCoverage $invCov -SelfKeys $self
         $expect = [ordered]@{
             2000 = 'AGENT_PROCESS'; 2001 = 'AGENT_DESCENDANT'; 2002 = 'AGENT_DESCENDANT'; 2003 = '(none)'; 3000 = 'SELF'; 3001 = 'SELF'
+            2500 = 'SELF'; 2501 = 'AGENT_DESCENDANT'; 2700 = 'AGENT_DESCENDANT'
             5000 = 'AGENT_PROCESS'; 5001 = '(none)'; 6000 = 'AGENT_PROCESS'; 6001 = '(none)'; 6002 = 'UNKNOWN'; 1000 = '(none)'; 4 = '(none)'
         }
         foreach ($e in $expect.GetEnumerator()) { Assert-Eq (& $b4State $res $k[[int]$e.Key]) $e.Value "processo $($e.Key)" }
         $f2000 = @($res.Findings | Where-Object { $_.Key -ceq $k[2000] })[0]
         Assert-Eq (@($f2000.Evidence | ForEach-Object { $_.Code } | Sort-Object) -join ',') 'PROCESS_MATCHER_IMAGE,SESSION_PROCESS_MATCH' 'claude.exe: matcher e sessao como evidencia'
         Assert-Eq $f2000.Provider 'claude-code' 'provider do processo'
+        Assert-Eq (@($f2000.Coverage | ForEach-Object { $_.Collector }) -join ',') 'process-snapshot,agent-processes,provider-claude-code,sessions-claude-code' 'cobertura das fontes da evidencia'
+        Assert-Eq (@(@($res.Findings | Where-Object { $_.Key -ceq $k[2002] })[0].Coverage | ForEach-Object { $_.Collector }) -join ',') 'process-snapshot,agent-processes,provider-claude-code,sessions-claude-code' 'descendente herda a cobertura da raiz'
+        Assert-Eq (@(@($res.Findings | Where-Object { $_.Key -ceq $k[5000] })[0].Coverage | ForEach-Object { $_.Collector }) -join ',') 'process-snapshot,agent-processes,inventory' 'referencia de caminho depende do inventario'
+        Assert-True (@($res.Findings | ForEach-Object { $_.Evidence } | Where-Object { @('process-matcher', 'session-registry', 'path-reference', 'diagnose') -cnotcontains $_.Source }).Count -eq 0) 'fontes de evidencia sao codigos fixos'
         Assert-Eq (@($res.Findings | Where-Object { $_.Key -ceq $k[2002] })[0].Evidence[0].Detail) $k[2000] 'descendente aponta a raiz verificada'
         Assert-Eq (@($res.Findings | Where-Object { $_.Key -ceq $k[5000] })[0].Evidence[0].Code) 'PATH_REFERENCE' 'referencia de caminho com identidade exata'
         Assert-Eq (@($res.Findings | Where-Object { $_.Key -ceq $k[6000] })[0].Evidence[0].Code) 'PROCESS_MATCHER_MARKER' 'marcador confirmado em memoria'
@@ -3559,8 +3573,9 @@ try {
         Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'sessions-claude-code' })[0].Status 'COMPLETE' 'registro de sessoes completo'
         # Resources per agent tree: partial counters stay partial (never 0), and so does an unsampled CPU.
         $t = @($res.Trees | Where-Object { $_.RootKey -ceq $k[2000] })[0]
-        Assert-True ((@($t.Tree.Members) -join ',') -eq (@($k[2000], $k[2001], $k[3000], $k[2002], $k[3001]) -join ',')) "arvore verificada da raiz: $(@($t.Tree.Members) -join ',')"
-        Assert-True (-not $t.Resources.Complete -and -not $t.Resources.Counters.HandleCount.Complete -and $t.Resources.Counters.HandleCount.Known -eq 4) 'contador ilegivel deixa a soma parcial'
+        $treeExpected = @($k[2000], $k[2001], $k[2002], $k[2500], $k[2501], $k[2700], $k[3000], $k[3001]) | Sort-Object
+        Assert-Eq (@($t.Tree.Members | Sort-Object) -join ',') ($treeExpected -join ',') 'arvore verificada da raiz (sem o git criado antes do pai)'
+        Assert-True (-not $t.Resources.Complete -and -not $t.Resources.Counters.HandleCount.Complete -and $t.Resources.Counters.HandleCount.Known -eq ($treeExpected.Count - 1)) 'contador ilegivel deixa a soma parcial'
         $rc = @($res.Coverage | Where-Object { $_.Collector -eq 'agent-resources' })[0]
         Assert-True ($rc.Status -eq 'PARTIAL' -and $rc.Reasons -contains 'COUNTERS_UNREADABLE' -and $rc.Reasons -contains 'CPU_NOT_SAMPLED') "recursos parciais: $($rc.Reasons -join ',')"
         # Nothing sensitive leaves the engine: no command line, marker, path or argument.
@@ -3590,7 +3605,8 @@ try {
         Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0].Status 'FAILED' 'cobertura FAILED'
         # Agent not installed: no process, empty registry. Nothing is claimed about the agent; coverage is conclusive
         # only because the collection is COMPLETE, and no finding says "not running".
-        $none = Get-AtmProcessCollection -Source ({ @((& $b4Row 4 0 'System' $b4T0.AddHours(-1)), (& $b4Row 100 4 'app.exe' $b4T0)) }.GetNewClosure())
+        $noneRows = @((& $b4Row 4 0 'System' $b4T0.AddHours(-1)), (& $b4Row 100 4 'app.exe' $b4T0))
+        $none = Get-AtmProcessCollection -Source ({ $noneRows }.GetNewClosure())
         $res = Get-AtmAgentRuntimeFindings -Collection $none -ProviderHints $claude -SessionRegistries $emptyReg
         Assert-Eq @($res.Findings).Count 0 'sem agente: nenhum achado'
         Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0].Status 'COMPLETE' 'sem agente: coleta completa sem candidatos'
@@ -3611,13 +3627,31 @@ try {
         Assert-True ($sc['sessions-fake-agent'].Status -eq 'FAILED' -and $sc['sessions-fake-agent'].Reasons -contains 'SESSION_REGISTRY_UNREADABLE') 'registro ilegivel: FAILED'
         Assert-True ($sc['sessions-fake-two'].Status -eq 'PARTIAL' -and $sc['sessions-fake-two'].Reasons -contains 'SESSION_ENTRIES_UNPARSEABLE') 'entradas ilegiveis: PARTIAL'
         Assert-Eq $sc['sessions-invalid'].Status 'FAILED' 'provider invalido isolado'
+        # A V0.1 provider with an upper-case Id (accepted by V0.1): its registry and path references are read; the real Id
+        # stays in the finding, the collector name is lower case.
+        $legacyUp = [pscustomobject]@{ Failed = $false; Processes = @([pscustomobject]@{ Pid = 100; Name = 'app.exe'; ParentPid = 4; CommandLine = $null; CreationUtc = $b4T0 }) }
+        $partsUp = @([pscustomobject]@{ Provider = 'Fake-Upper-V1'; DirectRefs = @('PID 100 (app.exe)'); AncestorRefs = @() })
+        $regUp = @([pscustomobject]@{ ProviderId = 'Fake-Upper-V1'; Registry = [pscustomobject]@{ Readable = $true; Unparseable = 0; Entries = @([pscustomobject]@{ SessionId = 'u1'; Pid = 100; StartUtc = $b4T0 }) }; Error = $null })
+        $res = Get-AtmAgentRuntimeFindings -Collection $none -SessionRegistries $regUp -LegacySnapshot $legacyUp -Partitions $partsUp
+        Assert-Eq (& $b4State $res (& $b4Key 100 $b4T0)) 'AGENT_PROCESS' 'provider v1 com Id em maiusculas: referencia e sessao lidas'
+        Assert-Eq @($res.Findings | Where-Object { $_.Key -ceq (& $b4Key 100 $b4T0) })[0].Provider 'Fake-Upper-V1' 'Id real no achado'
+        Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'sessions-fake-upper-v1' })[0].Status 'COMPLETE' 'coletor em minusculas'
+        Assert-Eq (& $b4State $res 'Fake-Upper-V1/u1') 'LIVE' 'sessao do provider v1'
+        # The same PID twice in the V0.1 snapshot: the reference cannot be attributed (never guessed).
+        $legacyDup = [pscustomobject]@{ Failed = $false; Processes = @($legacyUp.Processes[0], [pscustomobject]@{ Pid = 100; Name = 'app.exe'; ParentPid = 4; CommandLine = $null; CreationUtc = $b4T0.AddHours(-2) }) }
+        $res = Get-AtmAgentRuntimeFindings -Collection $none -LegacySnapshot $legacyDup -Partitions $partsUp
+        Assert-True ((& $b4State $res (& $b4Key 100 $b4T0)) -eq '(none)' -and @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0].Reasons -contains 'PATH_REFERENCE_UNVERIFIED') 'PID duplicado na V0.1: referencia nao atribuida'
+        # A runtime provider with service hints only: no process was searched, so the agent coverage is not observable.
+        $svcOnly = [pscustomobject]@{ ProviderId = 'fake-svc'; ProcessMatchers = @(); ServiceHints = @([pscustomobject]@{ Name = 'FakeSvc'; Role = $null }); VirtualizationHints = @(); Coverage = (New-AtmCoverage -Collector 'provider-fake-svc' -Status 'COMPLETE') }
+        $res = Get-AtmAgentRuntimeFindings -Collection $none -ProviderHints @($svcOnly)
+        Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0].Status 'NOT_OBSERVABLE' 'sem matcher de processo: NOT_OBSERVABLE, nunca COMPLETE'
         # A hint member that throws (provider coverage FAILED) keeps the agent coverage below COMPLETE.
         $throwing = [pscustomobject]@{ Id = 'fake-throw'; DisplayName = 'F'; ContractVersion = 2; Capabilities = @('runtime'); GetProcessMatchers = { throw (New-Object System.IO.IOException 'x') } }
         $th = Get-AtmProviderRuntimeHints $throwing
         Assert-Eq $th.Coverage.Status 'FAILED' 'dica com excecao: FAILED'
         $res = Get-AtmAgentRuntimeFindings -Collection $none -ProviderHints @($th)
         $ac = @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0]
-        Assert-True ($ac.Status -eq 'PARTIAL' -and $ac.Reasons -contains 'PROVIDER_HINTS_INCOMPLETE') "dica com excecao nunca vira ausencia confirmada: $($ac.Status)"
+        Assert-True ($ac.Status -ne 'COMPLETE' -and $ac.Status -ne 'NOT_PRESENT' -and $ac.Reasons -contains 'PROVIDER_HINTS_INCOMPLETE') "dica com excecao nunca vira ausencia confirmada: $($ac.Status)"
         # No runtime source at all: not observable, never "no agent".
         $res = Get-AtmAgentRuntimeFindings -Collection $none
         Assert-True (@($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0].Status -eq 'NOT_OBSERVABLE') 'sem fontes de runtime: NOT_OBSERVABLE'
@@ -3628,6 +3662,15 @@ try {
         Assert-Eq (& $b4State $res (& $b4Key 100 $b4T0)) 'AGENT_PROCESS' 'provider somente runtime ficticio'
         $threw = $false; try { $null = Get-AtmAgentRuntimeFindings -Collection $null } catch { $threw = $true }
         Assert-True $threw 'sem coleta: recusado'
+    }
+    Test-Case 'Diagnose' 'Identidade real (somente leitura, P1-B4-b): o snapshot da V0.1 e a coleta da P1-B1 dao ao proprio processo o mesmo horario de criacao em ticks' {
+        $legacy = Get-AtmProcessSnapshot
+        $c = Get-AtmProcessCollection
+        $lp = @($legacy.Processes | Where-Object { $_.Pid -eq $PID })
+        $cp = $(if ($c.ByPid.ContainsKey([long]$PID)) { $c.ByPid[[long]$PID] } else { $null })
+        Assert-True ($lp.Count -eq 1 -and $null -ne $cp -and $null -ne $lp[0].CreationUtc -and $cp.IdentityStatus -eq 'VERIFIED') 'proprio processo nas duas coletas'
+        Assert-Eq $lp[0].CreationUtc.ToUniversalTime().Ticks $cp.CreationUtc.Ticks 'mesmos ticks (marcadores e referencias dependem disso)'
+        Assert-True ($null -ne (Get-AtmLegacyCommandLine -LegacySnapshot $legacy -Process $cp)) 'linha de comando do proprio processo correlacionada em memoria (nao exibida)'
     }
     Test-Case 'Diagnose' 'CLI version mostra identidade, tipo de elevacao e integridade (PRIV-10) nos dois idiomas' {
         $cmd = Join-Path $srcDir 'bin\agent-temp.cmd'
