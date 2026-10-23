@@ -1,6 +1,7 @@
 # ADR-0010: Pseudonymization of exported identifiers
 
-Status: PROPOSED (maintainer gate after P1-B4-d; D-7 and D-8 open)
+Status: ACCEPTED (maintainer gate of 2026-10-23: D-7 = K1, D-8 = partition findings ordered by pseudonym; schema
+`atm.diagnose/2` approved)
 Date: 2026-10-23
 Phase: P1 (P1-B4-d)
 
@@ -57,25 +58,29 @@ ADR-0009 makes `diagnose` read-only, so it cannot create or store a secret on it
    * **minimal privilege:** elevation is never requested;
    * **explicit purpose:** session evidence;
    * **honest coverage:** an unreadable profile makes `sessions-<provider>` `PARTIAL`, never "no session".
+8. **Order of partition findings (D-8).** After collisions are grouped, `TempPartition` findings are ordered by `key`
+   (`StringComparer.Ordinal`), in the result, the JSON and any report that lists them; every partition finding carries
+   the same observation time, so no field gives the file-system enumeration order back. With the same key and the same
+   data the order is the same; with another (or an ephemeral) key it follows the new pseudonyms. This replaces, for the
+   V0.2 diagnose only, the rule of D6 that kept temporary partitions in the V0.1 order; the V0.1 inventory and every
+   V0.1 output keep their own order.
 
-## Open decision
+## Decisions taken at the gate
 
-**D-7, a persistent key.** Under this ADR the default key is ephemeral, which drops the "same session, same key in
-every run" property of the earlier D1 unless the operator supplies a key file. Options:
+**D-7 = K1, no persistent key.** The default key is ephemeral; correlation between runs exists only when the operator
+reuses the same key file. This replaces the earlier requirement (D1 of P1-B4-c) that the same session have the same key
+in every run automatically. `diagnose` never creates, changes or stores a key, and no secret is kept automatically.
 
-* **K1 (implemented):** ephemeral by default, operator key file for correlation. `diagnose` stays read-only.
-* **K2:** a separate, explicit command creates a per-user key protected with DPAPI (for example under
-  `%LOCALAPPDATA%\AgentTempManager`), and `diagnose` reads it when it is present. `diagnose` stays read-only, but the
-  product owns a secret and its lifecycle: rotation, loss, backup, elevated runs and multi-user machines.
-* **K3:** `diagnose` creates the key on first use. This needs a new ADR overriding the read-only rule of ADR-0009.
+* **K2, future evolution (not built):** a separate, explicit provisioning command creating a per-user key (for example
+  protected with DPAPI). It needs its own evaluation of DPAPI scope, backup, rotation, multi-user machines and elevated
+  runs. `diagnose` would behave as it does now: a supplied key when there is one, an ephemeral key otherwise.
+* **K3, rejected:** `diagnose` creating the key on first use (it would break the read-only rule of ADR-0009).
 
-`diagnose` behaves the same under K1 and K2: it uses a supplied key when there is one and an ephemeral key otherwise.
-Nothing beyond K1 is built until the maintainer decides D-7.
+**D-8 = partition findings ordered by pseudonym** (decision 8 above), replacing D6 for the V0.2 diagnose only.
 
-**D-8, order of partition findings.** D6 keeps temporary partitions in the V0.1 order, which links pseudonyms to paths
-by position for whoever can list the temporary bases (see the boundary below). Options: keep D6 (implemented; the link
-is documented), or order partition findings by pseudonym (the position link is gone; with an ephemeral key the order
-then changes between runs). Recommendation: order by pseudonym. Not built until decided.
+Earlier accepted records are not rewritten: ADR-0009 keeps its read-only rule and schema versioning rule, which this
+record applies (version 2); the D6 order rule of P1-B4-c stays recorded in `V0.2-PLAN.md`, superseded here for
+partition findings.
 
 ## Boundary (not changed by this ADR)
 
@@ -96,16 +101,16 @@ then changes between runs). Recommendation: order by pseudonym. Not built until 
   They stay linkable between runs.
 * **Order of `AgentSession` findings:** runtime findings are ordered by key, so with an ephemeral key the order of
   `AgentSession` findings differs between runs. The content does not change; the order is the same for one key.
-* **Linkage by position and evidence (independent review):** partition findings keep the V0.1 order (D6), which is the
-  file-system enumeration order, and keep the audit class and flags. Whoever can list the temporary bases, or holds a
-  V0.1 `audit -ExportJson` of the same moment (which already carries the paths), can relate partition pseudonyms to
-  paths by position. A process key (`pid@ticks`) with `SESSION_PROCESS_MATCH` can be tied to a session file by whoever
-  can read the session directory. The HMAC prevents computing or checking a pseudonym; it does not make the findings
-  unlinkable for someone with that local access. Ordering partition findings by pseudonym would remove the position
-  link but changes the approved D6: open decision D-8.
-* **Weak operator keys:** any 32 bytes are accepted. A key that is not random (a passphrase) can be guessed offline
-  from the exported `keyId`, and then every pseudonym computed for candidate identifiers. The documentation asks for
-  bytes from a random generator; the tool cannot measure a key's entropy.
+* **Residual linkage (no absolute anonymity):** the position link is removed by D-8, but partition findings keep the
+  audit class and flags, and runtime findings keep their evidence. Whoever has local access (can list the temporary
+  bases, read the session directory, or holds a V0.1 `audit -ExportJson`, which carries the paths) can still relate
+  some pseudonyms to directories or sessions through those classes, flags and counts, and can tie a process key
+  (`pid@ticks`) with `SESSION_PROCESS_MATCH` to a session file. The HMAC prevents computing or checking a pseudonym;
+  it does not make the findings unlinkable for someone with that local access.
+* **Weak operator keys:** any 32 bytes are accepted. `keyId` does not guarantee entropy: a key that is not random (a
+  passphrase) can be guessed offline from the exported `keyId`, and then every pseudonym computed for candidate
+  identifiers. The documentation asks for bytes from a random generator; the tool cannot measure a key's entropy. The
+  ephemeral key is always 32 bytes from the system random generator; the tool never generates a weak key.
 * **In memory:** the result object keeps the V0.1 inventory the run was built on (`Inventory`, with paths and the
   session registries), as before. It is never exported nor printed by `diagnose`.
 * **Progress and errors:** while `diagnose` runs, the progress line shows no path; an unexpected failure is reported by
@@ -148,6 +153,10 @@ then changes between runs). Recommendation: order by pseudonym. Not built until 
     readable or writable by another account (Everyone, INTERACTIVE, Users, generic read) are refused;
   * the CLI fails closed with exit code 2 and shows only the code.
 * **Test "Colisao de chave de particao (P1-B4-d)":** a forced collision gives one `UNKNOWN` finding, with nothing
-  overwritten.
+  overwritten, in ordinal order, the same with reversed input.
+* **Test "Ordem das particoes (P1-B4-d, D-8)":** reversed enumeration gives the same literal output; the same key gives
+  the same pseudonyms and order; another key gives new pseudonyms, still in ordinal order and each with its own audit
+  class; one observation time for every partition finding; the export lists exactly the created partitions by
+  pseudonym in ordinal order; the report lists no partition; the V0.1 inventory keeps its own order.
 * **Real read-only run on the development machine:** no session id or partition path appears in the export or the
   report.

@@ -84,7 +84,8 @@ state frees, authorizes or blocks the deletion of a temporary directory.
 
 **Pseudonyms (ADR-0010).** Temporary partitions and agent sessions appear only as keyed pseudonyms
 (`<provider>/p-<32 hex>`, `<provider>/s-<32 hex>`): no path and no session identifier is shown or exported. By default
-the key exists for one run only, so two runs cannot be compared item by item. To correlate runs, keep a key file of
+the key exists for one run only, so two runs cannot be compared item by item, and partition findings, which are
+listed in pseudonym order, come in another order each run. To correlate runs, keep a key file of
 32 to 4096 bytes from a random generator (not a passphrase: the exported `keyId` lets anyone test guesses of a weak
 key offline) that only you, SYSTEM and Administrators can read or change, and pass it every time:
 

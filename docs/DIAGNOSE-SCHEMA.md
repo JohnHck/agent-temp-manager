@@ -21,14 +21,16 @@ Rules:
   (`-PseudonymKeyFile`); only then are the pseudonyms of two exports comparable (same `keyId`). The export still
   contains the machine name, the user name and SID and the token elevation state; process keys, counts and coverage
   are not pseudonymized and stay linkable between runs. Review the export before sharing.
-* Order: temporary partitions keep the order of the V0.1 inventory; runtime findings (`Process`, `AgentSession`)
-  follow, ordered by `kind` and then `key` (ordinal), so the order of providers, registries or partitions never
-  changes the document for one key. With an ephemeral key the order of `AgentSession` findings differs between runs
-  (their keys do).
+* Order: temporary partitions come first, ordered by `key` (ordinal) after collisions are grouped, all with the same
+  observation time: the position of a directory in the file-system enumeration is not kept (ADR-0010, D-8). Runtime
+  findings (`Process`, `AgentSession`) follow, ordered by `kind` and then `key` (ordinal). For one key, the order of
+  providers, registries, profiles or directories never changes the document; with another key (an ephemeral key in
+  every run) the order follows the new pseudonyms.
 
 Changes from `atm.diagnose/1` (P1-B4-d):
 
 * `schemaVersion` is `atm.diagnose/2`.
+* Temporary partitions are ordered by `key` instead of the V0.1 inventory order.
 * `findings[].key` of a `TempPartition` is `<provider>/p-<32 hex>` (it was the partition path) and of an
   `AgentSession` `<provider>/s-<32 hex>` computed with a key (it was an unkeyed hash).
 * New top-level object `pseudonymization`.
@@ -161,7 +163,7 @@ never `0`.
 |---|---|---|
 | `scheme` | string | `HMAC-SHA256-128/1`. |
 | `keySource` | string | `EPHEMERAL` (a random key for this run only; pseudonyms are not comparable with another run) or `OPERATOR_KEY_FILE` (the key file given with `-PseudonymKeyFile`). |
-| `keyId` | string or null | Identifier of an operator key (32 hex, its own HMAC domain): two exports with the same `keyId` used the same key. `null` for an ephemeral key. It does not reveal the key. |
+| `keyId` | string or null | Identifier of an operator key (32 hex, its own HMAC domain): two exports with the same `keyId` used the same key. `null` for an ephemeral key. It does not reveal a random key, but it does not guarantee entropy: a weak operator key (a passphrase) can be tested offline against it. |
 
 ## inventory
 
