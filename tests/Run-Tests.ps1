@@ -3663,6 +3663,127 @@ try {
         $threw = $false; try { $null = Get-AtmAgentRuntimeFindings -Collection $null } catch { $threw = $true }
         Assert-True $threw 'sem coleta: recusado'
     }
+    Test-Case 'Diagnose' 'Cobertura de sessoes (P1-B4-b): um registro de sessoes FAILED ou PARTIAL impede agent-processes COMPLETE; evidencias positivas ficam, lacunas nunca viram ausencia' {
+        $claude = @(& $b4Hints 'claude-code' @([pscustomobject]@{ ImageName = 'claude.exe'; CommandLineMarker = $null }))
+        $rows = @((& $b4Row 4 0 'System' $b4T0.AddHours(-1)), (& $b4Row 200 4 'claude.exe' $b4T0), (& $b4Row 201 200 'bash.exe' $b4T0.AddMinutes(1)))
+        $c = Get-AtmProcessCollection -Source ({ $rows }.GetNewClosure())
+        $partialRows = @($rows) + @(& $b4Row 210 4 'nodate.exe' $null)
+        $cp = Get-AtmProcessCollection -Source ({ $partialRows }.GetNewClosure())
+        Assert-True ($c.Coverage.Status -eq 'COMPLETE' -and $cp.Coverage.Status -eq 'PARTIAL') 'coletas completa e parcial'
+        $live = [pscustomobject]@{ SessionId = 's1'; Pid = 200; StartUtc = $b4T0 }
+        $gone = [pscustomobject]@{ SessionId = 's9'; Pid = 7777; StartUtc = $b4T0 }
+        $reg = { param($Readable, $Unparseable, $Entries, $Err) @([pscustomobject]@{ ProviderId = 'claude-code'; Registry = $(if ($Err) { $null } else { [pscustomobject]@{ Readable = $Readable; Unparseable = $Unparseable; Entries = @($Entries) } }); Error = $Err }) }
+        $svcOnly = [pscustomobject]@{ ProviderId = 'fake-svc'; ProcessMatchers = @(); ServiceHints = @([pscustomobject]@{ Name = 'FakeSvc'; Role = $null }); VirtualizationHints = @(); Coverage = (New-AtmCoverage -Collector 'provider-fake-svc' -Status 'COMPLETE') }
+        # Name = (collection, hints, registries, agent-processes status, required reason, sessions status, 200 state, s9 state)
+        $cases = [ordered]@{
+            'registro completo com sessao valida' = @($c, $claude, (& $reg $true 0 @($live, $gone) $null), 'COMPLETE', $null, 'COMPLETE', 'AGENT_PROCESS', 'SESSION_PROCESS_NOT_FOUND')
+            'registro completo e vazio'           = @($c, $claude, (& $reg $true 0 @() $null), 'COMPLETE', $null, 'COMPLETE', 'AGENT_PROCESS', '(none)')
+            'registro FAILED por excecao'         = @($c, $claude, (& $reg $true 0 @() 'IOException'), 'PARTIAL', 'SESSION_REGISTRY_INCOMPLETE', 'FAILED', 'AGENT_PROCESS', '(none)')
+            'registro PARTIAL (entradas ilegiveis)' = @($c, $claude, (& $reg $true 2 @($live, $gone) $null), 'PARTIAL', 'SESSION_REGISTRY_INCOMPLETE', 'PARTIAL', 'AGENT_PROCESS', 'UNKNOWN')
+            'registro nao legivel'                = @($c, $claude, (& $reg $false 0 @() $null), 'PARTIAL', 'SESSION_REGISTRY_INCOMPLETE', 'FAILED', 'AGENT_PROCESS', '(none)')
+            'snapshot parcial'                    = @($cp, $claude, (& $reg $true 0 @($live, $gone) $null), 'PARTIAL', 'PROCESS_SNAPSHOT_INCOMPLETE', 'COMPLETE', 'AGENT_PROCESS', 'UNKNOWN')
+            'hints sem fonte de sessao'           = @($c, $claude, @(), 'COMPLETE', $null, '(none)', 'AGENT_PROCESS', '(none)')
+            'somente servico'                     = @($c, @($svcOnly), @(), 'NOT_OBSERVABLE', 'NO_RUNTIME_EVIDENCE_SOURCE', '(none)', '(none)', '(none)')
+            'somente servico, registro FAILED'    = @($c, @($svcOnly), (& $reg $true 0 @() 'IOException'), 'PARTIAL', 'SESSION_REGISTRY_INCOMPLETE', 'FAILED', '(none)', '(none)')
+        }
+        foreach ($n in $cases.Keys) {
+            $v = $cases[$n]
+            $res = Get-AtmAgentRuntimeFindings -Collection $v[0] -ProviderHints $v[1] -SessionRegistries $v[2]
+            $ac = @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0]
+            $sc = @($res.Coverage | Where-Object { $_.Collector -eq 'sessions-claude-code' })
+            Assert-Eq $ac.Status $v[3] "$($n): agent-processes"
+            if ($v[4]) { Assert-True (@($ac.Reasons) -ccontains $v[4]) "$($n): motivo $($v[4]) em $(@($ac.Reasons) -join ',')" }
+            else { Assert-Eq @($ac.Reasons).Count 0 "$($n): sem motivos" }
+            Assert-Eq $(if ($sc.Count -eq 1) { $sc[0].Status } else { '(none)' }) $v[5] "$($n): sessions-claude-code"
+            Assert-Eq (& $b4State $res (& $b4Key 200 $b4T0)) $v[6] "$($n): evidencia positiva do processo 200 preservada"
+            Assert-Eq (& $b4State $res 'claude-code/s9') $v[7] "$($n): sessao com PID ausente"
+            foreach ($f in @($res.Findings | Where-Object { $_.Kind -eq 'Process' })) { Assert-True (@($f.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0].Status -eq $ac.Status) "$($n): achado carrega a cobertura agent-processes" }
+        }
+        # The V0.1 audit reading of the same registry is untouched: the session State still comes from the V0.1 rule.
+        $p = New-TestProfile 'b4cov'
+        [IO.File]::WriteAllText((Join-Path (Join-Path $p.ProfilePath '.claude') 'sessions\200.json'), "{`"pid`":200,`"sessionId`":`"11111111-2222-3333-4444-555555555555`",`"procStart`":`"$($b4T0.ToFileTimeUtc())`"}")
+        [IO.File]::WriteAllText((Join-Path (Join-Path $p.ProfilePath '.claude') 'sessions\bad.json'), 'not json')
+        $v01 = Get-AtmClaudeSessionEvidence -ProfileInfo $p -Snapshot ([pscustomobject]@{ Failed = $false; Processes = @([pscustomobject]@{ Pid = 200; Name = 'claude.exe'; ParentPid = 4; CommandLine = $null; CreationUtc = $b4T0 }) })
+        Assert-True ($v01.Readable -and $v01.Unparseable -eq 1 -and @($v01.Entries).Count -eq 1 -and $v01.Entries[0].State -eq 'LIVE') 'auditoria V0.1: mesma leitura e mesmo estado'
+    }
+    Test-Case 'Diagnose' 'Varios providers no mesmo PID (P1-B4-b): um achado por processo, provider so com atribuicao unica, ambiguidade explicita, resultado independente da ordem' {
+        $rows = @(
+            (& $b4Row 4 0 'System' $b4T0.AddHours(-1)),
+            (& $b4Row 1000 4 'explorer.exe' $b4T0.AddMinutes(-30)),
+            (& $b4Row 200 1000 'claude.exe' $b4T0),
+            (& $b4Row 201 200 'bash.exe' $b4T0.AddMinutes(1)),
+            (& $b4Row 300 1000 'shared.exe' $b4T0.AddMinutes(2)),
+            (& $b4Row 301 300 'child.exe' $b4T0.AddMinutes(3)),
+            (& $b4Row 400 1000 'helper.exe' $b4T0.AddMinutes(4)),
+            (& $b4Row 450 1000 'tool.exe' $b4T0.AddMinutes(5)),
+            (& $b4Row 500 1000 'nodate.exe' $null),
+            (& $b4Row 600 1000 'markeragent.exe' $b4T0.AddMinutes(6)))
+        $c = Get-AtmProcessCollection -Source ({ $rows }.GetNewClosure())
+        $k = @{}; foreach ($r in $rows) { if ($null -ne $r.CreationDate) { $k[[int]$r.ProcessId] = & $b4Key $r.ProcessId $r.CreationDate } }
+        $hints = @(
+            (& $b4Hints 'claude-code' @([pscustomobject]@{ ImageName = 'claude.exe'; CommandLineMarker = $null })),
+            (& $b4Hints 'fake-a' @([pscustomobject]@{ ImageName = 'shared.exe'; CommandLineMarker = $null })),
+            (& $b4Hints 'fake-b' @([pscustomobject]@{ ImageName = 'shared.exe'; CommandLineMarker = $null }, [pscustomobject]@{ ImageName = 'markeragent.exe'; CommandLineMarker = '--fake-marker' })))
+        # PID 600 appears twice in the V0.1 snapshot (one entry with the exact ticks and the marker): ambiguous, so the
+        # marker is never checked against it.
+        $legacy = [pscustomobject]@{ Failed = $false; Processes = @(
+                [pscustomobject]@{ Pid = 400; Name = 'helper.exe'; ParentPid = 1000; CommandLine = 'helper.exe'; CreationUtc = $b4T0.AddMinutes(4) },
+                [pscustomobject]@{ Pid = 450; Name = 'tool.exe'; ParentPid = 1000; CommandLine = 'tool.exe'; CreationUtc = $b4T0.AddMinutes(5) },
+                [pscustomobject]@{ Pid = 500; Name = 'nodate.exe'; ParentPid = 1000; CommandLine = 'nodate.exe'; CreationUtc = $b4T0.AddMinutes(7) },
+                [pscustomobject]@{ Pid = 600; Name = 'markeragent.exe'; ParentPid = 1000; CommandLine = 'markeragent.exe --fake-marker'; CreationUtc = $b4T0.AddMinutes(6) },
+                [pscustomobject]@{ Pid = 600; Name = 'markeragent.exe'; ParentPid = 1000; CommandLine = 'markeragent.exe'; CreationUtc = $b4T0.AddMinutes(-9) }) }
+        $parts = @(
+            [pscustomobject]@{ Provider = 'claude-code'; DirectRefs = @('PID 400 (helper.exe)', 'PID 450 (tool.exe)'); AncestorRefs = @() },
+            [pscustomobject]@{ Provider = 'claude-code'; DirectRefs = @('PID 450 (tool.exe)'); AncestorRefs = @('PID 500 (nodate.exe) -> projeto') },
+            [pscustomobject]@{ Provider = 'fake-a'; DirectRefs = @(); AncestorRefs = @('PID 400 (helper.exe) -> projeto') },
+            [pscustomobject]@{ Provider = 'fake-b'; DirectRefs = @('PID 500 (nodate.exe)'); AncestorRefs = @() })
+        $regs = @([pscustomobject]@{ ProviderId = 'claude-code'; Registry = [pscustomobject]@{ Readable = $true; Unparseable = 0; Entries = @([pscustomobject]@{ SessionId = 's1'; Pid = 200; StartUtc = $b4T0 }) }; Error = $null })
+        $invCov = @(New-AtmCoverage -Collector 'inventory' -Status 'COMPLETE')
+        $res = Get-AtmAgentRuntimeFindings -Collection $c -ProviderHints $hints -SessionRegistries $regs -LegacySnapshot $legacy -Partitions $parts -InventoryCoverage $invCov
+        $one = { param([string]$Key) $f = @($res.Findings | Where-Object { $_.Key -ceq $Key }); Assert-Eq $f.Count 1 "um achado por processo: $Key"; $f[0] }
+        $amb = { param($F) @($F.Evidence | Where-Object { $_.Code -ceq 'PROVIDER_ATTRIBUTION_AMBIGUOUS' } | ForEach-Object { $_.Detail }) -join ';' }
+        # One PID, one provider (matcher and session of the same provider): attributed, no ambiguity; its descendant too.
+        $f = & $one $k[200]
+        Assert-True ($f.State -eq 'AGENT_PROCESS' -and $f.Provider -ceq 'claude-code' -and (& $amb $f) -eq '') 'um PID e um provider'
+        $f = & $one $k[201]
+        Assert-True ($f.State -eq 'AGENT_DESCENDANT' -and $f.Provider -ceq 'claude-code') 'descendente do provider unico'
+        # One PID referenced by partitions of two providers: agent-related, provider not chosen, ambiguity stated.
+        $f = & $one $k[400]
+        Assert-True ($f.State -eq 'AGENT_PROCESS' -and $null -eq $f.Provider -and (& $amb $f) -ceq 'claude-code,fake-a') "PID de dois providers: $($f.Provider) / $(& $amb $f)"
+        Assert-Eq @($f.Evidence | Where-Object { $_.Code -ceq 'PATH_REFERENCE' }).Count 1 'uma evidencia de referencia, nao duplicada'
+        # Two partitions of the same provider: one provider, one evidence item.
+        $f = & $one $k[450]
+        Assert-True ($f.State -eq 'AGENT_PROCESS' -and $f.Provider -ceq 'claude-code' -and (& $amb $f) -eq '' -and @($f.Evidence).Count -eq 1) 'duas particoes do mesmo provider'
+        # Two providers whose matchers match the same process; its descendant inherits the ambiguity.
+        $f = & $one $k[300]
+        Assert-True ($f.State -eq 'AGENT_PROCESS' -and $null -eq $f.Provider -and (& $amb $f) -ceq 'fake-a,fake-b' -and @($f.Evidence | Where-Object { $_.Code -ceq 'PROCESS_MATCHER_IMAGE' }).Count -eq 1) 'dois matchers no mesmo processo'
+        Assert-Eq (@($f.Coverage | ForEach-Object { $_.Collector }) -join ',') 'process-snapshot,agent-processes,provider-fake-a,provider-fake-b' 'cobertura das duas fontes'
+        $f = & $one $k[301]
+        Assert-True ($f.State -eq 'AGENT_DESCENDANT' -and $null -eq $f.Provider -and (& $amb $f) -ceq 'fake-a,fake-b') 'descendente de raiz ambigua'
+        # A path reference with an uncertain identity (no creation time) referenced by two providers: unverified, unattributed.
+        $f = & $one 'pid:500'
+        Assert-True ($f.State -eq 'IDENTITY_UNVERIFIED' -and $null -eq $f.Provider -and (& $amb $f) -ceq 'claude-code,fake-b') 'referencia com identidade incerta'
+        # Duplicate PID in the V0.1 snapshot: the marker is not checked (inconclusive), never confirmed by the ambiguous entry.
+        Assert-True ($null -eq (Get-AtmLegacyCommandLine -LegacySnapshot $legacy -Process $c.ByPid[[long]600])) 'linha de comando com PID duplicado na V0.1: nao usada'
+        Assert-True ($null -ne (Get-AtmLegacyCommandLine -LegacySnapshot $legacy -Process $c.ByPid[[long]450])) 'PID unico com ticks exatos: usada'
+        $sameTicks = [pscustomobject]@{ Failed = $false; Processes = @($legacy.Processes[1], $legacy.Processes[1]) }
+        Assert-True ($null -eq (Get-AtmLegacyCommandLine -LegacySnapshot $sameTicks -Process $c.ByPid[[long]450])) 'mesmo PID e mesmos ticks duas vezes: nao usada'
+        $f = & $one $k[600]
+        Assert-True ($f.State -eq 'UNKNOWN' -and @($f.Evidence | Where-Object { $_.Code -ceq 'COMMAND_LINE_MARKER_UNAVAILABLE' }).Count -eq 1) 'marcador com PID duplicado: inconclusivo'
+        # The order of providers, registries, partitions and references does not change the result.
+        $sig = { param($R)
+            $fs = @($R.Findings | ForEach-Object { '{0}|{1}|{2}|{3}|{4}|{5}' -f $_.Kind, $_.Key, $_.State, $_.Provider, (@($_.Evidence | ForEach-Object { "$($_.Code)/$($_.Source)/$($_.Collector)/$($_.Detail)" }) -join '+'), (@($_.Coverage | ForEach-Object { "$($_.Collector)=$($_.Status)" }) -join '+') })
+            $cs = @($R.Coverage | ForEach-Object { '{0}={1}:{2}' -f $_.Collector, $_.Status, (@($_.Reasons | Sort-Object) -join '+') } | Sort-Object)
+            $ts = @($R.Trees | ForEach-Object { '{0}|{1}|{2}' -f $_.RootKey, $_.Provider, (@($_.Tree.Members | Sort-Object) -join '+') })
+            (@($fs) + '#' + @($cs) + '#' + @($ts)) -join "`n" }
+        $revParts = @($parts[3..0] | ForEach-Object { [pscustomobject]@{ Provider = $_.Provider; DirectRefs = @($_.DirectRefs[($_.DirectRefs.Count - 1)..0] | Where-Object { $_ }); AncestorRefs = @($_.AncestorRefs) } })
+        $res2 = Get-AtmAgentRuntimeFindings -Collection $c -ProviderHints @($hints[2..0]) -SessionRegistries $regs -LegacySnapshot $legacy -Partitions $revParts -InventoryCoverage $invCov
+        Assert-Eq (& $sig $res2) (& $sig $res) 'ordem invertida: mesmo resultado (achados, evidencias, cobertura, arvores)'
+        $ac = @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0]
+        Assert-True ($ac.Status -eq 'PARTIAL' -and @($ac.Reasons) -ccontains 'IDENTITY_UNVERIFIED_CANDIDATES' -and @($ac.Reasons) -ccontains 'COMMAND_LINE_MARKER_UNAVAILABLE') "cobertura reflete as lacunas: $(@($ac.Reasons) -join ',')"
+        $json = (@{ F = $res.Findings; C = $res.Coverage } | ConvertTo-Json -Depth 10)
+        Assert-True (-not $json.Contains('--fake-marker')) 'marcador nunca no resultado'
+    }
     Test-Case 'Diagnose' 'Identidade real (somente leitura, P1-B4-b): o snapshot da V0.1 e a coleta da P1-B1 dao ao proprio processo o mesmo horario de criacao em ticks' {
         $legacy = Get-AtmProcessSnapshot
         $c = Get-AtmProcessCollection
