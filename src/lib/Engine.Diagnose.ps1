@@ -830,7 +830,7 @@ $script:AtmRuntimeReasonCodes = @(
 $script:AtmRuntimeEvidenceCodes = @(
     'PROCESS_MATCHER_IMAGE', 'PROCESS_MATCHER_MARKER', 'COMMAND_LINE_MARKER_UNAVAILABLE', 'SESSION_REGISTRY', 'SESSION_PROCESS',
     'SESSION_PROCESS_MATCH', 'PATH_REFERENCE', 'SELF_EXCLUSION', 'PARENT_LINK_VERIFIED', 'PROVIDER_ATTRIBUTION_AMBIGUOUS',
-    'PROCESS_EXITED_DURING_RUN', 'SESSION_KEY_COLLISION', 'SESSION_ENTRIES_CONFLICT')
+    'PROCESS_EXITED_DURING_RUN', 'SESSION_KEY_COLLISION', 'SESSION_ENTRIES_CONFLICT', 'PARTITION_KEY_COLLISION')
 
 function Resolve-AtmSessionProcess {
     <#
@@ -950,14 +950,15 @@ function Get-AtmAgentRuntimeFindings {
       its profiles, and the session findings carry that same record. AgentSession keys are pseudonyms
       (ConvertTo-AtmSessionKey); the SessionId stays in memory. Two different sessions with the same key, or one session
       listed with different PIDs, give one UNKNOWN finding (SESSION_KEY_COLLISION / SESSION_ENTRIES_CONFLICT), never an
-      overwritten one. -SessionKeyFunction: test override of the key function.
+      overwritten one. -Pseudonymizer: New-AtmPseudonymizer (ADR-0010; without it an ephemeral key is used for this
+      call only). -SessionKeyFunction: test override of the key function.
       -Second: the second collection of the CPU sample. A process (or the process of a LIVE session) that exited between
       the two collections gets the PROCESS_EXITED_DURING_RUN evidence, only when both collections are COMPLETE.
       Findings are ordered by Kind and Key (ordinal). Returns Findings, Coverage (sessions-<provider> sorted,
       agent-processes, agent-resources: exactly one record each, also on failure), Trees (Get-AtmProcessTreeResources
       per agent process, overlapping) and Totals (Get-AtmAgentResourceTotals over the union of the agent processes).
     #>
-    param($Collection, $ProviderHints = @(), $SessionRegistries = @(), $LegacySnapshot = $null, $Partitions = @(), $InventoryCoverage = @(), $SelfKeys = $null, $Cpu = $null, $Second = $null, [scriptblock]$SessionKeyFunction = $null)
+    param($Collection, $ProviderHints = @(), $SessionRegistries = @(), $LegacySnapshot = $null, $Partitions = @(), $InventoryCoverage = @(), $SelfKeys = $null, $Cpu = $null, $Second = $null, [scriptblock]$SessionKeyFunction = $null, $Pseudonymizer = $null)
     if ($null -eq $Collection) { throw (Get-AtmText 'err.diagProcess' 'Collection') }
     $findings = New-Object System.Collections.Generic.List[object]
     $coverage = New-Object System.Collections.Generic.List[object]
@@ -969,7 +970,9 @@ function Get-AtmAgentRuntimeFindings {
     $runStates = @{}
     if ($null -ne $Second -and -not $Collection.Failed -and -not $Second.Failed -and $snapCov.Status -ceq 'COMPLETE' -and $Second.Coverage.Status -ceq 'COMPLETE') { $runStates = Compare-AtmProcessCollections -First $Collection -Second $Second }
     $exitEv = { param([string]$Key) if ($Key -and $runStates.ContainsKey($Key) -and $runStates[$Key] -ceq 'EXITED_DURING_RUN') { New-AtmEvidence -Code 'PROCESS_EXITED_DURING_RUN' -Source 'diagnose' -Collector 'process-snapshot' -ObservedUtc $now } }
-    $keyFn = $(if ($null -ne $SessionKeyFunction) { $SessionKeyFunction } else { { param($Provider, $ProfileSid, $ProfilePath, $SessionId) ConvertTo-AtmSessionKey -Provider $Provider -ProfileSid $ProfileSid -ProfilePath $ProfilePath -SessionId $SessionId } })
+    $ownPseudonymizer = $null
+    if ($null -eq $Pseudonymizer -and $null -eq $SessionKeyFunction) { $ownPseudonymizer = New-AtmPseudonymizer; $Pseudonymizer = $ownPseudonymizer }
+    $keyFn = $(if ($null -ne $SessionKeyFunction) { $SessionKeyFunction } else { { param($Provider, $ProfileSid, $ProfilePath, $SessionId) ConvertTo-AtmSessionKey -Pseudonymizer $Pseudonymizer -Provider $Provider -ProfileSid $ProfileSid -ProfilePath $ProfilePath -SessionId $SessionId } })
     # Candidates by key: Process (or $null for pid:<n>), Evidence, Kind (AGENT | UNVERIFIED | UNCHECKED), the providers
     # of the AGENT evidence and of the other evidence (sets: one process can be related to several providers), and
     # SourceCoverage (the coverage records of the sources of the evidence, one per collector). Whether a process is
@@ -1228,6 +1231,7 @@ function Get-AtmAgentRuntimeFindings {
     $coverage.Add($resCov)
     # Runtime findings by Kind, then Key (ordinal): the order of the inputs never changes the result (D6).
     $sorted = @(Get-AtmOrdinalSorted -Items $findings.ToArray() -Signature { param($f) [string]$f.Kind + [char]1 + [string]$f.Key })
+    Close-AtmPseudonymizer $ownPseudonymizer
     [pscustomobject]@{ Findings = $sorted; Coverage = $coverage.ToArray(); Trees = $trees.ToArray(); Totals = $totals }
 }
 
@@ -1288,22 +1292,137 @@ function Get-AtmAgentResourceTotals {
     }
 }
 
+# ---------------------------------------------------------------------------------------------
+# Pseudonyms of exported identifiers (ADR-0010, P1-B4-d): keyed HMAC-SHA256, first 128 bits. Without the key nobody
+# can compute or check a pseudonym from the inputs, the export included. The key is EPHEMERAL (random, one run) unless
+# the operator supplies a key file (read only, never written by the tool) to correlate runs. The key never enters a
+# result, a string, a log or a message; the HMAC object is disposed at the end of the run.
+# ---------------------------------------------------------------------------------------------
+
+$script:AtmPseudonymScheme = 'HMAC-SHA256-128/1'
+$script:AtmPseudonymKeyMinBytes = 32
+$script:AtmPseudonymKeyMaxBytes = 4096
+# Accounts whose read access makes a key file unprotected: Everyone, Anonymous, Authenticated Users, Users, Guests.
+$script:AtmPseudonymKeyBroadSids = @('S-1-1-0', 'S-1-5-7', 'S-1-5-11', 'S-1-5-32-545', 'S-1-5-32-546')
+
+function New-AtmPseudonymizer {
+    # -Key: the operator's key (32 to 4096 bytes; the caller's array is copied, never kept); $null = an ephemeral random
+    # key of 32 bytes. KeyId identifies an operator key (another HMAC domain) so two exports can be compared; it is
+    # $null for an ephemeral key, whose pseudonyms are never comparable between runs.
+    param([byte[]]$Key = $null)
+    $source = 'OPERATOR_KEY_FILE'
+    if ($null -eq $Key) {
+        $k = New-Object byte[] 32
+        $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+        try { $rng.GetBytes($k) } finally { $rng.Dispose() }
+        $source = 'EPHEMERAL'
+    } else {
+        if ($Key.Length -lt $script:AtmPseudonymKeyMinBytes -or $Key.Length -gt $script:AtmPseudonymKeyMaxBytes) { throw (Get-AtmText 'err.diagPseudonymKey' 'PSEUDONYM_KEY_SIZE_INVALID') }
+        $k = [byte[]]$Key.Clone()
+    }
+    # The private copy is cleared by Close-AtmPseudonymizer after the HMAC object is disposed (some runtimes keep a
+    # reference to the array they were given).
+    $h = New-Object Security.Cryptography.HMACSHA256 (, $k)
+    $p = [pscustomobject]@{ Hmac = $h; Buffer = $k; KeySource = $source; KeyId = $null }
+    if ($source -ceq 'OPERATOR_KEY_FILE') { $p.KeyId = (Get-AtmPseudonym -Pseudonymizer $p -Domain 'atm-key-id/1' -Fields @()) }
+    return $p
+}
+
+function Get-AtmPseudonym {
+    # 32 hex characters: HMAC over the domain and the fields, each length-prefixed (no two field lists give one input).
+    param($Pseudonymizer, [string]$Domain, [string[]]$Fields = @())
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($f in @($Domain) + @($Fields)) { $v = [string]$f; [void]$sb.Append($v.Length).Append(':').Append($v).Append(';') }
+    $hash = $Pseudonymizer.Hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes($sb.ToString()))
+    return (-join @($hash[0..15] | ForEach-Object { $_.ToString('x2') }))
+}
+
+function Close-AtmPseudonymizer {
+    param($Pseudonymizer)
+    if ($null -eq $Pseudonymizer) { return }
+    if ($null -ne $Pseudonymizer.Hmac) { $Pseudonymizer.Hmac.Dispose(); $Pseudonymizer.Hmac = $null }
+    if ($null -ne $Pseudonymizer.Buffer) { [Array]::Clear($Pseudonymizer.Buffer, 0, $Pseudonymizer.Buffer.Length); $Pseudonymizer.Buffer = $null }
+}
+
 function ConvertTo-AtmSessionKey {
     <#
-      Exported key of an agent session: <provider>/s-<32 hex>, the first 128 bits of SHA-256 over length-prefixed fields
-      (scheme, provider Id in lower case, profile SID, profile path in lower case without a trailing separator,
-      SessionId in lower case). The same session of the same profile gives the same key in every run; the same
-      SessionId in another profile gives another key. It is a pseudonym, not anonymization: whoever holds the same
-      inputs can compute the same key. The inputs are never part of a result.
+      Exported key of an agent session: <provider>/s-<32 hex>, the keyed pseudonym of the provider Id (lower case), the
+      profile SID, the profile path (lower case, no trailing separator) and the SessionId (lower case). With the same
+      key, the same session of the same profile has the same pseudonym and the same SessionId in another profile has
+      another one. The SessionId and the profile never leave memory.
     #>
-    param([string]$Provider, [string]$ProfileSid, [string]$ProfilePath, [string]$SessionId)
+    param($Pseudonymizer, [string]$Provider, [string]$ProfileSid, [string]$ProfilePath, [string]$SessionId)
     $prov = $Provider.ToLowerInvariant()
-    $fields = @('atm-session/1', $prov, [string]$ProfileSid, ([string]$ProfilePath).TrimEnd('\', '/').ToLowerInvariant(), $SessionId.Trim().ToLowerInvariant())
-    $sb = New-Object System.Text.StringBuilder
-    foreach ($f in $fields) { [void]$sb.Append($f.Length).Append(':').Append($f).Append(';') }
-    $sha = [Security.Cryptography.SHA256]::Create()
-    try { $hash = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($sb.ToString())) } finally { $sha.Dispose() }
-    return ($prov + '/s-' + (-join @($hash[0..15] | ForEach-Object { $_.ToString('x2') })))
+    return ($prov + '/s-' + (Get-AtmPseudonym -Pseudonymizer $Pseudonymizer -Domain 'atm-session/2' -Fields @($prov, [string]$ProfileSid, ([string]$ProfilePath).TrimEnd('\', '/').ToLowerInvariant(), $SessionId.Trim().ToLowerInvariant())))
+}
+
+function ConvertTo-AtmPartitionKey {
+    # Exported key of a temporary partition: <provider>/p-<32 hex>, the keyed pseudonym of the provider Id and the
+    # partition path (lower case, no trailing separator). The path never leaves memory.
+    param($Pseudonymizer, [string]$Provider, [string]$Path)
+    $prov = $(if ([string]::IsNullOrWhiteSpace($Provider)) { 'none' } else { $Provider.ToLowerInvariant() })
+    return ($prov + '/p-' + (Get-AtmPseudonym -Pseudonymizer $Pseudonymizer -Domain 'atm-partition/1' -Fields @($prov, ([string]$Path).TrimEnd('\', '/').ToLowerInvariant())))
+}
+
+function Read-AtmPseudonymKeyFile {
+    <#
+      The operator's key file, read only: an absolute path to a regular file (no reparse point) of 32 to 4096 bytes that
+      no broad account (AtmPseudonymKeyBroadSids) may read. Returns Key (bytes) or Reason (a code); the path and the
+      content are never part of a message.
+    #>
+    param([string]$Path)
+    $fail = { param([string]$Code) [pscustomobject]@{ Key = $null; Reason = $Code } }
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not [IO.Path]::IsPathRooted($Path)) { return (& $fail 'PSEUDONYM_KEY_PATH_INVALID') }
+    try {
+        $fi = New-Object IO.FileInfo($Path)
+        if (-not $fi.Exists) { return (& $fail 'PSEUDONYM_KEY_NOT_FOUND') }
+        if (($fi.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return (& $fail 'PSEUDONYM_KEY_REPARSE_POINT') }
+        if ($fi.Length -lt $script:AtmPseudonymKeyMinBytes -or $fi.Length -gt $script:AtmPseudonymKeyMaxBytes) { return (& $fail 'PSEUDONYM_KEY_SIZE_INVALID') }
+        $acl = $fi.GetAccessControl()
+        foreach ($ace in @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))) {
+            if ($ace.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
+            if (($ace.FileSystemRights -band [Security.AccessControl.FileSystemRights]::ReadData) -eq 0) { continue }
+            if ($script:AtmPseudonymKeyBroadSids -ccontains $ace.IdentityReference.Value) { return (& $fail 'PSEUDONYM_KEY_ACL_TOO_OPEN') }
+        }
+        $bytes = [IO.File]::ReadAllBytes($Path)
+    } catch { return (& $fail 'PSEUDONYM_KEY_UNREADABLE') }
+    if ($bytes.Length -lt $script:AtmPseudonymKeyMinBytes -or $bytes.Length -gt $script:AtmPseudonymKeyMaxBytes) { [Array]::Clear($bytes, 0, $bytes.Length); return (& $fail 'PSEUDONYM_KEY_SIZE_INVALID') }
+    return [pscustomobject]@{ Key = $bytes; Reason = $null }
+}
+
+function Get-AtmPartitionFindings {
+    <#
+      TempPartition findings in the V0.1 order, keyed by ConvertTo-AtmPartitionKey (no path in a finding). Two partitions
+      with the same key are one UNKNOWN finding with PARTITION_KEY_COLLISION, never an overwritten one; its provider is
+      kept only when both name the same one. -KeyFunction: test override.
+    #>
+    param($Partitions, $InventoryCoverage, $Pseudonymizer, [scriptblock]$KeyFunction = $null)
+    $keyFn = $(if ($null -ne $KeyFunction) { $KeyFunction } else { { param($Provider, $Path) ConvertTo-AtmPartitionKey -Pseudonymizer $Pseudonymizer -Provider $Provider -Path $Path } })
+    $order = New-Object System.Collections.Generic.List[string]
+    $groups = @{}
+    foreach ($part in @($Partitions | Where-Object { $null -ne $_ -and $_.Kind -ne 'NotScanned' })) {
+        $key = [string](& $keyFn $part.Provider $part.Path)
+        if (-not $groups.ContainsKey($key)) { $groups[$key] = New-Object System.Collections.Generic.List[object]; $order.Add($key) }
+        $groups[$key].Add($part)
+    }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($key in $order) {
+        $parts = $groups[$key].ToArray()
+        $now = [datetime]::UtcNow
+        $ev = New-Object System.Collections.Generic.List[object]
+        if ($parts.Count -gt 1) {
+            $ev.Add((New-AtmEvidence -Code 'PARTITION_KEY_COLLISION' -Source 'diagnose' -Collector 'inventory' -ObservedUtc $now -Detail ([string]$parts.Count)))
+            $provs = @($parts | ForEach-Object { [string]$_.Provider } | Select-Object -Unique)
+            $out.Add((New-AtmFinding -Kind 'TempPartition' -Key $key -State 'UNKNOWN' -Evidence $ev.ToArray() -Coverage $InventoryCoverage -Provider $(if ($provs.Count -eq 1) { $provs[0] } else { $null })))
+            continue
+        }
+        $part = $parts[0]
+        $ev.Add((New-AtmEvidence -Code 'AUDIT_CLASS' -Source 'audit' -Collector 'inventory' -ObservedUtc $now -Detail $part.Class))
+        foreach ($fl in $part.Flags) { $ev.Add((New-AtmEvidence -Code 'AUDIT_FLAG' -Source 'audit' -Collector 'inventory' -ObservedUtc $now -Detail $fl)) }
+        # Runtime evidence of partitions (handles, working directories, dependencies) comes in later phases.
+        $out.Add((New-AtmFinding -Kind 'TempPartition' -Key $key -State 'RUNTIME_NOT_DIAGNOSED' -Evidence $ev.ToArray() -Coverage $InventoryCoverage -Provider $part.Provider))
+    }
+    return $out.ToArray()
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -1313,7 +1432,7 @@ function ConvertTo-AtmSessionKey {
 # worktrees) add coverage records and findings here.
 # ---------------------------------------------------------------------------------------------
 
-$script:AtmDiagnoseSchema = 'atm.diagnose/1'
+$script:AtmDiagnoseSchema = 'atm.diagnose/2'
 $script:AtmDiagnoseDefaultDeadlineSeconds = 300
 $script:AtmDiagnoseCpuSampleMs = 500
 
@@ -1361,11 +1480,27 @@ function Invoke-AtmDiagnose {
       Agent runtime (P1-B4-c): -ProcessSource: test override of the process rows (default: CIM; when the inventory
       gets ProcessesOverride, the same rows feed both collections). -CpuSampleMs: interval of the CPU sample (default
       500; 0 = not sampled; otherwise 100 to 5000). -SelfPid / -SelfCreationUtc: identity of this process (R-B1).
+      Pseudonyms (ADR-0010, P1-B4-d): -PseudonymKey: the operator's key bytes (Read-AtmPseudonymKeyFile); without it
+      the key is ephemeral. The key lives only in this call: the pseudonymizer is closed (HMAC disposed, buffer cleared)
+      when it returns or throws. -PartitionKeyFunction: test override of the partition key.
     #>
     param([hashtable]$InventoryArgs = @{}, [scriptblock]$IdentitySource, $Providers, [int]$DeadlineSeconds = $script:AtmDiagnoseDefaultDeadlineSeconds,
-        [scriptblock]$ProcessSource = $null, [int]$CpuSampleMs = $script:AtmDiagnoseCpuSampleMs, $SelfPid = $PID, $SelfCreationUtc = $null)
+        [scriptblock]$ProcessSource = $null, [int]$CpuSampleMs = $script:AtmDiagnoseCpuSampleMs, $SelfPid = $PID, $SelfCreationUtc = $null,
+        [byte[]]$PseudonymKey = $null, [scriptblock]$PartitionKeyFunction = $null)
     if ($DeadlineSeconds -lt 0) { throw (Get-AtmText 'err.diagDeadline' $DeadlineSeconds) }
     if ($CpuSampleMs -ne 0 -and ($CpuSampleMs -lt $script:AtmCpuSampleMinMs -or $CpuSampleMs -gt $script:AtmCpuSampleMaxMs)) { throw (Get-AtmText 'err.diagProcess' "CpuSampleMs $CpuSampleMs") }
+    $pz = New-AtmPseudonymizer -Key $PseudonymKey
+    try {
+        $runArgs = @{ InventoryArgs = $InventoryArgs; IdentitySource = $IdentitySource; Providers = $Providers; DeadlineSeconds = $DeadlineSeconds; ProcessSource = $ProcessSource
+            CpuSampleMs = $CpuSampleMs; SelfPid = $SelfPid; SelfCreationUtc = $SelfCreationUtc; Pseudonymizer = $pz; PartitionKeyFunction = $PartitionKeyFunction }
+        return (Invoke-AtmDiagnoseRun @runArgs)
+    } finally { Close-AtmPseudonymizer $pz }
+}
+
+function Invoke-AtmDiagnoseRun {
+    # The body of Invoke-AtmDiagnose, with its pseudonymizer (parameters already checked there).
+    param([hashtable]$InventoryArgs, [scriptblock]$IdentitySource, $Providers, [int]$DeadlineSeconds, [scriptblock]$ProcessSource, [int]$CpuSampleMs, $SelfPid, $SelfCreationUtc,
+        $Pseudonymizer, [scriptblock]$PartitionKeyFunction)
     $started = [datetime]::UtcNow
     $deadline = $started.AddSeconds($DeadlineSeconds)
     $coverage = New-Object System.Collections.Generic.List[object]
@@ -1420,14 +1555,8 @@ function Invoke-AtmDiagnose {
         } else {
             $invCov = @(Get-AtmInventoryCoverage -Inventory $inv -Identity $identity -StartedUtc $invStarted -ElapsedMs $sw.ElapsedMilliseconds -OverDeadline ([datetime]::UtcNow -gt $deadline))
             foreach ($c in $invCov) { $coverage.Add($c) }
-            foreach ($part in @($inv.Partitions | Where-Object { $_.Kind -ne 'NotScanned' })) {
-                $now = [datetime]::UtcNow
-                $ev = New-Object System.Collections.Generic.List[object]
-                $ev.Add((New-AtmEvidence -Code 'AUDIT_CLASS' -Source 'audit' -Collector 'inventory' -ObservedUtc $now -Detail $part.Class))
-                foreach ($fl in $part.Flags) { $ev.Add((New-AtmEvidence -Code 'AUDIT_FLAG' -Source 'audit' -Collector 'inventory' -ObservedUtc $now -Detail $fl)) }
-                # Runtime evidence (process trees, handles, services, worktrees) is not collected in P1-A.
-                $findings.Add((New-AtmFinding -Kind 'TempPartition' -Key $part.Path -State 'RUNTIME_NOT_DIAGNOSED' -Evidence $ev.ToArray() -Coverage $invCov -Provider $part.Provider))
-            }
+            # Temporary partitions: keyed pseudonyms, never the path (ADR-0010).
+            foreach ($f in @(Get-AtmPartitionFindings -Partitions @($inv.Partitions) -InventoryCoverage $invCov -Pseudonymizer $Pseudonymizer -KeyFunction $PartitionKeyFunction)) { $findings.Add($f) }
         }
     }
 
@@ -1470,7 +1599,7 @@ function Invoke-AtmDiagnose {
         }
         $selfKeys = Get-AtmSelfProcessKeys -Collection $sample.First -SelfPid $SelfPid -SelfCreationUtc $SelfCreationUtc -LauncherReferences $launchers.ToArray()
         $invCovRecords = @($coverage | Where-Object { @('inventory', 'processes', 'temp-profiles') -ccontains $_.Collector })
-        $rtArgs = @{ Collection = $sample.First; Second = $sample.Second; ProviderHints = $hints.ToArray(); SessionRegistries = $regs.ToArray(); InventoryCoverage = $invCovRecords; SelfKeys = $selfKeys; Cpu = $sample.Cpu }
+        $rtArgs = @{ Collection = $sample.First; Second = $sample.Second; ProviderHints = $hints.ToArray(); SessionRegistries = $regs.ToArray(); InventoryCoverage = $invCovRecords; SelfKeys = $selfKeys; Cpu = $sample.Cpu; Pseudonymizer = $Pseudonymizer }
         if ($null -ne $inv) { $rtArgs['LegacySnapshot'] = $inv.Snapshot; $rtArgs['Partitions'] = @($inv.Partitions) }
         $runtime = Get-AtmAgentRuntimeFindings @rtArgs
         foreach ($c in $runtime.Coverage) { $coverage.Add($c) }
@@ -1494,6 +1623,7 @@ function Invoke-AtmDiagnose {
         CoverageComplete = (@($covArr | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status }).Count -eq 0)
         Findings         = $findings.ToArray()
         AgentResources   = $(if ($null -ne $runtime) { $runtime.Totals } else { $null })
+        Pseudonymization = [pscustomobject]@{ Scheme = $script:AtmPseudonymScheme; KeySource = $Pseudonymizer.KeySource; KeyId = $Pseudonymizer.KeyId }
         Inventory        = $inv
     }
 }

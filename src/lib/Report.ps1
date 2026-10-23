@@ -322,6 +322,10 @@ function Show-AtmDiagnose {
     Write-Host ('  ' + (Get-AtmText 'cli.identity' $id.Name (Get-AtmYesNo ([bool]$id.IsElevatedAdministrator)) $id.ElevationType $id.IntegrityLevel $id.SessionId))
     Write-Host ('  ' + (Get-AtmText 'diag.deadline' $r.DeadlineSeconds (Format-AtmUtcIso $r.StartedUtc) (Format-AtmUtcIso $r.FinishedUtc)))
     Write-Host ('  ' + (Get-AtmText 'diag.providers' ((@($r.Providers) | ForEach-Object { "$($_.Id) v$($_.ContractVersion) [$(@($_.Capabilities) -join ',')]" }) -join '; ')))
+    if ($null -ne $r.Pseudonymization) {
+        if ($r.Pseudonymization.KeySource -ceq 'OPERATOR_KEY_FILE') { Write-Host ('  ' + (Get-AtmText 'diag.pseudonymOperator' $r.Pseudonymization.KeyId)) }
+        else { Write-Host ('  ' + (Get-AtmText 'diag.pseudonymEphemeral')) }
+    }
 
     Write-AtmHeader (Get-AtmText 'diag.coverageTitle')
     $rows = foreach ($c in @($r.Coverage)) {
@@ -483,7 +487,7 @@ function ConvertTo-AtmAgentResourcesJson {
 }
 
 function ConvertTo-AtmDiagnoseJson {
-    # Schema atm.diagnose/1 (docs/DIAGNOSE-SCHEMA.md). Codes only; no command lines, environment values, tokens,
+    # Schema atm.diagnose/2 (docs/DIAGNOSE-SCHEMA.md). Codes only; no command lines, environment values, tokens,
     # exception messages or file contents. Every array is explicit, every time is ISO 8601 UTC.
     param($Result)
     $r = $Result
@@ -511,6 +515,7 @@ function ConvertTo-AtmDiagnoseJson {
                     evidence = @(@($_.Evidence) | ForEach-Object { [ordered]@{ code = $_.Code; source = $_.Source; collector = $_.Collector; observedUtc = (Format-AtmUtcIso $_.ObservedUtc); detail = $_.Detail } }) }
             })
         agentResources   = (ConvertTo-AtmAgentResourcesJson -Totals $r.AgentResources)
+        pseudonymization = [ordered]@{ scheme = $r.Pseudonymization.Scheme; keySource = $r.Pseudonymization.KeySource; keyId = $r.Pseudonymization.KeyId }
         inventory        = [ordered]@{
             collected        = ($null -ne $inv)
             coverageComplete = $(if ($inv) { [bool]$inv.CoverageComplete } else { $null })

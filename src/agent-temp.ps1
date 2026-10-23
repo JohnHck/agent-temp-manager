@@ -17,7 +17,8 @@ param(
     [switch]$NoProgress,
     [switch]$Ascii,
     [string]$Lang,
-    [int]$DeadlineSeconds = -1
+    [int]$DeadlineSeconds = -1,
+    [string]$PseudonymKeyFile
 )
 
 $ErrorActionPreference = 'Stop'
@@ -221,7 +222,16 @@ try {
             # Read-only (docs/adr/ADR-0009). Partial coverage is a result, not an error: exit code 0.
             $diagArgs = @{ InventoryArgs = $cliInvArgs }
             if ($DeadlineSeconds -ge 0) { $diagArgs['DeadlineSeconds'] = $DeadlineSeconds }
-            $res = Invoke-AtmDiagnose @diagArgs
+            # Correlation between runs only with the operator's key file (ADR-0010): read only, fail closed, and
+            # neither its path nor its content is printed.
+            $keyRead = $null
+            if ($PSBoundParameters.ContainsKey('PseudonymKeyFile')) {
+                $keyRead = Read-AtmPseudonymKeyFile -Path $PseudonymKeyFile
+                if ($null -eq $keyRead.Key) { Write-Host (Get-AtmText 'cli.pseudonymKeyRefused' $keyRead.Reason) -ForegroundColor Red; exit 2 }
+                $diagArgs['PseudonymKey'] = $keyRead.Key
+            }
+            try { $res = Invoke-AtmDiagnose @diagArgs }
+            finally { if ($null -ne $keyRead -and $null -ne $keyRead.Key) { [Array]::Clear($keyRead.Key, 0, $keyRead.Key.Length) } }
             Show-AtmDiagnose -Result $res
             if ($ExportJson) {
                 # Fail closed: without an inventory the audited directories are unknown, so no path can be validated.
