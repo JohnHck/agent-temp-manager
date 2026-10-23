@@ -45,7 +45,6 @@ elseif (-not $atmCatalog) {
         'inst.incomplete'         = 'Source incomplete compared to the manifest. / Origem incompleta em relacao ao manifesto.'
         'inst.requiredMissing'    = 'Required file missing in the source / Arquivo obrigatorio ausente na origem: {0}'
         'inst.syntax'             = 'Syntax error / Erro de sintaxe: {0}: {1}'
-        'inst.previousIntegrity'  = 'The previous version failed its integrity check; nothing was changed. / A versao anterior falhou na verificacao de integridade; nada foi alterado. {0}'
     }
     function Get-AtmText {
         $key = [string]$args[0]
@@ -283,6 +282,7 @@ $script:AtmRecoveryTexts = @{
     'inst.rollbackUndoFailed'   = 'RECOVERY PENDING. The rollback failed ({0}) and putting the versions back also failed ({1}). Nothing was deleted. The version that was current is in {2}; the previous version is in {3}. Do not uninstall. Rename them back by hand (the previous version to {4}.previous, then {2} to {4}), check it with {4}\bin\agent-temp.cmd verify, then delete {5}. Until then updates, rollbacks and uninstall are refused. / RECUPERACAO PENDENTE. O rollback falhou ({0}) e devolver as versoes tambem falhou ({1}). Nada foi apagado. A versao que estava em uso esta em {2}; a versao anterior esta em {3}. Nao desinstale. Renomeie-as de volta manualmente (a versao anterior para {4}.previous e depois {2} para {4}), confira com {4}\bin\agent-temp.cmd verify e depois apague {5}. Ate la, atualizacoes, rollbacks e desinstalacao sao recusados.'
     'inst.recoveryPending'      = 'RECOVERY PENDING: an update or rollback did not complete ({0}). Nothing was changed. Do not uninstall: one of these copies may be the only intact installation. Check each copy with <copy>\bin\agent-temp.cmd verify, put the intact one back as {1} by renaming, remove what is no longer needed, then delete {2} if it exists. / RECUPERACAO PENDENTE: uma atualizacao ou rollback nao terminou ({0}). Nada foi alterado. Nao desinstale: uma dessas copias pode ser a unica instalacao integra. Confira cada copia com <copia>\bin\agent-temp.cmd verify, devolva a integra como {1} renomeando, remova o que nao for mais necessario e depois apague {2}, se existir.'
     'inst.recoveryLeftover'     = 'The operation completed, but {0} (a copy that is no longer needed) could not be removed. Remove it by hand: updates, rollbacks and uninstall are refused while it exists. / A operacao foi concluida, mas nao foi possivel remover {0} (uma copia que nao e mais necessaria). Remova-a manualmente: atualizacoes, rollbacks e desinstalacao sao recusados enquanto ela existir.'
+    'inst.previousIntegrity'    = 'The previous version failed its integrity check; nothing was changed: {0} / A versao anterior falhou na verificacao de integridade; nada foi alterado: {0}'
     'inst.interruptedPrevious'  = 'No installation in {0}, but a previous version exists in {1} (an interrupted update or rollback?). Nothing was changed. Do not uninstall. Rename it to {0} by hand, or install without -Update. / Nenhuma instalacao em {0}, mas existe uma versao anterior em {1} (atualizacao ou rollback interrompido?). Nada foi alterado. Nao desinstale. Renomeie-a para {0} manualmente ou instale sem -Update.'
 }
 
@@ -513,7 +513,7 @@ function Restore-AtmPrevious {
     if (-not (Test-Path -LiteralPath (Join-Path $InstallDir 'install-state.json'))) { throw (Get-AtmText 'inst.noCurrent' $InstallDir) }
     # The previous copy is checked in this process (manifest, SHA-256, exact file set) before anything moves: an
     # altered or damaged copy never replaces the current one and none of its code runs (R-B5).
-    try { Test-AtmSourceIntegrity -SourceDir $previous -InstalledCopy } catch { throw (Get-AtmText 'inst.previousIntegrity' $_.Exception.Message) }
+    try { Test-AtmSourceIntegrity -SourceDir $previous -InstalledCopy } catch { throw (Get-AtmRecoveryText 'inst.previousIntegrity' $_.Exception.Message) }
     # The retired copy is a recovery directory (R-B6): if it cannot be put back, nothing sweeps it. The transaction
     # marker is written before the first rename and removed only once the rollback completed or both copies are back.
     $retired = New-AtmSiblingDir -InstallDir $InstallDir -Kind recovery

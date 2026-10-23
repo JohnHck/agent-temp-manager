@@ -1844,6 +1844,10 @@ try { Test-AtmSourceIntegrity -SourceDir $Source; 'INTEGRITY=OK' } catch { 'INTE
                 $staging.Count -eq 1 -and $msg.Contains($staging[0].FullName) -and $msg.Contains($prevAt)) "desfazer falhou ($which): erro claro com a posicao de cada copia ($msg)"
             if ($which -eq 'retirada') { Assert-True (-not (Test-Path -LiteralPath $cur)) 'desfazer falhou (retirada): nada foi colocado no lugar da instalacao' }
             Assert-True ((Test-Path -LiteralPath "$cur.transaction.json") -and $msg.Contains("$cur.transaction.json")) "desfazer falhou ($which): recuperacao pendente registrada e informada (R-B6)"
+            foreach ($copy in @($staging[0].FullName, $prevAt)) {
+                $ok = $true; try { Test-AtmSourceIntegrity -SourceDir $copy -InstalledCopy } catch { $ok = $false }
+                Assert-True $ok "desfazer falhou ($which): copia preservada integra (manifesto, SHA-256, conjunto exato): $copy"
+            }
             # Manual recovery by rename only, as the message instructs, then the pending marker is removed.
             if ($which -eq 'restaurada') { Rename-Item -LiteralPath $cur -NewName (Split-Path -Leaf $prev) }
             Rename-Item -LiteralPath $staging[0].FullName -NewName (Split-Path -Leaf $cur)
@@ -1880,6 +1884,8 @@ try { Test-AtmSourceIntegrity -SourceDir $Source; 'INTEGRITY=OK' } catch { 'INTE
         $s | Add-Member -NotePropertyName tag -NotePropertyValue $Tag -Force
         [IO.File]::WriteAllText($f, ($s | ConvertTo-Json), (New-Object Text.UTF8Encoding($false))) }
     $rb6Leftovers = { param([string]$Inst) (@(@(Get-ChildItem -LiteralPath (Split-Path -Parent $Inst) -Directory | Where-Object { $_.Name -match '^AgentTempManager\.(staging|recovery)-' } | ForEach-Object { $_.Name }) + @(if (Test-Path -LiteralPath "$Inst.transaction.json") { 'transaction.json' })) -join ',') }
+    # Integrity of a preserved copy: manifest, SHA-256 and exact file set, checked in this process (no code run).
+    $rb6Intact = { param([string]$Dir) try { Test-AtmSourceIntegrity -SourceDir $Dir -InstalledCopy; $true } catch { $false } }
     # Pending recovery only: recovery directories and the transaction marker (intermediate staging copies ignored).
     $rb6Pending = { param([string]$Inst) (@(@(Get-ChildItem -LiteralPath (Split-Path -Parent $Inst) -Directory | Where-Object { $_.Name -match '^AgentTempManager\.recovery-' } | ForEach-Object { $_.Name }) + @(if (Test-Path -LiteralPath "$Inst.transaction.json") { 'transaction.json' })) -join ',') }
     Test-Case 'Instalacao' 'R-B6 atualizacao: falha ou excecao apos a troca devolve a instalacao e a .previous; recuperacao que falha nao apaga nada; copias de recuperacao bloqueiam novas operacoes e sobrevivem a desinstalacao' {
@@ -1991,6 +1997,8 @@ try { Test-AtmSourceIntegrity -SourceDir $Source; 'INTEGRITY=OK' } catch { 'INTE
                 Assert-Eq (& $pathSnap) $pathHeld "recuperacao falhou ($which): PATH intacto apos as recusas"
                 Assert-True ((Test-Path -LiteralPath "$inst.transaction.json") -and $msg.Contains("$inst.transaction.json")) "recuperacao falhou ($which): transacao pendente registrada e informada"
             } finally { if ($null -ne $script:rb6Lock) { $script:rb6Lock.Dispose() } }
+            $kept = @($rec[0].FullName, $(if ($which -eq 'nova') { $prev } else { $inst }), $(if ($which -eq 'nova') { $inst } else { $stg[0].FullName }))
+            foreach ($copy in $kept) { Assert-True (& $rb6Intact $copy) "recuperacao falhou ($which): copia preservada integra (manifesto, SHA-256, conjunto exato): $copy" }
             # Manual recovery by rename only, as the message instructs, then the pending marker is removed.
             if ($which -eq 'nova') {
                 Rename-Item -LiteralPath $inst -NewName 'AgentTempManager.staging-0000000a'
@@ -2061,6 +2069,7 @@ try { Test-AtmSourceIntegrity -SourceDir $Source; 'INTEGRITY=OK' } catch { 'INTE
                 $g = $null; try { $null = Uninstall-AtmProduct -InstallDir $cur } catch { $g = $_.Exception.Message }
                 Assert-True ($null -ne $g -and $g.Contains("$cur.transaction.json")) "troca e reversao falharam: desinstalacao recusada ($g)"
                 Assert-True ((& $rb6Tag $rec[0].FullName) -eq 'atual' -and (& $rb6Tag $prev) -eq 'anterior') 'troca e reversao falharam: copias intactas apos a recusa'
+                foreach ($copy in @($rec[0].FullName, $prev)) { Assert-True (& $rb6Intact $copy) "troca e reversao falharam: copia preservada integra (manifesto, SHA-256, conjunto exato): $copy" }
                 Microsoft.PowerShell.Management\Rename-Item -LiteralPath $rec[0].FullName -NewName (Split-Path -Leaf $cur)
                 [IO.File]::Delete("$cur.transaction.json")
             } else {
@@ -2160,6 +2169,8 @@ try { Test-AtmSourceIntegrity -SourceDir $Source; 'INTEGRITY=OK' } catch { 'INTE
                 Assert-True ((& $rb6Tag $prev) -eq 'v2' -and (Test-Path -LiteralPath $marker)) "reversao falhou ($which): versao integra e marcador intactos apos as recusas"
                 Assert-Eq (& $pathSnap) $pathHeld "reversao falhou ($which): PATH intacto apos as recusas"
             } finally { if ($null -ne $script:rb6Lock) { $script:rb6Lock.Dispose() } }
+            $kept = @($prev, $(if ($which -eq 'primeiro passo') { $inst } else { $failed[0].FullName }))
+            foreach ($copy in $kept) { Assert-True (& $rb6Intact $copy) "reversao falhou ($which): copia preservada integra (manifesto, SHA-256, conjunto exato): $copy" }
             # Manual recovery by rename only, then the marker is removed; the installation can be updated again.
             if ($which -eq 'primeiro passo') { Rename-Item -LiteralPath $inst -NewName 'AgentTempManager.staging-2000000a' }
             Rename-Item -LiteralPath $prev -NewName (Split-Path -Leaf $inst)
@@ -2184,7 +2195,7 @@ try { Test-AtmSourceIntegrity -SourceDir $Source; 'INTEGRITY=OK' } catch { 'INTE
         $prev = "$cur.previous"
         $pf15 = Split-Path -Parent $cur
         $ver = Get-AtmSourceVersion -SourceDir $srcDir
-        $recKeys = "'inst\.(rollbackUndoFailed|rollbackVerifyFailed|updateRestored|updateUndoFailed|recoveryPending|recoveryLeftover|recoveryKept|interruptedPrevious|stagingVerifyFailed)'"
+        $recKeys = "'inst\.(rollbackUndoFailed|rollbackVerifyFailed|updateRestored|updateUndoFailed|recoveryPending|recoveryLeftover|recoveryKept|interruptedPrevious|stagingVerifyFailed|previousIntegrity)'"
         foreach ($d in @(@{ P = $cur; T = 'atual' }, @{ P = $prev; T = 'anterior' })) {
             [void][IO.Directory]::CreateDirectory($d.P)
             Copy-AtmTree -From $srcDir -To $d.P
