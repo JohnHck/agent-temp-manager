@@ -281,9 +281,8 @@ function Get-AtmProviderRuntimeHints {
 }
 
 # ---------------------------------------------------------------------------------------------
-# Process collection and identity (ADR-0003 rule 1, P1-B1) with resource counters (rule 6, P1-B3). Not yet part of
-# Invoke-AtmDiagnose: the findings that use them come in a later increment. Command lines and executable paths are
-# never requested.
+# Process collection and identity (ADR-0003 rule 1, P1-B1) with resource counters (rule 6, P1-B3), used by the agent
+# runtime of Invoke-AtmDiagnose (P1-B4-c). Command lines and executable paths are never requested.
 # ---------------------------------------------------------------------------------------------
 
 $script:AtmProcessIdentityProperties = @('ProcessId', 'ParentProcessId', 'Name', 'CreationDate')
@@ -505,7 +504,7 @@ function Resolve-AtmProcessReference {
 }
 
 # ---------------------------------------------------------------------------------------------
-# Process trees, run consistency and self-exclusion (ADR-0003 rules 2-4, P1-B2). Not yet part of Invoke-AtmDiagnose.
+# Process trees, run consistency and self-exclusion (ADR-0003 rules 2-4, P1-B2), used by the agent runtime (P1-B4-c).
 # ---------------------------------------------------------------------------------------------
 
 $script:AtmParentLinkResults = @('VERIFIED', 'ROOT', 'PARENT_EXITED_OR_REUSED', 'UNVERIFIED')
@@ -657,7 +656,7 @@ function Get-AtmSelfProcessKeys {
 }
 
 # ---------------------------------------------------------------------------------------------
-# Resources: CPU sampling and per-tree sums (ADR-0003 rules 6-8, P1-B3). Not yet part of Invoke-AtmDiagnose.
+# Resources: CPU sampling and per-tree sums (ADR-0003 rules 6-8, P1-B3), used by the agent runtime (P1-B4-c).
 # "Disk" here is only process I/O transfer counts; space used by paths is the inventory's (rule 8).
 # ---------------------------------------------------------------------------------------------
 
@@ -804,8 +803,8 @@ function Get-AtmProcessTreeResources {
 }
 
 # ---------------------------------------------------------------------------------------------
-# Agent runtime: sessions, agent-related processes and their trees (ADR-0003 rule 5, ADR-0008, P1-B4-b). Not yet part
-# of Invoke-AtmDiagnose (P1-B4-c). Inputs are injected: a process collection (P1-B1), provider runtime hints, session
+# Agent runtime: sessions, agent-related processes and their trees (ADR-0003 rule 5, ADR-0008, P1-B4-b), called by
+# Invoke-AtmDiagnose since P1-B4-c. Inputs are injected: a process collection (P1-B1), provider runtime hints, session
 # registries, the V0.1 snapshot (command lines, in memory only), V0.1 partitions (path references) and the SELF keys.
 # Command lines, markers, working directories and paths are never put in a finding, an evidence item, a coverage
 # record or a result.
@@ -817,6 +816,21 @@ function Get-AtmProcessTreeResources {
 $script:AtmSessionToleranceMs = 2000
 $script:AtmUnverifiedKeyPrefix = 'pid:'
 $script:AtmPathReferencePattern = '^PID (\d{1,10}) \('
+# Codes the agent runtime collectors can report (besides EXCEPTION_<TYPE>); each has a text in both languages
+# (reason.<code>, evidence.<code>), checked by the suite against what the collectors actually emit.
+$script:AtmRuntimeReasonCodes = @(
+    'DEADLINE_EXCEEDED', 'PROCESS_SNAPSHOT_TIMEOUT', 'PROCESS_SNAPSHOT_FAILED', 'PROCESS_SNAPSHOT_EMPTY', 'PROCESS_LIMIT_EXCEEDED',
+    'PARENT_ID_UNREADABLE', 'PROCESS_NAME_UNREADABLE', 'CREATION_TIME_UNREADABLE', 'DUPLICATE_PID', 'MALFORMED_PROCESS_RECORDS',
+    'PROCESS_SNAPSHOT_UNAVAILABLE', 'PROCESS_SNAPSHOT_INCOMPLETE', 'PROVIDER_HINTS_INCOMPLETE', 'IDENTITY_UNVERIFIED_CANDIDATES',
+    'COMMAND_LINE_MARKER_UNAVAILABLE', 'SESSION_REGISTRY_INCOMPLETE', 'LEGACY_SNAPSHOT_UNAVAILABLE', 'PATH_REFERENCE_UNVERIFIED',
+    'TREE_INCOMPLETE', 'NO_RUNTIME_EVIDENCE_SOURCE', 'SESSION_REGISTRY_PROVIDER_INVALID', 'SESSION_REGISTRY_FAILED',
+    'SESSION_REGISTRY_UNREADABLE', 'SESSION_ENTRIES_UNPARSEABLE', 'SESSION_KEY_COLLISION', 'SESSION_ENTRIES_CONFLICT',
+    'INVENTORY_UNAVAILABLE', 'AGENT_PROCESSES_INCOMPLETE', 'MEMBER_NOT_COLLECTED', 'CPU_NOT_SAMPLED', 'COUNTERS_UNREADABLE',
+    'CPU_PROCESS_EXITED', 'CPU_VALUES_INCOMPLETE', 'CPU_SAMPLE_UNAVAILABLE', 'CPU_SAMPLE_TIMEOUT', 'CPU_INTERVAL_INVALID')
+$script:AtmRuntimeEvidenceCodes = @(
+    'PROCESS_MATCHER_IMAGE', 'PROCESS_MATCHER_MARKER', 'COMMAND_LINE_MARKER_UNAVAILABLE', 'SESSION_REGISTRY', 'SESSION_PROCESS',
+    'SESSION_PROCESS_MATCH', 'PATH_REFERENCE', 'SELF_EXCLUSION', 'PARENT_LINK_VERIFIED', 'PROVIDER_ATTRIBUTION_AMBIGUOUS',
+    'PROCESS_EXITED_DURING_RUN', 'SESSION_KEY_COLLISION', 'SESSION_ENTRIES_CONFLICT')
 
 function Resolve-AtmSessionProcess {
     <#
@@ -921,11 +935,21 @@ function Get-AtmAgentRuntimeFindings {
       Precedence per process: SELF, then AGENT_PROCESS, then AGENT_DESCENDANT, then UNKNOWN (a matcher that could not
       be checked). One finding per process key. Finding.Provider is set only when the evidence names exactly one
       provider; with several, it is $null and a PROVIDER_ATTRIBUTION_AMBIGUOUS evidence lists them. agent-processes is
-      never COMPLETE while a session registry is failed or partial (SESSION_REGISTRY_INCOMPLETE). A process without a verified identity is IDENTITY_UNVERIFIED with the key pid:<n>. Returns Findings,
-      Coverage (agent-processes, sessions-<provider>, agent-resources) and Trees (Get-AtmProcessTreeResources per agent
-      process).
+      never COMPLETE while a session registry is failed or partial (SESSION_REGISTRY_INCOMPLETE). A process without a
+      verified identity is IDENTITY_UNVERIFIED with the key pid:<n>.
+      Session registries (P1-B4-c): one item per provider and profile ({ ProviderId; Registry; Error; Reason (a code,
+      instead of Error); ProfileSid; ProfilePath }); there is one sessions-<provider> record per provider, aggregated over
+      its profiles, and the session findings carry that same record. AgentSession keys are pseudonyms
+      (ConvertTo-AtmSessionKey); the SessionId stays in memory. Two different sessions with the same key, or one session
+      listed with different PIDs, give one UNKNOWN finding (SESSION_KEY_COLLISION / SESSION_ENTRIES_CONFLICT), never an
+      overwritten one. -SessionKeyFunction: test override of the key function.
+      -Second: the second collection of the CPU sample. A process (or the process of a LIVE session) that exited between
+      the two collections gets the PROCESS_EXITED_DURING_RUN evidence, only when both collections are COMPLETE.
+      Findings are ordered by Kind and Key (ordinal). Returns Findings, Coverage (sessions-<provider> sorted,
+      agent-processes, agent-resources: exactly one record each, also on failure), Trees (Get-AtmProcessTreeResources
+      per agent process, overlapping) and Totals (Get-AtmAgentResourceTotals over the union of the agent processes).
     #>
-    param($Collection, $ProviderHints = @(), $SessionRegistries = @(), $LegacySnapshot = $null, $Partitions = @(), $InventoryCoverage = @(), $SelfKeys = $null, $Cpu = $null)
+    param($Collection, $ProviderHints = @(), $SessionRegistries = @(), $LegacySnapshot = $null, $Partitions = @(), $InventoryCoverage = @(), $SelfKeys = $null, $Cpu = $null, $Second = $null, [scriptblock]$SessionKeyFunction = $null)
     if ($null -eq $Collection) { throw (Get-AtmText 'err.diagProcess' 'Collection') }
     $findings = New-Object System.Collections.Generic.List[object]
     $coverage = New-Object System.Collections.Generic.List[object]
@@ -933,6 +957,11 @@ function Get-AtmAgentRuntimeFindings {
     $snapCov = $Collection.Coverage
     $reasons = New-Object System.Collections.Generic.List[string]
     $now = [datetime]::UtcNow
+    # Exit during the run: only between two COMPLETE collections (a reused PID in a partial one proves nothing).
+    $runStates = @{}
+    if ($null -ne $Second -and -not $Collection.Failed -and -not $Second.Failed -and $snapCov.Status -ceq 'COMPLETE' -and $Second.Coverage.Status -ceq 'COMPLETE') { $runStates = Compare-AtmProcessCollections -First $Collection -Second $Second }
+    $exitEv = { param([string]$Key) if ($Key -and $runStates.ContainsKey($Key) -and $runStates[$Key] -ceq 'EXITED_DURING_RUN') { New-AtmEvidence -Code 'PROCESS_EXITED_DURING_RUN' -Source 'diagnose' -Collector 'process-snapshot' -ObservedUtc $now } }
+    $keyFn = $(if ($null -ne $SessionKeyFunction) { $SessionKeyFunction } else { { param($Provider, $ProfileSid, $ProfilePath, $SessionId) ConvertTo-AtmSessionKey -Provider $Provider -ProfileSid $ProfileSid -ProfilePath $ProfilePath -SessionId $SessionId } })
     # Candidates by key: Process (or $null for pid:<n>), Evidence, Kind (AGENT | UNVERIFIED | UNCHECKED), the providers
     # of the AGENT evidence and of the other evidence (sets: one process can be related to several providers), and
     # SourceCoverage (the coverage records of the sources of the evidence, one per collector). Whether a process is
@@ -955,9 +984,7 @@ function Get-AtmAgentRuntimeFindings {
 
     $runtimeProviders = @($ProviderHints | Where-Object { $null -ne $_ })
     $registries = @($SessionRegistries | Where-Object { $null -ne $_ })
-    if ($Collection.Failed) {
-        $coverage.Add((New-AtmCoverage -Collector 'agent-processes' -Status $(if ($snapCov.Status -ceq 'TIMEOUT') { 'TIMEOUT' } else { 'FAILED' }) -Reasons @('PROCESS_SNAPSHOT_UNAVAILABLE') -ElevationWouldHelp 'UNKNOWN'))
-    }
+    $failStatus = $(if ($snapCov.Status -ceq 'TIMEOUT') { 'TIMEOUT' } else { 'FAILED' })
     foreach ($h in $runtimeProviders) { if ($h.Coverage.Status -cne 'COMPLETE') { $reasons.Add('PROVIDER_HINTS_INCOMPLETE') } }
 
     # 1. Provider process matchers.
@@ -989,44 +1016,87 @@ function Get-AtmAgentRuntimeFindings {
         }
     }
 
-    # 2. Session registries.
+    # 2. Session registries: grouped by provider (one collector each), every profile of the provider in it.
+    $regGroups = @{}
     foreach ($reg in $registries) {
         $prov = [string](Get-AtmHintProperty -Item $reg -Name 'ProviderId')
         # Same Id rule as the registration (a V0.1 Id may be upper case); the collector name is only lower-cased.
-        if ($prov -notmatch '^[A-Za-z0-9-]+$') { $coverage.Add((New-AtmCoverage -Collector 'sessions-invalid' -Status 'FAILED' -Reasons @('SESSION_REGISTRY_PROVIDER_INVALID') -ElevationWouldHelp 'NO')); continue }
-        $collector = 'sessions-' + $prov.ToLowerInvariant()
+        $valid = ($prov -match '^[A-Za-z0-9-]+$')
+        $collector = $(if ($valid) { 'sessions-' + $prov.ToLowerInvariant() } else { 'sessions-invalid' })
+        if (-not $regGroups.ContainsKey($collector)) { $regGroups[$collector] = [pscustomobject]@{ Collector = $collector; Provider = $null; Reasons = (New-Object System.Collections.Generic.List[string]); Usable = 0; Entries = (New-Object System.Collections.Generic.List[object]); SessionKeys = @{} } }
+        $g = $regGroups[$collector]
+        if (-not $valid) { $g.Reasons.Add('SESSION_REGISTRY_PROVIDER_INVALID'); continue }
+        # Ids that differ only by case share the collector; the ordinally smaller one is kept (order-independent).
+        if ($null -eq $g.Provider -or [string]::CompareOrdinal($prov, $g.Provider) -lt 0) { $g.Provider = $prov }
         $r = Get-AtmHintProperty -Item $reg -Name 'Registry'
         $err = Get-AtmHintProperty -Item $reg -Name 'Error'
+        $code = [string](Get-AtmHintProperty -Item $reg -Name 'Reason')
+        if ($code -and $code -cmatch $script:AtmCodePattern) { $g.Reasons.Add($code); continue }
         if ($null -ne $err -or $null -eq $r) {
-            $rs = @('SESSION_REGISTRY_FAILED'); if ($null -ne $err) { $rs += ConvertTo-AtmExceptionCode ([string]$err) }
-            $coverage.Add((New-AtmCoverage -Collector $collector -Status 'FAILED' -Reasons $rs -ElevationWouldHelp 'UNKNOWN'))
+            $g.Reasons.Add('SESSION_REGISTRY_FAILED'); if ($null -ne $err) { $g.Reasons.Add((ConvertTo-AtmExceptionCode ([string]$err))) }
             continue
         }
-        $sr = @()
         $readable = [bool](Get-AtmHintProperty -Item $r -Name 'Readable')
         $unparseable = 0; [void][int]::TryParse([string](Get-AtmHintProperty -Item $r -Name 'Unparseable'), [ref]$unparseable)
-        if (-not $readable) { $sr += 'SESSION_REGISTRY_UNREADABLE' }
-        if ($unparseable -gt 0) { $sr += 'SESSION_ENTRIES_UNPARSEABLE' }
-        $entries = @(@(Get-AtmHintProperty -Item $r -Name 'Entries') | Where-Object { $null -ne $_ })
-        $status = $(if (-not $readable) { 'FAILED' } elseif ($sr.Count -gt 0) { 'PARTIAL' } else { 'COMPLETE' })
-        $regCov = New-AtmCoverage -Collector $collector -Status $status -Reasons $sr -ElevationWouldHelp $(if ($status -eq 'COMPLETE') { 'NO' } else { 'UNKNOWN' }) -Observed $entries.Count
+        if (-not $readable) { $g.Reasons.Add('SESSION_REGISTRY_UNREADABLE') } else { $g.Usable++ }
+        if ($unparseable -gt 0) { $g.Reasons.Add('SESSION_ENTRIES_UNPARSEABLE') }
+        $psid = [string](Get-AtmHintProperty -Item $reg -Name 'ProfileSid')
+        $ppath = [string](Get-AtmHintProperty -Item $reg -Name 'ProfilePath')
+        foreach ($e in @(@(Get-AtmHintProperty -Item $r -Name 'Entries') | Where-Object { $null -ne $_ })) {
+            $g.Entries.Add([pscustomobject]@{ Entry = $e; ProfileSid = $psid; ProfilePath = $ppath })
+        }
+    }
+    # Keys first (pseudonyms; the SessionId stays here, in memory): a collision or a conflicting entry is a gap of
+    # the registry record, so it is known before the record is built.
+    foreach ($g in $regGroups.Values) {
+        if ($null -eq $g.Provider) { continue }
+        foreach ($x in $g.Entries) {
+            $sid = ([string](Get-AtmHintProperty -Item $x.Entry -Name 'SessionId')).Trim().ToLowerInvariant()
+            if ([string]::IsNullOrWhiteSpace($sid)) { continue }
+            $key = [string](& $keyFn $g.Provider $x.ProfileSid $x.ProfilePath $sid)
+            if (-not $g.SessionKeys.ContainsKey($key)) { $g.SessionKeys[$key] = New-Object System.Collections.Generic.List[object] }
+            $epid = Get-AtmHintProperty -Item $x.Entry -Name 'Pid'
+            $who = '{0}|{1}|{2}' -f $x.ProfileSid, ([string]$x.ProfilePath).ToLowerInvariant(), $sid
+            # The same entry listed twice (same session, profile and PID) is read once.
+            if (@($g.SessionKeys[$key] | Where-Object { $_.Who -ceq $who -and [string]$_.Pid -ceq [string]$epid }).Count -gt 0) { continue }
+            $g.SessionKeys[$key].Add([pscustomobject]@{ Who = $who; Pid = $epid; StartUtc = (Get-AtmHintProperty -Item $x.Entry -Name 'StartUtc') })
+        }
+        foreach ($k in $g.SessionKeys.Keys) {
+            $list = $g.SessionKeys[$k]
+            if (@($list | ForEach-Object { $_.Who } | Select-Object -Unique).Count -gt 1) { $g.Reasons.Add('SESSION_KEY_COLLISION') }
+            elseif ($list.Count -gt 1) { $g.Reasons.Add('SESSION_ENTRIES_CONFLICT') }
+        }
+    }
+    $groupKeys = [string[]]@($regGroups.Keys)
+    [Array]::Sort($groupKeys, [StringComparer]::Ordinal)
+    foreach ($gk in $groupKeys) {
+        $g = $regGroups[$gk]
+        $rs = @($g.Reasons | Select-Object -Unique)
+        # Every profile failed: FAILED; some gap: PARTIAL; all read: COMPLETE.
+        $status = $(if ($g.Usable -eq 0 -and $rs.Count -gt 0) { 'FAILED' } elseif ($rs.Count -gt 0) { 'PARTIAL' } else { 'COMPLETE' })
+        $regCov = New-AtmCoverage -Collector $gk -Status $status -Reasons $rs -ElevationWouldHelp $(if ($status -eq 'COMPLETE') { 'NO' } elseif ($null -eq $g.Provider) { 'NO' } else { 'UNKNOWN' }) -Observed $g.Entries.Count
         $coverage.Add($regCov)
-        $seen = @{}
-        foreach ($e in $entries) {
-            $sid = [string](Get-AtmHintProperty -Item $e -Name 'SessionId')
-            $epid = Get-AtmHintProperty -Item $e -Name 'Pid'
-            $key = $prov + '/' + $sid
-            if ([string]::IsNullOrWhiteSpace($sid) -or $seen.ContainsKey("$key|$epid")) { continue }
-            $seen["$key|$epid"] = $true
-            $res = Resolve-AtmSessionProcess -Collection $Collection -ProcessId $epid -StartUtc (Get-AtmHintProperty -Item $e -Name 'StartUtc')
-            $ev = @(
-                (New-AtmEvidence -Code 'SESSION_REGISTRY' -Source 'session-registry' -Collector $collector -ObservedUtc $now),
-                (New-AtmEvidence -Code 'SESSION_PROCESS' -Source 'session-registry' -Collector 'process-snapshot' -ObservedUtc $now -Detail $res.Reason)
-            )
-            $findings.Add((New-AtmFinding -Kind 'AgentSession' -Key $key -State $res.State -Evidence $ev -Coverage @($snapCov, $regCov) -Provider $prov))
-            if ($res.State -ceq 'LIVE') {
-                & $addCand $res.Process.Key $res.Process 'AGENT' (New-AtmEvidence -Code 'SESSION_PROCESS_MATCH' -Source 'session-registry' -Collector $collector -ObservedUtc $now) $prov @($regCov)
+        if ($null -eq $g.Provider) { continue }
+        foreach ($key in @($g.SessionKeys.Keys)) {
+            $list = $g.SessionKeys[$key].ToArray()
+            $conflict = $(if (@($list | ForEach-Object { $_.Who } | Select-Object -Unique).Count -gt 1) { 'SESSION_KEY_COLLISION' } elseif ($list.Count -gt 1) { 'SESSION_ENTRIES_CONFLICT' } else { $null })
+            $ev = New-Object System.Collections.Generic.List[object]
+            $ev.Add((New-AtmEvidence -Code 'SESSION_REGISTRY' -Source 'session-registry' -Collector $gk -ObservedUtc $now))
+            $state = 'UNKNOWN'
+            foreach ($x in $list) {
+                $res = Resolve-AtmSessionProcess -Collection $Collection -ProcessId $x.Pid -StartUtc $x.StartUtc
+                # A process proven by a session stays agent-related even when the session key is in conflict.
+                if ($res.State -ceq 'LIVE') {
+                    & $addCand $res.Process.Key $res.Process 'AGENT' (New-AtmEvidence -Code 'SESSION_PROCESS_MATCH' -Source 'session-registry' -Collector $gk -ObservedUtc $now) $g.Provider @($regCov)
+                    $xe = & $exitEv $res.Process.Key; if ($null -ne $xe) { $ev.Add($xe) }
+                }
+                if ($null -eq $conflict) {
+                    $state = $res.State
+                    $ev.Add((New-AtmEvidence -Code 'SESSION_PROCESS' -Source 'session-registry' -Collector 'process-snapshot' -ObservedUtc $now -Detail $res.Reason))
+                }
             }
+            if ($null -ne $conflict) { $ev.Add((New-AtmEvidence -Code $conflict -Source 'session-registry' -Collector $gk -ObservedUtc $now)) }
+            $findings.Add((New-AtmFinding -Kind 'AgentSession' -Key $key -State $state -Evidence $ev.ToArray() -Coverage @($snapCov, $regCov) -Provider $g.Provider))
         }
     }
 
@@ -1085,7 +1155,6 @@ function Get-AtmAgentRuntimeFindings {
     # root: one evidence item per root, the union of their source coverage and of their providers.
     $agentKeys = @($candKeys | Where-Object { $cand[$_].Kind -ceq 'AGENT' -and -not $selfSet.ContainsKey($_) })
     $descendants = @{}
-    $resReasons = New-Object System.Collections.Generic.List[string]
     foreach ($k in $agentKeys) {
         $tree = Get-AtmProcessTree -Collection $Collection -RootKey $k
         if (-not $tree.Complete) { $reasons.Add('TREE_INCOMPLETE') }
@@ -1097,8 +1166,8 @@ function Get-AtmAgentRuntimeFindings {
             foreach ($pv in $cand[$k].AgentProviders.Values) { Add-AtmProviderToSet -Set $d.Providers -Provider ([string]$pv) }
             foreach ($sc in $cand[$k].SourceCoverage.Values) { if (-not $d.SourceCoverage.ContainsKey($sc.Collector)) { $d.SourceCoverage[$sc.Collector] = $sc } }
         }
+        # Per-tree sums overlap when agent roots are nested: they are never added together (see Totals).
         $tr = Get-AtmProcessTreeResources -Collection $Collection -Tree $tree -Cpu $Cpu
-        if (-not $tr.Complete) { foreach ($x in $tr.Reasons) { $resReasons.Add($x) } }
         $trees.Add([pscustomobject]@{ RootKey = $k; Provider = $attr[$k].Provider; Tree = $tree; Resources = $tr })
     }
     # Evidence and source coverage in a fixed order; an ambiguous attribution is stated as evidence, never resolved.
@@ -1106,8 +1175,13 @@ function Get-AtmAgentRuntimeFindings {
     $sortCov = { param($Items) Get-AtmOrdinalSorted -Items $Items -Signature { param($x) [string]$x.Collector } }
     $ambEv = { param($a) if ($a.Ambiguous) { New-AtmEvidence -Code 'PROVIDER_ATTRIBUTION_AMBIGUOUS' -Source 'diagnose' -Collector 'agent-processes' -ObservedUtc $now -Detail ($a.Ids -join ',') } }
 
-    # 6. Findings and the agent-processes coverage.
-    if (-not $Collection.Failed) {
+    # 6. Findings and the agent-processes coverage. Without a collection: no process finding, and agent-processes and
+    # agent-resources are FAILED/TIMEOUT (one record each, never missing).
+    $agentCov = $null
+    if ($Collection.Failed) {
+        $agentCov = New-AtmCoverage -Collector 'agent-processes' -Status $failStatus -Reasons @('PROCESS_SNAPSHOT_UNAVAILABLE') -ElevationWouldHelp 'UNKNOWN'
+        $coverage.Add($agentCov)
+    } else {
         if ($snapCov.Status -cne 'COMPLETE') { $reasons.Add('PROCESS_SNAPSHOT_INCOMPLETE') }
         $rs = @($reasons | Select-Object -Unique)
         # Nothing was searched (no matcher, no session registry, no path reference): not observable, never "no agent".
@@ -1117,7 +1191,8 @@ function Get-AtmAgentRuntimeFindings {
         $pcov = @($snapCov, $agentCov)
         foreach ($k in $selfSet.Keys) {
             if ($null -eq (Get-AtmCollectedProcess -Collection $Collection -Key $k)) { continue }
-            $findings.Add((New-AtmFinding -Kind 'Process' -Key $k -State 'SELF' -Evidence @(New-AtmEvidence -Code 'SELF_EXCLUSION' -Source 'diagnose' -Collector 'process-snapshot' -ObservedUtc $now) -Coverage $pcov))
+            $ev = @(New-AtmEvidence -Code 'SELF_EXCLUSION' -Source 'diagnose' -Collector 'process-snapshot' -ObservedUtc $now) + @(& $exitEv $k)
+            $findings.Add((New-AtmFinding -Kind 'Process' -Key $k -State 'SELF' -Evidence $ev -Coverage $pcov))
         }
         foreach ($k in $candKeys) {
             if ($selfSet.ContainsKey($k)) { continue }
@@ -1125,7 +1200,7 @@ function Get-AtmAgentRuntimeFindings {
             $state = $(switch ($c.Kind) { 'AGENT' { 'AGENT_PROCESS' } 'UNVERIFIED' { 'IDENTITY_UNVERIFIED' } default { 'UNKNOWN' } })
             # A process seen by a matcher that could not be checked, but under a verified agent process, is a descendant.
             if ($state -ceq 'UNKNOWN' -and $descendants.ContainsKey($k)) { continue }
-            $ev = & $sortEv (@($c.Evidence.ToArray()) + @(& $ambEv $attr[$k]))
+            $ev = & $sortEv (@($c.Evidence.ToArray()) + @(& $ambEv $attr[$k]) + @(& $exitEv $k))
             $findings.Add((New-AtmFinding -Kind 'Process' -Key $k -State $state -Evidence $ev -Coverage (@($pcov) + @(& $sortCov @($c.SourceCoverage.Values))) -Provider $attr[$k].Provider))
         }
         $descKeys = [string[]]@($descendants.Keys)
@@ -1133,23 +1208,106 @@ function Get-AtmAgentRuntimeFindings {
         foreach ($k in $descKeys) {
             $d = $descendants[$k]
             $da = Get-AtmProviderAttribution -Sets @($d.Providers)
-            $ev = & $sortEv (@($d.Roots | ForEach-Object { New-AtmEvidence -Code 'PARENT_LINK_VERIFIED' -Source 'diagnose' -Collector 'process-snapshot' -ObservedUtc $now -Detail $_ }) + @(& $ambEv $da))
+            $ev = & $sortEv (@($d.Roots | ForEach-Object { New-AtmEvidence -Code 'PARENT_LINK_VERIFIED' -Source 'diagnose' -Collector 'process-snapshot' -ObservedUtc $now -Detail $_ }) + @(& $ambEv $da) + @(& $exitEv $k))
             $findings.Add((New-AtmFinding -Kind 'Process' -Key $k -State 'AGENT_DESCENDANT' -Evidence $ev -Coverage (@($pcov) + @(& $sortCov @($d.SourceCoverage.Values))) -Provider $da.Provider))
         }
-        $rr = @($resReasons | Select-Object -Unique)
-        $coverage.Add((New-AtmCoverage -Collector 'agent-resources' -Status $(if ($rr.Count -gt 0) { 'PARTIAL' } else { 'COMPLETE' }) -Reasons $rr -ElevationWouldHelp $(if ($rr.Count -eq 0) { 'NO' } else { 'UNKNOWN' }) -Observed $trees.Count -Expected $trees.Count))
     }
-    [pscustomobject]@{ Findings = $findings.ToArray(); Coverage = $coverage.ToArray(); Trees = $trees.ToArray() }
+    # Resources of the union of the agent processes (SELF excluded), each process counted once.
+    $memberKeys = @($findings | Where-Object { $_.Kind -ceq 'Process' -and ($_.State -ceq 'AGENT_PROCESS' -or $_.State -ceq 'AGENT_DESCENDANT') } | ForEach-Object { $_.Key })
+    $totals = Get-AtmAgentResourceTotals -Collection $Collection -MemberKeys $memberKeys -AgentCoverage $agentCov -Cpu $Cpu -RunStates $runStates
+    if ($Collection.Failed) { $resCov = New-AtmCoverage -Collector 'agent-resources' -Status $failStatus -Reasons @('PROCESS_SNAPSHOT_UNAVAILABLE') -ElevationWouldHelp 'UNKNOWN' }
+    else { $resCov = New-AtmCoverage -Collector 'agent-resources' -Status $(if ($totals.Complete) { 'COMPLETE' } else { 'PARTIAL' }) -Reasons $totals.Reasons -ElevationWouldHelp $(if ($totals.Complete) { 'NO' } else { 'UNKNOWN' }) -Observed $totals.Processes }
+    $coverage.Add($resCov)
+    # Runtime findings by Kind, then Key (ordinal): the order of the inputs never changes the result (D6).
+    $sorted = @(Get-AtmOrdinalSorted -Items $findings.ToArray() -Signature { param($f) [string]$f.Kind + [char]1 + [string]$f.Key })
+    [pscustomobject]@{ Findings = $sorted; Coverage = $coverage.ToArray(); Trees = $trees.ToArray(); Totals = $totals }
+}
+
+function Get-AtmAgentResourceTotals {
+    <#
+      Resource totals over the union of the agent processes (-MemberKeys: AGENT_PROCESS and AGENT_DESCENDANT keys, SELF
+      excluded): every process once, even when it is in several overlapping trees. For each counter of AtmTreeCounters
+      and CpuPercent: Sum of the values read ($null when none was), Known and Complete. Unread values are never 0. With
+      no member, a sum is 0 only when agent-processes is conclusive (no agent process identified by the observed
+      sources), otherwise $null. Complete only when agent-processes is conclusive, every member and counter was read
+      and, with members, the CPU was sampled. A member that exited during the run keeps the counters of the first
+      collection and has no CPU percentage.
+    #>
+    param($Collection, [string[]]$MemberKeys = @(), $AgentCoverage = $null, $Cpu = $null, [hashtable]$RunStates = @{})
+    $reasons = New-Object System.Collections.Generic.List[string]
+    $conclusive = ($null -ne $AgentCoverage -and $script:AtmConclusiveCoverage -ccontains $AgentCoverage.Status)
+    if (-not $conclusive) { $reasons.Add('AGENT_PROCESSES_INCOMPLETE') }
+    $members = New-Object System.Collections.Generic.List[object]
+    foreach ($k in @($MemberKeys | Where-Object { $_ } | Select-Object -Unique)) {
+        $p = Get-AtmCollectedProcess -Collection $Collection -Key $k
+        if ($null -eq $p) { $reasons.Add('MEMBER_NOT_COLLECTED') } else { $members.Add($p) }
+    }
+    $cpuUsable = ($null -ne $Cpu -and $null -ne $Cpu.IntervalMs)
+    if ($members.Count -gt 0 -and -not $cpuUsable) {
+        $reasons.Add('CPU_NOT_SAMPLED')
+        if ($null -ne $Cpu -and $null -ne $Cpu.Coverage) { foreach ($x in @($Cpu.Coverage.Reasons)) { if ($x) { $reasons.Add($x) } } }
+    }
+    $counters = [ordered]@{}
+    foreach ($n in @($script:AtmTreeCounters) + @('CpuPercent')) {
+        $sum = $null; $known = 0
+        foreach ($p in $members) {
+            $v = $null
+            if ($n -ceq 'CpuTime100ns') { $v = Get-AtmProcessCpuTime $p }
+            elseif ($n -ceq 'CpuPercent') { if ($cpuUsable -and $Cpu.ByKey.ContainsKey($p.Key)) { $v = $Cpu.ByKey[$p.Key] } }
+            elseif ($null -ne $p.Resources) { $v = $p.Resources.$n }
+            if ($null -eq $v) { continue }
+            $known++
+            $sum = $(if ($n -ceq 'CpuPercent') { [double]$(if ($null -eq $sum) { 0 } else { $sum }) + [double]$v } else { [long]$(if ($null -eq $sum) { 0 } else { $sum }) + [long]$v })
+        }
+        if ($members.Count -eq 0 -and $conclusive) { $sum = $(if ($n -ceq 'CpuPercent') { [double]0 } else { [long]0 }) }
+        $complete = ($conclusive -and $known -eq $members.Count)
+        if ($known -lt $members.Count) {
+            if ($n -cne 'CpuPercent') { $reasons.Add('COUNTERS_UNREADABLE') }
+            elseif ($cpuUsable) {
+                $exited = @($members | Where-Object { $RunStates.ContainsKey($_.Key) -and $RunStates[$_.Key] -ceq 'EXITED_DURING_RUN' }).Count
+                $reasons.Add($(if ($exited -gt 0) { 'CPU_PROCESS_EXITED' } else { 'CPU_VALUES_INCOMPLETE' }))
+            }
+        }
+        $counters[$n] = [pscustomobject]@{ Sum = $sum; Known = $known; Complete = $complete }
+    }
+    $rs = @($reasons | Select-Object -Unique)
+    [pscustomobject]@{
+        Processes     = $members.Count
+        Complete      = ($rs.Count -eq 0)
+        Reasons       = $rs
+        CpuIntervalMs = $(if ($cpuUsable) { [long][math]::Round([double]$Cpu.IntervalMs) } else { $null })
+        Counters      = [pscustomobject]$counters
+    }
+}
+
+function ConvertTo-AtmSessionKey {
+    <#
+      Exported key of an agent session: <provider>/s-<32 hex>, the first 128 bits of SHA-256 over length-prefixed fields
+      (scheme, provider Id in lower case, profile SID, profile path in lower case without a trailing separator,
+      SessionId in lower case). The same session of the same profile gives the same key in every run; the same
+      SessionId in another profile gives another key. It is a pseudonym, not anonymization: whoever holds the same
+      inputs can compute the same key. The inputs are never part of a result.
+    #>
+    param([string]$Provider, [string]$ProfileSid, [string]$ProfilePath, [string]$SessionId)
+    $prov = $Provider.ToLowerInvariant()
+    $fields = @('atm-session/1', $prov, [string]$ProfileSid, ([string]$ProfilePath).TrimEnd('\', '/').ToLowerInvariant(), $SessionId.Trim().ToLowerInvariant())
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($f in $fields) { [void]$sb.Append($f.Length).Append(':').Append($f).Append(';') }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $hash = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($sb.ToString())) } finally { $sha.Dispose() }
+    return ($prov + '/s-' + (-join @($hash[0..15] | ForEach-Object { $_.ToString('x2') })))
 }
 
 # ---------------------------------------------------------------------------------------------
 # Invoke-AtmDiagnose (ADR-0009). P1-A collectors: identity, provider runtime hints, the V0.1 temporary-directory
-# inventory and the coverage it implies (processes, temp-profiles). Runtime collectors of later phases (process
-# trees, services, virtualization, Git worktrees) add coverage records and findings here.
+# inventory and the coverage it implies (processes, temp-profiles). P1-B4-c: the agent runtime (process-snapshot,
+# sessions-<provider>, agent-processes, agent-resources). Collectors of later phases (services, virtualization, Git
+# worktrees) add coverage records and findings here.
 # ---------------------------------------------------------------------------------------------
 
 $script:AtmDiagnoseSchema = 'atm.diagnose/1'
 $script:AtmDiagnoseDefaultDeadlineSeconds = 300
+$script:AtmDiagnoseCpuSampleMs = 500
 
 function New-AtmDeadlineCoverage {
     param([string]$Collector)
@@ -1192,9 +1350,14 @@ function Invoke-AtmDiagnose {
       -InventoryArgs: passed to Invoke-AtmInventory (tests pass ProfilesOverride / ProcessesOverride / NowUtc).
       -IdentitySource: test override for the token identity. -Providers: provider objects (default: registered).
       -DeadlineSeconds: global deadline; a collector not started before it is TIMEOUT, never COMPLETE.
+      Agent runtime (P1-B4-c): -ProcessSource: test override of the process rows (default: CIM; when the inventory
+      gets ProcessesOverride, the same rows feed both collections). -CpuSampleMs: interval of the CPU sample (default
+      500; 0 = not sampled; otherwise 100 to 5000). -SelfPid / -SelfCreationUtc: identity of this process (R-B1).
     #>
-    param([hashtable]$InventoryArgs = @{}, [scriptblock]$IdentitySource, $Providers, [int]$DeadlineSeconds = $script:AtmDiagnoseDefaultDeadlineSeconds)
+    param([hashtable]$InventoryArgs = @{}, [scriptblock]$IdentitySource, $Providers, [int]$DeadlineSeconds = $script:AtmDiagnoseDefaultDeadlineSeconds,
+        [scriptblock]$ProcessSource = $null, [int]$CpuSampleMs = $script:AtmDiagnoseCpuSampleMs, $SelfPid = $PID, $SelfCreationUtc = $null)
     if ($DeadlineSeconds -lt 0) { throw (Get-AtmText 'err.diagDeadline' $DeadlineSeconds) }
+    if ($CpuSampleMs -ne 0 -and ($CpuSampleMs -lt $script:AtmCpuSampleMinMs -or $CpuSampleMs -gt $script:AtmCpuSampleMaxMs)) { throw (Get-AtmText 'err.diagProcess' "CpuSampleMs $CpuSampleMs") }
     $started = [datetime]::UtcNow
     $deadline = $started.AddSeconds($DeadlineSeconds)
     $coverage = New-Object System.Collections.Generic.List[object]
@@ -1260,6 +1423,53 @@ function Invoke-AtmDiagnose {
         }
     }
 
+    # Agent runtime (P1-B4-c): a process collection with a CPU sample, the session registries of every profile, SELF,
+    # the agent findings (P1-B4-b) and the resource totals. Each collector has exactly one record, TIMEOUT when the
+    # deadline came first.
+    $tempProviders = @($validProviders | Where-Object { (Get-AtmProviderCapabilities $_) -ccontains 'temp' })
+    $sessionCollectors = [string[]]@($tempProviders | ForEach-Object { 'sessions-' + ([string]$_.Id).ToLowerInvariant() } | Select-Object -Unique)
+    [Array]::Sort($sessionCollectors, [StringComparer]::Ordinal)
+    $runtime = $null
+    if ([datetime]::UtcNow -ge $deadline) {
+        foreach ($c in @('process-snapshot') + @($sessionCollectors) + @('agent-processes', 'agent-resources')) { $coverage.Add((New-AtmDeadlineCoverage $c)) }
+    } else {
+        $src = $ProcessSource
+        if ($null -eq $src -and $InventoryArgs.ContainsKey('ProcessesOverride')) { $ovRows = @($InventoryArgs['ProcessesOverride']); $src = { $ovRows }.GetNewClosure() }
+        if ($CpuSampleMs -gt 0) { $sample = Invoke-AtmProcessCpuSampling -Source $src -IntervalMs $CpuSampleMs -Deadline $deadline }
+        else { $sample = [pscustomobject]@{ First = (Get-AtmProcessCollection -Source $src -Deadline $deadline); Second = $null; Cpu = $null } }
+        $coverage.Add($sample.First.Coverage)
+        # Session registries: the inventory's own reading is reused; a profile and provider it did not read (no
+        # temporary base there) is read through the same provider member, read-only. Exception type only.
+        $regs = New-Object System.Collections.Generic.List[object]
+        foreach ($tp in $tempProviders) {
+            if ($null -eq $inv) { $regs.Add([pscustomobject]@{ ProviderId = $tp.Id; Registry = $null; Error = $null; Reason = 'INVENTORY_UNAVAILABLE' }); continue }
+            foreach ($pr in @($inv.Profiles)) {
+                $item = [pscustomobject]@{ ProviderId = $tp.Id; Registry = $null; Error = $null; Reason = $null; ProfileSid = [string]$pr.Sid; ProfilePath = [string]$pr.ProfilePath }
+                $rk = Get-AtmRegistryKey -ProviderId $tp.Id -ProfileInfo $pr
+                if ($inv.Registries.ContainsKey($rk)) { $item.Registry = $inv.Registries[$rk] }
+                elseif ([datetime]::UtcNow -ge $deadline) { $item.Reason = 'DEADLINE_EXCEEDED' }
+                else { try { $item.Registry = & $tp.GetSessionEvidence $pr $inv.Snapshot } catch { $item.Error = $_.Exception.GetType().Name } }
+                $regs.Add($item)
+            }
+        }
+        # SELF: this process and the launchers of the V0.1 self chain (their PID and creation time from the V0.1 snapshot).
+        $launchers = New-Object System.Collections.Generic.List[object]
+        if ($null -ne $inv -and -not $inv.Snapshot.Failed) {
+            foreach ($sp in @($inv.SelfPids | Where-Object { $_ -ne $SelfPid })) {
+                $lp = @($inv.Snapshot.Processes | Where-Object { $_.Pid -eq $sp })
+                if ($lp.Count -eq 1) { $launchers.Add([pscustomobject]@{ Pid = $sp; CreationUtc = $lp[0].CreationUtc }) }
+            }
+        }
+        $selfKeys = Get-AtmSelfProcessKeys -Collection $sample.First -SelfPid $SelfPid -SelfCreationUtc $SelfCreationUtc -LauncherReferences $launchers.ToArray()
+        $invCovRecords = @($coverage | Where-Object { @('inventory', 'processes', 'temp-profiles') -ccontains $_.Collector })
+        $rtArgs = @{ Collection = $sample.First; Second = $sample.Second; ProviderHints = $hints.ToArray(); SessionRegistries = $regs.ToArray(); InventoryCoverage = $invCovRecords; SelfKeys = $selfKeys; Cpu = $sample.Cpu }
+        if ($null -ne $inv) { $rtArgs['LegacySnapshot'] = $inv.Snapshot; $rtArgs['Partitions'] = @($inv.Partitions) }
+        $runtime = Get-AtmAgentRuntimeFindings @rtArgs
+        foreach ($c in $runtime.Coverage) { $coverage.Add($c) }
+        # Temporary partitions keep their V0.1 order; runtime findings follow, ordered by Kind and Key.
+        foreach ($f in $runtime.Findings) { $findings.Add($f) }
+    }
+
     $covArr = $coverage.ToArray()
     [pscustomobject]@{
         SchemaVersion    = $script:AtmDiagnoseSchema
@@ -1275,6 +1485,7 @@ function Invoke-AtmDiagnose {
         Coverage         = $covArr
         CoverageComplete = (@($covArr | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status }).Count -eq 0)
         Findings         = $findings.ToArray()
+        AgentResources   = $(if ($null -ne $runtime) { $runtime.Totals } else { $null })
         Inventory        = $inv
     }
 }

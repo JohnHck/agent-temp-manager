@@ -348,10 +348,138 @@ function Show-AtmDiagnose {
     if (@($r.Coverage | Where-Object { $_.Collector -eq 'inventory' -and $_.Status -ne 'COMPLETE' }).Count -gt 0) { Write-Host ('  ' + (Get-AtmText 'diag.inventoryIncomplete')) -ForegroundColor Yellow }
     Write-Host ('  ' + (Get-AtmText 'diag.notYet'))
 
+    Show-AtmDiagnoseRuntime -Result $r
+
     Write-AtmHeader (Get-AtmText 'diag.summaryTitle')
     Write-Host ('  ' + (Get-AtmText 'diag.coverageComplete' (Get-AtmYesNo ([bool]$r.CoverageComplete) -Upper))) -ForegroundColor $(if ($r.CoverageComplete) { 'Green' } else { 'Yellow' })
     Write-Host ('  ' + (Get-AtmText 'diag.unknownNote'))
     Write-Host ('  ' + (Get-AtmText 'diag.readOnly')) -ForegroundColor Green
+}
+
+$script:AtmRuntimeListMax = 20
+$script:AtmRuntimeCollectors = @('process-snapshot', 'agent-processes', 'agent-resources')
+
+function Test-AtmRuntimeCollector { param([string]$Collector) return ($script:AtmRuntimeCollectors -ccontains $Collector -or $Collector.StartsWith('sessions-', [StringComparison]::Ordinal)) }
+
+function Get-AtmCodeText {
+    # Catalog text of a code (reason.<code>, evidence.<code>), or $null when the code has none (EXCEPTION_<TYPE>).
+    param([string]$Prefix, [string]$Code)
+    $k = $Prefix + '.' + $Code
+    if ($script:AtmMessages['en-US'].ContainsKey($k)) { return (Get-AtmText $k) }
+    return $null
+}
+
+function Get-AtmRuntimePid {
+    # The PID of a Process finding key (pid@ticks or pid:<n>).
+    param([string]$Key)
+    if ($Key -match '^(\d{1,10})[@:]') { return $Matches[1] }
+    if ($Key -match '^pid:(\d{1,10})$') { return $Matches[1] }
+    return $Key
+}
+
+function Format-AtmResourceValue {
+    # A total for the report: unknown when nothing was read, marked partial when it is a lower bound. Never 0 for
+    # an unread value.
+    param([string]$Name, $Counter)
+    if ($null -eq $Counter -or $null -eq $Counter.Sum) { return (Get-AtmText 'diag.runtimeUnknownValue') }
+    $v = $Counter.Sum
+    if ($Name.EndsWith('Time100ns')) { $txt = [string][math]::Round([double]$v / 10000000, 1) }
+    elseif ($Name.EndsWith('Bytes')) { $txt = [string](Format-AtmMB ([long]$v)) }
+    elseif ($Name -ceq 'CpuPercent') { $txt = [string][math]::Round([double]$v, 1) }
+    else { $txt = [string]$v }
+    if (-not $Counter.Complete) { $txt = $txt + ' ' + (Get-AtmText 'diag.runtimePartialTag') }
+    return $txt
+}
+
+function Show-AtmDiagnoseRuntime {
+    # Agent runtime section of the diagnose report (P1-B4-c). States, attribution (ambiguity shown, never resolved),
+    # processes that exited during the run, totals counted once per process, coverage gaps and the meaning of the
+    # codes. Never states that no agent exists, and never relates a runtime state to deleting a temporary directory.
+    param($Result)
+    $r = $Result
+    Write-AtmHeader (Get-AtmText 'diag.runtimeTitle')
+    $cov = @($r.Coverage | Where-Object { Test-AtmRuntimeCollector $_.Collector })
+    $rt = @($r.Findings | Where-Object { $_.Kind -ceq 'Process' -or $_.Kind -ceq 'AgentSession' })
+    $ap = @($cov | Where-Object { $_.Collector -ceq 'agent-processes' })
+    if ($ap.Count -eq 0 -or $ap[0].Status -ceq 'TIMEOUT') {
+        Write-Host ('  ' + (Get-AtmText 'diag.runtimeNotRun')) -ForegroundColor Yellow
+    } else {
+        if (@($rt | Where-Object { $_.State -cne 'SELF' }).Count -eq 0) { Write-Host ('  ' + (Get-AtmText 'diag.runtimeNone')) }
+        foreach ($kind in @('Process', 'AgentSession')) {
+            foreach ($st in @($script:AtmFindingStates[$kind])) {
+                $n = @($rt | Where-Object { $_.Kind -ceq $kind -and $_.State -ceq $st }).Count
+                if ($n -gt 0) { Write-Host ('  ' + (Get-AtmText 'diag.runtimeStateLine' $kind $st $n (Get-AtmText "state.$kind.$st"))) }
+            }
+        }
+        $ambOf = { param($F) @($F.Evidence | Where-Object { $_.Code -ceq 'PROVIDER_ATTRIBUTION_AMBIGUOUS' } | ForEach-Object { [string]$_.Detail }) -join ';' }
+        $exited = { param($F) @($F.Evidence | Where-Object { $_.Code -ceq 'PROCESS_EXITED_DURING_RUN' }).Count -gt 0 }
+        $agents = @($rt | Where-Object { $_.Kind -ceq 'Process' -and ($_.State -ceq 'AGENT_PROCESS' -or $_.State -ceq 'AGENT_DESCENDANT') })
+        foreach ($g in @($agents | Where-Object { $_.Provider } | Group-Object Provider | Sort-Object Name)) { Write-Host ('  ' + (Get-AtmText 'diag.runtimeProviderLine' $g.Name $g.Count)) }
+        $amb = @($agents | Where-Object { -not $_.Provider -and (& $ambOf $_) })
+        if ($amb.Count -gt 0) { Write-Host ('  ' + (Get-AtmText 'diag.runtimeAmbiguous' $amb.Count ((@($amb | ForEach-Object { & $ambOf $_ } | Sort-Object -Unique)) -join '; '))) -ForegroundColor Yellow }
+        $un = @($agents | Where-Object { -not $_.Provider -and -not (& $ambOf $_) })
+        if ($un.Count -gt 0) { Write-Host ('  ' + (Get-AtmText 'diag.runtimeUnattributed' $un.Count)) }
+        $procs = @($rt | Where-Object { $_.Kind -ceq 'Process' -and $_.State -cne 'SELF' })
+        if ($procs.Count -gt 0) {
+            Write-Host ('  ' + (Get-AtmText 'diag.runtimeProcessesTitle'))
+            foreach ($p in @($procs | Select-Object -First $script:AtmRuntimeListMax)) {
+                $who = $(if ($p.Provider) { $p.Provider } elseif (& $ambOf $p) { Get-AtmText 'diag.runtimeAmbiguousTag' (& $ambOf $p) } else { '-' })
+                $line = Get-AtmText 'diag.runtimeProcessLine' (Get-AtmRuntimePid $p.Key) $p.State $who
+                if (& $exited $p) { $line = $line + '  ' + (Get-AtmText 'diag.runtimeExitedTag') }
+                Write-Host ('    ' + $line)
+            }
+            if ($procs.Count -gt $script:AtmRuntimeListMax) { Write-Host ('    ' + (Get-AtmText 'diag.runtimeMore' ($procs.Count - $script:AtmRuntimeListMax))) }
+        }
+        $sess = @($rt | Where-Object { $_.Kind -ceq 'AgentSession' })
+        if ($sess.Count -gt 0) {
+            Write-Host ('  ' + (Get-AtmText 'diag.runtimeSessionsTitle'))
+            foreach ($s in @($sess | Select-Object -First $script:AtmRuntimeListMax)) {
+                $line = Get-AtmText 'diag.runtimeSessionLine' $s.Key $s.State
+                if (& $exited $s) { $line = $line + '  ' + (Get-AtmText 'diag.runtimeExitedTag') }
+                Write-Host ('    ' + $line)
+            }
+            if ($sess.Count -gt $script:AtmRuntimeListMax) { Write-Host ('    ' + (Get-AtmText 'diag.runtimeMore' ($sess.Count - $script:AtmRuntimeListMax))) }
+        }
+        $ex = @($rt | Where-Object { & $exited $_ }).Count
+        if ($ex -gt 0) { Write-Host ('  ' + (Get-AtmText 'diag.runtimeExited' $ex)) -ForegroundColor Yellow }
+        $t = $r.AgentResources
+        if ($null -ne $t) {
+            Write-Host ('  ' + (Get-AtmText 'diag.runtimeResourcesTitle'))
+            Write-Host ('    ' + (Get-AtmText 'diag.runtimeResourcesProcesses' $t.Processes))
+            foreach ($n in @($t.Counters.PSObject.Properties.Name)) {
+                $label = $(if ($n -ceq 'CpuPercent') { Get-AtmText 'diag.res.CpuPercent' $(if ($null -ne $t.CpuIntervalMs) { $t.CpuIntervalMs } else { '-' }) } else { Get-AtmText "diag.res.$n" })
+                Write-Host ('    ' + (Get-AtmText 'diag.runtimeResourcesLine' $label (Format-AtmResourceValue -Name $n -Counter $t.Counters.$n)))
+            }
+            if (-not $t.Complete) { Write-Host ('    ' + (Get-AtmText 'diag.runtimeResourcesPartial' (@($t.Reasons) -join ', '))) -ForegroundColor Yellow }
+        }
+    }
+    foreach ($c in @($cov | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status })) {
+        Write-Host ('  ' + (Get-AtmText 'diag.runtimeCoverageLine' $c.Collector $c.Status (@($c.Reasons) -join ', '))) -ForegroundColor Yellow
+    }
+    # Meaning of every reason and evidence code shown in this section.
+    $codes = New-Object System.Collections.Generic.List[string]
+    foreach ($x in @($cov | ForEach-Object { @($_.Reasons) }) + @($r.AgentResources | Where-Object { $null -ne $_ } | ForEach-Object { @($_.Reasons) })) { $tx = Get-AtmCodeText 'reason' $x; if ($tx -and -not $codes.Contains("$x|$tx")) { $codes.Add("$x|$tx") } }
+    foreach ($x in @($rt | ForEach-Object { @($_.Evidence | ForEach-Object { $_.Code }) })) { $tx = Get-AtmCodeText 'evidence' $x; if ($tx -and -not $codes.Contains("$x|$tx")) { $codes.Add("$x|$tx") } }
+    if ($codes.Count -gt 0) {
+        Write-Host ('  ' + (Get-AtmText 'diag.runtimeLegendTitle'))
+        foreach ($c in @($codes | Sort-Object)) { $i = $c.IndexOf('|'); Write-Host ('    ' + (Get-AtmText 'diag.runtimeLegendLine' $c.Substring(0, $i) $c.Substring($i + 1))) }
+    }
+    Write-Host ('  ' + (Get-AtmText 'diag.runtimeScope'))
+    Write-Host ('  ' + (Get-AtmText 'diag.runtimeNoDelete')) -ForegroundColor Green
+}
+
+function ConvertTo-AtmAgentResourcesJson {
+    # agentResources (docs/DIAGNOSE-SCHEMA.md): totals over the union of the agent processes, each counted once. Unread
+    # values stay null; collected = false when the runtime was not observed.
+    param($Totals)
+    if ($null -eq $Totals) { return [ordered]@{ collected = $false; processes = $null; complete = $false; reasons = @(); cpuIntervalMs = $null; counters = $null } }
+    $counters = [ordered]@{}
+    foreach ($n in @($Totals.Counters.PSObject.Properties.Name)) {
+        $c = $Totals.Counters.$n
+        $sum = $(if ($null -eq $c.Sum) { $null } elseif ($n -ceq 'CpuPercent') { [math]::Round([double]$c.Sum, 3) } else { [long]$c.Sum })
+        $counters[$n.Substring(0, 1).ToLowerInvariant() + $n.Substring(1)] = [ordered]@{ sum = $sum; known = $c.Known; complete = [bool]$c.Complete }
+    }
+    return [ordered]@{ collected = $true; processes = $Totals.Processes; complete = [bool]$Totals.Complete; reasons = @($Totals.Reasons); cpuIntervalMs = $Totals.CpuIntervalMs; counters = $counters }
 }
 
 function ConvertTo-AtmDiagnoseJson {
@@ -382,6 +510,7 @@ function ConvertTo-AtmDiagnoseJson {
                     coverage = @(@($_.Coverage) | ForEach-Object { $_.Collector }); incompleteCoverage = @($_.IncompleteCoverage)
                     evidence = @(@($_.Evidence) | ForEach-Object { [ordered]@{ code = $_.Code; source = $_.Source; collector = $_.Collector; observedUtc = (Format-AtmUtcIso $_.ObservedUtc); detail = $_.Detail } }) }
             })
+        agentResources   = (ConvertTo-AtmAgentResourcesJson -Totals $r.AgentResources)
         inventory        = [ordered]@{
             collected        = ($null -ne $inv)
             coverageComplete = $(if ($inv) { [bool]$inv.CoverageComplete } else { $null })
