@@ -2454,7 +2454,10 @@ try {
             Assert-True $h.Ready 'atualizacao detentora (excecao) chegou ao portao'
             $r = & $rb6Release $h
             Assert-True ($r -match '^RESULT=ERROR .*simulated exception in the holder') "excecao no detentor relatada ($r)"
-            Assert-True ((& $rb6LockGone $inst) -and (& $rb6Tag $inst) -eq 'v3' -and (& $rb6Tag $prev) -eq 'v2' -and (& $rb6Leftovers $inst) -eq '' -and (& $pathSnap) -eq $path0) 'excecao no detentor: bloqueio liberado; instalacao, .previous e PATH intactos; nada pendente'
+            Assert-True (& $rb6LockGone $inst) 'excecao no detentor: bloqueio liberado'
+            Assert-True ((& $rb6Tag $inst) -eq 'v3' -and (& $rb6Tag $prev) -eq 'v2') "excecao no detentor: instalacao e .previous intactas ($(& $rb6Tag $inst) / $(& $rb6Tag $prev))"
+            Assert-Eq (& $rb6Leftovers $inst) '' 'excecao no detentor: nada pendente nem intermediario'
+            Assert-Eq (& $pathSnap) $path0 'excecao no detentor: PATH intacto'
             # 5. An update holder killed after the swap (marker written): the lock goes with the process; the marker, the
             # installed copy (now .previous) and the older .previous (recovery) stay; every later operation refuses.
             $h = & $rb6StartHolder 'update' $inst 'postswap' $testKey; $holders += $h
