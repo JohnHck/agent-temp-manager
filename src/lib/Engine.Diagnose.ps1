@@ -1422,23 +1422,26 @@ function Read-AtmPseudonymKeyFile {
 
 function Get-AtmPartitionFindings {
     <#
-      TempPartition findings in the V0.1 order, keyed by ConvertTo-AtmPartitionKey (no path in a finding). Two partitions
-      with the same key are one UNKNOWN finding with PARTITION_KEY_COLLISION, never an overwritten one; its provider is
-      kept only when both name the same one. -KeyFunction: test override.
+      TempPartition findings keyed by ConvertTo-AtmPartitionKey (no path in a finding), ordered by Key (ordinal; ADR-0010
+      D-8): the position of a directory in the file-system enumeration is not kept, and every finding carries the same
+      observation time, so no field gives that order back. Collisions are grouped first: two partitions with the same key
+      are one UNKNOWN finding with PARTITION_KEY_COLLISION, never an overwritten one; its provider is kept only when both
+      name the same one. -KeyFunction: test override.
     #>
     param($Partitions, $InventoryCoverage, $Pseudonymizer, [scriptblock]$KeyFunction = $null)
     $keyFn = $(if ($null -ne $KeyFunction) { $KeyFunction } else { { param($Provider, $Path) ConvertTo-AtmPartitionKey -Pseudonymizer $Pseudonymizer -Provider $Provider -Path $Path } })
-    $order = New-Object System.Collections.Generic.List[string]
     $groups = @{}
     foreach ($part in @($Partitions | Where-Object { $null -ne $_ -and $_.Kind -ne 'NotScanned' })) {
         $key = [string](& $keyFn $part.Provider $part.Path)
-        if (-not $groups.ContainsKey($key)) { $groups[$key] = New-Object System.Collections.Generic.List[object]; $order.Add($key) }
+        if (-not $groups.ContainsKey($key)) { $groups[$key] = New-Object System.Collections.Generic.List[object] }
         $groups[$key].Add($part)
     }
+    $keys = [string[]]@($groups.Keys)
+    [Array]::Sort($keys, [StringComparer]::Ordinal)
+    $now = [datetime]::UtcNow
     $out = New-Object System.Collections.Generic.List[object]
-    foreach ($key in $order) {
+    foreach ($key in $keys) {
         $parts = $groups[$key].ToArray()
-        $now = [datetime]::UtcNow
         $ev = New-Object System.Collections.Generic.List[object]
         if ($parts.Count -gt 1) {
             $ev.Add((New-AtmEvidence -Code 'PARTITION_KEY_COLLISION' -Source 'diagnose' -Collector 'inventory' -ObservedUtc $now -Detail ([string]$parts.Count)))
@@ -1633,7 +1636,7 @@ function Invoke-AtmDiagnoseRun {
         if ($null -ne $inv) { $rtArgs['LegacySnapshot'] = $inv.Snapshot; $rtArgs['Partitions'] = @($inv.Partitions) }
         $runtime = Get-AtmAgentRuntimeFindings @rtArgs
         foreach ($c in $runtime.Coverage) { $coverage.Add($c) }
-        # Temporary partitions keep their V0.1 order; runtime findings follow, ordered by Kind and Key.
+        # Temporary partitions first (ordered by pseudonym, ADR-0010 D-8); runtime findings follow, ordered by Kind and Key.
         foreach ($f in $runtime.Findings) { $findings.Add($f) }
     }
 

@@ -4182,7 +4182,7 @@ try {
         $out = (& cmd.exe /c "`"$cmd`" help -Lang en-US" 2>&1) -join "`n"
         Assert-True ($out.Contains('-PseudonymKeyFile')) 'ajuda mostra -PseudonymKeyFile'
     }
-    Test-Case 'Diagnose' 'Colisao de chave de particao (P1-B4-d): duas particoes com a mesma chave viram um achado UNKNOWN, nada sobrescrito, ordem da V0.1 mantida' {
+    Test-Case 'Diagnose' 'Colisao de chave de particao (P1-B4-d): duas particoes com a mesma chave viram um achado UNKNOWN, nada sobrescrito, ordem pelo pseudonimo (D-8)' {
         $parts = @(
             [pscustomobject]@{ Provider = 'claude-code'; Path = 'D:\t\a'; Kind = 'SessionRoot'; Class = 'OLD'; Flags = @() },
             [pscustomobject]@{ Provider = 'claude-code'; Path = 'D:\t\b'; Kind = 'SessionRoot'; Class = 'ACTIVE_EVIDENCE'; Flags = @('X') },
@@ -4191,11 +4191,54 @@ try {
         $inv = @(New-AtmCoverage -Collector 'inventory' -Status 'COMPLETE')
         $f = @(Get-AtmPartitionFindings -Partitions $parts -InventoryCoverage $inv -Pseudonymizer $b4Pz)
         Assert-True ($f.Count -eq 3 -and @($f | Where-Object { $_.State -eq 'RUNTIME_NOT_DIAGNOSED' }).Count -eq 3) 'sem colisao: um achado por particao medida'
-        Assert-Eq (@($f | ForEach-Object { $_.Key }) -join ',') ((@('D:\t\a', 'D:\t\b', 'D:\t\c') | ForEach-Object { ConvertTo-AtmPartitionKey -Pseudonymizer $b4Pz -Provider 'claude-code' -Path $_ }) -join ',') 'ordem da V0.1'
+        $expected = [string[]]@(@('D:\t\a', 'D:\t\b', 'D:\t\c') | ForEach-Object { ConvertTo-AtmPartitionKey -Pseudonymizer $b4Pz -Provider 'claude-code' -Path $_ }); [Array]::Sort($expected, [StringComparer]::Ordinal)
+        Assert-Eq (@($f | ForEach-Object { $_.Key }) -join ',') ($expected -join ',') 'ordem ordinal pelo pseudonimo (D-8)'
         $clash = { param($Provider, $Path) if ($Path -like '*\c') { 'claude-code/p-' + ('1' * 32) } else { 'claude-code/p-' + ('0' * 32) } }
         $f = @(Get-AtmPartitionFindings -Partitions $parts -InventoryCoverage $inv -Pseudonymizer $b4Pz -KeyFunction $clash)
         Assert-True ($f.Count -eq 2 -and $f[0].State -eq 'UNKNOWN' -and @($f[0].Evidence | Where-Object { $_.Code -eq 'PARTITION_KEY_COLLISION' -and $_.Detail -eq '2' }).Count -eq 1 -and @($f[0].Evidence | Where-Object { $_.Code -eq 'AUDIT_CLASS' }).Count -eq 0) 'colisao: um achado UNKNOWN, sem a classe de nenhuma das duas'
         Assert-True ($f[1].State -eq 'RUNTIME_NOT_DIAGNOSED' -and $f[1].Key -ceq ('claude-code/p-' + ('1' * 32))) 'particao sem colisao inalterada'
+        # Reversed input: the same collision and the same order.
+        $fr = @(Get-AtmPartitionFindings -Partitions @($parts[($parts.Count - 1)..0]) -InventoryCoverage $inv -Pseudonymizer $b4Pz -KeyFunction $clash)
+        Assert-Eq (@($fr | ForEach-Object { $_.Key + '=' + $_.State }) -join ',') (@($f | ForEach-Object { $_.Key + '=' + $_.State }) -join ',') 'colisao com entrada invertida: mesmo resultado'
+    }
+    Test-Case 'Privacidade' 'Ordem das particoes (P1-B4-d, D-8): enumeracao invertida da a mesma saida literal; mesma chave, mesma ordem; outra chave, ordem ordinal dos novos pseudonimos; nenhum campo devolve a ordem das pastas; V0.1 inalterada' {
+        $mk = { param([string]$Leaf, [string]$Class, [string[]]$Flags) [pscustomobject]@{ Provider = 'claude-code'; Path = "D:\t\$Leaf"; Kind = 'SessionRoot'; Class = $Class; Flags = @($Flags) } }
+        $parts = @((& $mk 'a1' 'OLD' @()), (& $mk 'b2' 'ACTIVE_EVIDENCE' @('X')), (& $mk 'c3' 'OLD' @('Y', 'Z')), (& $mk 'd4' 'RECENT' @()), (& $mk 'e5' 'OLD' @()))
+        $inv = @(New-AtmCoverage -Collector 'inventory' -Status 'COMPLETE')
+        $sig = { param($F) @($F | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Key, $_.State, $_.Provider, (@($_.Evidence | ForEach-Object { $_.Code + '/' + $_.Detail }) -join '+') }) -join "`n" }
+        $f1 = @(Get-AtmPartitionFindings -Partitions $parts -InventoryCoverage $inv -Pseudonymizer $b4Pz)
+        $f2 = @(Get-AtmPartitionFindings -Partitions @($parts[($parts.Count - 1)..0]) -InventoryCoverage $inv -Pseudonymizer $b4Pz)
+        Assert-Eq (& $sig $f2) (& $sig $f1) 'enumeracao invertida, mesma chave: saida literal identica'
+        $f3 = @(Get-AtmPartitionFindings -Partitions $parts -InventoryCoverage $inv -Pseudonymizer $b4Pz)
+        Assert-Eq (& $sig $f3) (& $sig $f1) 'mesma chave reutilizada: pseudonimos e ordem identicos'
+        $keys1 = [string[]]@($f1 | ForEach-Object { $_.Key }); $sorted1 = [string[]]$keys1.Clone(); [Array]::Sort($sorted1, [StringComparer]::Ordinal)
+        Assert-Eq ($keys1 -join ',') ($sorted1 -join ',') 'ordem ordinal pela chave'
+        $other = New-AtmPseudonymizer -Key ([byte[]](101..132))
+        try {
+            $f4 = @(Get-AtmPartitionFindings -Partitions $parts -InventoryCoverage $inv -Pseudonymizer $other)
+            $keys4 = [string[]]@($f4 | ForEach-Object { $_.Key }); $sorted4 = [string[]]$keys4.Clone(); [Array]::Sort($sorted4, [StringComparer]::Ordinal)
+            Assert-True (@($keys4 | Where-Object { $keys1 -ccontains $_ }).Count -eq 0 -and ($keys4 -join ',') -ceq ($sorted4 -join ',')) 'outra chave: pseudonimos recalculados, ordem ordinal'
+            $byPath = @{}; foreach ($pt in $parts) { $byPath[(ConvertTo-AtmPartitionKey -Pseudonymizer $other -Provider 'claude-code' -Path $pt.Path)] = $pt.Class }
+            Assert-True (@($f4 | Where-Object { @($_.Evidence | Where-Object { $_.Code -eq 'AUDIT_CLASS' })[0].Detail -cne $byPath[$_.Key] }).Count -eq 0) 'cada achado continua com a classe da sua particao'
+        } finally { Close-AtmPseudonymizer $other }
+        # No field gives the enumeration order back: one observation time for every partition finding.
+        Assert-Eq @($f1 | ForEach-Object { $_.Evidence } | ForEach-Object { $_.ObservedUtc.Ticks } | Select-Object -Unique).Count 1 'mesmo horario de observacao em todas as particoes'
+        # Integrated: roots created in a known order; the export lists them by pseudonym; the report lists none; the V0.1
+        # inventory carried by the result keeps its own order.
+        $p = New-TestProfile 'b4dord'
+        $roots = @(1..4 | ForEach-Object { New-TestRoot -ProfileInfo $p -Uuid ('0000000' + $_ + '-0000-0000-0000-000000000000') })
+        $rows = $b4cRows
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $b4cLegacy) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0]) -ProcessSource ({ $rows }.GetNewClosure()) -CpuSampleMs 0 -PseudonymKey $testPseudonymKey
+        $j = (ConvertTo-AtmDiagnoseJson -Result $d) | ConvertFrom-Json
+        $pk = [string[]]@($j.findings | Where-Object { $_.kind -eq 'TempPartition' } | ForEach-Object { $_.key }); $pks = [string[]]$pk.Clone(); [Array]::Sort($pks, [StringComparer]::Ordinal)
+        Assert-True ($pk.Count -eq 4 -and ($pk -join ',') -ceq ($pks -join ',')) 'JSON: particoes em ordem ordinal'
+        Assert-Eq ((@($pk) | Sort-Object) -join ',') ((@($roots | ForEach-Object { & $b4PKey $_ }) | Sort-Object) -join ',') 'JSON: exatamente as particoes criadas, pelos seus pseudonimos'
+        Assert-Eq @($j.findings | Where-Object { $_.kind -eq 'TempPartition' } | ForEach-Object { $_.evidence } | ForEach-Object { $_.observedUtc } | Select-Object -Unique).Count 1 'JSON: um horario de observacao para as particoes'
+        $txt = (Show-AtmDiagnose -Result $d 6>&1 | Out-String)
+        Assert-True (-not ($txt -match '/p-[0-9a-f]{32}')) 'relatorio nao lista particoes individualmente'
+        $invOrder = @($d.Inventory.Partitions | Where-Object { $_.Kind -ne 'NotScanned' -and $_.Kind -ne 'BaseLooseFiles' } | ForEach-Object { $_.Path })
+        $fresh = Inv -Profiles @($p) -Procs $b4cLegacy
+        Assert-Eq ($invOrder -join '|') (@($fresh.Partitions | Where-Object { $_.Kind -ne 'NotScanned' -and $_.Kind -ne 'BaseLooseFiles' } | ForEach-Object { $_.Path }) -join '|') 'inventario V0.1 com a sua propria ordem (nao alterado pelo diagnostico)'
     }
     Test-Case 'Diagnose' 'Identidade real (somente leitura, P1-B4-b): o snapshot da V0.1 e a coleta da P1-B1 dao ao proprio processo o mesmo horario de criacao em ticks' {
         $legacy = Get-AtmProcessSnapshot
