@@ -1843,9 +1843,11 @@ try { Test-AtmSourceIntegrity -SourceDir $Source; 'INTEGRITY=OK' } catch { 'INTE
             Assert-True ($null -ne $msg -and $msg -match 'simulated exception' -and $msg -match 'Nada foi apagado' -and
                 $staging.Count -eq 1 -and $msg.Contains($staging[0].FullName) -and $msg.Contains($prevAt)) "desfazer falhou ($which): erro claro com a posicao de cada copia ($msg)"
             if ($which -eq 'retirada') { Assert-True (-not (Test-Path -LiteralPath $cur)) 'desfazer falhou (retirada): nada foi colocado no lugar da instalacao' }
-            # Manual recovery by rename only, as the message instructs.
+            Assert-True ((Test-Path -LiteralPath "$cur.transaction.json") -and $msg.Contains("$cur.transaction.json")) "desfazer falhou ($which): recuperacao pendente registrada e informada (R-B6)"
+            # Manual recovery by rename only, as the message instructs, then the pending marker is removed.
             if ($which -eq 'restaurada') { Rename-Item -LiteralPath $cur -NewName (Split-Path -Leaf $prev) }
             Rename-Item -LiteralPath $staging[0].FullName -NewName (Split-Path -Leaf $cur)
+            if (Test-Path -LiteralPath "$cur.transaction.json") { [IO.File]::Delete("$cur.transaction.json") }
             Assert-True ((& $tagOf $cur) -eq 'atual' -and (& $tagOf $prev) -eq 'anterior') "recuperacao manual ($which): posicoes originais"
             $r = Invoke-Rb5Cli (Join-Path $cur 'bin\agent-temp.cmd') 'verify'; Assert-Eq $r.Exit 0 "recuperacao manual ($which): instalacao atual integra ($($r.Text))"
         }
@@ -1877,7 +1879,9 @@ try { Test-AtmSourceIntegrity -SourceDir $Source; 'INTEGRITY=OK' } catch { 'INTE
         $s = Get-Content -LiteralPath $f -Raw | ConvertFrom-Json
         $s | Add-Member -NotePropertyName tag -NotePropertyValue $Tag -Force
         [IO.File]::WriteAllText($f, ($s | ConvertTo-Json), (New-Object Text.UTF8Encoding($false))) }
-    $rb6Leftovers = { param([string]$Inst) (@(Get-ChildItem -LiteralPath (Split-Path -Parent $Inst) -Directory | Where-Object { $_.Name -match '^AgentTempManager\.(staging|recovery)-' } | ForEach-Object { $_.Name }) -join ',') }
+    $rb6Leftovers = { param([string]$Inst) (@(@(Get-ChildItem -LiteralPath (Split-Path -Parent $Inst) -Directory | Where-Object { $_.Name -match '^AgentTempManager\.(staging|recovery)-' } | ForEach-Object { $_.Name }) + @(if (Test-Path -LiteralPath "$Inst.transaction.json") { 'transaction.json' })) -join ',') }
+    # Pending recovery only: recovery directories and the transaction marker (intermediate staging copies ignored).
+    $rb6Pending = { param([string]$Inst) (@(@(Get-ChildItem -LiteralPath (Split-Path -Parent $Inst) -Directory | Where-Object { $_.Name -match '^AgentTempManager\.recovery-' } | ForEach-Object { $_.Name }) + @(if (Test-Path -LiteralPath "$Inst.transaction.json") { 'transaction.json' })) -join ',') }
     Test-Case 'Instalacao' 'R-B6 atualizacao: falha ou excecao apos a troca devolve a instalacao e a .previous; recuperacao que falha nao apaga nada; copias de recuperacao bloqueiam novas operacoes e sobrevivem a desinstalacao' {
         $testKey = 'Software\AgentTempManagerTest\EnvB6'
         $cleanupActions.Add({ try { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree('Software\AgentTempManagerTest', $false) } catch { $null = $_ } })
@@ -1977,29 +1981,49 @@ try { Test-AtmSourceIntegrity -SourceDir $Source; 'INTEGRITY=OK' } catch { 'INTE
                 Assert-True ($null -ne $g -and $g.Contains($rec[0].FullName)) "recuperacao falhou ($which): nova atualizacao recusada enquanto ha copia de recuperacao ($g)"
                 $g = $null; try { $null = Restore-AtmPrevious -InstallDir $inst } catch { $g = $_.Exception.Message }
                 Assert-True ($null -ne $g -and $g.Contains($rec[0].FullName)) "recuperacao falhou ($which): rollback recusado enquanto ha copia de recuperacao ($g)"
+                $pathHeld = & $pathSnap
+                $g = $null; try { $null = Uninstall-AtmProduct -InstallDir $inst -TestPathKey $testKey } catch { $g = $_.Exception.Message }
+                Assert-True ($null -ne $g -and $g.Contains($rec[0].FullName) -and $g -match 'Nao desinstale') "recuperacao falhou ($which): desinstalacao recusada ($g)"
                 Assert-Eq @(Get-ChildItem -LiteralPath $pf12 -Directory -Filter 'AgentTempManager.recovery-*').Count 1 "recuperacao falhou ($which): recusas nao mexeram em nada"
+                Assert-True ((& $rb6Tag $rec[0].FullName) -eq 'v2') "recuperacao falhou ($which): copia de recuperacao intacta apos as recusas"
+                if ($which -eq 'nova') { Assert-True ((& $rb6Tag $prev) -eq 'v3' -and (& $rb6Tag $inst) -eq '') 'recuperacao falhou (nova): instalacao e .previous intactas apos as recusas' }
+                else { Assert-True ((& $rb6Tag $inst) -eq 'v3' -and $stg.Count -eq 1 -and (Test-Path -LiteralPath $stg[0].FullName)) 'recuperacao falhou (antiga): instalacao e copia nova intactas apos as recusas' }
+                Assert-Eq (& $pathSnap) $pathHeld "recuperacao falhou ($which): PATH intacto apos as recusas"
+                Assert-True ((Test-Path -LiteralPath "$inst.transaction.json") -and $msg.Contains("$inst.transaction.json")) "recuperacao falhou ($which): transacao pendente registrada e informada"
             } finally { if ($null -ne $script:rb6Lock) { $script:rb6Lock.Dispose() } }
-            # Manual recovery by rename only, as the message instructs.
+            # Manual recovery by rename only, as the message instructs, then the pending marker is removed.
             if ($which -eq 'nova') {
                 Rename-Item -LiteralPath $inst -NewName 'AgentTempManager.staging-0000000a'
                 Rename-Item -LiteralPath $prev -NewName (Split-Path -Leaf $inst)
             }
             Rename-Item -LiteralPath $rec[0].FullName -NewName (Split-Path -Leaf $prev)
+            if (Test-Path -LiteralPath "$inst.transaction.json") { [IO.File]::Delete("$inst.transaction.json") }
             Assert-True ((& $rb6Tag $inst) -eq 'v3' -and (& $rb6Tag $prev) -eq 'v2') "recuperacao manual ($which): posicoes originais"
             Assert-Eq (Invoke-Rb5Cli $cmd 'verify').Exit 0 "recuperacao manual ($which): instalacao integra"
         }
-        # Uninstall sweeps intermediate copies but never a recovery copy (it may hold the only intact installation).
-        Rename-Item -LiteralPath $prev -NewName 'AgentTempManager.recovery-0000000c'
-        $null = Uninstall-AtmProduct -InstallDir $inst -TestPathKey $testKey
-        Assert-True (-not (Test-Path -LiteralPath $inst)) 'desinstalacao: produto removido'
-        Assert-True ((& $rb6Tag (Join-Path $pf12 'AgentTempManager.recovery-0000000c')) -eq 'v2') 'desinstalacao: copia de recuperacao preservada'
-        Assert-Eq @(Get-ChildItem -LiteralPath $pf12 -Directory -Filter 'AgentTempManager.staging-*').Count 0 'desinstalacao: diretorios intermediarios removidos'
-        Assert-Eq (& $pathSnap) 'ExpandString|%SystemRoot%\system32;C:\Outro\Bin' 'desinstalacao: PATH como antes da instalacao'
         # Interrupted between renames (no installation, a .previous): -Update refuses and names it; nothing is changed.
-        Rename-Item -LiteralPath (Join-Path $pf12 'AgentTempManager.recovery-0000000c') -NewName (Split-Path -Leaf $prev)
+        Rename-Item -LiteralPath $inst -NewName 'AgentTempManager.staging-0000000d'
         $g = $null; try { $null = Install-AtmProduct @inArgs -Update } catch { $g = $_.Exception.Message }
         Assert-True ($null -ne $g -and $g.Contains($prev)) "sem instalacao e com .previous: -Update recusado e aponta a .previous ($g)"
         Assert-True ((& $rb6Tag $prev) -eq 'v2' -and -not (Test-Path -LiteralPath $inst)) 'sem instalacao e com .previous: nada alterado'
+        Rename-Item -LiteralPath (Join-Path $pf12 'AgentTempManager.staging-0000000d') -NewName (Split-Path -Leaf $inst)
+        # A recovery copy pending: uninstall refuses before changing anything (PATH, product directories, sweeps).
+        Rename-Item -LiteralPath $prev -NewName 'AgentTempManager.recovery-0000000c'
+        $rc = Join-Path $pf12 'AgentTempManager.recovery-0000000c'
+        $stgBefore = (@(Get-ChildItem -LiteralPath $pf12 -Directory -Filter 'AgentTempManager.staging-*' | ForEach-Object { $_.Name }) -join ',')
+        $pathBefore = & $pathSnap
+        $g = $null; try { $null = Uninstall-AtmProduct -InstallDir $inst -TestPathKey $testKey } catch { $g = $_.Exception.Message }
+        Assert-True ($null -ne $g -and $g.Contains($rc) -and $g -match 'Nao desinstale') "desinstalacao recusada com recuperacao pendente ($g)"
+        Assert-True ((& $rb6Tag $inst) -eq 'v3' -and (& $rb6Tag $rc) -eq 'v2') 'desinstalacao recusada: instalacao e copia de recuperacao intactas'
+        Assert-Eq (Invoke-Rb5Cli $cmd 'verify').Exit 0 'desinstalacao recusada: instalacao integra'
+        Assert-Eq (& $pathSnap) $pathBefore 'desinstalacao recusada: PATH intacto'
+        Assert-Eq (@(Get-ChildItem -LiteralPath $pf12 -Directory -Filter 'AgentTempManager.staging-*' | ForEach-Object { $_.Name }) -join ',') $stgBefore 'desinstalacao recusada: nada varrido'
+        # Resolved by hand: the normal uninstall works.
+        Rename-Item -LiteralPath $rc -NewName (Split-Path -Leaf $prev)
+        $null = Uninstall-AtmProduct -InstallDir $inst -TestPathKey $testKey
+        Assert-True (-not (Test-Path -LiteralPath $inst) -and -not (Test-Path -LiteralPath $prev)) 'desinstalacao normal: produto e .previous removidos'
+        Assert-Eq (& $rb6Leftovers $inst) '' 'desinstalacao normal: intermediarios varridos, nada pendente'
+        Assert-Eq (& $pathSnap) 'ExpandString|%SystemRoot%\system32;C:\Outro\Bin' 'desinstalacao normal: PATH como antes da instalacao'
     }
     Test-Case 'Instalacao' 'R-B6 rollback: falha na troca e na sua reversao nao apaga nada e informa a posicao de cada copia' {
         $cur = Join-Path $sandbox 'PF13\AgentTempManager'
@@ -2033,17 +2057,184 @@ try { Test-AtmSourceIntegrity -SourceDir $Source; 'INTEGRITY=OK' } catch { 'INTE
                 Assert-True ($null -ne $msg -and $msg -match 'simulated rename failure' -and $msg -match 'Nada foi apagado') "troca e reversao falharam: erro claro ($msg)"
                 Assert-True ($rec.Count -eq 1 -and (& $rb6Tag $rec[0].FullName) -eq 'atual' -and $msg.Contains($rec[0].FullName)) "troca e reversao falharam: copia em uso preservada e informada ($msg)"
                 Assert-True ((& $rb6Tag $prev) -eq 'anterior' -and $msg.Contains($prev) -and -not (Test-Path -LiteralPath $cur)) 'troca e reversao falharam: .previous preservada e informada'
+                Assert-True ((Test-Path -LiteralPath "$cur.transaction.json") -and $msg.Contains("$cur.transaction.json") -and $msg -match 'Nao desinstale') "troca e reversao falharam: transacao pendente registrada e informada ($msg)"
+                $g = $null; try { $null = Uninstall-AtmProduct -InstallDir $cur } catch { $g = $_.Exception.Message }
+                Assert-True ($null -ne $g -and $g.Contains("$cur.transaction.json")) "troca e reversao falharam: desinstalacao recusada ($g)"
+                Assert-True ((& $rb6Tag $rec[0].FullName) -eq 'atual' -and (& $rb6Tag $prev) -eq 'anterior') 'troca e reversao falharam: copias intactas apos a recusa'
                 Microsoft.PowerShell.Management\Rename-Item -LiteralPath $rec[0].FullName -NewName (Split-Path -Leaf $cur)
+                [IO.File]::Delete("$cur.transaction.json")
             } else {
                 # Only the swap fails: reverted, nothing left behind.
                 Assert-True ($null -ne $msg -and $msg -match 'simulated rename failure') "troca falhou: erro ($msg)"
                 Assert-Eq $rec.Count 0 'troca falhou: revertida, nenhuma copia de recuperacao'
+                Assert-True (-not (Test-Path -LiteralPath "$cur.transaction.json")) 'troca falhou: revertida, nada pendente'
             }
             Assert-True ((& $rb6Tag $cur) -eq 'atual' -and (& $rb6Tag $prev) -eq 'anterior') "falha ($case): posicoes originais"
         }
         Assert-Eq (Restore-AtmPrevious -InstallDir $cur) $ver 'rollback integro conclui'
         Assert-True ((& $rb6Tag $cur) -eq 'anterior' -and -not (Test-Path -LiteralPath $prev)) 'rollback integro: versao anterior em uso'
         Assert-Eq (& $rb6Leftovers $cur) '' 'rollback integro: nenhum diretorio intermediario ou de recuperacao'
+    }
+    Test-Case 'Instalacao' 'R-B6 primeira atualizacao (sem .previous): sucesso; falha recuperada; reversao que falha deixa a transacao pendente e update, rollback e desinstalacao recusam sem apagar a versao integra' {
+        $testKey = 'Software\AgentTempManagerTest\EnvB6b'
+        $cleanupActions.Add({ try { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree('Software\AgentTempManagerTest', $false) } catch { $null = $_ } })
+        $k = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($testKey)
+        $k.SetValue('Path', '%SystemRoot%\system32;C:\Outro\Bin', [Microsoft.Win32.RegistryValueKind]::ExpandString); $k.Close()
+        $pathSnap = { $pk = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($testKey); try { [string]$pk.GetValueKind('Path') + '|' + [string]$pk.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } finally { $pk.Close() } }
+        $inst = Join-Path $sandbox 'PF14\AgentTempManager'
+        $prev = "$inst.previous"
+        $marker = "$inst.transaction.json"
+        $pf14 = Split-Path -Parent $inst
+        [void][IO.Directory]::CreateDirectory($pf14)
+        $cmd = Join-Path $inst 'bin\agent-temp.cmd'
+        $inArgs = @{ SourceDir = $srcDir; InstallDir = $inst; TrustSid = $me.Sid; TestPathKey = $testKey; SourceWithoutManifest = $true }
+        $null = Install-AtmProduct @inArgs
+        $path0 = & $pathSnap
+        $script:rb6Real = ${function:Invoke-AtmVerifyInstalled}
+        $script:rb6Inst = $inst
+        # The installed version gets a tag and every .previous is set aside first, so each update below starts with none.
+        $script:rb6Aside = 0
+        $noPrevious = { param([string]$Tag)
+            if (Test-Path -LiteralPath $prev) { $script:rb6Aside++; Rename-Item -LiteralPath $prev -NewName ('AgentTempManager.staging-1000000' + $script:rb6Aside) }
+            & $rb6SetTag $inst $Tag }
+        $refusals = { param([string]$Label)
+            # Update, rollback and uninstall all refuse while the transaction is pending, and name the marker.
+            $g = $null; try { $null = Install-AtmProduct @inArgs -Update } catch { $g = $_.Exception.Message }
+            Assert-True ($null -ne $g -and $g.Contains($marker) -and $g -match 'Nao desinstale') "$($Label): atualizacao recusada com a transacao pendente ($g)"
+            $g = $null; try { $null = Restore-AtmPrevious -InstallDir $inst } catch { $g = $_.Exception.Message }
+            Assert-True ($null -ne $g -and $g.Contains($marker)) "$($Label): rollback recusado ($g)"
+            $g = $null; try { $null = Uninstall-AtmProduct -InstallDir $inst -TestPathKey $testKey } catch { $g = $_.Exception.Message }
+            Assert-True ($null -ne $g -and $g.Contains($marker)) "$($Label): desinstalacao recusada ($g)" }
+        # 1. First update, no .previous: success, nothing pending.
+        & $noPrevious 'v1'
+        $null = Install-AtmProduct @inArgs -Update
+        Assert-True ((& $rb6Tag $inst) -eq '' -and (& $rb6Tag $prev) -eq 'v1') 'primeira atualizacao: nova versao instalada, a anterior em .previous'
+        Assert-Eq (& $rb6Pending $inst) '' 'primeira atualizacao: nada pendente'
+        Assert-Eq (Invoke-Rb5Cli $cmd 'verify').Exit 0 'primeira atualizacao: verify'
+        # 2. First update, verify fails: recovered, nothing pending, no .previous invented.
+        & $noPrevious 'v2'
+        $script:rb6Mode = 'falha'; $script:rb6Msg = $null
+        & {
+            function Invoke-AtmVerifyInstalled {
+                param([string]$InstallDir)
+                if (-not [string]::Equals($InstallDir.TrimEnd('\'), $script:rb6Inst, [StringComparison]::OrdinalIgnoreCase)) { return (& $script:rb6Real -InstallDir $InstallDir) }
+                return [pscustomobject]@{ Ok = $false; Output = 'simulated failure' }
+            }
+            try { $null = Install-AtmProduct @inArgs -Update } catch { $script:rb6Msg = $_.Exception.Message }
+        }
+        Assert-True ($null -ne $script:rb6Msg -and $script:rb6Msg -match 'simulated failure') "primeira atualizacao, verify falha: recusada ($($script:rb6Msg))"
+        Assert-True ((& $rb6Tag $inst) -eq 'v2' -and -not (Test-Path -LiteralPath $prev)) 'primeira atualizacao, verify falha: versao instalada de volta, sem .previous'
+        Assert-Eq (& $rb6Pending $inst) '' 'primeira atualizacao, verify falha: nada pendente'
+        Assert-Eq (& $pathSnap) $path0 'primeira atualizacao, verify falha: PATH inalterado'
+        Assert-Eq (Invoke-Rb5Cli $cmd 'verify').Exit 0 'primeira atualizacao, verify falha: instalacao integra'
+        # 3-4. First update, the reversal fails at its first step (the failed copy cannot be moved out) or at the next
+        # (the installed copy cannot be moved back). No recovery directory exists here: the transaction marker is what
+        # keeps the state pending.
+        foreach ($which in @('primeiro passo', 'passo seguinte')) {
+            $script:rb6Which = $which; $script:rb6Lock = $null; $script:rb6Msg = $null
+            & {
+                function Invoke-AtmVerifyInstalled {
+                    param([string]$InstallDir)
+                    if (-not [string]::Equals($InstallDir.TrimEnd('\'), $script:rb6Inst, [StringComparison]::OrdinalIgnoreCase)) { return (& $script:rb6Real -InstallDir $InstallDir) }
+                    $dir = $(if ($script:rb6Which -eq 'primeiro passo') { $InstallDir } else { "$InstallDir.previous" })
+                    $script:rb6Lock = [IO.File]::Open((Join-Path $dir 'agent-temp.ps1'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+                    throw 'simulated exception'
+                }
+                try { $null = Install-AtmProduct @inArgs -Update } catch { $script:rb6Msg = $_.Exception.Message }
+            }
+            try {
+                $msg = $script:rb6Msg
+                Assert-True ($null -ne $msg -and $msg -match 'simulated exception' -and $msg -match 'Nada foi apagado' -and $msg -match 'Nao desinstale') "reversao falhou ($which): erro claro ($msg)"
+                Assert-True ((Test-Path -LiteralPath $marker) -and $msg.Contains($marker)) "reversao falhou ($which): transacao pendente registrada e informada"
+                Assert-True ((& $rb6Tag $prev) -eq 'v2' -and $msg.Contains($prev)) "reversao falhou ($which): versao integra preservada em .previous e informada"
+                if ($which -eq 'primeiro passo') {
+                    Assert-True ((& $rb6Tag $inst) -eq '' -and $msg.Contains($inst)) 'reversao falhou (primeiro passo): nova versao com falha no lugar, informada'
+                } else {
+                    $failed = @(Get-ChildItem -LiteralPath $pf14 -Directory -Filter 'AgentTempManager.staging-*' | Where-Object { $_.Name -notmatch '^AgentTempManager\.staging-1000000' })
+                    Assert-True (-not (Test-Path -LiteralPath $inst) -and $failed.Count -eq 1 -and $msg.Contains($failed[0].FullName)) "reversao falhou (passo seguinte): nova versao guardada, nao apagada, informada ($msg)"
+                }
+                $pathHeld = & $pathSnap
+                & $refusals "reversao falhou ($which)"
+                Assert-True ((& $rb6Tag $prev) -eq 'v2' -and (Test-Path -LiteralPath $marker)) "reversao falhou ($which): versao integra e marcador intactos apos as recusas"
+                Assert-Eq (& $pathSnap) $pathHeld "reversao falhou ($which): PATH intacto apos as recusas"
+            } finally { if ($null -ne $script:rb6Lock) { $script:rb6Lock.Dispose() } }
+            # Manual recovery by rename only, then the marker is removed; the installation can be updated again.
+            if ($which -eq 'primeiro passo') { Rename-Item -LiteralPath $inst -NewName 'AgentTempManager.staging-2000000a' }
+            Rename-Item -LiteralPath $prev -NewName (Split-Path -Leaf $inst)
+            [IO.File]::Delete($marker)
+            Assert-True ((& $rb6Tag $inst) -eq 'v2' -and (& $rb6Pending $inst) -eq '') "recuperacao manual ($which): versao integra de volta, nada pendente"
+            Assert-Eq (Invoke-Rb5Cli $cmd 'verify').Exit 0 "recuperacao manual ($which): instalacao integra"
+            $null = Install-AtmProduct @inArgs -Update
+            Assert-True ((& $rb6Tag $prev) -eq 'v2' -and (& $rb6Pending $inst) -eq '') "recuperacao manual ($which): atualizar volta a funcionar"
+            & $noPrevious 'v2'
+        }
+        # The normal uninstall still works and sweeps only intermediate copies.
+        $null = Uninstall-AtmProduct -InstallDir $inst -TestPathKey $testKey
+        Assert-True (-not (Test-Path -LiteralPath $inst) -and (& $rb6Leftovers $inst) -eq '') 'desinstalacao normal apos as recuperacoes'
+        Assert-Eq (& $pathSnap) 'ExpandString|%SystemRoot%\system32;C:\Outro\Bin' 'desinstalacao normal: PATH como antes da instalacao'
+    }
+    Test-Case 'Instalacao' 'R-B6 mensagens de recuperacao nao dependem do catalogo: com um catalogo sem as chaves de recuperacao (como o da V0.1) trazem motivo, posicoes, estado pendente e a orientacao de nao desinstalar' {
+        $repoDir = Split-Path -Parent $testsDir
+        # A package without a manifest (git checkout): uninstall and rollback load the installed copy's catalog.
+        $pkg = Join-Path $sandbox 'pkg-rb6'
+        foreach ($d in @('src', 'install')) { $t = Join-Path $pkg $d; [void][IO.Directory]::CreateDirectory($t); Copy-AtmTree -From (Join-Path $repoDir $d) -To $t }
+        $cur = Join-Path $sandbox 'PF15\AgentTempManager'
+        $prev = "$cur.previous"
+        $pf15 = Split-Path -Parent $cur
+        $ver = Get-AtmSourceVersion -SourceDir $srcDir
+        $recKeys = "'inst\.(rollbackUndoFailed|rollbackVerifyFailed|updateRestored|updateUndoFailed|recoveryPending|recoveryLeftover|recoveryKept|interruptedPrevious|stagingVerifyFailed)'"
+        foreach ($d in @(@{ P = $cur; T = 'atual' }, @{ P = $prev; T = 'anterior' })) {
+            [void][IO.Directory]::CreateDirectory($d.P)
+            Copy-AtmTree -From $srcDir -To $d.P
+            # The installed catalog without any recovery key, as V0.1's (verified: the manifest is written after it).
+            $i18n = Join-Path $d.P 'lib\I18n.ps1'
+            $old = @([IO.File]::ReadAllText($i18n) -split "`r`n" | Where-Object { $_ -notmatch $recKeys }) -join "`r`n"
+            [IO.File]::WriteAllText($i18n, $old, (New-Object Text.UTF8Encoding($true)))
+            Write-AtmManifest -Root $d.P -Version $ver
+            [IO.File]::WriteAllText((Join-Path $d.P 'install-state.json'), '{ "product": "Agent Temp Manager", "version": "' + $ver + '", "pathAddedByInstaller": false, "tag": "' + $d.T + '" }')
+        }
+        $cleanupActions.Add({ try { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree('Software\AgentTempManagerTest', $false) } catch { $null = $_ } })
+        $probe = Join-Path $sandbox 'rb6-probe.ps1'
+        [IO.File]::WriteAllText($probe, @'
+param([string]$Common, [string]$InstallDir, [string]$Source, [string]$Mode)
+$ErrorActionPreference = 'Stop'
+$script:AtmCatalogInstallDir = $InstallDir
+. $Common
+'CATALOG=' + (Get-AtmText 'inst.noPrevious' 'x') + ' RECOVERYKEY=' + (Get-AtmText 'inst.recoveryPending' 'x')
+$script:n = 0
+function Rename-Item { param([string]$LiteralPath, [string]$NewName) $script:n++; if ($Mode -eq 'undo' -and $script:n -ge 2) { throw 'simulated rename failure' }; Microsoft.PowerShell.Management\Rename-Item -LiteralPath $LiteralPath -NewName $NewName }
+foreach ($op in $(if ($Mode -eq 'undo') { @('restore') } else { @('uninstall', 'restore', 'update') })) {
+    try {
+        switch ($op) {
+            'uninstall' { $null = Uninstall-AtmProduct -InstallDir $InstallDir -TestPathKey 'Software\AgentTempManagerTest\EnvB6c' }
+            'restore' { $null = Restore-AtmPrevious -InstallDir $InstallDir }
+            'update' { $null = Install-AtmProduct -SourceDir $Source -InstallDir $InstallDir -Update -SkipPath -SourceWithoutManifest -TrustSid 'S-1-5-32-544' }
+        }
+        "MSG[$op]=(none)"
+    } catch { "MSG[$op]=" + $_.Exception.Message }
+}
+'@)
+        $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $runProbe = { param([string]$Mode) $ErrorActionPreference = 'Continue'; $o = & $ps -NoProfile -ExecutionPolicy Bypass -File $probe -Common (Join-Path $pkg 'install\InstallCommon.ps1') -InstallDir $cur -Source (Join-Path $pkg 'src') -Mode $Mode 2>&1; @($o | ForEach-Object { "$_" }) }
+        # Pending recovery (a recovery directory): the three operations refuse with a complete built-in message.
+        $rc = "$cur.recovery-0000000e"
+        [void][IO.Directory]::CreateDirectory($rc)
+        $out = & $runProbe 'guard'
+        $txt = $out -join ' '
+        Assert-True ($txt -match 'CATALOG=Nenhuma' -and $txt -match 'RECOVERYKEY=\[inst\.recoveryPending\]') "catalogo antigo carregado e sem as chaves de recuperacao ($txt)"
+        foreach ($op in @('uninstall', 'restore', 'update')) {
+            $line = @($out | Where-Object { $_ -like "MSG[$op]=*" }) -join ' '
+            Assert-True ($line.Contains($rc) -and $line -match 'pendente' -and $line -match 'pending' -and $line -match 'Nao desinstale' -and $line -notmatch '\[inst\.') "$($op): mensagem completa sem depender do catalogo ($line)"
+        }
+        Assert-True ((& $rb6Tag $cur) -eq 'atual' -and (& $rb6Tag $prev) -eq 'anterior' -and (Test-Path -LiteralPath $rc)) 'recusas com catalogo antigo: nada alterado'
+        # A rollback whose swap and reversal fail: the message names every copy and the pending marker.
+        Rename-Item -LiteralPath $rc -NewName 'AgentTempManager.staging-0000000e'
+        $out = & $runProbe 'undo'
+        $line = @($out | Where-Object { $_ -like 'MSG[restore]=*' }) -join ' '
+        $retired = @(Get-ChildItem -LiteralPath $pf15 -Directory -Filter 'AgentTempManager.recovery-*')
+        Assert-True ($retired.Count -eq 1 -and $line.Contains($retired[0].FullName) -and $line.Contains($prev) -and $line.Contains("$cur.transaction.json")) "rollback que nao reverte: posicoes e marcador na mensagem ($line)"
+        Assert-True ($line -match 'simulated rename failure' -and $line -match 'Nada foi apagado' -and $line -match 'Nao desinstale' -and $line -notmatch '\[inst\.') "rollback que nao reverte: motivo e orientacao sem o catalogo ($line)"
+        Assert-True ($retired.Count -eq 1 -and (& $rb6Tag $retired[0].FullName) -eq 'atual' -and (& $rb6Tag $prev) -eq 'anterior') 'rollback que nao reverte: copias preservadas'
     }
     Test-Case 'Instalacao' 'Auditoria de ACL: escrita por Users/Everyone e detectada; Program Files padrao e aceito' {
         $d = Join-Path $sandbox 'aclcheck'; [void][IO.Directory]::CreateDirectory($d); [IO.File]::WriteAllText((Join-Path $d 'x.ps1'), '#')
