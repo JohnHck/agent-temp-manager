@@ -2449,6 +2449,8 @@ try {
             Assert-True (-not (Test-Path -LiteralPath $fresh)) 'instalacao em andamento: a recusada nao criou o destino'
             Assert-Eq (& $rb6Release $h) 'RESULT=OK' 'instalacao detentora concluiu'
             Assert-Eq (Invoke-Rb5Cli (Join-Path $fresh 'bin\agent-temp.cmd') 'verify').Exit 0 'instalacao detentora: instalacao integra'
+            # (that installation added its own bin to the test PATH key: the reference for the cases below)
+            $path0 = & $pathSnap
             # 4. An exception in an update holder: lock released, installation and .previous intact, next update runs.
             $h = & $rb6StartHolder 'update' $inst 'staging' $testKey -Throw; $holders += $h
             Assert-True $h.Ready 'atualizacao detentora (excecao) chegou ao portao'
