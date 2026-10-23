@@ -3871,7 +3871,9 @@ try {
         Assert-True (-not $dv.AgentResources.Complete -and @($dv.AgentResources.Reasons) -contains 'CPU_NOT_SAMPLED' -and $null -eq $dv.AgentResources.Counters.CpuPercent.Sum) 'CPU nao amostrada: parcial, nunca 0'
     }
     Test-Case 'Diagnose' 'Sessoes (P1-B4-c): perfis agregados num registro por provider, colisao de chave e entradas conflitantes ficam UNKNOWN sem sobrescrever, evidencia positiva mantida, ordem das entradas irrelevante' {
-        $c = Get-AtmProcessCollection -Source ({ $b4cRows }.GetNewClosure())
+        # GetNewClosure captures only local variables: the shared rows are copied into one first.
+        $rows = $b4cRows
+        $c = Get-AtmProcessCollection -Source ({ $rows }.GetNewClosure())
         $claude = @(& $b4Hints 'claude-code' @([pscustomobject]@{ ImageName = 'claude.exe'; CommandLineMarker = $null }))
         $reg = { param($Sid, $Path, $Entries, $Readable = $true, $Unparseable = 0) [pscustomobject]@{ ProviderId = 'claude-code'; Registry = [pscustomobject]@{ Readable = $Readable; Unparseable = $Unparseable; Entries = @($Entries) }; Error = $null; ProfileSid = $Sid; ProfilePath = $Path } }
         $e = { param($Session, $ProcessId, $Start) [pscustomobject]@{ SessionId = $Session; Pid = $ProcessId; StartUtc = $Start } }
@@ -3918,9 +3920,23 @@ try {
         $r1 = Get-AtmAgentRuntimeFindings -Collection $c -ProviderHints $claude -SessionRegistries @($two, $okB) -SelfKeys $self
         $r2 = Get-AtmAgentRuntimeFindings -Collection $c -ProviderHints $claude -SessionRegistries @($okB, $twoRev) -SelfKeys $selfRev
         Assert-Eq (& $sig $r2) (& $sig $r1) 'ordem de registros, entradas e SELF: resultado literal identico'
+        # Reasons in coverage records: the same literal order whatever the order of providers and profiles (D6).
+        $mixRows = @($b4cRows) + @((& $b4Row 9998 4 'nodate.exe' $null))
+        $cm = Get-AtmProcessCollection -Source ({ $mixRows }.GetNewClosure())
+        $ha = & $b4Hints 'fake-a' @([pscustomobject]@{ ImageName = 'node.exe'; CommandLineMarker = '--x' })
+        $hb = & $b4Hints 'fake-b' @([pscustomobject]@{ ImageName = 'nodate.exe'; CommandLineMarker = $null })
+        $ra = & $reg 'S-1-5-21-9' 'D:\profiles\a' @() $false
+        $rb = [pscustomobject]@{ ProviderId = 'claude-code'; Registry = $null; Error = 'IOException'; ProfileSid = 'S-1-5-21-9'; ProfilePath = 'D:\profiles\b' }
+        $rcv = { param($R) @($R.Coverage | ForEach-Object { $_.Collector + '=' + $_.Status + ':' + (@($_.Reasons) -join '+') }) + @('totals:' + (@($R.Totals.Reasons) -join '+')) -join "`n" }
+        $m1 = Get-AtmAgentRuntimeFindings -Collection $cm -ProviderHints @($ha, $hb) -SessionRegistries @($ra, $rb)
+        $m2 = Get-AtmAgentRuntimeFindings -Collection $cm -ProviderHints @($hb, $ha) -SessionRegistries @($rb, $ra)
+        Assert-True (@(@($m1.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0].Reasons).Count -ge 3 -and @(@($m1.Coverage | Where-Object { $_.Collector -eq 'sessions-claude-code' })[0].Reasons).Count -ge 3) 'varios motivos nos registros comparados'
+        Assert-Eq (& $rcv $m2) (& $rcv $m1) 'motivos na mesma ordem literal com providers e perfis invertidos'
     }
     Test-Case 'Diagnose' 'Saida durante a execucao e recursos (P1-B4-c): evidencia so entre duas coletas completas; CPU sem segunda amostra ou com prazo insuficiente fica parcial; zero processos so com cobertura conclusiva' {
-        $c = Get-AtmProcessCollection -Source ({ $b4cRows }.GetNewClosure())
+        # GetNewClosure captures only local variables: the shared rows are copied into one first.
+        $rows = $b4cRows
+        $c = Get-AtmProcessCollection -Source ({ $rows }.GetNewClosure())
         $claude = @(& $b4Hints 'claude-code' @([pscustomobject]@{ ImageName = 'claude.exe'; CommandLineMarker = $null }))
         $regs = @([pscustomobject]@{ ProviderId = 'claude-code'; Registry = [pscustomobject]@{ Readable = $true; Unparseable = 0; Entries = @([pscustomobject]@{ SessionId = 'x1'; Pid = 202; StartUtc = $b4T0.AddMinutes(2) }) }; Error = $null })
         $exitedRows = @($b4cRows | Where-Object { $_.ProcessId -ne 203 -and $_.ProcessId -ne 202 })

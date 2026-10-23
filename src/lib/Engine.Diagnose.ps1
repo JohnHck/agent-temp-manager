@@ -918,6 +918,14 @@ function Get-AtmOrdinalSorted {
     return @($keys | ForEach-Object { $arr[[int]$_.Substring($_.LastIndexOf([char]0) + 1)] })
 }
 
+function Get-AtmSortedCodes {
+    # Distinct codes in ordinal order: the reasons of the runtime records never depend on the order of the inputs.
+    param($Codes)
+    $a = [string[]]@($Codes | Where-Object { $_ } | ForEach-Object { [string]$_ } | Select-Object -Unique)
+    [Array]::Sort($a, [StringComparer]::Ordinal)
+    return $a
+}
+
 function Get-AtmAgentRuntimeFindings {
     <#
       Process and AgentSession findings for the agents of the providers, from evidence only (ADR-0003 rule 5):
@@ -1071,7 +1079,7 @@ function Get-AtmAgentRuntimeFindings {
     [Array]::Sort($groupKeys, [StringComparer]::Ordinal)
     foreach ($gk in $groupKeys) {
         $g = $regGroups[$gk]
-        $rs = @($g.Reasons | Select-Object -Unique)
+        $rs = @(Get-AtmSortedCodes $g.Reasons)
         # Every profile failed: FAILED; some gap: PARTIAL; all read: COMPLETE.
         $status = $(if ($g.Usable -eq 0 -and $rs.Count -gt 0) { 'FAILED' } elseif ($rs.Count -gt 0) { 'PARTIAL' } else { 'COMPLETE' })
         $regCov = New-AtmCoverage -Collector $gk -Status $status -Reasons $rs -ElevationWouldHelp $(if ($status -eq 'COMPLETE') { 'NO' } elseif ($null -eq $g.Provider) { 'NO' } else { 'UNKNOWN' }) -Observed $g.Entries.Count
@@ -1183,7 +1191,7 @@ function Get-AtmAgentRuntimeFindings {
         $coverage.Add($agentCov)
     } else {
         if ($snapCov.Status -cne 'COMPLETE') { $reasons.Add('PROCESS_SNAPSHOT_INCOMPLETE') }
-        $rs = @($reasons | Select-Object -Unique)
+        $rs = @(Get-AtmSortedCodes $reasons)
         # Nothing was searched (no matcher, no session registry, no path reference): not observable, never "no agent".
         if ($matcherCount -eq 0 -and $registries.Count -eq 0 -and $refPids.Count -eq 0) { $agentCov = New-AtmCoverage -Collector 'agent-processes' -Status 'NOT_OBSERVABLE' -Reasons (@('NO_RUNTIME_EVIDENCE_SOURCE') + $rs) -ElevationWouldHelp 'NO' }
         else { $agentCov = New-AtmCoverage -Collector 'agent-processes' -Status $(if ($rs.Count -gt 0) { 'PARTIAL' } else { 'COMPLETE' }) -Reasons $rs -ElevationWouldHelp $(if ($rs.Count -eq 0) { 'NO' } else { 'UNKNOWN' }) -Observed $agentKeys.Count }
@@ -1270,7 +1278,7 @@ function Get-AtmAgentResourceTotals {
         }
         $counters[$n] = [pscustomobject]@{ Sum = $sum; Known = $known; Complete = $complete }
     }
-    $rs = @($reasons | Select-Object -Unique)
+    $rs = @(Get-AtmSortedCodes $reasons)
     [pscustomobject]@{
         Processes     = $members.Count
         Complete      = ($rs.Count -eq 0)
