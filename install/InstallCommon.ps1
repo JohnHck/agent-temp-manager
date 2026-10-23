@@ -47,7 +47,14 @@ elseif (-not $atmCatalog) {
         'inst.syntax'             = 'Syntax error / Erro de sintaxe: {0}: {1}'
         'inst.previousIntegrity'  = 'The previous version failed its integrity check; nothing was changed. / A versao anterior falhou na verificacao de integridade; nada foi alterado. {0}'
         'inst.rollbackVerifyFailed' = 'Verification after rollback failed; both versions were put back where they were. / Verificacao apos rollback falhou; as duas versoes voltaram para onde estavam. {0}'
-        'inst.rollbackUndoFailed' = 'Verification after rollback failed ({0}) and putting the versions back also failed ({1}). Nothing was deleted. The version that was current is in {2}; the previous version is in {3}. Rename them back by hand (the previous version to {4}.previous, then {2} to {4}) before running uninstall, which removes {2}. / A verificacao apos rollback falhou ({0}) e devolver as versoes tambem falhou ({1}). Nada foi apagado. A versao que estava em uso esta em {2}; a versao anterior esta em {3}. Renomeie-as de volta manualmente (a versao anterior para {4}.previous e depois {2} para {4}) antes de executar a desinstalacao, que remove {2}.'
+        'inst.rollbackUndoFailed' = 'Verification after rollback failed ({0}) and putting the versions back also failed ({1}). Nothing was deleted. The version that was current is in {2}; the previous version is in {3}. Rename them back by hand (the previous version to {4}.previous, then {2} to {4}). Uninstall leaves {2} in place, and updates and rollbacks are refused until it is resolved. / A verificacao apos rollback falhou ({0}) e devolver as versoes tambem falhou ({1}). Nada foi apagado. A versao que estava em uso esta em {2}; a versao anterior esta em {3}. Renomeie-as de volta manualmente (a versao anterior para {4}.previous e depois {2} para {4}). A desinstalacao mantem {2}, e atualizacoes e rollbacks sao recusados ate que isso seja resolvido.'
+        'inst.stagingVerifyFailed' = 'The new version failed its own verification before anything was replaced; nothing was changed: {0} / A nova versao falhou na propria verificacao antes de qualquer substituicao; nada foi alterado: {0}'
+        'inst.updateRestored' = 'The update failed after the swap; the installed version and its previous version were put back: {0} / A atualizacao falhou apos a troca; a versao instalada e a versao anterior voltaram para onde estavam: {0}'
+        'inst.updateUndoFailed' = 'The update failed ({0}) and putting the versions back also failed ({1}). Nothing was deleted. The version that was installed is in {2}; the older previous version is in {3}; the new version is in {4}. Rename them back by hand (the installed version to {5}, the older previous version to {5}.previous). Updates and rollbacks are refused until no {5}.recovery-* directory is left. / A atualizacao falhou ({0}) e devolver as versoes tambem falhou ({1}). Nada foi apagado. A versao que estava instalada esta em {2}; a versao anterior mais antiga esta em {3}; a nova versao esta em {4}. Renomeie-as de volta manualmente (a versao instalada para {5}, a anterior mais antiga para {5}.previous). Atualizacoes e rollbacks sao recusados enquanto existir algum diretorio {5}.recovery-*.'
+        'inst.recoveryPending' = 'Recovery copies from a failed recovery or an interrupted operation exist: {0}. Nothing was changed. One of them may be the only intact installation: put the intact version back by hand (rename), remove what is no longer needed, then try again. / Existem copias de recuperacao de uma recuperacao que falhou ou de uma operacao interrompida: {0}. Nada foi alterado. Uma delas pode ser a unica instalacao integra: devolva a versao integra manualmente (renomeando), remova o que nao for mais necessario e tente de novo.'
+        'inst.recoveryLeftover' = 'The operation completed, but {0} could not be removed. Remove it by hand: updates and rollbacks are refused while a recovery copy exists. / A operacao foi concluida, mas nao foi possivel remover {0}. Remova-o manualmente: atualizacoes e rollbacks sao recusados enquanto existir uma copia de recuperacao.'
+        'inst.recoveryKept' = 'Recovery copies were left in place (they may hold an intact installation): {0} / Copias de recuperacao foram mantidas (podem conter uma instalacao integra): {0}'
+        'inst.interruptedPrevious' = 'No installation in {0}, but a previous version exists in {1} (an interrupted update or rollback?). Nothing was changed. Rename it to {0} by hand, or install without -Update. / Nenhuma instalacao em {0}, mas existe uma versao anterior em {1} (atualizacao ou rollback interrompido?). Nada foi alterado. Renomeie-a para {0} manualmente ou instale sem -Update.'
     }
     function Get-AtmText {
         $key = [string]$args[0]
@@ -168,7 +175,8 @@ function Test-AtmInstallAcl {
 }
 
 function Remove-AtmOwnTree {
-    # Removes ONLY the product's own directories: <InstallDir>, <InstallDir>.previous, <InstallDir>.staging-<8 hex>.
+    # Removes ONLY the product's own directories: <InstallDir>, <InstallDir>.previous, <InstallDir>.staging-<8 hex>,
+    # <InstallDir>.recovery-<8 hex> (the last only when named explicitly; nothing sweeps them, R-B6).
     # Refuses reparse points anywhere in the tree.
     param([string]$Path, [string]$InstallDir)
     if (-not (Test-Path -LiteralPath $Path)) { return }
@@ -176,7 +184,7 @@ function Remove-AtmOwnTree {
     $inst = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
     $ok = [string]::Equals($full, $inst, [StringComparison]::OrdinalIgnoreCase) -or
           [string]::Equals($full, "$inst.previous", [StringComparison]::OrdinalIgnoreCase) -or
-          ($full.StartsWith("$inst.staging-", [StringComparison]::OrdinalIgnoreCase) -and $full.Substring($inst.Length) -match '^\.staging-[0-9a-f]{8}$')
+          ($full.StartsWith("$inst.", [StringComparison]::OrdinalIgnoreCase) -and $full.Substring($inst.Length) -match '^\.(staging|recovery)-[0-9a-f]{8}$')
     if (-not $ok) { throw (Get-AtmText 'inst.notProductDir' $Path) }
     foreach ($i in @(Get-Item -LiteralPath $full -Force) + @(Get-ChildItem -LiteralPath $full -Recurse -Force)) {
         if (($i.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw (Get-AtmText 'inst.reparseRefused' $i.FullName) }
@@ -273,6 +281,40 @@ function Remove-AtmMachinePath {
     return $true
 }
 
+function New-AtmSiblingDir {
+    # A sibling name for the product: <InstallDir>.staging-<8 hex> (intermediate, swept by uninstall) or
+    # <InstallDir>.recovery-<8 hex> (a copy that may be the only intact installation; never swept, R-B6).
+    param([string]$InstallDir, [ValidateSet('staging', 'recovery')][string]$Kind)
+    return "$InstallDir.$Kind-" + [guid]::NewGuid().ToString('N').Substring(0, 8)
+}
+
+function Get-AtmRecoveryDirs {
+    param([string]$InstallDir)
+    $leaf = Split-Path -Leaf $InstallDir
+    return @(Get-ChildItem -LiteralPath (Split-Path -Parent $InstallDir) -Directory -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name.Length -gt $leaf.Length -and $_.Name.StartsWith($leaf, [StringComparison]::OrdinalIgnoreCase) -and $_.Name.Substring($leaf.Length) -match '^\.recovery-[0-9a-f]{8}$' } |
+        ForEach-Object { $_.FullName })
+}
+
+function Assert-AtmNoRecoveryPending {
+    # A recovery copy means an earlier failed recovery or an interrupted operation: an administrator decides what to
+    # keep. Nothing is recovered silently and nothing is changed while one exists.
+    param([string]$InstallDir)
+    $r = @(Get-AtmRecoveryDirs -InstallDir $InstallDir)
+    if ($r.Count -gt 0) { throw (Get-AtmText 'inst.recoveryPending' ($r -join '; ')) }
+}
+
+function Invoke-AtmRenameSteps {
+    # Renames each step (Key, From, To) in order and records where each copy now is in $Where; stops at the first
+    # failure and returns its message ($null when every step succeeded). Never deletes anything.
+    param([object[]]$Steps, [hashtable]$Where)
+    foreach ($s in $Steps) {
+        try { Rename-Item -LiteralPath $s.From -NewName (Split-Path -Leaf $s.To) } catch { return $_.Exception.Message }
+        $Where[$s.Key] = $s.To
+    }
+    return $null
+}
+
 function Invoke-AtmVerifyInstalled {
     param([string]$InstallDir)
     $out = & cmd.exe /c "`"$(Join-Path $InstallDir 'bin\agent-temp.cmd')`" verify" 2>&1
@@ -299,9 +341,15 @@ function Install-AtmProduct {
     Test-AtmSourceIntegrity -SourceDir $SourceDir -AllowNoManifest:$SourceWithoutManifest
 
     # 2. Existing installation handling.
+    Assert-AtmNoRecoveryPending -InstallDir $InstallDir
     $exists = Test-Path -LiteralPath $InstallDir
+    $previous = "$InstallDir.previous"
     if ($exists -and -not $Update) { throw (Get-AtmText 'inst.alreadyInstalled' $InstallDir) }
-    if (-not $exists -and $Update) { throw (Get-AtmText 'inst.nothingToUpdate' $InstallDir) }
+    if (-not $exists -and $Update) {
+        # No installation but a previous version: an interrupted update or rollback. Nothing is guessed or moved.
+        if (Test-Path -LiteralPath (Join-Path $previous 'install-state.json')) { throw (Get-AtmText 'inst.interruptedPrevious' $InstallDir $previous) }
+        throw (Get-AtmText 'inst.nothingToUpdate' $InstallDir)
+    }
     if ($exists) {
         if (([IO.File]::GetAttributes($InstallDir) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw (Get-AtmText 'inst.targetReparse') }
         if (-not (Test-Path -LiteralPath (Join-Path $InstallDir 'install-state.json'))) { throw (Get-AtmText 'inst.targetForeign') }
@@ -335,26 +383,69 @@ function Install-AtmProduct {
         throw
     }
 
-    # 4. Swap (keeps exactly one previous version for rollback).
-    $previous = "$InstallDir.previous"
-    if ($exists) {
-        if (Test-Path -LiteralPath $previous) { Remove-AtmOwnTree -Path $previous -InstallDir $InstallDir }
-        Rename-Item -LiteralPath $InstallDir -NewName (Split-Path -Leaf $previous)
+    # 3b. The staged copy runs its own verify before anything moves: a failure changes nothing.
+    $stagedFailure = $null
+    try {
+        $sv = Invoke-AtmVerifyInstalled -InstallDir $staging
+        if (-not $sv.Ok) { $stagedFailure = [string]$sv.Output }
+    } catch { $stagedFailure = $_.Exception.Message }
+    if ($null -ne $stagedFailure) {
+        Remove-AtmOwnTree -Path $staging -InstallDir $InstallDir
+        throw (Get-AtmText 'inst.stagingVerifyFailed' $stagedFailure)
     }
-    Rename-Item -LiteralPath $staging -NewName (Split-Path -Leaf $InstallDir)
 
-    # 5. PATH, preserving REG_EXPAND_SZ.
+    # 4. Swap. Nothing is deleted before the new version verified (R-B6): an older .previous is set aside in a
+    # recovery directory, the installed copy becomes .previous and the staged copy takes its place. $where tracks
+    # each copy, so that every failure up to the end of 6 can put them back, or say where they were left.
+    $where = @{ installed = $null; older = $null; new = $staging }
+    $olderAside = $null
     $bin = Join-Path $InstallDir 'bin'
     $pathAdded = $false
-    if (-not $SkipPath) { $pathAdded = Add-AtmMachinePath -Dir $bin -TestKeyPath $TestPathKey }
+    try {
+        if ($exists) {
+            $where.installed = $InstallDir
+            if (Test-Path -LiteralPath $previous) {
+                $where.older = $previous
+                $olderAside = New-AtmSiblingDir -InstallDir $InstallDir -Kind recovery
+                Rename-Item -LiteralPath $previous -NewName (Split-Path -Leaf $olderAside); $where.older = $olderAside
+            }
+            Rename-Item -LiteralPath $InstallDir -NewName (Split-Path -Leaf $previous); $where.installed = $previous
+        }
+        Rename-Item -LiteralPath $staging -NewName (Split-Path -Leaf $InstallDir); $where.new = $InstallDir
 
-    # 6. State + verification.
-    $state = [ordered]@{ product = 'Agent Temp Manager'; version = $version; installedUtc = [datetime]::UtcNow.ToString('o'); installDir = $InstallDir; binOnPath = (-not $SkipPath); pathAddedByInstaller = ($pathAdded -or $pathAddedBefore) }
-    [IO.File]::WriteAllText((Join-Path $InstallDir 'install-state.json'), ($state | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
-    $acl = Test-AtmInstallAcl -Path $InstallDir -AlsoTrustSid $TrustSid
-    if (-not $acl.Ok) { throw (Get-AtmText 'inst.aclInstalled' ($acl.Problems -join '; ')) }
-    $v = Invoke-AtmVerifyInstalled -InstallDir $InstallDir
-    if (-not $v.Ok) { throw (Get-AtmText 'inst.verifyFailed' $v.Output) }
+        # 5. PATH, preserving REG_EXPAND_SZ.
+        if (-not $SkipPath) { $pathAdded = Add-AtmMachinePath -Dir $bin -TestKeyPath $TestPathKey }
+
+        # 6. State + verification.
+        $state = [ordered]@{ product = 'Agent Temp Manager'; version = $version; installedUtc = [datetime]::UtcNow.ToString('o'); installDir = $InstallDir; binOnPath = (-not $SkipPath); pathAddedByInstaller = ($pathAdded -or $pathAddedBefore) }
+        [IO.File]::WriteAllText((Join-Path $InstallDir 'install-state.json'), ($state | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
+        $acl = Test-AtmInstallAcl -Path $InstallDir -AlsoTrustSid $TrustSid
+        if (-not $acl.Ok) { throw (Get-AtmText 'inst.aclInstalled' ($acl.Problems -join '; ')) }
+        $v = Invoke-AtmVerifyInstalled -InstallDir $InstallDir
+        if (-not $v.Ok) { throw (Get-AtmText 'inst.verifyFailed' $v.Output) }
+    } catch {
+        # A first installation has nothing to put back (V0.1 behaviour).
+        if (-not $exists) { throw }
+        $failure = $_.Exception.Message
+        # Reverse order: the failed new copy out of the way, the installed copy back, the older .previous back.
+        $steps = @()
+        if ($where.new -eq $InstallDir) { $steps += @{ Key = 'new'; From = $InstallDir; To = (New-AtmSiblingDir -InstallDir $InstallDir -Kind staging) } }
+        if ($where.installed -eq $previous) { $steps += @{ Key = 'installed'; From = $previous; To = $InstallDir } }
+        if ($null -ne $olderAside -and $where.older -eq $olderAside) { $steps += @{ Key = 'older'; From = $olderAside; To = $previous } }
+        $undo = Invoke-AtmRenameSteps -Steps $steps -Where $where
+        if ($null -ne $undo) {
+            # Nothing more is moved or deleted; the recovery copy (if any) blocks further operations until resolved.
+            throw (Get-AtmText 'inst.updateUndoFailed' $failure $undo $where.installed $(if ($null -ne $where.older) { $where.older } else { '-' }) $where.new $InstallDir)
+        }
+        if ($pathAdded) { $null = Remove-AtmMachinePath -Dir $bin -TestKeyPath $TestPathKey }
+        # Only now that both intact copies are back is the failed new copy removed (an intermediate directory).
+        try { Remove-AtmOwnTree -Path $where.new -InstallDir $InstallDir } catch { Write-Warning (Get-AtmText 'inst.recoveryLeftover' $where.new) }
+        throw (Get-AtmText 'inst.updateRestored' $failure)
+    }
+    # The new version verified: the older .previous is no longer needed.
+    if ($null -ne $olderAside) {
+        try { Remove-AtmOwnTree -Path $olderAside -InstallDir $InstallDir } catch { Write-Warning (Get-AtmText 'inst.recoveryLeftover' $olderAside) }
+    }
     return [pscustomobject]@{ Version = $version; InstallDir = $InstallDir; PreviousKept = (Test-Path -LiteralPath $previous); PathAdded = $pathAdded }
 }
 
@@ -363,15 +454,25 @@ function Restore-AtmPrevious {
     param([string]$InstallDir)
     $InstallDir = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
     $previous = "$InstallDir.previous"
+    Assert-AtmNoRecoveryPending -InstallDir $InstallDir
     if (-not (Test-Path -LiteralPath (Join-Path $previous 'install-state.json'))) { throw (Get-AtmText 'inst.noPrevious' $previous) }
     if (-not (Test-Path -LiteralPath (Join-Path $InstallDir 'install-state.json'))) { throw (Get-AtmText 'inst.noCurrent' $InstallDir) }
     # The previous copy is checked in this process (manifest, SHA-256, exact file set) before anything moves: an
     # altered or damaged copy never replaces the current one and none of its code runs (R-B5).
     try { Test-AtmSourceIntegrity -SourceDir $previous -InstalledCopy } catch { throw (Get-AtmText 'inst.previousIntegrity' $_.Exception.Message) }
-    $retired = "$InstallDir.staging-" + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    # The retired copy is a recovery directory (R-B6): if it cannot be put back, nothing sweeps it.
+    $retired = New-AtmSiblingDir -InstallDir $InstallDir -Kind recovery
     Rename-Item -LiteralPath $InstallDir -NewName (Split-Path -Leaf $retired)
     try { Rename-Item -LiteralPath $previous -NewName (Split-Path -Leaf $InstallDir) }
-    catch { Rename-Item -LiteralPath $retired -NewName (Split-Path -Leaf $InstallDir); throw }
+    catch {
+        $swapError = $_
+        try { Rename-Item -LiteralPath $retired -NewName (Split-Path -Leaf $InstallDir) }
+        catch {
+            $prevAt = $(if (Test-Path -LiteralPath $previous) { $previous } else { $InstallDir })
+            throw (Get-AtmText 'inst.rollbackUndoFailed' $swapError.Exception.Message $_.Exception.Message $retired $prevAt $InstallDir)
+        }
+        throw $swapError
+    }
     # A verify that fails or throws is the same failure: both copies go back where they were. The current copy is
     # removed only after the restored one verified; no failure path removes anything.
     $failure = $null
@@ -393,7 +494,7 @@ function Restore-AtmPrevious {
         }
         throw (Get-AtmText 'inst.rollbackVerifyFailed' $failure)
     }
-    Remove-AtmOwnTree -Path $retired -InstallDir $InstallDir
+    try { Remove-AtmOwnTree -Path $retired -InstallDir $InstallDir } catch { Write-Warning (Get-AtmText 'inst.recoveryLeftover' $retired) }
     return (Get-Content -LiteralPath (Join-Path $InstallDir 'install-state.json') -Raw | ConvertFrom-Json).version
 }
 
@@ -413,5 +514,8 @@ function Uninstall-AtmProduct {
         if ($env:TEMP -and [string]::Equals($s.FullName.TrimEnd('\'), $env:TEMP.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) { continue }   # private temp in use
         Remove-AtmOwnTree -Path $s.FullName -InstallDir $InstallDir
     }
+    # Recovery copies may hold the only intact installation: never swept, only reported (R-B6).
+    $kept = @(Get-AtmRecoveryDirs -InstallDir $InstallDir)
+    if ($kept.Count -gt 0) { Write-Warning (Get-AtmText 'inst.recoveryKept' ($kept -join '; ')) }
     return $removed
 }
