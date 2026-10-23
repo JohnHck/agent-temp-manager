@@ -4039,12 +4039,16 @@ try {
         }
         foreach ($x in @($emitted | Select-Object -Unique)) { Assert-True ($x -like 'EXCEPTION_*' -or $script:AtmRuntimeReasonCodes -ccontains $x) "motivo emitido com texto: $x" }
     }
-    # P1-B4-d fixtures: a key file of the operator in the sandbox (32 random bytes, the sandbox ACL: owner only).
+    # P1-B4-d fixtures: a key file of the operator in the sandbox (random bytes) with the ACL an operator would give it:
+    # no inheritance, only the current user, SYSTEM and Administrators (the inherited TEMP ACL may grant other accounts).
     $b4dKeyFile = { param([string]$Name, [int]$Size = 32)
         $f = Join-Path $sandbox $Name
         $b = New-Object byte[] $Size
         $rng = [Security.Cryptography.RandomNumberGenerator]::Create(); try { $rng.GetBytes($b) } finally { $rng.Dispose() }
         [IO.File]::WriteAllBytes($f, $b)
+        # icacls writes only the DACL (Set-Acl would also write the SACL, which needs a privilege).
+        $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $null = & icacls.exe $f /inheritance:r /grant:r "*$($me):(F)" '*S-1-5-18:(F)' '*S-1-5-32-544:(F)' 2>&1
         return $f }
     Test-Case 'Privacidade' 'Pseudonimos (P1-B4-d): chave efemera por padrao, arquivo de chave do operador para correlacao, nenhum caminho nem id de sessao exportado, chave nunca no resultado' {
         $sid = [guid]::NewGuid().ToString()
@@ -4146,18 +4150,28 @@ try {
         Assert-True ($null -ne (Read-AtmPseudonymKeyFile -Path $ok).Key) 'arquivo valido'
         $cases = [ordered]@{
             'b4d-relative.bin'                 = 'PSEUDONYM_KEY_PATH_INVALID'
+            ($ok.Substring(0, 2) + 'b4d-ok.bin') = 'PSEUDONYM_KEY_PATH_INVALID'
+            ($ok.Substring(2))                 = 'PSEUDONYM_KEY_PATH_INVALID'
             (Join-Path $sandbox 'b4d-none.bin') = 'PSEUDONYM_KEY_NOT_FOUND'
-            $sandbox                           = 'PSEUDONYM_KEY_NOT_FOUND'
+            $sandbox                           = 'PSEUDONYM_KEY_NOT_A_FILE'
             (& $b4dKeyFile 'b4d-short.bin' 31) = 'PSEUDONYM_KEY_SIZE_INVALID'
             (& $b4dKeyFile 'b4d-long.bin' 4097) = 'PSEUDONYM_KEY_SIZE_INVALID'
         }
         foreach ($c in $cases.GetEnumerator()) { $r = Read-AtmPseudonymKeyFile -Path $c.Key; Assert-True ($null -eq $r.Key -and $r.Reason -eq $c.Value) "$($c.Value): $($r.Reason)" }
-        # Readable by Everyone: refused (sandbox file only).
-        $open = & $b4dKeyFile 'b4d-open.bin'
-        $acl = Get-Acl -LiteralPath $open
-        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier('S-1-1-0')), 'Read', 'Allow')))
-        Set-Acl -LiteralPath $open -AclObject $acl
+        # Another account may read or change the file: refused, generic rights included (sandbox files only).
+        $grant = { param([string]$Name, [string]$Grant) $f = & $b4dKeyFile $Name; $null = & icacls.exe $f /grant $Grant 2>&1; return $f }
+        $open = & $grant 'b4d-open.bin' '*S-1-1-0:(R)'
         Assert-Eq (Read-AtmPseudonymKeyFile -Path $open).Reason 'PSEUDONYM_KEY_ACL_TOO_OPEN' 'legivel por Everyone: recusado'
+        Assert-Eq (Read-AtmPseudonymKeyFile -Path (& $grant 'b4d-inter.bin' '*S-1-5-4:(RX)')).Reason 'PSEUDONYM_KEY_ACL_TOO_OPEN' 'legivel por INTERACTIVE: recusado'
+        Assert-Eq (Read-AtmPseudonymKeyFile -Path (& $grant 'b4d-write.bin' '*S-1-5-32-545:(W)')).Reason 'PSEUDONYM_KEY_ACL_TOO_OPEN' 'gravavel por Users: recusado'
+        $gen = & $b4dKeyFile 'b4d-generic.bin'
+        $null = & icacls.exe $gen /grant '*S-1-1-0:(GR)' 2>&1
+        $genAce = @((Get-Acl -LiteralPath $gen).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference.Value -eq 'S-1-1-0' })
+        Assert-True ($genAce.Count -ge 1) 'ACE de leitura generica aplicada'
+        Assert-Eq (Read-AtmPseudonymKeyFile -Path $gen).Reason 'PSEUDONYM_KEY_ACL_TOO_OPEN' 'leitura generica (GR) por Everyone: recusado'
+        # The diagnose progress line never carries the inventory's messages (they name temporary bases).
+        $launcher = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        Assert-True ($launcher -match 'diagInvArgs\[''ProgressCallback''\] = \{ param\(\$pct, \$msg\)[^\r\n]*-Status \(Get-AtmText ''cli\.diagProgressStatus''\)' -and $launcher -match '\$diagArgs = @\{ InventoryArgs = \$diagInvArgs \}') 'progresso do diagnose sem caminhos'
         # CLI: refused before running (exit 2), the code is shown, the path and the content are not.
         $cmd = Join-Path $srcDir 'bin\agent-temp.cmd'
         $out = (& cmd.exe /c "`"$cmd`" diagnose -DeadlineSeconds 0 -NoProgress -Lang en-US -PseudonymKeyFile `"$open`"" 2>&1) -join "`n"

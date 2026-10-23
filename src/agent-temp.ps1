@@ -220,7 +220,10 @@ try {
         }
         'diagnose' {
             # Read-only (docs/adr/ADR-0009). Partial coverage is a result, not an error: exit code 0.
-            $diagArgs = @{ InventoryArgs = $cliInvArgs }
+            # Progress never shows a path during diagnose (ADR-0010): the inventory's own messages name temporary bases.
+            $diagInvArgs = @{} + $cliInvArgs
+            $diagInvArgs['ProgressCallback'] = { param($pct, $msg) $act = Get-AtmText 'cli.progressActivity'; if ($pct -ge 100) { Write-Progress -Activity $act -Completed } else { Write-Progress -Activity $act -Status (Get-AtmText 'cli.diagProgressStatus') -PercentComplete $pct } }
+            $diagArgs = @{ InventoryArgs = $diagInvArgs }
             if ($DeadlineSeconds -ge 0) { $diagArgs['DeadlineSeconds'] = $DeadlineSeconds }
             # Correlation between runs only with the operator's key file (ADR-0010): read only, fail closed, and
             # neither its path nor its content is printed.
@@ -230,7 +233,9 @@ try {
                 if ($null -eq $keyRead.Key) { Write-Host (Get-AtmText 'cli.pseudonymKeyRefused' $keyRead.Reason) -ForegroundColor Red; exit 2 }
                 $diagArgs['PseudonymKey'] = $keyRead.Key
             }
+            # An unexpected failure is reported by its exception type only: its message could carry collected data.
             try { $res = Invoke-AtmDiagnose @diagArgs }
+            catch { Write-Host (Get-AtmText 'cli.diagFailed' $_.Exception.GetType().Name) -ForegroundColor Red; Write-Host (Get-AtmText 'cli.errorNoDeletion') -ForegroundColor Yellow; exit 10 }
             finally { if ($null -ne $keyRead -and $null -ne $keyRead.Key) { [Array]::Clear($keyRead.Key, 0, $keyRead.Key.Length) } }
             Show-AtmDiagnose -Result $res
             if ($ExportJson) {

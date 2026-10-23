@@ -959,6 +959,15 @@ function Get-AtmAgentRuntimeFindings {
       per agent process, overlapping) and Totals (Get-AtmAgentResourceTotals over the union of the agent processes).
     #>
     param($Collection, $ProviderHints = @(), $SessionRegistries = @(), $LegacySnapshot = $null, $Partitions = @(), $InventoryCoverage = @(), $SelfKeys = $null, $Cpu = $null, $Second = $null, [scriptblock]$SessionKeyFunction = $null, $Pseudonymizer = $null)
+    # Without a pseudonymizer (direct calls), an ephemeral one for this call only, closed even when the call throws.
+    $own = $null
+    if ($null -eq $Pseudonymizer -and $null -eq $SessionKeyFunction) { $own = New-AtmPseudonymizer; $PSBoundParameters['Pseudonymizer'] = $own }
+    try { return (Get-AtmAgentRuntimeFindingsRun @PSBoundParameters) } finally { Close-AtmPseudonymizer $own }
+}
+
+function Get-AtmAgentRuntimeFindingsRun {
+    # The body of Get-AtmAgentRuntimeFindings (same parameters; the pseudonymizer is already set there).
+    param($Collection, $ProviderHints = @(), $SessionRegistries = @(), $LegacySnapshot = $null, $Partitions = @(), $InventoryCoverage = @(), $SelfKeys = $null, $Cpu = $null, $Second = $null, [scriptblock]$SessionKeyFunction = $null, $Pseudonymizer = $null)
     if ($null -eq $Collection) { throw (Get-AtmText 'err.diagProcess' 'Collection') }
     $findings = New-Object System.Collections.Generic.List[object]
     $coverage = New-Object System.Collections.Generic.List[object]
@@ -970,8 +979,6 @@ function Get-AtmAgentRuntimeFindings {
     $runStates = @{}
     if ($null -ne $Second -and -not $Collection.Failed -and -not $Second.Failed -and $snapCov.Status -ceq 'COMPLETE' -and $Second.Coverage.Status -ceq 'COMPLETE') { $runStates = Compare-AtmProcessCollections -First $Collection -Second $Second }
     $exitEv = { param([string]$Key) if ($Key -and $runStates.ContainsKey($Key) -and $runStates[$Key] -ceq 'EXITED_DURING_RUN') { New-AtmEvidence -Code 'PROCESS_EXITED_DURING_RUN' -Source 'diagnose' -Collector 'process-snapshot' -ObservedUtc $now } }
-    $ownPseudonymizer = $null
-    if ($null -eq $Pseudonymizer -and $null -eq $SessionKeyFunction) { $ownPseudonymizer = New-AtmPseudonymizer; $Pseudonymizer = $ownPseudonymizer }
     $keyFn = $(if ($null -ne $SessionKeyFunction) { $SessionKeyFunction } else { { param($Provider, $ProfileSid, $ProfilePath, $SessionId) ConvertTo-AtmSessionKey -Pseudonymizer $Pseudonymizer -Provider $Provider -ProfileSid $ProfileSid -ProfilePath $ProfilePath -SessionId $SessionId } })
     # Candidates by key: Process (or $null for pid:<n>), Evidence, Kind (AGENT | UNVERIFIED | UNCHECKED), the providers
     # of the AGENT evidence and of the other evidence (sets: one process can be related to several providers), and
@@ -1231,7 +1238,6 @@ function Get-AtmAgentRuntimeFindings {
     $coverage.Add($resCov)
     # Runtime findings by Kind, then Key (ordinal): the order of the inputs never changes the result (D6).
     $sorted = @(Get-AtmOrdinalSorted -Items $findings.ToArray() -Signature { param($f) [string]$f.Kind + [char]1 + [string]$f.Key })
-    Close-AtmPseudonymizer $ownPseudonymizer
     [pscustomobject]@{ Findings = $sorted; Coverage = $coverage.ToArray(); Trees = $trees.ToArray(); Totals = $totals }
 }
 
@@ -1302,8 +1308,11 @@ function Get-AtmAgentResourceTotals {
 $script:AtmPseudonymScheme = 'HMAC-SHA256-128/1'
 $script:AtmPseudonymKeyMinBytes = 32
 $script:AtmPseudonymKeyMaxBytes = 4096
-# Accounts whose read access makes a key file unprotected: Everyone, Anonymous, Authenticated Users, Users, Guests.
-$script:AtmPseudonymKeyBroadSids = @('S-1-1-0', 'S-1-5-7', 'S-1-5-11', 'S-1-5-32-545', 'S-1-5-32-546')
+# Besides the current user, only SYSTEM and Administrators may own, read or change a key file.
+$script:AtmPseudonymKeyTrustedSids = @('S-1-5-18', 'S-1-5-32-544')
+# Rights that read or change a key file (FileSystemRights, generic rights included).
+$script:AtmPseudonymKeyReadMask = [uint32](0x1 -bor 0x10000000) + [uint32]2147483648
+$script:AtmPseudonymKeyWriteMask = [uint32](0x2 -bor 0x4 -bor 0x10 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000)
 
 function New-AtmPseudonymizer {
     # -Key: the operator's key (32 to 4096 bytes; the caller's array is copied, never kept); $null = an ephemeral random
@@ -1322,9 +1331,11 @@ function New-AtmPseudonymizer {
     }
     # The private copy is cleared by Close-AtmPseudonymizer after the HMAC object is disposed (some runtimes keep a
     # reference to the array they were given).
-    $h = New-Object Security.Cryptography.HMACSHA256 (, $k)
-    $p = [pscustomobject]@{ Hmac = $h; Buffer = $k; KeySource = $source; KeyId = $null }
-    if ($source -ceq 'OPERATOR_KEY_FILE') { $p.KeyId = (Get-AtmPseudonym -Pseudonymizer $p -Domain 'atm-key-id/1' -Fields @()) }
+    $p = [pscustomobject]@{ Hmac = $null; Buffer = $k; KeySource = $source; KeyId = $null }
+    try {
+        $p.Hmac = New-Object Security.Cryptography.HMACSHA256 (, $k)
+        if ($source -ceq 'OPERATOR_KEY_FILE') { $p.KeyId = (Get-AtmPseudonym -Pseudonymizer $p -Domain 'atm-key-id/1' -Fields @()) }
+    } catch { Close-AtmPseudonymizer $p; throw }
     return $p
 }
 
@@ -1366,27 +1377,46 @@ function ConvertTo-AtmPartitionKey {
 
 function Read-AtmPseudonymKeyFile {
     <#
-      The operator's key file, read only: an absolute path to a regular file (no reparse point) of 32 to 4096 bytes that
-      no broad account (AtmPseudonymKeyBroadSids) may read. Returns Key (bytes) or Reason (a code); the path and the
-      content are never part of a message.
+      The operator's key file, read only. Refused (Reason, a code; the path and the content are never part of a message)
+      unless: a drive-absolute path on a fixed drive whose every component exists and none is a reparse point
+      (Test-AtmPathChain); a regular file of 32 to 4096 bytes; owned by the current user, SYSTEM or Administrators; and
+      no other account may read or change it (generic rights included). The file is opened once, without write or
+      delete sharing, so the file checked is the file read. Returns Key (bytes) or Reason.
     #>
     param([string]$Path)
     $fail = { param([string]$Code) [pscustomobject]@{ Key = $null; Reason = $Code } }
-    if ([string]::IsNullOrWhiteSpace($Path) -or -not [IO.Path]::IsPathRooted($Path)) { return (& $fail 'PSEUDONYM_KEY_PATH_INVALID') }
+    if ([string]::IsNullOrWhiteSpace($Path) -or $Path -notmatch '^[A-Za-z]:\\[^\\]') { return (& $fail 'PSEUDONYM_KEY_PATH_INVALID') }
+    $chain = Test-AtmPathChain $Path
+    switch ($chain.Status) {
+        'OK' { }
+        'NOT_FOUND' { return (& $fail 'PSEUDONYM_KEY_NOT_FOUND') }
+        'REPARSE_IN_PATH' { return (& $fail 'PSEUDONYM_KEY_REPARSE_POINT') }
+        'INACCESSIBLE' { return (& $fail 'PSEUDONYM_KEY_UNREADABLE') }
+        default { return (& $fail 'PSEUDONYM_KEY_PATH_INVALID') }
+    }
+    try { if (([IO.File]::GetAttributes($Path) -band [IO.FileAttributes]::Directory) -ne 0) { return (& $fail 'PSEUDONYM_KEY_NOT_A_FILE') } } catch { return (& $fail 'PSEUDONYM_KEY_UNREADABLE') }
+    $fs = $null; $bytes = $null
     try {
-        $fi = New-Object IO.FileInfo($Path)
-        if (-not $fi.Exists) { return (& $fail 'PSEUDONYM_KEY_NOT_FOUND') }
-        if (($fi.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return (& $fail 'PSEUDONYM_KEY_REPARSE_POINT') }
-        if ($fi.Length -lt $script:AtmPseudonymKeyMinBytes -or $fi.Length -gt $script:AtmPseudonymKeyMaxBytes) { return (& $fail 'PSEUDONYM_KEY_SIZE_INVALID') }
-        $acl = $fi.GetAccessControl()
+        $fs = New-Object IO.FileStream($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        if ($fs.Length -lt $script:AtmPseudonymKeyMinBytes -or $fs.Length -gt $script:AtmPseudonymKeyMaxBytes) { return (& $fail 'PSEUDONYM_KEY_SIZE_INVALID') }
+        $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $trusted = @($me) + $script:AtmPseudonymKeyTrustedSids
+        $acl = Get-Acl -LiteralPath $Path
+        if ($trusted -cnotcontains $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value) { return (& $fail 'PSEUDONYM_KEY_ACL_TOO_OPEN') }
         foreach ($ace in @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))) {
             if ($ace.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
-            if (($ace.FileSystemRights -band [Security.AccessControl.FileSystemRights]::ReadData) -eq 0) { continue }
-            if ($script:AtmPseudonymKeyBroadSids -ccontains $ace.IdentityReference.Value) { return (& $fail 'PSEUDONYM_KEY_ACL_TOO_OPEN') }
+            if ($trusted -ccontains $ace.IdentityReference.Value) { continue }
+            $rights = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$ace.FileSystemRights), 0)
+            if (($rights -band ($script:AtmPseudonymKeyReadMask -bor $script:AtmPseudonymKeyWriteMask)) -ne 0) { return (& $fail 'PSEUDONYM_KEY_ACL_TOO_OPEN') }
         }
-        $bytes = [IO.File]::ReadAllBytes($Path)
-    } catch { return (& $fail 'PSEUDONYM_KEY_UNREADABLE') }
-    if ($bytes.Length -lt $script:AtmPseudonymKeyMinBytes -or $bytes.Length -gt $script:AtmPseudonymKeyMaxBytes) { [Array]::Clear($bytes, 0, $bytes.Length); return (& $fail 'PSEUDONYM_KEY_SIZE_INVALID') }
+        $bytes = New-Object byte[] ([int]$fs.Length)
+        $read = 0
+        while ($read -lt $bytes.Length) { $n = $fs.Read($bytes, $read, $bytes.Length - $read); if ($n -le 0) { break }; $read += $n }
+        if ($read -ne $bytes.Length) { [Array]::Clear($bytes, 0, $bytes.Length); return (& $fail 'PSEUDONYM_KEY_UNREADABLE') }
+    } catch {
+        if ($null -ne $bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
+        return (& $fail 'PSEUDONYM_KEY_UNREADABLE')
+    } finally { if ($null -ne $fs) { $fs.Dispose() } }
     return [pscustomobject]@{ Key = $bytes; Reason = $null }
 }
 
