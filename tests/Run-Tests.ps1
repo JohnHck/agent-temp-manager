@@ -3433,8 +3433,12 @@ try {
         $cov = $(if ($Status -eq 'COMPLETE') { New-AtmCoverage -Collector ('provider-' + $ProviderId) -Status 'COMPLETE' } else { New-AtmCoverage -Collector ('provider-' + $ProviderId) -Status $Status -Reasons @('HINT_FAILED_PROCESS_MATCHERS') })
         [pscustomobject]@{ ProviderId = $ProviderId; ProcessMatchers = @($Matchers); ServiceHints = @(); VirtualizationHints = @(); Coverage = $cov } }
     $b4Key = { param([long]$ProcessId, $Created) ConvertTo-AtmProcessKey -ProcessId $ProcessId -CreationUtc $Created }
-    # Session keys are pseudonyms (P1-B4-c); these fixtures carry no profile.
-    $b4SKey = { param([string]$Provider, [string]$SessionId) ConvertTo-AtmSessionKey -Provider $Provider -ProfileSid '' -ProfilePath '' -SessionId $SessionId }
+    # Session keys are keyed pseudonyms (P1-B4-c, ADR-0010): a fixed test key, passed to the engine-level runtime calls
+    # below and to Invoke-AtmDiagnose where a key is computed; these fixtures carry no profile.
+    $testPseudonymKey = [byte[]](1..32)
+    $b4Pz = New-AtmPseudonymizer -Key $testPseudonymKey
+    $b4SKey = { param([string]$Provider, [string]$SessionId) ConvertTo-AtmSessionKey -Pseudonymizer $b4Pz -Provider $Provider -ProfileSid '' -ProfilePath '' -SessionId $SessionId }
+    $b4PKey = { param([string]$Path) ConvertTo-AtmPartitionKey -Pseudonymizer $b4Pz -Provider 'claude-code' -Path $Path }
     $b4State = { param($Result, [string]$Key) $f = @($Result.Findings | Where-Object { $_.Key -ceq $Key }); if ($f.Count -eq 1) { $f[0].State } elseif ($f.Count -eq 0) { '(none)' } else { "(x$($f.Count))" } }
     Test-Case 'Diagnose' 'Estados de ausencia (P1-B4-b): SESSION_PROCESS_NOT_FOUND so com cobertura conclusiva; sem cobertura ou com qualquer status nao conclusivo vira UNKNOWN' {
         $exercised = @{}
@@ -3549,7 +3553,7 @@ try {
         Assert-Eq (@($self.Keys | Sort-Object) -join ',') ((@($k[2500], $k[3000], $k[3001]) | Sort-Object) -join ',') 'SELF: o proprio processo, o launcher verificado e o filho proprio'
         Assert-True (@($self.Unverified | Where-Object { $_.Pid -eq 2700 -and $_.Result -eq 'PID_REUSED' }).Count -eq 1) 'launcher com PID reutilizado nao verificado'
         $invCov = @(New-AtmCoverage -Collector 'inventory' -Status 'COMPLETE')
-        $res = Get-AtmAgentRuntimeFindings -Collection $c -ProviderHints $hints -SessionRegistries $regs -LegacySnapshot $legacy -Partitions $parts -InventoryCoverage $invCov -SelfKeys $self
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -ProviderHints $hints -SessionRegistries $regs -LegacySnapshot $legacy -Partitions $parts -InventoryCoverage $invCov -SelfKeys $self
         $expect = [ordered]@{
             2000 = 'AGENT_PROCESS'; 2001 = 'AGENT_DESCENDANT'; 2002 = 'AGENT_DESCENDANT'; 2003 = '(none)'; 3000 = 'SELF'; 3001 = 'SELF'
             2500 = 'SELF'; 2501 = 'AGENT_DESCENDANT'; 2700 = 'AGENT_DESCENDANT'
@@ -3593,7 +3597,7 @@ try {
         $rows = @((& $b4Row 4 0 'System' $b4T0.AddHours(-1)), (& $b4Row 4000 4 'claude.exe' $null))
         $c = Get-AtmProcessCollection -Source ({ $rows }.GetNewClosure())
         $regs = @([pscustomobject]@{ ProviderId = 'claude-code'; Registry = [pscustomobject]@{ Readable = $true; Unparseable = 0; Entries = @([pscustomobject]@{ SessionId = 's3'; Pid = 7777; StartUtc = $b4T0 }) }; Error = $null })
-        $res = Get-AtmAgentRuntimeFindings -Collection $c -ProviderHints $claude -SessionRegistries $regs
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -ProviderHints $claude -SessionRegistries $regs
         Assert-Eq (& $b4State $res 'pid:4000') 'IDENTITY_UNVERIFIED' 'processo sem horario: identidade nao verificada'
         Assert-True ($null -eq (ConvertFrom-AtmProcessKey 'pid:4000')) 'pid:<n> nunca e uma chave de identidade'
         Assert-Eq (& $b4State $res (& $b4SKey 'claude-code' 's3')) 'UNKNOWN' 'PID ausente em coleta PARTIAL: UNKNOWN'
@@ -3601,7 +3605,7 @@ try {
         Assert-True ($ac.Status -eq 'PARTIAL' -and $ac.Reasons -contains 'PROCESS_SNAPSHOT_INCOMPLETE' -and $ac.Reasons -contains 'IDENTITY_UNVERIFIED_CANDIDATES') "cobertura parcial: $($ac.Reasons -join ',')"
         # Failed collection: no process finding at all, sessions UNKNOWN, coverage FAILED.
         $failed = Get-AtmProcessCollection -Source { throw (New-Object System.UnauthorizedAccessException 'x') }
-        $res = Get-AtmAgentRuntimeFindings -Collection $failed -ProviderHints $claude -SessionRegistries $regs
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $failed -ProviderHints $claude -SessionRegistries $regs
         Assert-Eq @($res.Findings | Where-Object { $_.Kind -eq 'Process' }).Count 0 'coleta com falha: nenhum processo afirmado'
         Assert-Eq (& $b4State $res (& $b4SKey 'claude-code' 's3')) 'UNKNOWN' 'coleta com falha: sessao UNKNOWN'
         Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0].Status 'FAILED' 'cobertura FAILED'
@@ -3609,7 +3613,7 @@ try {
         # only because the collection is COMPLETE, and no finding says "not running".
         $noneRows = @((& $b4Row 4 0 'System' $b4T0.AddHours(-1)), (& $b4Row 100 4 'app.exe' $b4T0))
         $none = Get-AtmProcessCollection -Source ({ $noneRows }.GetNewClosure())
-        $res = Get-AtmAgentRuntimeFindings -Collection $none -ProviderHints $claude -SessionRegistries $emptyReg
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $none -ProviderHints $claude -SessionRegistries $emptyReg
         Assert-Eq @($res.Findings).Count 0 'sem agente: nenhum achado'
         Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0].Status 'COMPLETE' 'sem agente: coleta completa sem candidatos'
         Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'sessions-claude-code' })[0].Status 'COMPLETE' 'sem agente: registro vazio'
@@ -3623,7 +3627,7 @@ try {
             [pscustomobject]@{ ProviderId = 'fake-agent'; Registry = [pscustomobject]@{ Readable = $false; Unparseable = 0; Entries = @() }; Error = $null },
             [pscustomobject]@{ ProviderId = 'fake-two'; Registry = [pscustomobject]@{ Readable = $true; Unparseable = 2; Entries = @() }; Error = $null },
             [pscustomobject]@{ ProviderId = 'Bad Id'; Registry = $null; Error = $null })
-        $res = Get-AtmAgentRuntimeFindings -Collection $none -ProviderHints $claude -SessionRegistries $bad
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $none -ProviderHints $claude -SessionRegistries $bad
         $sc = @{}; foreach ($cv in $res.Coverage) { $sc[$cv.Collector] = $cv }
         Assert-True ($sc['sessions-claude-code'].Status -eq 'FAILED' -and $sc['sessions-claude-code'].Reasons -contains 'EXCEPTION_IOEXCEPTION') 'excecao do provider: FAILED com o tipo'
         Assert-True ($sc['sessions-fake-agent'].Status -eq 'FAILED' -and $sc['sessions-fake-agent'].Reasons -contains 'SESSION_REGISTRY_UNREADABLE') 'registro ilegivel: FAILED'
@@ -3634,35 +3638,35 @@ try {
         $legacyUp = [pscustomobject]@{ Failed = $false; Processes = @([pscustomobject]@{ Pid = 100; Name = 'app.exe'; ParentPid = 4; CommandLine = $null; CreationUtc = $b4T0 }) }
         $partsUp = @([pscustomobject]@{ Provider = 'Fake-Upper-V1'; DirectRefs = @('PID 100 (app.exe)'); AncestorRefs = @() })
         $regUp = @([pscustomobject]@{ ProviderId = 'Fake-Upper-V1'; Registry = [pscustomobject]@{ Readable = $true; Unparseable = 0; Entries = @([pscustomobject]@{ SessionId = 'u1'; Pid = 100; StartUtc = $b4T0 }) }; Error = $null })
-        $res = Get-AtmAgentRuntimeFindings -Collection $none -SessionRegistries $regUp -LegacySnapshot $legacyUp -Partitions $partsUp
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $none -SessionRegistries $regUp -LegacySnapshot $legacyUp -Partitions $partsUp
         Assert-Eq (& $b4State $res (& $b4Key 100 $b4T0)) 'AGENT_PROCESS' 'provider v1 com Id em maiusculas: referencia e sessao lidas'
         Assert-Eq @($res.Findings | Where-Object { $_.Key -ceq (& $b4Key 100 $b4T0) })[0].Provider 'Fake-Upper-V1' 'Id real no achado'
         Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'sessions-fake-upper-v1' })[0].Status 'COMPLETE' 'coletor em minusculas'
         Assert-Eq (& $b4State $res (& $b4SKey 'Fake-Upper-V1' 'u1')) 'LIVE' 'sessao do provider v1'
         # The same PID twice in the V0.1 snapshot: the reference cannot be attributed (never guessed).
         $legacyDup = [pscustomobject]@{ Failed = $false; Processes = @($legacyUp.Processes[0], [pscustomobject]@{ Pid = 100; Name = 'app.exe'; ParentPid = 4; CommandLine = $null; CreationUtc = $b4T0.AddHours(-2) }) }
-        $res = Get-AtmAgentRuntimeFindings -Collection $none -LegacySnapshot $legacyDup -Partitions $partsUp
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $none -LegacySnapshot $legacyDup -Partitions $partsUp
         Assert-True ((& $b4State $res (& $b4Key 100 $b4T0)) -eq '(none)' -and @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0].Reasons -contains 'PATH_REFERENCE_UNVERIFIED') 'PID duplicado na V0.1: referencia nao atribuida'
         # A runtime provider with service hints only: no process was searched, so the agent coverage is not observable.
         $svcOnly = [pscustomobject]@{ ProviderId = 'fake-svc'; ProcessMatchers = @(); ServiceHints = @([pscustomobject]@{ Name = 'FakeSvc'; Role = $null }); VirtualizationHints = @(); Coverage = (New-AtmCoverage -Collector 'provider-fake-svc' -Status 'COMPLETE') }
-        $res = Get-AtmAgentRuntimeFindings -Collection $none -ProviderHints @($svcOnly)
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $none -ProviderHints @($svcOnly)
         Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0].Status 'NOT_OBSERVABLE' 'sem matcher de processo: NOT_OBSERVABLE, nunca COMPLETE'
         # A hint member that throws (provider coverage FAILED) keeps the agent coverage below COMPLETE.
         $throwing = [pscustomobject]@{ Id = 'fake-throw'; DisplayName = 'F'; ContractVersion = 2; Capabilities = @('runtime'); GetProcessMatchers = { throw (New-Object System.IO.IOException 'x') } }
         $th = Get-AtmProviderRuntimeHints $throwing
         Assert-Eq $th.Coverage.Status 'FAILED' 'dica com excecao: FAILED'
-        $res = Get-AtmAgentRuntimeFindings -Collection $none -ProviderHints @($th)
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $none -ProviderHints @($th)
         $ac = @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0]
         Assert-True ($ac.Status -ne 'COMPLETE' -and $ac.Status -ne 'NOT_PRESENT' -and $ac.Reasons -contains 'PROVIDER_HINTS_INCOMPLETE') "dica com excecao nunca vira ausencia confirmada: $($ac.Status)"
         # No runtime source at all: not observable, never "no agent".
-        $res = Get-AtmAgentRuntimeFindings -Collection $none
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $none
         Assert-True (@($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0].Status -eq 'NOT_OBSERVABLE') 'sem fontes de runtime: NOT_OBSERVABLE'
         # A v1 provider has no runtime hints, and a runtime-only fictional provider takes part like any other.
         Assert-True ($null -eq (Get-AtmProviderRuntimeHints (ConvertTo-AtmTestV1Provider (Get-AtmProviders)[0]))) 'provider v1: sem dicas'
         $rtOnly = [pscustomobject]@{ Id = 'fake-runtime'; DisplayName = 'F'; ContractVersion = 2; Capabilities = @('runtime'); GetProcessMatchers = { @([pscustomobject]@{ ImageName = 'app.exe' }) } }
-        $res = Get-AtmAgentRuntimeFindings -Collection $none -ProviderHints @(Get-AtmProviderRuntimeHints $rtOnly)
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $none -ProviderHints @(Get-AtmProviderRuntimeHints $rtOnly)
         Assert-Eq (& $b4State $res (& $b4Key 100 $b4T0)) 'AGENT_PROCESS' 'provider somente runtime ficticio'
-        $threw = $false; try { $null = Get-AtmAgentRuntimeFindings -Collection $null } catch { $threw = $true }
+        $threw = $false; try { $null = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $null } catch { $threw = $true }
         Assert-True $threw 'sem coleta: recusado'
     }
     Test-Case 'Diagnose' 'Cobertura de sessoes (P1-B4-b): um registro de sessoes FAILED ou PARTIAL impede agent-processes COMPLETE; evidencias positivas ficam, lacunas nunca viram ausencia' {
@@ -3690,7 +3694,7 @@ try {
         }
         foreach ($n in $cases.Keys) {
             $v = $cases[$n]
-            $res = Get-AtmAgentRuntimeFindings -Collection $v[0] -ProviderHints $v[1] -SessionRegistries $v[2]
+            $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $v[0] -ProviderHints $v[1] -SessionRegistries $v[2]
             $ac = @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0]
             $sc = @($res.Coverage | Where-Object { $_.Collector -eq 'sessions-claude-code' })
             Assert-Eq $ac.Status $v[3] "$($n): agent-processes"
@@ -3741,7 +3745,7 @@ try {
             [pscustomobject]@{ Provider = 'fake-b'; DirectRefs = @('PID 500 (nodate.exe)'); AncestorRefs = @() })
         $regs = @([pscustomobject]@{ ProviderId = 'claude-code'; Registry = [pscustomobject]@{ Readable = $true; Unparseable = 0; Entries = @([pscustomobject]@{ SessionId = 's1'; Pid = 200; StartUtc = $b4T0 }) }; Error = $null })
         $invCov = @(New-AtmCoverage -Collector 'inventory' -Status 'COMPLETE')
-        $res = Get-AtmAgentRuntimeFindings -Collection $c -ProviderHints $hints -SessionRegistries $regs -LegacySnapshot $legacy -Partitions $parts -InventoryCoverage $invCov
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -ProviderHints $hints -SessionRegistries $regs -LegacySnapshot $legacy -Partitions $parts -InventoryCoverage $invCov
         $one = { param([string]$Key) $f = @($res.Findings | Where-Object { $_.Key -ceq $Key }); Assert-Eq $f.Count 1 "um achado por processo: $Key"; $f[0] }
         $amb = { param($F) @($F.Evidence | Where-Object { $_.Code -ceq 'PROVIDER_ATTRIBUTION_AMBIGUOUS' } | ForEach-Object { $_.Detail }) -join ';' }
         # One PID, one provider (matcher and session of the same provider): attributed, no ambiguity; its descendant too.
@@ -3779,7 +3783,7 @@ try {
             $ts = @($R.Trees | ForEach-Object { '{0}|{1}|{2}' -f $_.RootKey, $_.Provider, (@($_.Tree.Members | Sort-Object) -join '+') })
             (@($fs) + '#' + @($cs) + '#' + @($ts)) -join "`n" }
         $revParts = @($parts[3..0] | ForEach-Object { [pscustomobject]@{ Provider = $_.Provider; DirectRefs = @($_.DirectRefs[($_.DirectRefs.Count - 1)..0] | Where-Object { $_ }); AncestorRefs = @($_.AncestorRefs) } })
-        $res2 = Get-AtmAgentRuntimeFindings -Collection $c -ProviderHints @($hints[2..0]) -SessionRegistries $regs -LegacySnapshot $legacy -Partitions $revParts -InventoryCoverage $invCov
+        $res2 = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -ProviderHints @($hints[2..0]) -SessionRegistries $regs -LegacySnapshot $legacy -Partitions $revParts -InventoryCoverage $invCov
         Assert-Eq (& $sig $res2) (& $sig $res) 'ordem invertida: mesmo resultado (achados, evidencias, cobertura, arvores)'
         $ac = @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0]
         Assert-True ($ac.Status -eq 'PARTIAL' -and @($ac.Reasons) -ccontains 'IDENTITY_UNVERIFIED_CANDIDATES' -and @($ac.Reasons) -ccontains 'COMMAND_LINE_MARKER_UNAVAILABLE') "cobertura reflete as lacunas: $(@($ac.Reasons) -join ',')"
@@ -3812,8 +3816,8 @@ try {
         & $b4cSession $p2 7777 $sid $b4T0
         $rows = $b4cRows
         $src = { $rows }.GetNewClosure()
-        $run = { Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p1, $p2) -Procs $b4cLegacy) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0]) -ProcessSource $src -SelfPid 3000 -SelfCreationUtc $b4T0.AddMinutes(5) }
-        $d = & $run
+        $run = { param($Key) Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p1, $p2) -Procs $b4cLegacy) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0]) -ProcessSource $src -SelfPid 3000 -SelfCreationUtc $b4T0.AddMinutes(5) -PseudonymKey $Key }
+        $d = & $run $testPseudonymKey
         $k = @{}; foreach ($r in $b4cRows) { $k[[int]$r.ProcessId] = & $b4Key $r.ProcessId $r.CreationDate }
         $cs = @{}; foreach ($c in $d.Coverage) { $cs[$c.Collector] = $c }
         foreach ($c in @('process-snapshot', 'sessions-claude-code', 'agent-processes', 'agent-resources')) { Assert-Eq $cs[$c].Status 'COMPLETE' "$c completo: $(@($cs[$c].Reasons) -join ',')" }
@@ -3822,8 +3826,8 @@ try {
         $expect = @{ 200 = 'AGENT_PROCESS'; 202 = 'AGENT_PROCESS'; 201 = 'AGENT_DESCENDANT'; 203 = 'AGENT_DESCENDANT'; 3000 = 'SELF'; 3001 = 'SELF'; 1000 = '(none)'; 4 = '(none)' }
         foreach ($e in $expect.GetEnumerator()) { Assert-Eq (& $b4State $d $k[[int]$e.Key]) $e.Value "processo $($e.Key)" }
         # Sessions: one key per profile for the same session id; LIVE (exact identity) and absent from a complete collection.
-        $k1 = ConvertTo-AtmSessionKey -Provider 'claude-code' -ProfileSid $p1.Sid -ProfilePath $p1.ProfilePath -SessionId $sid
-        $k2 = ConvertTo-AtmSessionKey -Provider 'claude-code' -ProfileSid $p2.Sid -ProfilePath $p2.ProfilePath -SessionId $sid
+        $k1 = ConvertTo-AtmSessionKey -Pseudonymizer $b4Pz -Provider 'claude-code' -ProfileSid $p1.Sid -ProfilePath $p1.ProfilePath -SessionId $sid
+        $k2 = ConvertTo-AtmSessionKey -Pseudonymizer $b4Pz -Provider 'claude-code' -ProfileSid $p2.Sid -ProfilePath $p2.ProfilePath -SessionId $sid
         Assert-True ($k1 -cmatch '^claude-code/s-[0-9a-f]{32}$' -and $k1 -cne $k2) "chaves pseudonimas distintas por perfil: $k1 / $k2"
         Assert-Eq (& $b4State $d $k1) 'LIVE' 'sessao viva do perfil 1'
         Assert-Eq (& $b4State $d $k2) 'SESSION_PROCESS_NOT_FOUND' 'mesma sessao no perfil 2: PID ausente de coleta completa'
@@ -3840,9 +3844,11 @@ try {
         $rt = @($d.Findings | Where-Object { $_.Kind -ne 'TempPartition' } | ForEach-Object { $_.Kind + [char]1 + $_.Key })
         $sorted = [string[]]@($rt); [Array]::Sort($sorted, [StringComparer]::Ordinal)
         Assert-Eq ($rt -join '|') ($sorted -join '|') 'runtime ordenado por Kind e Key'
-        # Same session, same profile: the same key in another run.
-        $d2 = & $run
-        Assert-Eq (& $b4State $d2 $k1) 'LIVE' 'mesma chave entre execucoes'
+        # Same session, same profile: the same key in another run with the same operator key; another key without it.
+        $d2 = & $run $testPseudonymKey
+        Assert-Eq (& $b4State $d2 $k1) 'LIVE' 'mesma chave entre execucoes com o mesmo arquivo de chave'
+        $d3 = & $run $null
+        Assert-True ((& $b4State $d3 $k1) -eq '(none)' -and @($d3.Findings | Where-Object { $_.Kind -eq 'AgentSession' -and $_.State -eq 'LIVE' }).Count -eq 1) 'sem arquivo de chave: outra chave (efemera), mesmo estado'
         # JSON: identical in both languages; agentResources; the session id is in no runtime finding.
         $old = Get-AtmLanguage
         try { Set-AtmLanguage -Requested 'en-US'; $en = ConvertTo-AtmDiagnoseJson -Result $d; $txt = (Show-AtmDiagnose -Result $d 6>&1 | Out-String); Set-AtmLanguage -Requested 'pt-BR'; $pt = ConvertTo-AtmDiagnoseJson -Result $d; $txtPt = (Show-AtmDiagnose -Result $d 6>&1 | Out-String) } finally { Set-AtmLanguage -Requested $old }
@@ -3852,8 +3858,11 @@ try {
         $rtJson = (@($j.findings | Where-Object { $_.kind -ne 'TempPartition' }) | ConvertTo-Json -Depth 8)
         Assert-True (-not $rtJson.Contains($sid)) 'SessionId original nunca nos achados de runtime'
         Assert-True (@($j.findings | Where-Object { $_.kind -eq 'AgentSession' -and $_.key -notmatch '^claude-code/s-[0-9a-f]{32}$' }).Count -eq 0) 'chaves de sessao pseudonimas'
-        # Known limitation (gate decision): the path of the temporary partition named after the session carries it.
-        Assert-True (@($j.findings | Where-Object { $_.kind -eq 'TempPartition' -and $_.key.Contains($sid) }).Count -eq 1) 'limitacao registrada: o caminho da particao contem o id da sessao'
+        # P1-B4-d (ADR-0010): the partition named after the session is a keyed pseudonym; the session id and the paths
+        # are nowhere in the export.
+        Assert-True (@($j.findings | Where-Object { $_.kind -eq 'TempPartition' }).Count -ge 1 -and @($j.findings | Where-Object { $_.kind -eq 'TempPartition' -and $_.key -cnotmatch '^claude-code/p-[0-9a-f]{32}$' }).Count -eq 0) 'particoes com chave pseudonima'
+        Assert-True (@($j.findings | Where-Object { $_.kind -eq 'TempPartition' -and $_.key -ceq (& $b4PKey $root) }).Count -eq 1) 'particao da sessao pela chave calculada'
+        foreach ($x in @($sid, $root, $p1.ProfilePath, $p2.ProfilePath)) { Assert-True (-not $en.Contains($x) -and -not $en.Contains($x.Replace('\', '\\'))) 'nenhum id de sessao nem caminho no JSON' }
         foreach ($x in @($en, $txt, $txtPt)) { Assert-True (-not $x.Contains($b4cMarker)) 'marcador plantado nunca exportado'; Assert-True (-not $x.Contains('--resume')) 'argumentos nunca exportados' }
         foreach ($x in @($txt, $txtPt)) { Assert-True (-not $x.Contains($sid)) 'SessionId original nunca no relatorio' }
         Assert-True ($txt.Contains('AGENT RUNTIME') -and $txt.Contains('provider claude-code: 4 agent process(es)') -and $txt.Contains('processes counted: 4')) 'relatorio en-US: secao, atribuicao e totais'
@@ -3864,7 +3873,7 @@ try {
         # A v1 provider (same session registry shape) next to the v2 one: its sessions are read too; the process both
         # name is agent-related with an ambiguous attribution, one finding.
         $v1 = ConvertTo-AtmTestV1Provider (Get-AtmProviders)[0]; $v1.Id = 'Fake-Upper-V1'; $v1.TempSubdir = 'fake-upper'
-        $dv = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p1, $p2) -Procs $b4cLegacy) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0], $v1) -ProcessSource $src -SelfPid 3000 -SelfCreationUtc $b4T0.AddMinutes(5) -CpuSampleMs 0
+        $dv = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p1, $p2) -Procs $b4cLegacy) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0], $v1) -ProcessSource $src -SelfPid 3000 -SelfCreationUtc $b4T0.AddMinutes(5) -CpuSampleMs 0 -PseudonymKey $testPseudonymKey
         $f200 = @($dv.Findings | Where-Object { $_.Key -ceq $k[200] })
         Assert-True ($f200.Count -eq 1 -and $f200[0].State -eq 'AGENT_PROCESS' -and $null -eq $f200[0].Provider -and @($f200[0].Evidence | Where-Object { $_.Code -eq 'PROVIDER_ATTRIBUTION_AMBIGUOUS' -and $_.Detail -ceq 'Fake-Upper-V1,claude-code' }).Count -eq 1) 'providers v1 e v2 no mesmo processo: um achado, ambiguo'
         Assert-Eq (@($dv.Coverage | Where-Object { $_.Collector -like 'sessions-*' } | ForEach-Object { $_.Collector }) -join ',') 'sessions-claude-code,sessions-fake-upper-v1' 'um registro por provider, em ordem'
@@ -3880,24 +3889,24 @@ try {
         $okA = & $reg 'S-1-5-21-9' 'D:\profiles\a' @((& $e 'AAA' 200 $b4T0))
         $okB = & $reg 'S-1-5-21-9' 'D:\profiles\b' @((& $e 'AAA' 7777 $b4T0))
         $bad = & $reg 'S-1-5-21-9' 'D:\profiles\c' @() $false
-        $sk = @{ a = (ConvertTo-AtmSessionKey -Provider 'claude-code' -ProfileSid 'S-1-5-21-9' -ProfilePath 'D:\profiles\a' -SessionId 'aaa'); b = (ConvertTo-AtmSessionKey -Provider 'claude-code' -ProfileSid 'S-1-5-21-9' -ProfilePath 'D:\profiles\b\' -SessionId ' AAA ') }
+        $sk = @{ a = (ConvertTo-AtmSessionKey -Pseudonymizer $b4Pz -Provider 'claude-code' -ProfileSid 'S-1-5-21-9' -ProfilePath 'D:\profiles\a' -SessionId 'aaa'); b = (ConvertTo-AtmSessionKey -Pseudonymizer $b4Pz -Provider 'claude-code' -ProfileSid 'S-1-5-21-9' -ProfilePath 'D:\profiles\b\' -SessionId ' AAA ') }
         Assert-True ($sk.a -cne $sk.b) 'mesmo SessionId e SID, perfis diferentes: chaves diferentes'
-        Assert-Eq (ConvertTo-AtmSessionKey -Provider 'Claude-Code' -ProfileSid 'S-1-5-21-9' -ProfilePath 'D:\PROFILES\A\' -SessionId 'AAA') $sk.a 'normalizacao: caixa, separador final e espacos'
-        Assert-True ((ConvertTo-AtmSessionKey -Provider 'claude-code' -ProfileSid 'S-1-5-21-9a' -ProfilePath 'D:\profiles\a' -SessionId 'aaa') -cne (ConvertTo-AtmSessionKey -Provider 'claude-code' -ProfileSid 'S-1-5-21-9' -ProfilePath 'aD:\profiles\a' -SessionId 'aaa')) 'campos com separacao inequivoca'
-        $res = Get-AtmAgentRuntimeFindings -Collection $c -ProviderHints $claude -SessionRegistries @($okA, $okB, $bad)
+        Assert-Eq (ConvertTo-AtmSessionKey -Pseudonymizer $b4Pz -Provider 'Claude-Code' -ProfileSid 'S-1-5-21-9' -ProfilePath 'D:\PROFILES\A\' -SessionId 'AAA') $sk.a 'normalizacao: caixa, separador final e espacos'
+        Assert-True ((ConvertTo-AtmSessionKey -Pseudonymizer $b4Pz -Provider 'claude-code' -ProfileSid 'S-1-5-21-9a' -ProfilePath 'D:\profiles\a' -SessionId 'aaa') -cne (ConvertTo-AtmSessionKey -Pseudonymizer $b4Pz -Provider 'claude-code' -ProfileSid 'S-1-5-21-9' -ProfilePath 'aD:\profiles\a' -SessionId 'aaa')) 'campos com separacao inequivoca'
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -ProviderHints $claude -SessionRegistries @($okA, $okB, $bad)
         $rc = @($res.Coverage | Where-Object { $_.Collector -eq 'sessions-claude-code' })
         Assert-True ($rc.Count -eq 1 -and $rc[0].Status -eq 'PARTIAL' -and @($rc[0].Reasons) -contains 'SESSION_REGISTRY_UNREADABLE' -and $rc[0].Observed -eq 2) "um perfil ilegivel de tres: PARTIAL ($($rc[0].Status) $(@($rc[0].Reasons) -join ','))"
         Assert-True ((& $b4State $res $sk.a) -eq 'LIVE' -and (& $b4State $res $sk.b) -eq 'UNKNOWN') 'registro parcial: ausencia vira UNKNOWN, LIVE mantido'
-        $res = Get-AtmAgentRuntimeFindings -Collection $c -ProviderHints $claude -SessionRegistries @($bad, (& $reg 'S-1-5-21-9' 'D:\profiles\d' @() $true 0 | ForEach-Object { $_.Registry = $null; $_.Error = 'IOException'; $_ }))
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -ProviderHints $claude -SessionRegistries @($bad, (& $reg 'S-1-5-21-9' 'D:\profiles\d' @() $true 0 | ForEach-Object { $_.Registry = $null; $_.Error = 'IOException'; $_ }))
         Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'sessions-claude-code' })[0].Status 'FAILED' 'todos os perfis falharam: FAILED'
         $deadlineItem = [pscustomobject]@{ ProviderId = 'claude-code'; Registry = $null; Error = $null; Reason = 'DEADLINE_EXCEEDED'; ProfileSid = 'S-1-5-21-9'; ProfilePath = 'D:\profiles\e' }
-        $res = Get-AtmAgentRuntimeFindings -Collection $c -ProviderHints $claude -SessionRegistries @($okA, $deadlineItem)
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -ProviderHints $claude -SessionRegistries @($okA, $deadlineItem)
         $rc = @($res.Coverage | Where-Object { $_.Collector -eq 'sessions-claude-code' })[0]
         Assert-True ($rc.Status -eq 'PARTIAL' -and @($rc.Reasons) -contains 'DEADLINE_EXCEEDED') 'perfil nao lido por prazo: PARTIAL'
         # A forced collision (test key function): never an overwritten finding; one UNKNOWN finding with the reason;
         # the process proven by the LIVE entry stays agent-related.
         $same = { param($Provider, $ProfileSid, $ProfilePath, $SessionId) 'claude-code/s-' + ('0' * 32) }
-        $res = Get-AtmAgentRuntimeFindings -Collection $c -ProviderHints $claude -SessionRegistries @($okA, $okB) -SessionKeyFunction $same
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -ProviderHints $claude -SessionRegistries @($okA, $okB) -SessionKeyFunction $same
         $f = @($res.Findings | Where-Object { $_.Kind -eq 'AgentSession' })
         Assert-True ($f.Count -eq 1 -and $f[0].State -eq 'UNKNOWN' -and @($f[0].Evidence | Where-Object { $_.Code -eq 'SESSION_KEY_COLLISION' }).Count -eq 1) 'colisao: um achado UNKNOWN com a evidencia'
         $rc = @($res.Coverage | Where-Object { $_.Collector -eq 'sessions-claude-code' })[0]
@@ -3905,11 +3914,11 @@ try {
         Assert-Eq (& $b4State $res (& $b4Key 200 $b4T0)) 'AGENT_PROCESS' 'evidencia positiva mantida na colisao'
         # One session listed with two PIDs in the same profile: conflict, UNKNOWN.
         $conf = & $reg 'S-1-5-21-9' 'D:\profiles\a' @((& $e 'BBB' 200 $b4T0), (& $e 'BBB' 201 $b4T0.AddMinutes(1)))
-        $res = Get-AtmAgentRuntimeFindings -Collection $c -ProviderHints $claude -SessionRegistries @($conf)
-        $kb = ConvertTo-AtmSessionKey -Provider 'claude-code' -ProfileSid 'S-1-5-21-9' -ProfilePath 'D:\profiles\a' -SessionId 'bbb'
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -ProviderHints $claude -SessionRegistries @($conf)
+        $kb = ConvertTo-AtmSessionKey -Pseudonymizer $b4Pz -Provider 'claude-code' -ProfileSid 'S-1-5-21-9' -ProfilePath 'D:\profiles\a' -SessionId 'bbb'
         Assert-True ((& $b4State $res $kb) -eq 'UNKNOWN' -and @(@($res.Findings | Where-Object { $_.Key -ceq $kb })[0].Evidence | Where-Object { $_.Code -eq 'SESSION_ENTRIES_CONFLICT' }).Count -eq 1) 'entradas conflitantes: UNKNOWN'
         $dup = & $reg 'S-1-5-21-9' 'D:\profiles\a' @((& $e 'CCC' 200 $b4T0), (& $e 'CCC' 200 $b4T0))
-        $res = Get-AtmAgentRuntimeFindings -Collection $c -ProviderHints $claude -SessionRegistries @($dup)
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -ProviderHints $claude -SessionRegistries @($dup)
         Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'sessions-claude-code' })[0].Status 'COMPLETE' 'entrada repetida identica lida uma vez'
         # The order of registries, entries and SELF keys does not change the literal result.
         $self = Get-AtmSelfProcessKeys -Collection $c -SelfPid 3000 -SelfCreationUtc $b4T0.AddMinutes(5)
@@ -3917,8 +3926,8 @@ try {
         $two = & $reg 'S-1-5-21-9' 'D:\profiles\a' @((& $e 'AAA' 200 $b4T0), (& $e 'DDD' 202 $b4T0.AddMinutes(2)))
         $twoRev = & $reg 'S-1-5-21-9' 'D:\profiles\a' @((& $e 'DDD' 202 $b4T0.AddMinutes(2)), (& $e 'AAA' 200 $b4T0))
         $sig = { param($R) (@($R.Findings | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.Kind, $_.Key, $_.State, $_.Provider, (@($_.Evidence | ForEach-Object { $_.Code + '/' + $_.Detail }) -join '+') }) + @($R.Coverage | ForEach-Object { $_.Collector + '=' + $_.Status })) -join "`n" }
-        $r1 = Get-AtmAgentRuntimeFindings -Collection $c -ProviderHints $claude -SessionRegistries @($two, $okB) -SelfKeys $self
-        $r2 = Get-AtmAgentRuntimeFindings -Collection $c -ProviderHints $claude -SessionRegistries @($okB, $twoRev) -SelfKeys $selfRev
+        $r1 = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -ProviderHints $claude -SessionRegistries @($two, $okB) -SelfKeys $self
+        $r2 = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -ProviderHints $claude -SessionRegistries @($okB, $twoRev) -SelfKeys $selfRev
         Assert-Eq (& $sig $r2) (& $sig $r1) 'ordem de registros, entradas e SELF: resultado literal identico'
         # Reasons in coverage records: the same literal order whatever the order of providers and profiles (D6).
         $mixRows = @($b4cRows) + @((& $b4Row 9998 4 'nodate.exe' $null))
@@ -3928,8 +3937,8 @@ try {
         $ra = & $reg 'S-1-5-21-9' 'D:\profiles\a' @() $false
         $rb = [pscustomobject]@{ ProviderId = 'claude-code'; Registry = $null; Error = 'IOException'; ProfileSid = 'S-1-5-21-9'; ProfilePath = 'D:\profiles\b' }
         $rcv = { param($R) @($R.Coverage | ForEach-Object { $_.Collector + '=' + $_.Status + ':' + (@($_.Reasons) -join '+') }) + @('totals:' + (@($R.Totals.Reasons) -join '+')) -join "`n" }
-        $m1 = Get-AtmAgentRuntimeFindings -Collection $cm -ProviderHints @($ha, $hb) -SessionRegistries @($ra, $rb)
-        $m2 = Get-AtmAgentRuntimeFindings -Collection $cm -ProviderHints @($hb, $ha) -SessionRegistries @($rb, $ra)
+        $m1 = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $cm -ProviderHints @($ha, $hb) -SessionRegistries @($ra, $rb)
+        $m2 = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $cm -ProviderHints @($hb, $ha) -SessionRegistries @($rb, $ra)
         Assert-True (@(@($m1.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0].Reasons).Count -ge 3 -and @(@($m1.Coverage | Where-Object { $_.Collector -eq 'sessions-claude-code' })[0].Reasons).Count -ge 3) 'varios motivos nos registros comparados'
         Assert-Eq (& $rcv $m2) (& $rcv $m1) 'motivos na mesma ordem literal com providers e perfis invertidos'
     }
@@ -3943,7 +3952,7 @@ try {
         $second = Get-AtmProcessCollection -Source ({ $exitedRows }.GetNewClosure())
         Assert-Eq $second.Coverage.Status 'COMPLETE' 'segunda coleta completa'
         $cpu = Measure-AtmProcessCpu -First $c -Second $second -ElapsedMs 500
-        $res = Get-AtmAgentRuntimeFindings -Collection $c -Second $second -ProviderHints $claude -SessionRegistries $regs -Cpu $cpu
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -Second $second -ProviderHints $claude -SessionRegistries $regs -Cpu $cpu
         $hasExit = { param($Key) @(@($res.Findings | Where-Object { $_.Key -ceq $Key })[0].Evidence | Where-Object { $_.Code -eq 'PROCESS_EXITED_DURING_RUN' }).Count -eq 1 }
         Assert-True ((& $hasExit (& $b4Key 203 $b4T0.AddMinutes(3))) -and (& $hasExit (& $b4Key 202 $b4T0.AddMinutes(2)))) 'processos encerrados entre coletas completas: evidencia de saida'
         Assert-True (-not (& $hasExit (& $b4Key 200 $b4T0))) 'processo presente: sem evidencia de saida'
@@ -3955,28 +3964,28 @@ try {
         $reusedRows = @($b4cRows | Where-Object { $_.ProcessId -ne 203 }) + @((& $b4Row 203 202 'node.exe' $b4T0.AddMinutes(9)), (& $b4Row 9999 4 'nodate.exe' $null))
         $partial = Get-AtmProcessCollection -Source ({ $reusedRows }.GetNewClosure())
         Assert-Eq $partial.Coverage.Status 'PARTIAL' 'segunda coleta parcial'
-        $res = Get-AtmAgentRuntimeFindings -Collection $c -Second $partial -ProviderHints $claude
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -Second $partial -ProviderHints $claude
         Assert-Eq @($res.Findings | ForEach-Object { $_.Evidence } | Where-Object { $_.Code -eq 'PROCESS_EXITED_DURING_RUN' }).Count 0 'PID reutilizado em coleta parcial: nenhuma saida concluida'
         # CPU: no second sample, and a deadline too short for the interval.
-        $res = Get-AtmAgentRuntimeFindings -Collection $c -ProviderHints $claude
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -ProviderHints $claude
         Assert-True (-not $res.Totals.Complete -and @($res.Totals.Reasons) -contains 'CPU_NOT_SAMPLED' -and $null -eq $res.Totals.Counters.CpuPercent.Sum -and $res.Totals.Counters.HandleCount.Sum -eq (1000 * $res.Totals.Processes)) 'sem segunda amostra: CPU nula, demais contadores somados'
         $rowsT = $b4cRows
         $sample = Invoke-AtmProcessCpuSampling -Source ({ $rowsT }.GetNewClosure()) -IntervalMs 500 -Deadline ([datetime]::UtcNow.AddMilliseconds(200))
         Assert-True ($null -eq $sample.Second -and $sample.Cpu.Coverage.Status -eq 'TIMEOUT') 'prazo insuficiente: so a primeira coleta'
-        $res = Get-AtmAgentRuntimeFindings -Collection $sample.First -Second $sample.Second -ProviderHints $claude -Cpu $sample.Cpu
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $sample.First -Second $sample.Second -ProviderHints $claude -Cpu $sample.Cpu
         Assert-True (@($res.Totals.Reasons) -contains 'CPU_NOT_SAMPLED' -and @($res.Totals.Reasons) -contains 'DEADLINE_EXCEEDED' -and $null -eq $res.Totals.CpuIntervalMs) "prazo insuficiente: $(@($res.Totals.Reasons) -join ',')"
         $rc = @($res.Coverage | Where-Object { $_.Collector -eq 'agent-resources' })[0]
         Assert-True ($rc.Status -eq 'PARTIAL' -and @($rc.Reasons) -contains 'CPU_NOT_SAMPLED') 'agent-resources parcial'
         # No agent process: 0 only with a conclusive discovery; otherwise null.
         $noAgent = @($b4cRows | Where-Object { $_.Name -ne 'claude.exe' })
         $cn = Get-AtmProcessCollection -Source ({ $noAgent }.GetNewClosure())
-        $res = Get-AtmAgentRuntimeFindings -Collection $cn -ProviderHints $claude
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $cn -ProviderHints $claude
         Assert-True ($res.Totals.Processes -eq 0 -and $res.Totals.Complete -and $res.Totals.Counters.WorkingSetBytes.Sum -eq 0 -and $res.Totals.Counters.CpuPercent.Sum -eq 0) 'nenhum processo identificado com cobertura conclusiva: 0'
-        $res = Get-AtmAgentRuntimeFindings -Collection $cn -ProviderHints @(& $b4Hints 'claude-code' @([pscustomobject]@{ ImageName = 'claude.exe'; CommandLineMarker = $null }) 'FAILED')
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $cn -ProviderHints @(& $b4Hints 'claude-code' @([pscustomobject]@{ ImageName = 'claude.exe'; CommandLineMarker = $null }) 'FAILED')
         Assert-True ($res.Totals.Processes -eq 0 -and -not $res.Totals.Complete -and $null -eq $res.Totals.Counters.WorkingSetBytes.Sum -and @($res.Totals.Reasons) -contains 'AGENT_PROCESSES_INCOMPLETE') 'nenhum processo com descoberta inconclusiva: nulo, nunca 0'
         # Failed collection: every runtime collector still has exactly one record.
         $failed = Get-AtmProcessCollection -Source { throw (New-Object System.InvalidOperationException 'x') }
-        $res = Get-AtmAgentRuntimeFindings -Collection $failed -ProviderHints $claude -SessionRegistries $regs
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $failed -ProviderHints $claude -SessionRegistries $regs
         Assert-Eq (@($res.Coverage | ForEach-Object { $_.Collector + '=' + $_.Status }) -join ',') 'sessions-claude-code=COMPLETE,agent-processes=FAILED,agent-resources=FAILED' 'coleta com falha: um registro por coletor'
         Assert-True ($null -eq $res.Totals.Counters.WorkingSetBytes.Sum) 'coleta com falha: totais nulos'
     }
@@ -4020,15 +4029,159 @@ try {
             [pscustomobject]@{ ProviderId = 'fake-agent'; Registry = [pscustomobject]@{ Readable = $true; Unparseable = 1; Entries = @() }; Error = $null })
         $parts = @([pscustomobject]@{ Provider = 'claude-code'; DirectRefs = @('PID 4242 (gone.exe)'); AncestorRefs = @() })
         $emitted = New-Object System.Collections.Generic.List[string]
-        foreach ($res in @((Get-AtmAgentRuntimeFindings -Collection $cp -ProviderHints @($claude + $marker) -SessionRegistries $regs -Partitions $parts),
-                (Get-AtmAgentRuntimeFindings -Collection $failed -ProviderHints $claude -SessionRegistries $regs),
-                (Get-AtmAgentRuntimeFindings -Collection $cp -Partitions $parts -LegacySnapshot ([pscustomobject]@{ Failed = $false; Processes = @() })),
-                (Get-AtmAgentRuntimeFindings -Collection $cp))) {
+        foreach ($res in @((Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $cp -ProviderHints @($claude + $marker) -SessionRegistries $regs -Partitions $parts),
+                (Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $failed -ProviderHints $claude -SessionRegistries $regs),
+                (Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $cp -Partitions $parts -LegacySnapshot ([pscustomobject]@{ Failed = $false; Processes = @() })),
+                (Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $cp))) {
             foreach ($cv in @($res.Coverage) + @($cp.Coverage, $failed.Coverage)) { foreach ($x in @($cv.Reasons)) { $emitted.Add([string]$x) } }
             foreach ($x in @($res.Totals.Reasons)) { $emitted.Add([string]$x) }
             foreach ($f in @($res.Findings)) { foreach ($ev in @($f.Evidence)) { Assert-True ($script:AtmRuntimeEvidenceCodes -ccontains $ev.Code) "evidencia emitida com texto: $($ev.Code)" } }
         }
         foreach ($x in @($emitted | Select-Object -Unique)) { Assert-True ($x -like 'EXCEPTION_*' -or $script:AtmRuntimeReasonCodes -ccontains $x) "motivo emitido com texto: $x" }
+    }
+    # P1-B4-d fixtures: a key file of the operator in the sandbox (32 random bytes, the sandbox ACL: owner only).
+    $b4dKeyFile = { param([string]$Name, [int]$Size = 32)
+        $f = Join-Path $sandbox $Name
+        $b = New-Object byte[] $Size
+        $rng = [Security.Cryptography.RandomNumberGenerator]::Create(); try { $rng.GetBytes($b) } finally { $rng.Dispose() }
+        [IO.File]::WriteAllBytes($f, $b)
+        return $f }
+    Test-Case 'Privacidade' 'Pseudonimos (P1-B4-d): chave efemera por padrao, arquivo de chave do operador para correlacao, nenhum caminho nem id de sessao exportado, chave nunca no resultado' {
+        $sid = [guid]::NewGuid().ToString()
+        $p = New-TestProfile 'b4dps'
+        $root = New-TestRoot -ProfileInfo $p -Uuid $sid
+        $other = New-TestRoot -ProfileInfo $p
+        & $b4cSession $p 200 $sid $b4T0
+        $rows = $b4cRows
+        $src = { $rows }.GetNewClosure()
+        $run = { param($Key) Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $b4cLegacy) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0]) -ProcessSource $src -SelfPid 3000 -SelfCreationUtc $b4T0.AddMinutes(5) -CpuSampleMs 0 -PseudonymKey $Key }
+        $keysOf = { param($D, [string]$Kind) @($D.Findings | Where-Object { $_.Kind -eq $Kind } | ForEach-Object { $_.Key } | Sort-Object) -join ',' }
+        # Ephemeral (default): no correlation between runs for partitions and sessions; process keys stay comparable.
+        $e1 = & $run $null; $e2 = & $run $null
+        Assert-True ($e1.Pseudonymization.KeySource -eq 'EPHEMERAL' -and $null -eq $e1.Pseudonymization.KeyId -and $e1.Pseudonymization.Scheme -eq 'HMAC-SHA256-128/1') 'chave efemera por padrao, sem id'
+        $pk1 = @($e1.Findings | Where-Object { $_.Kind -eq 'TempPartition' } | ForEach-Object { $_.Key }); $pk2 = @($e2.Findings | Where-Object { $_.Kind -eq 'TempPartition' } | ForEach-Object { $_.Key })
+        Assert-True ($pk1.Count -eq 2 -and @($pk1 | Where-Object { $pk2 -ccontains $_ }).Count -eq 0) 'particoes: chaves diferentes entre execucoes sem arquivo de chave'
+        Assert-True ((& $keysOf $e1 'AgentSession') -cne (& $keysOf $e2 'AgentSession')) 'sessoes: chaves diferentes entre execucoes sem arquivo de chave'
+        Assert-Eq (& $keysOf $e2 'Process') (& $keysOf $e1 'Process') 'chaves de processo continuam comparaveis (nao sao pseudonimos)'
+        # Operator key file: the same file gives the same keys and key id; another file gives others.
+        $kf1 = & $b4dKeyFile 'b4d-key1.bin'; $kf2 = & $b4dKeyFile 'b4d-key2.bin'
+        $r1 = Read-AtmPseudonymKeyFile -Path $kf1; $r2 = Read-AtmPseudonymKeyFile -Path $kf2
+        Assert-True ($null -ne $r1.Key -and $null -eq $r1.Reason -and $null -ne $r2.Key) "arquivos de chave lidos: $($r1.Reason) $($r2.Reason)"
+        $keyBytes = [byte[]]$r1.Key.Clone()
+        $o1 = & $run $r1.Key; $o2 = & $run $r1.Key; $o3 = & $run $r2.Key
+        Assert-True ($o1.Pseudonymization.KeySource -eq 'OPERATOR_KEY_FILE' -and $o1.Pseudonymization.KeyId -cmatch '^[0-9a-f]{32}$' -and $o1.Pseudonymization.KeyId -ceq $o2.Pseudonymization.KeyId -and $o1.Pseudonymization.KeyId -cne $o3.Pseudonymization.KeyId) 'id da chave: igual com o mesmo arquivo, diferente com outro'
+        foreach ($kind in @('TempPartition', 'AgentSession')) {
+            Assert-Eq (& $keysOf $o2 $kind) (& $keysOf $o1 $kind) "$($kind): mesmas chaves com o mesmo arquivo de chave"
+            Assert-True ((& $keysOf $o3 $kind) -cne (& $keysOf $o1 $kind)) "$($kind): outras chaves com outro arquivo"
+        }
+        Assert-True ($r1.Key.Length -eq $keyBytes.Length -and @(0..($keyBytes.Length - 1) | Where-Object { $r1.Key[$_] -ne $keyBytes[$_] }).Count -eq 0) 'a chave do chamador nao e alterada pelo diagnostico'
+        Assert-True (@($o1.Findings | Where-Object { $_.Kind -eq 'TempPartition' -and $_.Key -cnotmatch '^claude-code/p-[0-9a-f]{32}$' }).Count -eq 0 -and @($o1.Findings | Where-Object { $_.Kind -eq 'AgentSession' -and $_.Key -cnotmatch '^claude-code/s-[0-9a-f]{32}$' }).Count -eq 0) 'formato das chaves'
+        # Nothing protected in the export, the report or the whole in-memory result: session id, paths, root names,
+        # the key (hex, base64), the key file path.
+        $old = Get-AtmLanguage
+        try { Set-AtmLanguage -Requested 'en-US'; $json = ConvertTo-AtmDiagnoseJson -Result $o1; $txt = (Show-AtmDiagnose -Result $o1 6>&1 | Out-String) } finally { Set-AtmLanguage -Requested $old }
+        $mem = ($o1 | Select-Object * -ExcludeProperty Inventory | ConvertTo-Json -Depth 12)
+        $hex = -join @($keyBytes | ForEach-Object { $_.ToString('x2') }); $b64 = [Convert]::ToBase64String($keyBytes)
+        $needles = @($sid, $root, $other, (Split-Path -Leaf $other), $p.ProfilePath, $hex, $hex.ToUpperInvariant(), $b64, $kf1)
+        foreach ($x in @($json, $txt, $mem)) { foreach ($n in $needles) { Assert-True (-not $x.Contains($n) -and -not $x.Contains($n.Replace('\', '\\'))) 'nada protegido nas saidas nem no resultado em memoria' } }
+        Assert-Eq (@($o1.Pseudonymization.PSObject.Properties.Name) -join ',') 'Scheme,KeySource,KeyId' 'resultado leva so esquema, origem e id da chave'
+        Assert-True ($txt.Contains('operator key file, key id ' + $o1.Pseudonymization.KeyId)) 'relatorio: origem da chave'
+        $te = (Show-AtmDiagnose -Result $e1 6>&1 | Out-String) -replace '\s+', ' '
+        Assert-True ($te.Contains('one-run key') -or $te.Contains('chave de uma execu')) 'relatorio: chave efemera'
+        # The pseudonymizer: closed means disposed and cleared; the key id uses its own domain.
+        $z = New-AtmPseudonymizer -Key $keyBytes
+        $kid = $z.KeyId
+        Assert-True ($kid -cne (Get-AtmPseudonym -Pseudonymizer $z -Domain 'atm-session/2' -Fields @()) -and $kid -cne (Get-AtmPseudonym -Pseudonymizer $z -Domain 'atm-partition/1' -Fields @())) 'id da chave em dominio proprio'
+        $buf = $z.Buffer
+        Close-AtmPseudonymizer $z
+        Assert-True ($null -eq $z.Hmac -and $null -eq $z.Buffer -and @($buf | Where-Object { $_ -ne 0 }).Count -eq 0) 'pseudonimizador fechado: HMAC descartado, copia da chave zerada'
+        $threw = $false; try { $null = New-AtmPseudonymizer -Key ([byte[]](1..31)) } catch { $threw = $true }
+        Assert-True $threw 'chave curta recusada'
+        # The engine alone, without a pseudonymizer, uses an ephemeral key for that call only.
+        $cr = Get-AtmProcessCollection -Source $src
+        $reg1 = @([pscustomobject]@{ ProviderId = 'claude-code'; Registry = [pscustomobject]@{ Readable = $true; Unparseable = 0; Entries = @([pscustomobject]@{ SessionId = 'e1'; Pid = 200; StartUtc = $b4T0 }) }; Error = $null })
+        $ka = @((Get-AtmAgentRuntimeFindings -Collection $cr -SessionRegistries $reg1).Findings | Where-Object { $_.Kind -eq 'AgentSession' } | ForEach-Object { $_.Key })
+        $kb = @((Get-AtmAgentRuntimeFindings -Collection $cr -SessionRegistries $reg1).Findings | Where-Object { $_.Kind -eq 'AgentSession' } | ForEach-Object { $_.Key })
+        Assert-True ($ka.Count -eq 1 -and $kb.Count -eq 1 -and $ka[0] -cne $kb[0]) 'motor sem pseudonimizador: chave efemera por chamada'
+    }
+    Test-Case 'Privacidade' 'Reconstrucao adversarial (P1-B4-d): a partir do proprio export, nenhuma chave de sessao ou particao e recalculada (formula sem chave, chaves derivadas dos campos exportados, chave vazia ou zerada)' {
+        $sid = [guid]::NewGuid().ToString()
+        $p = New-TestProfile 'b4dadv'
+        $root = New-TestRoot -ProfileInfo $p -Uuid $sid
+        & $b4cSession $p 200 $sid $b4T0
+        $rows = $b4cRows
+        $kf = & $b4dKeyFile 'b4d-adv.bin'
+        $kr = Read-AtmPseudonymKeyFile -Path $kf
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $b4cLegacy) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0]) -ProcessSource ({ $rows }.GetNewClosure()) -CpuSampleMs 0 -PseudonymKey $kr.Key
+        $j = (ConvertTo-AtmDiagnoseJson -Result $d) | ConvertFrom-Json
+        $exported = @($j.findings | Where-Object { $_.kind -eq 'TempPartition' -or $_.kind -eq 'AgentSession' } | ForEach-Object { $_.key })
+        Assert-True ($exported.Count -ge 2) 'chaves de particao e sessao exportadas'
+        # The attacker knows the raw inputs (worst case: session id and paths leaked elsewhere) and every exported field.
+        $cands = New-Object System.Collections.Generic.List[string]
+        # 1. The P1-B4-c unkeyed formula (SHA-256 over the same fields).
+        $sha = { param([string[]]$Fields) $sb = New-Object System.Text.StringBuilder; foreach ($f in $Fields) { [void]$sb.Append($f.Length).Append(':').Append($f).Append(';') }; $h = [Security.Cryptography.SHA256]::Create(); try { -join @($h.ComputeHash([Text.Encoding]::UTF8.GetBytes($sb.ToString()))[0..15] | ForEach-Object { $_.ToString('x2') }) } finally { $h.Dispose() } }
+        $sessFields = @('claude-code', [string]$p.Sid, $p.ProfilePath.TrimEnd('\').ToLowerInvariant(), $sid.ToLowerInvariant())
+        $partFields = @('claude-code', $root.TrimEnd('\').ToLowerInvariant())
+        $cands.Add('claude-code/s-' + (& $sha (@('atm-session/1') + $sessFields))); $cands.Add('claude-code/s-' + (& $sha (@('atm-session/2') + $sessFields)))
+        $cands.Add('claude-code/p-' + (& $sha (@('atm-partition/1') + $partFields)))
+        # 2. HMAC keys an attacker could build from the export: machine, SID, user, key id, schema, scheme, empty, zeros.
+        $guesses = @($j.machine, $j.identity.sid, $j.identity.user, $j.pseudonymization.keyId, $j.schemaVersion, $j.pseudonymization.scheme, '') | Where-Object { $null -ne $_ }
+        $keys = @($guesses | ForEach-Object { , [Text.Encoding]::UTF8.GetBytes([string]$_) }) + @(, (New-Object byte[] 32))
+        foreach ($k in $keys) {
+            $h = New-Object Security.Cryptography.HMACSHA256 (, [byte[]]$k)
+            try {
+                $z = [pscustomobject]@{ Hmac = $h }
+                $cands.Add('claude-code/s-' + (Get-AtmPseudonym -Pseudonymizer $z -Domain 'atm-session/2' -Fields $sessFields))
+                $cands.Add('claude-code/p-' + (Get-AtmPseudonym -Pseudonymizer $z -Domain 'atm-partition/1' -Fields $partFields))
+            } finally { $h.Dispose() }
+        }
+        Assert-True ($cands.Count -ge 19) "candidatos testados: $($cands.Count)"
+        Assert-Eq @($cands | Where-Object { $exported -ccontains $_ }).Count 0 'nenhum pseudonimo recalculado a partir do export'
+        # Control: with the real key the same computation does match (the attack above is meaningful).
+        $zr = New-AtmPseudonymizer -Key $kr.Key
+        try { Assert-True ($exported -ccontains ('claude-code/p-' + (Get-AtmPseudonym -Pseudonymizer $zr -Domain 'atm-partition/1' -Fields $partFields))) 'controle: com a chave real o pseudonimo confere' } finally { Close-AtmPseudonymizer $zr }
+    }
+    Test-Case 'Privacidade' 'Arquivo de chave do operador (P1-B4-d): caminho relativo, ausente, pasta, tamanho invalido e ACL aberta recusados sem expor caminho nem conteudo; CLI falha fechada' {
+        $ok = & $b4dKeyFile 'b4d-ok.bin'
+        Assert-True ($null -ne (Read-AtmPseudonymKeyFile -Path $ok).Key) 'arquivo valido'
+        $cases = [ordered]@{
+            'b4d-relative.bin'                 = 'PSEUDONYM_KEY_PATH_INVALID'
+            (Join-Path $sandbox 'b4d-none.bin') = 'PSEUDONYM_KEY_NOT_FOUND'
+            $sandbox                           = 'PSEUDONYM_KEY_NOT_FOUND'
+            (& $b4dKeyFile 'b4d-short.bin' 31) = 'PSEUDONYM_KEY_SIZE_INVALID'
+            (& $b4dKeyFile 'b4d-long.bin' 4097) = 'PSEUDONYM_KEY_SIZE_INVALID'
+        }
+        foreach ($c in $cases.GetEnumerator()) { $r = Read-AtmPseudonymKeyFile -Path $c.Key; Assert-True ($null -eq $r.Key -and $r.Reason -eq $c.Value) "$($c.Value): $($r.Reason)" }
+        # Readable by Everyone: refused (sandbox file only).
+        $open = & $b4dKeyFile 'b4d-open.bin'
+        $acl = Get-Acl -LiteralPath $open
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier('S-1-1-0')), 'Read', 'Allow')))
+        Set-Acl -LiteralPath $open -AclObject $acl
+        Assert-Eq (Read-AtmPseudonymKeyFile -Path $open).Reason 'PSEUDONYM_KEY_ACL_TOO_OPEN' 'legivel por Everyone: recusado'
+        # CLI: refused before running (exit 2), the code is shown, the path and the content are not.
+        $cmd = Join-Path $srcDir 'bin\agent-temp.cmd'
+        $out = (& cmd.exe /c "`"$cmd`" diagnose -DeadlineSeconds 0 -NoProgress -Lang en-US -PseudonymKeyFile `"$open`"" 2>&1) -join "`n"
+        Assert-Eq $LASTEXITCODE 2 'CLI: arquivo de chave recusado, codigo 2'
+        Assert-True ($out.Contains('PSEUDONYM_KEY_ACL_TOO_OPEN') -and -not $out.Contains($open) -and -not $out.Contains('b4d-open') -and -not $out.Contains('COVERAGE BY COLLECTOR')) 'CLI: so o codigo; nada executado'
+        $out = (& cmd.exe /c "`"$cmd`" diagnose -DeadlineSeconds 0 -NoProgress -Lang en-US -PseudonymKeyFile `"$ok`"" 2>&1) -join "`n"
+        Assert-True ($LASTEXITCODE -eq 0 -and $out -match 'operator key file, key id [0-9a-f]{32}' -and -not $out.Contains($ok)) 'CLI: arquivo valido aceito, id da chave mostrado'
+        $out = (& cmd.exe /c "`"$cmd`" help -Lang en-US" 2>&1) -join "`n"
+        Assert-True ($out.Contains('-PseudonymKeyFile')) 'ajuda mostra -PseudonymKeyFile'
+    }
+    Test-Case 'Diagnose' 'Colisao de chave de particao (P1-B4-d): duas particoes com a mesma chave viram um achado UNKNOWN, nada sobrescrito, ordem da V0.1 mantida' {
+        $parts = @(
+            [pscustomobject]@{ Provider = 'claude-code'; Path = 'D:\t\a'; Kind = 'SessionRoot'; Class = 'OLD'; Flags = @() },
+            [pscustomobject]@{ Provider = 'claude-code'; Path = 'D:\t\b'; Kind = 'SessionRoot'; Class = 'ACTIVE_EVIDENCE'; Flags = @('X') },
+            [pscustomobject]@{ Provider = 'claude-code'; Path = 'D:\t\c'; Kind = 'SessionRoot'; Class = 'OLD'; Flags = @() },
+            [pscustomobject]@{ Provider = 'claude-code'; Path = 'D:\t\n'; Kind = 'NotScanned'; Class = 'OLD'; Flags = @() })
+        $inv = @(New-AtmCoverage -Collector 'inventory' -Status 'COMPLETE')
+        $f = @(Get-AtmPartitionFindings -Partitions $parts -InventoryCoverage $inv -Pseudonymizer $b4Pz)
+        Assert-True ($f.Count -eq 3 -and @($f | Where-Object { $_.State -eq 'RUNTIME_NOT_DIAGNOSED' }).Count -eq 3) 'sem colisao: um achado por particao medida'
+        Assert-Eq (@($f | ForEach-Object { $_.Key }) -join ',') ((@('D:\t\a', 'D:\t\b', 'D:\t\c') | ForEach-Object { ConvertTo-AtmPartitionKey -Pseudonymizer $b4Pz -Provider 'claude-code' -Path $_ }) -join ',') 'ordem da V0.1'
+        $clash = { param($Provider, $Path) if ($Path -like '*\c') { 'claude-code/p-' + ('1' * 32) } else { 'claude-code/p-' + ('0' * 32) } }
+        $f = @(Get-AtmPartitionFindings -Partitions $parts -InventoryCoverage $inv -Pseudonymizer $b4Pz -KeyFunction $clash)
+        Assert-True ($f.Count -eq 2 -and $f[0].State -eq 'UNKNOWN' -and @($f[0].Evidence | Where-Object { $_.Code -eq 'PARTITION_KEY_COLLISION' -and $_.Detail -eq '2' }).Count -eq 1 -and @($f[0].Evidence | Where-Object { $_.Code -eq 'AUDIT_CLASS' }).Count -eq 0) 'colisao: um achado UNKNOWN, sem a classe de nenhuma das duas'
+        Assert-True ($f[1].State -eq 'RUNTIME_NOT_DIAGNOSED' -and $f[1].Key -ceq ('claude-code/p-' + ('1' * 32))) 'particao sem colisao inalterada'
     }
     Test-Case 'Diagnose' 'Identidade real (somente leitura, P1-B4-b): o snapshot da V0.1 e a coleta da P1-B1 dao ao proprio processo o mesmo horario de criacao em ticks' {
         $legacy = Get-AtmProcessSnapshot
@@ -4151,14 +4304,14 @@ try {
     Test-Case 'Diagnose' 'Invoke-AtmDiagnose (fontes injetadas): identidade, providers, inventario e cobertura de processos/perfis; achados das particoes' {
         $p = New-TestProfile 'diag'
         $r1 = New-TestRoot -ProfileInfo $p
-        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser
-        Assert-Eq $d.SchemaVersion 'atm.diagnose/1' 'schema'
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -PseudonymKey $testPseudonymKey
+        Assert-Eq $d.SchemaVersion 'atm.diagnose/2' 'schema'
         Assert-Eq (@($d.Coverage | ForEach-Object { $_.Collector }) -join ',') 'identity,provider-claude-code,inventory,processes,temp-profiles,process-snapshot,sessions-claude-code,agent-processes,agent-resources' 'coletores (Claude Code v2: dicas de runtime lidas; runtime de agentes da P1-B4-c)'
         foreach ($c in $d.Coverage) { Assert-Eq $c.Status 'COMPLETE' "$($c.Collector) completo" }
         Assert-True $d.CoverageComplete 'cobertura completa'
         Assert-True ($null -eq @($d.Coverage | Where-Object { $_.Collector -eq 'inventory' })[0].BudgetMs) 'inventario V0.1 sem orcamento declarado (nao interrompivel)'
-        $f = @($d.Findings | Where-Object { $_.Key -eq $r1 })
-        Assert-Eq $f.Count 1 'achado da particao'
+        $f = @($d.Findings | Where-Object { $_.Key -ceq (& $b4PKey $r1) })
+        Assert-Eq $f.Count 1 'achado da particao (pela chave pseudonima)'
         Assert-Eq $f[0].State 'RUNTIME_NOT_DIAGNOSED' 'estado'
         Assert-Eq $f[0].Provider 'claude-code' 'provider'
         Assert-Eq (@($f[0].Evidence | Where-Object { $_.Code -eq 'AUDIT_CLASS' })[0].Detail) (Find-Part $d.Inventory $r1).Class 'classe da auditoria como evidencia'
@@ -4190,7 +4343,7 @@ try {
             if ($n -eq 'uninspectable') { $procs = New-Procs -Extra @([pscustomobject]@{ ProcessId = 4243; Name = 'other.exe'; ParentProcessId = 1; CommandLine = $null; CreationDate = (Get-Date).AddHours(-1) }) }
             if ($n -eq 'unverified') { $p.Loaded = $false; $p.EnvStatus = 'NOT_LOADED'; $p.EnvKnown = $false }
             if ($n -eq 'snapshot') { ${function:script:Get-AtmProcessSnapshot} = { param($Override) [pscustomobject]([ordered]@{ Failed = $true; Error = 'x'; Processes = @(); Total = 0; Readable = 0; Uninspectable = 0; UninspectableByName = @{} }) } }
-            try { $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0]) }
+            try { $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0]) -PseudonymKey $testPseudonymKey }
             finally { ${function:script:Get-AtmProcessSnapshot} = $origSnapshot }
             $control = ($n -eq 'controle')
             Assert-Eq ([bool]$d.Inventory.CoverageComplete) $control ("$n`: Inventory.CoverageComplete (bases $(@($d.Inventory.Bases | ForEach-Object { $_.Status }) -join ','); registros legiveis $(@($d.Inventory.Registries.Values | ForEach-Object { $_.Readable }) -join ','))")
@@ -4198,7 +4351,7 @@ try {
             if (-not $control) {
                 $c = @($d.Coverage | Where-Object { $_.Collector -eq $row.Collector })[0]
                 Assert-True ($c.Status -ceq $row.Status -and @($c.Reasons) -ccontains $row.Reason) "$n`: $($row.Collector) $($row.Status) $($row.Reason) (obtido $($c.Status) $(@($c.Reasons) -join ','))"
-                $f = @($d.Findings | Where-Object { $_.Key -eq $r })
+                $f = @($d.Findings | Where-Object { $_.Key -ceq (& $b4PKey $r) })
                 Assert-Eq $f.Count 1 "$n`: achado da particao"
                 Assert-True (@($f[0].IncompleteCoverage) -ccontains $row.Collector) "$n`: achado lista $($row.Collector) como incompleto"
                 if ($n -eq 'inaccessible') { Assert-Eq @($d.Inventory.InaccessibleProfiles).Count 1 'perfil inacessivel no inventario' }
@@ -4264,7 +4417,7 @@ try {
         Assert-Eq $diff.Count 0 ('listagem identica: ' + ($diff -join ' ; '))
         Assert-Eq @($d.Findings).Count 2 'duas particoes diagnosticadas'
     }
-    Test-Case 'Diagnose' 'JSON atm.diagnose/1: campos iguais ao documento do schema; identico nos dois idiomas (exceto language); horarios ISO UTC; listas sempre arrays' {
+    Test-Case 'Diagnose' 'JSON atm.diagnose/2: campos iguais ao documento do schema; identico nos dois idiomas (exceto language); horarios ISO UTC; listas sempre arrays' {
         $p = New-TestProfile 'diagjson'
         $null = New-TestRoot -ProfileInfo $p
         $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser
@@ -4279,12 +4432,12 @@ try {
             if ($cur -and $l -match '^\| `([A-Za-z][A-Za-z0-9]*)` \|') { $sections[$cur].Add($Matches[1]) }
         }
         $objects = [ordered]@{ 'Top level' = $j; 'identity' = $j.identity; 'providers[]' = $j.providers[0]; 'coverage[]' = $j.coverage[0]; 'findings[]' = $j.findings[0]; 'findings[].evidence[]' = $j.findings[0].evidence[0]; 'inventory' = $j.inventory
-            'agentResources' = $j.agentResources; 'agentResources.counters' = $j.agentResources.counters; 'agentResources.counters.*' = $j.agentResources.counters.cpuTime100ns }
+            'agentResources' = $j.agentResources; 'agentResources.counters' = $j.agentResources.counters; 'agentResources.counters.*' = $j.agentResources.counters.cpuTime100ns; 'pseudonymization' = $j.pseudonymization }
         foreach ($k in $objects.Keys) {
             Assert-True $sections.ContainsKey($k) "secao '$k' no documento do schema"
             Assert-Eq (@($objects[$k].PSObject.Properties.Name | Sort-Object) -join ',') (@($sections[$k] | Sort-Object) -join ',') "campos de '$k'"
         }
-        Assert-Eq $j.schemaVersion 'atm.diagnose/1' 'versao'
+        Assert-Eq $j.schemaVersion 'atm.diagnose/2' 'versao'
         foreach ($name in @('startedUtc', 'finishedUtc', 'deadlineUtc', 'observedUtc')) {
             $ms = @([regex]::Matches($en, '"' + $name + '":\s*"([^"]*)"'))
             Assert-True ($ms.Count -ge 1) "$name presente"
@@ -4304,8 +4457,8 @@ try {
         $boom = 'ATM' + 'PLANTED' + 'EXCEPTION'
         $procs = New-Procs -Extra @([pscustomobject]@{ ProcessId = 777; Name = 'fake-agent.exe'; ParentProcessId = 1; CommandLine = "fake-agent.exe --secret $marker `"$r1`""; CreationDate = (Get-Date).AddHours(-1) })
         $rt = [pscustomobject]@{ Id = 'fake-runtime'; DisplayName = 'F'; ContractVersion = 2; Capabilities = @('runtime'); GetProcessMatchers = ([scriptblock]::Create("throw '$boom'")) }
-        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0], $rt)
-        Assert-Eq (@(@($d.Findings | Where-Object { $_.Key -eq $r1 })[0].Evidence | Where-Object { $_.Code -eq 'AUDIT_CLASS' })[0].Detail) 'ACTIVE_EVIDENCE' 'referencia direta considerada (classe da auditoria)'
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0], $rt) -PseudonymKey $testPseudonymKey
+        Assert-Eq (@(@($d.Findings | Where-Object { $_.Key -ceq (& $b4PKey $r1) })[0].Evidence | Where-Object { $_.Code -eq 'AUDIT_CLASS' })[0].Detail) 'ACTIVE_EVIDENCE' 'referencia direta considerada (classe da auditoria)'
         Assert-True (@(@($d.Coverage | Where-Object { $_.Collector -eq 'provider-fake-runtime' })[0].Reasons) -contains 'HINT_FAILED_PROCESS_MATCHERS') 'falha do provider registrada por codigo'
         $json = ConvertTo-AtmDiagnoseJson -Result $d
         $txt = (Show-AtmDiagnose -Result $d 6>&1 | Out-String)
