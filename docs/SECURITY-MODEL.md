@@ -155,7 +155,10 @@ Integrity at install and at every run:
   `.previous` is set aside in `<InstallDir>.recovery-*`, and a failure or exception after the swap puts the installed
   copy and the older `.previous` back. Update and rollback write `<InstallDir>.transaction.json` before the first
   rename and remove it only once they completed or every copy is back; while it or a recovery directory exists,
-  update, rollback and uninstall refuse before changing anything. Recovery messages are built into the installer
+  update, rollback and uninstall refuse before changing anything. Only one administrative operation runs on an
+  installation at a time: each takes an exclusive, delete-on-close handle on `<InstallDir>.lock` before its first
+  change, released by the OS when the process ends (the marker, not the lock, records an unfinished operation).
+  Recovery messages are built into the installer
   (never taken from an installed, possibly older, catalog). A run killed abruptly is detected at the next run, not
   recovered: no atomicity across an interruption is promised.
 * Limits: the local manifest proves integrity against the release, not authenticity against an administrator who

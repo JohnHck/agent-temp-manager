@@ -283,6 +283,9 @@ $script:AtmRecoveryTexts = @{
     'inst.recoveryPending'      = 'RECOVERY PENDING: an update or rollback did not complete ({0}). Nothing was changed. Do not uninstall: one of these copies may be the only intact installation. Check each copy with <copy>\bin\agent-temp.cmd verify, put the intact one back as {1} by renaming, remove what is no longer needed, then delete {2} if it exists. / RECUPERACAO PENDENTE: uma atualizacao ou rollback nao terminou ({0}). Nada foi alterado. Nao desinstale: uma dessas copias pode ser a unica instalacao integra. Confira cada copia com <copia>\bin\agent-temp.cmd verify, devolva a integra como {1} renomeando, remova o que nao for mais necessario e depois apague {2}, se existir.'
     'inst.recoveryLeftover'     = 'The operation completed, but {0} (a copy that is no longer needed) could not be removed. Remove it by hand: updates, rollbacks and uninstall are refused while it exists. / A operacao foi concluida, mas nao foi possivel remover {0} (uma copia que nao e mais necessaria). Remova-a manualmente: atualizacoes, rollbacks e desinstalacao sao recusados enquanto ela existir.'
     'inst.previousIntegrity'    = 'The previous version failed its integrity check; nothing was changed: {0} / A versao anterior falhou na verificacao de integridade; nada foi alterado: {0}'
+    'inst.operationLocked'      = 'Another administrative operation (install, update, rollback or uninstall) is running on {0}, or its lock cannot be taken ({1}: {2}). Nothing was changed. Wait for it to finish and try again. / Outra operacao administrativa (instalacao, atualizacao, rollback ou desinstalacao) esta em andamento em {0}, ou o bloqueio nao pode ser obtido ({1}: {2}). Nada foi alterado. Aguarde o termino e tente de novo.'
+    'inst.lockParentMissing'    = 'The directory {0} does not exist: there is nothing to update, roll back or uninstall, and nowhere to install. Nothing was changed. / O diretorio {0} nao existe: nao ha o que atualizar, reverter ou desinstalar, nem onde instalar. Nada foi alterado.'
+    'inst.transactionForeign'   = 'The transaction marker {0} belongs to another operation; it was left as it is. / O marcador de transacao {0} pertence a outra operacao; ele foi mantido como esta.'
     'inst.interruptedPrevious'  = 'No installation in {0}, but a previous version exists in {1} (an interrupted update or rollback?). Nothing was changed. Do not uninstall. Rename it to {0} by hand, or install without -Update. / Nenhuma instalacao em {0}, mas existe uma versao anterior em {1} (atualizacao ou rollback interrompido?). Nada foi alterado. Nao desinstale. Renomeie-a para {0} manualmente ou instale sem -Update.'
 }
 
@@ -293,6 +296,42 @@ function Get-AtmRecoveryText {
     $tpl = $script:AtmRecoveryTexts[$key]
     if ($fmtArgs.Count -eq 0) { return $tpl }
     return ($tpl -f $fmtArgs)
+}
+
+if (-not (Test-Path variable:script:AtmLockDepth)) { $script:AtmLockDepth = 0; $script:AtmLockStream = $null; $script:AtmLockPath = $null }
+
+function Enter-AtmOperationLock {
+    # Mutual exclusion for install, update, rollback and uninstall of one InstallDir (R-B6), across processes and
+    # sessions: an exclusive handle (FileShare.None, delete-on-close) on <InstallDir>.lock, next to the installation in
+    # the administrator-only parent. A second operation cannot open it and refuses before changing anything. The OS
+    # closes the handle when the holder ends, abruptly too, so the lock never outlives its process; the evidence of an
+    # unfinished operation is the transaction marker, which is separate and persistent. Aliases of the same path
+    # (8.3, case) reach the same file. Re-entrant in one process: the scripts take it before the functions do.
+    param([string]$InstallDir, [string]$Operation)
+    $path = [IO.Path]::GetFullPath("$InstallDir.lock")
+    # No parent directory: nothing exists to protect, and nothing is created (refused, not run unlocked).
+    $parent = Split-Path -Parent $path
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) { throw (Get-AtmRecoveryText 'inst.lockParentMissing' $parent) }
+    if ($script:AtmLockDepth -gt 0) {
+        if ([string]::Equals($script:AtmLockPath, $path, [StringComparison]::OrdinalIgnoreCase)) { $script:AtmLockDepth++; return }
+        throw (Get-AtmRecoveryText 'inst.operationLocked' $InstallDir $path 'this process holds the lock of another installation')
+    }
+    $fs = $null
+    try { $fs = New-Object IO.FileStream($path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None, 4096, [IO.FileOptions]::DeleteOnClose) }
+    catch { throw (Get-AtmRecoveryText 'inst.operationLocked' $InstallDir $path $_.Exception.Message) }
+    try {
+        $info = [Text.Encoding]::UTF8.GetBytes((([ordered]@{ operation = $Operation; pid = $PID; startedUtc = [datetime]::UtcNow.ToString('o') }) | ConvertTo-Json -Compress))
+        $fs.SetLength(0); $fs.Write($info, 0, $info.Length); $fs.Flush()
+    } catch { $null = $_ }   # diagnostic content only; the open handle is the lock
+    $script:AtmLockStream = $fs; $script:AtmLockPath = $path; $script:AtmLockDepth = 1
+}
+
+function Exit-AtmOperationLock {
+    if ($script:AtmLockDepth -le 0) { return }
+    $script:AtmLockDepth--
+    if ($script:AtmLockDepth -eq 0) {
+        try { $script:AtmLockStream.Dispose() } finally { $script:AtmLockStream = $null; $script:AtmLockPath = $null }
+    }
 }
 
 function New-AtmSiblingDir {
@@ -318,16 +357,34 @@ function Get-AtmTransactionPath {
     return "$InstallDir.transaction.json"
 }
 
+function Get-AtmTransactionId {
+    param([string]$InstallDir)
+    try { return [string](Get-Content -LiteralPath (Get-AtmTransactionPath -InstallDir $InstallDir) -Raw | ConvertFrom-Json).id } catch { return $null }
+}
+
 function Write-AtmTransaction {
-    param([string]$InstallDir, [string]$Operation, [string]$State, [hashtable]$Copies)
-    $doc = [ordered]@{ product = 'Agent Temp Manager'; operation = $Operation; state = $State; updatedUtc = [datetime]::UtcNow.ToString('o'); installDir = $InstallDir; copies = $Copies }
-    [IO.File]::WriteAllText((Get-AtmTransactionPath -InstallDir $InstallDir), ($doc | ConvertTo-Json -Depth 3), (New-Object Text.UTF8Encoding($false)))
+    # -New creates the marker only if none exists (CreateNew): another transaction's marker is never overwritten.
+    # Without -New it rewrites the marker only if it carries this transaction's id.
+    param([string]$InstallDir, [string]$Id, [string]$Operation, [string]$State, [hashtable]$Copies, [switch]$New)
+    $path = Get-AtmTransactionPath -InstallDir $InstallDir
+    $doc = [ordered]@{ product = 'Agent Temp Manager'; id = $Id; operation = $Operation; state = $State; updatedUtc = [datetime]::UtcNow.ToString('o'); installDir = $InstallDir; copies = $Copies }
+    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes(($doc | ConvertTo-Json -Depth 3))
+    if ($New) {
+        $fs = New-Object IO.FileStream($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try { $fs.Write($bytes, 0, $bytes.Length); $fs.Flush() } finally { $fs.Dispose() }
+        return
+    }
+    if ((Get-AtmTransactionId -InstallDir $InstallDir) -ne $Id) { throw (Get-AtmRecoveryText 'inst.transactionForeign' $path) }
+    [IO.File]::WriteAllBytes($path, $bytes)
 }
 
 function Clear-AtmTransaction {
-    param([string]$InstallDir)
+    # Removes the marker only if it is this transaction's.
+    param([string]$InstallDir, [string]$Id)
     $m = Get-AtmTransactionPath -InstallDir $InstallDir
-    if (Test-Path -LiteralPath $m -PathType Leaf) { [IO.File]::Delete($m) }
+    if (-not (Test-Path -LiteralPath $m -PathType Leaf)) { return }
+    if ((Get-AtmTransactionId -InstallDir $InstallDir) -eq $Id) { [IO.File]::Delete($m) }
+    else { Write-Warning (Get-AtmRecoveryText 'inst.transactionForeign' $m) }
 }
 
 function Assert-AtmNoRecoveryPending {
@@ -368,12 +425,18 @@ function Install-AtmProduct {
     <#
       Install / update flow. The public script Install-AgentTempManager.ps1 calls Assert-AtmElevated first;
       the isolated test suite calls this function with a sandbox InstallDir and -TestPathKey.
+      Runs under the operation lock of InstallDir (R-B6); the flow itself is Invoke-AtmInstallUnlocked.
     #>
     param([string]$SourceDir, [string]$InstallDir, [string]$ProjectsFile, [switch]$Update, [switch]$SkipPath, [string]$TrustSid, [string]$TestPathKey, [switch]$SourceWithoutManifest)
-    $SourceDir = [IO.Path]::GetFullPath($SourceDir)
-    $InstallDir = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
+    # 1. Source validation (read-only), before the lock: a bad source is reported as such.
+    $version = Assert-AtmInstallSource -SourceDir ([IO.Path]::GetFullPath($SourceDir)) -SourceWithoutManifest:$SourceWithoutManifest
+    Enter-AtmOperationLock -InstallDir ([IO.Path]::GetFullPath($InstallDir).TrimEnd('\')) -Operation $(if ($Update) { 'update' } else { 'install' })
+    try { return (Invoke-AtmInstallUnlocked @PSBoundParameters -Version $version) } finally { Exit-AtmOperationLock }
+}
 
-    # 1. Source validation: required files, PowerShell syntax.
+function Assert-AtmInstallSource {
+    # Required files, PowerShell syntax, manifest; returns the source version.
+    param([string]$SourceDir, [switch]$SourceWithoutManifest)
     foreach ($rel in $script:AtmRequiredFiles) { if (-not (Test-Path -LiteralPath (Join-Path $SourceDir $rel) -PathType Leaf)) { throw (Get-AtmText 'inst.requiredMissing' $rel) } }
     foreach ($f in Get-ChildItem -LiteralPath $SourceDir -Recurse -Filter '*.ps1' -File) {
         $t = $null; $e = $null
@@ -382,6 +445,15 @@ function Install-AtmProduct {
     }
     $version = Get-AtmSourceVersion -SourceDir $SourceDir
     Test-AtmSourceIntegrity -SourceDir $SourceDir -AllowNoManifest:$SourceWithoutManifest
+    return $version
+}
+
+function Invoke-AtmInstallUnlocked {
+    # Sections 2-6 of the install / update flow; Install-AtmProduct validated the source and holds the lock.
+    param([string]$SourceDir, [string]$InstallDir, [string]$ProjectsFile, [switch]$Update, [switch]$SkipPath, [string]$TrustSid, [string]$TestPathKey, [switch]$SourceWithoutManifest, [string]$Version)
+    $SourceDir = [IO.Path]::GetFullPath($SourceDir)
+    $InstallDir = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
+    $version = $Version
 
     # 2. Existing installation handling.
     Assert-AtmNoRecoveryPending -InstallDir $InstallDir
@@ -447,8 +519,9 @@ function Install-AtmProduct {
     $bin = Join-Path $InstallDir 'bin'
     $pathAdded = $false
     $marker = Get-AtmTransactionPath -InstallDir $InstallDir
+    $txId = [guid]::NewGuid().ToString('N')
     if ($exists) {
-        try { Write-AtmTransaction -InstallDir $InstallDir -Operation 'update' -State 'started' -Copies $where }
+        try { Write-AtmTransaction -InstallDir $InstallDir -Id $txId -Operation 'update' -State 'started' -Copies $where -New }
         catch { Remove-AtmOwnTree -Path $staging -InstallDir $InstallDir; throw }
     }
     try {
@@ -485,12 +558,12 @@ function Install-AtmProduct {
         $undo = Invoke-AtmRenameSteps -Steps $steps -Where $where
         if ($null -ne $undo) {
             # Nothing more is moved or deleted; the marker stays (with the positions) and blocks every operation.
-            try { Write-AtmTransaction -InstallDir $InstallDir -Operation 'update' -State 'recovery-failed' -Copies $where } catch { $null = $_ }
+            try { Write-AtmTransaction -InstallDir $InstallDir -Id $txId -Operation 'update' -State 'recovery-failed' -Copies $where } catch { $null = $_ }
             throw (Get-AtmRecoveryText 'inst.updateUndoFailed' $failure $undo $where.installed $(if ($null -ne $where.older) { $where.older } else { '-' }) $where.new $InstallDir $marker)
         }
         if ($pathAdded) { $null = Remove-AtmMachinePath -Dir $bin -TestKeyPath $TestPathKey }
         # Every intact copy is back: the transaction is over. Only then is the failed new copy removed.
-        Clear-AtmTransaction -InstallDir $InstallDir
+        Clear-AtmTransaction -InstallDir $InstallDir -Id $txId
         try { Remove-AtmOwnTree -Path $where.new -InstallDir $InstallDir } catch { Write-Warning (Get-AtmRecoveryText 'inst.recoveryLeftover' $where.new) }
         throw (Get-AtmRecoveryText 'inst.updateRestored' $failure)
     }
@@ -499,12 +572,19 @@ function Install-AtmProduct {
     if ($null -ne $olderAside) {
         try { Remove-AtmOwnTree -Path $olderAside -InstallDir $InstallDir } catch { Write-Warning (Get-AtmRecoveryText 'inst.recoveryLeftover' $olderAside) }
     }
-    if ($exists) { Clear-AtmTransaction -InstallDir $InstallDir }
+    if ($exists) { Clear-AtmTransaction -InstallDir $InstallDir -Id $txId }
     return [pscustomobject]@{ Version = $version; InstallDir = $InstallDir; PreviousKept = (Test-Path -LiteralPath $previous); PathAdded = $pathAdded }
 }
 
 function Restore-AtmPrevious {
-    # Rollback to <InstallDir>.previous (created by the last -Update). The PATH entry is unchanged.
+    # Rollback to <InstallDir>.previous (created by the last -Update). The PATH entry is unchanged. Runs under the
+    # operation lock of InstallDir (R-B6).
+    param([string]$InstallDir)
+    Enter-AtmOperationLock -InstallDir ([IO.Path]::GetFullPath($InstallDir).TrimEnd('\')) -Operation 'rollback'
+    try { return (Invoke-AtmRestoreUnlocked -InstallDir $InstallDir) } finally { Exit-AtmOperationLock }
+}
+
+function Invoke-AtmRestoreUnlocked {
     param([string]$InstallDir)
     $InstallDir = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
     $previous = "$InstallDir.previous"
@@ -519,9 +599,10 @@ function Restore-AtmPrevious {
     $retired = New-AtmSiblingDir -InstallDir $InstallDir -Kind recovery
     $marker = Get-AtmTransactionPath -InstallDir $InstallDir
     $copies = @{ current = $InstallDir; previous = $previous; retired = $retired }
-    Write-AtmTransaction -InstallDir $InstallDir -Operation 'rollback' -State 'started' -Copies $copies
+    $txId = [guid]::NewGuid().ToString('N')
+    Write-AtmTransaction -InstallDir $InstallDir -Id $txId -Operation 'rollback' -State 'started' -Copies $copies -New
     try { Rename-Item -LiteralPath $InstallDir -NewName (Split-Path -Leaf $retired) }
-    catch { Clear-AtmTransaction -InstallDir $InstallDir; throw }
+    catch { Clear-AtmTransaction -InstallDir $InstallDir -Id $txId; throw }
     try { Rename-Item -LiteralPath $previous -NewName (Split-Path -Leaf $InstallDir) }
     catch {
         $swapError = $_
@@ -529,10 +610,10 @@ function Restore-AtmPrevious {
         catch {
             $prevAt = $(if (Test-Path -LiteralPath $previous) { $previous } else { $InstallDir })
             $copies.current = $retired; $copies.previous = $prevAt
-            try { Write-AtmTransaction -InstallDir $InstallDir -Operation 'rollback' -State 'recovery-failed' -Copies $copies } catch { $null = $_ }
+            try { Write-AtmTransaction -InstallDir $InstallDir -Id $txId -Operation 'rollback' -State 'recovery-failed' -Copies $copies } catch { $null = $_ }
             throw (Get-AtmRecoveryText 'inst.rollbackUndoFailed' $swapError.Exception.Message $_.Exception.Message $retired $prevAt $InstallDir $marker)
         }
-        Clear-AtmTransaction -InstallDir $InstallDir
+        Clear-AtmTransaction -InstallDir $InstallDir -Id $txId
         throw $swapError
     }
     # A verify that fails or throws is the same failure: both copies go back where they were. The current copy is
@@ -554,18 +635,25 @@ function Restore-AtmPrevious {
             $curAt = $retired
             $prevAt = $(if (Test-Path -LiteralPath $previous) { $previous } else { $InstallDir })
             $copies.current = $curAt; $copies.previous = $prevAt
-            try { Write-AtmTransaction -InstallDir $InstallDir -Operation 'rollback' -State 'recovery-failed' -Copies $copies } catch { $null = $_ }
+            try { Write-AtmTransaction -InstallDir $InstallDir -Id $txId -Operation 'rollback' -State 'recovery-failed' -Copies $copies } catch { $null = $_ }
             throw (Get-AtmRecoveryText 'inst.rollbackUndoFailed' $failure $undo $curAt $prevAt $InstallDir $marker)
         }
-        Clear-AtmTransaction -InstallDir $InstallDir
+        Clear-AtmTransaction -InstallDir $InstallDir -Id $txId
         throw (Get-AtmRecoveryText 'inst.rollbackVerifyFailed' $failure)
     }
     try { Remove-AtmOwnTree -Path $retired -InstallDir $InstallDir } catch { Write-Warning (Get-AtmRecoveryText 'inst.recoveryLeftover' $retired) }
-    Clear-AtmTransaction -InstallDir $InstallDir
+    Clear-AtmTransaction -InstallDir $InstallDir -Id $txId
     return (Get-Content -LiteralPath (Join-Path $InstallDir 'install-state.json') -Raw | ConvertFrom-Json).version
 }
 
 function Uninstall-AtmProduct {
+    # Runs under the operation lock of InstallDir (R-B6).
+    param([string]$InstallDir, [string]$TestPathKey)
+    Enter-AtmOperationLock -InstallDir ([IO.Path]::GetFullPath($InstallDir).TrimEnd('\')) -Operation 'uninstall'
+    try { return (Invoke-AtmUninstallUnlocked @PSBoundParameters) } finally { Exit-AtmOperationLock }
+}
+
+function Invoke-AtmUninstallUnlocked {
     param([string]$InstallDir, [string]$TestPathKey)
     $InstallDir = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
     # A pending recovery is refused before anything changes (PATH, product directories, sweeps): one of the copies

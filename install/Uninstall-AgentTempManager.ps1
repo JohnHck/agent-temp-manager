@@ -14,9 +14,13 @@ $script:AtmCatalogInstallDir = $InstallDir
 . (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'InstallCommon.ps1')
 
 Assert-AtmElevated
-# A pending recovery (R-B6) is refused before anything is created, the private TEMP included.
-Assert-AtmNoRecoveryPending -InstallDir ([IO.Path]::GetFullPath($InstallDir).TrimEnd('\'))
-$privateTemp = Enter-AtmPrivateTemp -InstallDir $InstallDir
-try { $removed = Uninstall-AtmProduct -InstallDir $InstallDir } finally { Exit-AtmPrivateTemp -State $privateTemp -InstallDir $InstallDir }
+# The operation lock and the pending-recovery check (R-B6) come before anything is created, the private TEMP included.
+$lockDir = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
+Enter-AtmOperationLock -InstallDir $lockDir -Operation 'uninstall'
+try {
+    Assert-AtmNoRecoveryPending -InstallDir $lockDir
+    $privateTemp = Enter-AtmPrivateTemp -InstallDir $InstallDir
+    try { $removed = Uninstall-AtmProduct -InstallDir $InstallDir } finally { Exit-AtmPrivateTemp -State $privateTemp -InstallDir $InstallDir }
+} finally { Exit-AtmOperationLock }
 Write-Host (Get-AtmText 'inst.pathRemoved' $removed)
 Write-Host (Get-AtmText 'inst.uninstalled') -ForegroundColor Green

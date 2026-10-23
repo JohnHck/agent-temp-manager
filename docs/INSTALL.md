@@ -76,6 +76,10 @@ version passed `verify`. If anything fails after the swap (PATH, state, ACL chec
 and its `.previous` are put back and the update reports the failure. If putting them back fails too, nothing is
 deleted and the message says where each copy is and how to rename them back.
 
+Only one install, update, rollback or uninstall runs on an installation at a time: a second one, from any console or
+session, stops with "another administrative operation is running" and changes nothing (the running one holds
+`%ProgramFiles%\AgentTempManager.lock` open; the file disappears when it ends).
+
 An update or rollback in progress is recorded in `%ProgramFiles%\AgentTempManager.transaction.json`, written before
 the first directory is moved and removed only when the operation completed or every copy is back.
 `AgentTempManager.recovery-*` directories may hold the only intact installation. While the transaction file or a

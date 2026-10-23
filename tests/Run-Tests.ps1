@@ -2364,7 +2364,7 @@ try {
             $h = & $rb6StartHolder 'rollback' $cur 'integrity' -Throw; $holders += $h
             Assert-True $h.Ready 'rollback detentor (excecao) chegou ao portao'
             $r = & $rb6Release $h
-            Assert-True ($r -match 'RESULT=ERROR simulated exception in the holder') "excecao no detentor relatada ($r)"
+            Assert-True ($r -match '^RESULT=ERROR .*simulated exception in the holder') "excecao no detentor relatada ($r)"
             Assert-True ((& $rb6LockGone $cur) -and (& $rb6Tag $cur) -eq 'atual' -and (& $rb6Tag "$cur.previous") -eq 'anterior' -and (& $rb6Leftovers $cur) -eq '') 'excecao no detentor: bloqueio liberado, nada movido, nada pendente'
             Assert-Eq (Restore-AtmPrevious -InstallDir $cur) (Get-AtmSourceVersion -SourceDir $srcDir) 'excecao no detentor: operacao seguinte executa'
             # In this process too: an operation that throws after taking the lock releases it.
@@ -2453,7 +2453,7 @@ try {
             $h = & $rb6StartHolder 'update' $inst 'staging' $testKey -Throw; $holders += $h
             Assert-True $h.Ready 'atualizacao detentora (excecao) chegou ao portao'
             $r = & $rb6Release $h
-            Assert-True ($r -match 'RESULT=ERROR simulated exception in the holder') "excecao no detentor relatada ($r)"
+            Assert-True ($r -match '^RESULT=ERROR .*simulated exception in the holder') "excecao no detentor relatada ($r)"
             Assert-True ((& $rb6LockGone $inst) -and (& $rb6Tag $inst) -eq 'v3' -and (& $rb6Tag $prev) -eq 'v2' -and (& $rb6Leftovers $inst) -eq '' -and (& $pathSnap) -eq $path0) 'excecao no detentor: bloqueio liberado; instalacao, .previous e PATH intactos; nada pendente'
             # 5. An update holder killed after the swap (marker written): the lock goes with the process; the marker, the
             # installed copy (now .previous) and the older .previous (recovery) stay; every later operation refuses.
