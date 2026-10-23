@@ -2249,6 +2249,243 @@ foreach ($op in $(if ($Mode -eq 'undo') { @('restore') } else { @('uninstall', '
         Assert-True ($line -match 'simulated rename failure' -and $line -match 'Nada foi apagado' -and $line -match 'Nao desinstale' -and $line -notmatch '\[inst\.') "rollback que nao reverte: motivo e orientacao sem o catalogo ($line)"
         Assert-True ($retired.Count -eq 1 -and (& $rb6Tag $retired[0].FullName) -eq 'atual' -and (& $rb6Tag $prev) -eq 'anterior') 'rollback que nao reverte: copias preservadas'
     }
+    # R-B6 concurrency between independent processes. A holder process runs one administrative operation and stops at a
+    # gate: when it gets there it writes <gate>.ready and waits until the test writes <gate>.go (no timing guesses).
+    # 'staging' stops while the new copy is staged (before any marker), 'integrity' at the rollback's check of
+    # .previous (before any marker), 'remove' at the uninstall's first removal, 'postswap' at the verify after the swap.
+    $rb6Ps = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    $rb6Common = Join-Path (Split-Path -Parent $testsDir) 'install\InstallCommon.ps1'
+    $rb6HolderScript = Join-Path $sandbox 'rb6-holder.ps1'
+    [IO.File]::WriteAllText($rb6HolderScript, @'
+param([string]$Common, [string]$Op, [string]$Source, [string]$InstallDir, [string]$TestPathKey, [string]$TrustSid, [string]$Hold, [string]$Gate, [switch]$Throw)
+$ErrorActionPreference = 'Stop'
+$script:AtmCatalogTrustUnverified = $true
+. $Common
+$script:target = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
+$script:origNative = ${function:New-AtmNativeAssembly}
+$script:origVerify = ${function:Invoke-AtmVerifyInstalled}
+$script:origIntegrity = ${function:Test-AtmSourceIntegrity}
+$script:origRemove = ${function:Remove-AtmOwnTree}
+$script:held = $false
+function Wait-Gate {
+    if ($script:held) { return }
+    $script:held = $true
+    [IO.File]::WriteAllText("$Gate.ready", [string]$PID)
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while (-not (Test-Path -LiteralPath "$Gate.go")) { if ($sw.Elapsed.TotalSeconds -gt 300) { throw 'gate timeout' }; Start-Sleep -Milliseconds 50 }
+    if ($Throw) { throw 'simulated exception in the holder' }
+}
+switch ($Hold) {
+    'staging' { function New-AtmNativeAssembly { param([string]$Root) Wait-Gate; & $script:origNative -Root $Root } }
+    'postswap' { function Invoke-AtmVerifyInstalled { param([string]$InstallDir) if ([string]::Equals($InstallDir.TrimEnd('\'), $script:target, [StringComparison]::OrdinalIgnoreCase)) { Wait-Gate }; & $script:origVerify -InstallDir $InstallDir } }
+    'integrity' { function Test-AtmSourceIntegrity { param([string]$SourceDir, [switch]$AllowNoManifest, [switch]$InstalledCopy) Wait-Gate; & $script:origIntegrity @PSBoundParameters } }
+    'remove' { function Remove-AtmOwnTree { param([string]$Path, [string]$InstallDir) Wait-Gate; & $script:origRemove @PSBoundParameters } }
+}
+$result = 'RESULT=OK'
+try {
+    switch ($Op) {
+        'install' { $null = Install-AtmProduct -SourceDir $Source -InstallDir $InstallDir -TrustSid $TrustSid -TestPathKey $TestPathKey -SourceWithoutManifest }
+        'update' { $null = Install-AtmProduct -SourceDir $Source -InstallDir $InstallDir -Update -TrustSid $TrustSid -TestPathKey $TestPathKey -SourceWithoutManifest }
+        'rollback' { $null = Restore-AtmPrevious -InstallDir $InstallDir }
+        'uninstall' { $null = Uninstall-AtmProduct -InstallDir $InstallDir -TestPathKey $TestPathKey }
+    }
+} catch { $result = 'RESULT=ERROR ' + $_.Exception.Message }
+[IO.File]::WriteAllText("$Gate.result", $result)
+'@)
+    $rb6StartHolder = { param([string]$Op, [string]$InstallDir, [string]$Hold, [string]$TestPathKey = 'Software\AgentTempManagerTest\EnvB6h', [switch]$Throw)
+        $gate = Join-Path $sandbox ('gate-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $psi = New-Object Diagnostics.ProcessStartInfo
+        $psi.FileName = $rb6Ps
+        $psi.Arguments = ('-NoProfile -ExecutionPolicy Bypass -File "{0}" -Common "{1}" -Op {2} -Source "{3}" -InstallDir "{4}" -TestPathKey "{5}" -TrustSid {6} -Hold {7} -Gate "{8}"' -f $rb6HolderScript, $rb6Common, $Op, $srcDir, $InstallDir, $TestPathKey, $me.Sid, $Hold, $gate) + $(if ($Throw) { ' -Throw' } else { '' })
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $p = [Diagnostics.Process]::Start($psi)
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        while (-not (Test-Path -LiteralPath "$gate.ready") -and -not $p.HasExited -and $sw.Elapsed.TotalSeconds -lt 240) { Start-Sleep -Milliseconds 50 }
+        [pscustomobject]@{ Process = $p; Gate = $gate; Ready = (Test-Path -LiteralPath "$gate.ready") } }
+    $rb6Result = { param($H) if (Test-Path -LiteralPath "$($H.Gate).result") { [IO.File]::ReadAllText("$($H.Gate).result") } else { '(no result)' } }
+    $rb6Release = { param($H)
+        [IO.File]::WriteAllText("$($H.Gate).go", 'go')
+        if (-not $H.Process.WaitForExit(240000)) { $H.Process.Kill(); [void]$H.Process.WaitForExit(30000) }
+        & $rb6Result $H }
+    $rb6Stop = { param($H) if ($null -ne $H -and -not $H.Process.HasExited) { $H.Process.Kill(); [void]$H.Process.WaitForExit(30000) } }
+    $rb6LockGone = { param([string]$Inst)
+        # The OS closes the holder's handle when its process ends; the lock file is delete-on-close.
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        while ((Test-Path -LiteralPath "$Inst.lock") -and $sw.Elapsed.TotalSeconds -lt 20) { Start-Sleep -Milliseconds 100 }
+        -not (Test-Path -LiteralPath "$Inst.lock") }
+    $rb6Build = { param([string]$Cur)
+        # A current installation ('atual') and its .previous ('anterior'), built without Install-AtmProduct (no parent
+        # ACL requirement, so this runs on any machine).
+        $ver = Get-AtmSourceVersion -SourceDir $srcDir
+        foreach ($d in @(@{ P = $Cur; T = 'atual' }, @{ P = "$Cur.previous"; T = 'anterior' })) {
+            [void][IO.Directory]::CreateDirectory($d.P)
+            Copy-AtmTree -From $srcDir -To $d.P
+            New-AtmNativeAssembly -Root $d.P
+            Write-AtmManifest -Root $d.P -Version $ver
+            [IO.File]::WriteAllText((Join-Path $d.P 'install-state.json'), '{ "product": "Agent Temp Manager", "version": "' + $ver + '", "pathAddedByInstaller": false, "tag": "' + $d.T + '" }')
+        } }
+    Test-Case 'Instalacao' 'R-B6 concorrencia entre processos (rollback e desinstalacao): uma operacao por destino; a concorrente recusa sem alterar nada; destinos distintos nao se bloqueiam; excecao e encerramento abrupto liberam o bloqueio e preservam a evidencia' {
+        $holders = @()
+        try {
+            # 1. A rollback held before its marker exists: uninstall and rollback from this process refuse, nothing moves.
+            $cur = Join-Path $sandbox 'PF16\AgentTempManager'
+            & $rb6Build $cur
+            $h = & $rb6StartHolder 'rollback' $cur 'integrity'; $holders += $h
+            Assert-True $h.Ready "rollback detentor chegou ao portao ($(& $rb6Result $h))"
+            foreach ($op in @('uninstall', 'rollback')) {
+                $g = $null
+                try { if ($op -eq 'uninstall') { $null = Uninstall-AtmProduct -InstallDir $cur } else { $null = Restore-AtmPrevious -InstallDir $cur } } catch { $g = $_.Exception.Message }
+                Assert-True ($null -ne $g -and $g.Contains("$cur.lock") -and $g -match 'Nada foi alterado') "rollback em andamento: $op concorrente recusado ($g)"
+            }
+            Assert-True (Test-Path -LiteralPath "$cur.lock") 'bloqueio da operacao presente enquanto o rollback roda'
+            Assert-True ((& $rb6Tag $cur) -eq 'atual' -and (& $rb6Tag "$cur.previous") -eq 'anterior' -and (& $rb6Leftovers $cur) -eq '') 'rollback em andamento: recusas nao alteraram nada'
+            # 2. A different destination is not blocked.
+            $other = Join-Path $sandbox 'PF17\AgentTempManager'
+            & $rb6Build $other
+            Assert-Eq (Restore-AtmPrevious -InstallDir $other) (Get-AtmSourceVersion -SourceDir $srcDir) 'destino distinto: rollback concluido enquanto o outro destino esta bloqueado'
+            Assert-True ((& $rb6Tag $other) -eq 'anterior' -and (& $rb6Leftovers $other) -eq '') 'destino distinto: rollback integro'
+            $r = & $rb6Release $h
+            Assert-Eq $r 'RESULT=OK' 'rollback detentor concluiu depois de liberado'
+            Assert-True ((& $rb6Tag $cur) -eq 'anterior' -and (& $rb6Leftovers $cur) -eq '' -and (& $rb6LockGone $cur)) 'rollback detentor: concluido, nada pendente, bloqueio liberado'
+            # 3. An uninstall held at its first removal: a rollback from this process refuses.
+            $cur = Join-Path $sandbox 'PF18\AgentTempManager'
+            & $rb6Build $cur
+            $h = & $rb6StartHolder 'uninstall' $cur 'remove'; $holders += $h
+            Assert-True $h.Ready "desinstalacao detentora chegou ao portao ($(& $rb6Result $h))"
+            $g = $null; try { $null = Restore-AtmPrevious -InstallDir $cur } catch { $g = $_.Exception.Message }
+            Assert-True ($null -ne $g -and $g.Contains("$cur.lock")) "desinstalacao em andamento: rollback concorrente recusado ($g)"
+            Assert-True ((& $rb6Tag $cur) -eq 'atual' -and (& $rb6Tag "$cur.previous") -eq 'anterior') 'desinstalacao em andamento: rollback recusado nao moveu nada'
+            Assert-Eq (& $rb6Release $h) 'RESULT=OK' 'desinstalacao detentora concluiu'
+            Assert-True (-not (Test-Path -LiteralPath $cur) -and (& $rb6LockGone $cur)) 'desinstalacao detentora: produto removido, bloqueio liberado'
+            # 4. An exception in the holder releases the lock; nothing was moved; the next operation runs.
+            $cur = Join-Path $sandbox 'PF19\AgentTempManager'
+            & $rb6Build $cur
+            $h = & $rb6StartHolder 'rollback' $cur 'integrity' -Throw; $holders += $h
+            Assert-True $h.Ready 'rollback detentor (excecao) chegou ao portao'
+            $r = & $rb6Release $h
+            Assert-True ($r -match 'RESULT=ERROR simulated exception in the holder') "excecao no detentor relatada ($r)"
+            Assert-True ((& $rb6LockGone $cur) -and (& $rb6Tag $cur) -eq 'atual' -and (& $rb6Tag "$cur.previous") -eq 'anterior' -and (& $rb6Leftovers $cur) -eq '') 'excecao no detentor: bloqueio liberado, nada movido, nada pendente'
+            Assert-Eq (Restore-AtmPrevious -InstallDir $cur) (Get-AtmSourceVersion -SourceDir $srcDir) 'excecao no detentor: operacao seguinte executa'
+            # In this process too: an operation that throws after taking the lock releases it.
+            $g = $null; try { $null = Restore-AtmPrevious -InstallDir $cur } catch { $g = $_.Exception.Message }
+            Assert-True ($null -ne $g -and -not (Test-Path -LiteralPath "$cur.lock") -and $script:AtmLockDepth -eq 0) "excecao neste processo: bloqueio liberado ($g)"
+            # 5. The holder is killed after the swap (marker written): the lock goes with the process, the marker stays,
+            # every later operation refuses and nothing intact is lost.
+            $cur = Join-Path $sandbox 'PF20\AgentTempManager'
+            & $rb6Build $cur
+            $h = & $rb6StartHolder 'rollback' $cur 'postswap'; $holders += $h
+            Assert-True $h.Ready "rollback detentor chegou ao portao apos a troca ($(& $rb6Result $h))"
+            $h.Process.Kill(); [void]$h.Process.WaitForExit(30000)
+            Assert-True (& $rb6LockGone $cur) 'encerramento abrupto: bloqueio liberado com o processo'
+            $rec = @(Get-ChildItem -LiteralPath (Split-Path -Parent $cur) -Directory -Filter 'AgentTempManager.recovery-*')
+            Assert-True ((Test-Path -LiteralPath "$cur.transaction.json") -and $rec.Count -eq 1) 'encerramento abrupto: marcador e copia retirada preservados'
+            foreach ($op in @('uninstall', 'rollback')) {
+                $g = $null
+                try { if ($op -eq 'uninstall') { $null = Uninstall-AtmProduct -InstallDir $cur } else { $null = Restore-AtmPrevious -InstallDir $cur } } catch { $g = $_.Exception.Message }
+                Assert-True ($null -ne $g -and $g.Contains("$cur.transaction.json") -and $g -match 'Nao desinstale') "encerramento abrupto: $op posterior recusado pela recuperacao pendente ($g)"
+            }
+            Assert-True ((& $rb6Tag $cur) -eq 'anterior' -and (& $rb6Tag $rec[0].FullName) -eq 'atual' -and (& $rb6Intact $cur) -and (& $rb6Intact $rec[0].FullName)) 'encerramento abrupto: as duas copias integras onde estavam'
+            Rename-Item -LiteralPath $cur -NewName (Split-Path -Leaf "$cur.previous")
+            Rename-Item -LiteralPath $rec[0].FullName -NewName (Split-Path -Leaf $cur)
+            [IO.File]::Delete("$cur.transaction.json")
+            Assert-Eq (Invoke-Rb5Cli (Join-Path $cur 'bin\agent-temp.cmd') 'verify').Exit 0 'encerramento abrupto: recuperacao manual, instalacao integra'
+            # 6. The marker of another transaction is never overwritten nor removed.
+            $m = "$cur.transaction.json"
+            [IO.File]::WriteAllText($m, '{ "id": "outra-transacao", "operation": "update" }')
+            $threw = $false; try { Write-AtmTransaction -InstallDir $cur -Id 'esta' -Operation 'rollback' -State 'started' -Copies @{} -New } catch { $threw = $true }
+            Assert-True ($threw -and [IO.File]::ReadAllText($m).Contains('outra-transacao')) 'marcador de outra transacao nao sobrescrito'
+            Clear-AtmTransaction -InstallDir $cur -Id 'esta' 3> $null
+            Assert-True ([IO.File]::ReadAllText($m).Contains('outra-transacao')) 'marcador de outra transacao nao removido'
+            [IO.File]::Delete($m)
+        } finally { foreach ($x in $holders) { & $rb6Stop $x } }
+    }
+    Test-Case 'Instalacao' 'R-B6 concorrencia entre processos (instalacao e atualizacao): update+update, update+rollback, update+desinstalacao e instalacao+instalacao recusam a segunda; destinos distintos seguem; excecao e encerramento abrupto do detentor nao destroem a instalacao integra' {
+        $testKey = 'Software\AgentTempManagerTest\EnvB6h'
+        $cleanupActions.Add({ try { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree('Software\AgentTempManagerTest', $false) } catch { $null = $_ } })
+        $k = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($testKey)
+        $k.SetValue('Path', '%SystemRoot%\system32;C:\Outro\Bin', [Microsoft.Win32.RegistryValueKind]::ExpandString); $k.Close()
+        $pathSnap = { $pk = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($testKey); try { [string]$pk.GetValueKind('Path') + '|' + [string]$pk.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } finally { $pk.Close() } }
+        $inst = Join-Path $sandbox 'PF21\AgentTempManager'
+        $prev = "$inst.previous"
+        [void][IO.Directory]::CreateDirectory((Split-Path -Parent $inst))
+        $inArgs = @{ SourceDir = $srcDir; InstallDir = $inst; TrustSid = $me.Sid; TestPathKey = $testKey; SourceWithoutManifest = $true }
+        $null = Install-AtmProduct @inArgs
+        $null = Install-AtmProduct @inArgs -Update
+        & $rb6SetTag $inst 'v2'; & $rb6SetTag $prev 'v1'
+        $path0 = & $pathSnap
+        $holders = @()
+        try {
+            # 1. An update held while staging (before any marker): update, rollback and uninstall refuse.
+            $h = & $rb6StartHolder 'update' $inst 'staging' $testKey; $holders += $h
+            Assert-True $h.Ready "atualizacao detentora chegou ao portao ($(& $rb6Result $h))"
+            foreach ($op in @('update', 'rollback', 'uninstall')) {
+                $g = $null
+                try {
+                    switch ($op) {
+                        'update' { $null = Install-AtmProduct @inArgs -Update }
+                        'rollback' { $null = Restore-AtmPrevious -InstallDir $inst }
+                        'uninstall' { $null = Uninstall-AtmProduct -InstallDir $inst -TestPathKey $testKey }
+                    }
+                } catch { $g = $_.Exception.Message }
+                Assert-True ($null -ne $g -and $g.Contains("$inst.lock") -and $g -match 'Nada foi alterado') "atualizacao em andamento: $op concorrente recusado ($g)"
+                Assert-True ((& $rb6Tag $inst) -eq 'v2' -and (& $rb6Tag $prev) -eq 'v1' -and (& $rb6Pending $inst) -eq '' -and (& $pathSnap) -eq $path0) "atualizacao em andamento: $op recusado nao alterou instalacao, .previous nem PATH"
+            }
+            # 2. A different destination is not blocked: a first installation there completes meanwhile.
+            $other = Join-Path $sandbox 'PF22\AgentTempManager'
+            [void][IO.Directory]::CreateDirectory((Split-Path -Parent $other))
+            $null = Install-AtmProduct -SourceDir $srcDir -InstallDir $other -TrustSid $me.Sid -SkipPath -SourceWithoutManifest
+            Assert-Eq (Invoke-Rb5Cli (Join-Path $other 'bin\agent-temp.cmd') 'verify').Exit 0 'destino distinto: instalado enquanto o outro destino esta bloqueado'
+            Assert-Eq (& $rb6Release $h) 'RESULT=OK' 'atualizacao detentora concluiu depois de liberada'
+            Assert-True ((& $rb6Tag $inst) -eq '' -and (& $rb6Tag $prev) -eq 'v2' -and (& $rb6Pending $inst) -eq '' -and (& $rb6LockGone $inst)) 'atualizacao detentora: concluida, nada pendente, bloqueio liberado'
+            & $rb6SetTag $inst 'v3'
+            # 3. Two first installations on the same destination: the second refuses.
+            $fresh = Join-Path $sandbox 'PF23\AgentTempManager'
+            [void][IO.Directory]::CreateDirectory((Split-Path -Parent $fresh))
+            $h = & $rb6StartHolder 'install' $fresh 'staging' $testKey; $holders += $h
+            Assert-True $h.Ready "instalacao detentora chegou ao portao ($(& $rb6Result $h))"
+            $g = $null; try { $null = Install-AtmProduct -SourceDir $srcDir -InstallDir $fresh -TrustSid $me.Sid -SkipPath -SourceWithoutManifest } catch { $g = $_.Exception.Message }
+            Assert-True ($null -ne $g -and $g.Contains("$fresh.lock")) "instalacao em andamento: segunda instalacao no mesmo destino recusada ($g)"
+            Assert-True (-not (Test-Path -LiteralPath $fresh)) 'instalacao em andamento: a recusada nao criou o destino'
+            Assert-Eq (& $rb6Release $h) 'RESULT=OK' 'instalacao detentora concluiu'
+            Assert-Eq (Invoke-Rb5Cli (Join-Path $fresh 'bin\agent-temp.cmd') 'verify').Exit 0 'instalacao detentora: instalacao integra'
+            # 4. An exception in an update holder: lock released, installation and .previous intact, next update runs.
+            $h = & $rb6StartHolder 'update' $inst 'staging' $testKey -Throw; $holders += $h
+            Assert-True $h.Ready 'atualizacao detentora (excecao) chegou ao portao'
+            $r = & $rb6Release $h
+            Assert-True ($r -match 'RESULT=ERROR simulated exception in the holder') "excecao no detentor relatada ($r)"
+            Assert-True ((& $rb6LockGone $inst) -and (& $rb6Tag $inst) -eq 'v3' -and (& $rb6Tag $prev) -eq 'v2' -and (& $rb6Leftovers $inst) -eq '' -and (& $pathSnap) -eq $path0) 'excecao no detentor: bloqueio liberado; instalacao, .previous e PATH intactos; nada pendente'
+            # 5. An update holder killed after the swap (marker written): the lock goes with the process; the marker, the
+            # installed copy (now .previous) and the older .previous (recovery) stay; every later operation refuses.
+            $h = & $rb6StartHolder 'update' $inst 'postswap' $testKey; $holders += $h
+            Assert-True $h.Ready "atualizacao detentora chegou ao portao apos a troca ($(& $rb6Result $h))"
+            $h.Process.Kill(); [void]$h.Process.WaitForExit(30000)
+            Assert-True (& $rb6LockGone $inst) 'encerramento abrupto: bloqueio liberado com o processo'
+            $rec = @(Get-ChildItem -LiteralPath (Split-Path -Parent $inst) -Directory -Filter 'AgentTempManager.recovery-*')
+            Assert-True ((Test-Path -LiteralPath "$inst.transaction.json") -and $rec.Count -eq 1) 'encerramento abrupto: marcador e .previous antiga preservados'
+            foreach ($op in @('update', 'rollback', 'uninstall')) {
+                $g = $null
+                try {
+                    switch ($op) {
+                        'update' { $null = Install-AtmProduct @inArgs -Update }
+                        'rollback' { $null = Restore-AtmPrevious -InstallDir $inst }
+                        'uninstall' { $null = Uninstall-AtmProduct -InstallDir $inst -TestPathKey $testKey }
+                    }
+                } catch { $g = $_.Exception.Message }
+                Assert-True ($null -ne $g -and $g.Contains("$inst.transaction.json") -and $g -match 'Nao desinstale') "encerramento abrupto: $op posterior recusado ($g)"
+            }
+            Assert-True ((& $rb6Tag $prev) -eq 'v3' -and (& $rb6Tag $rec[0].FullName) -eq 'v2' -and (& $rb6Intact $prev) -and (& $rb6Intact $rec[0].FullName) -and (& $rb6Intact $inst)) 'encerramento abrupto: instalada (v3), .previous antiga (v2) e nova integras, nada apagado'
+            Assert-Eq (& $pathSnap) $path0 'encerramento abrupto: PATH intacto'
+            # Manual recovery by rename only, then the marker; the installation updates again.
+            Rename-Item -LiteralPath $inst -NewName 'AgentTempManager.staging-3000000a'
+            Rename-Item -LiteralPath $prev -NewName (Split-Path -Leaf $inst)
+            Rename-Item -LiteralPath $rec[0].FullName -NewName (Split-Path -Leaf $prev)
+            [IO.File]::Delete("$inst.transaction.json")
+            Assert-True ((& $rb6Tag $inst) -eq 'v3' -and (& $rb6Tag $prev) -eq 'v2') 'recuperacao manual: posicoes originais'
+            $null = Install-AtmProduct @inArgs -Update
+            Assert-True ((& $rb6Tag $prev) -eq 'v3' -and (& $rb6Pending $inst) -eq '' -and (& $rb6LockGone $inst)) 'recuperacao manual: atualizar volta a funcionar'
+        } finally { foreach ($x in $holders) { & $rb6Stop $x } }
+    }
     Test-Case 'Instalacao' 'Auditoria de ACL: escrita por Users/Everyone e detectada; Program Files padrao e aceito' {
         $d = Join-Path $sandbox 'aclcheck'; [void][IO.Directory]::CreateDirectory($d); [IO.File]::WriteAllText((Join-Path $d 'x.ps1'), '#')
         # The scenario needs an ordinary-user write entry; in an elevated session the sandbox only grants SYSTEM and
