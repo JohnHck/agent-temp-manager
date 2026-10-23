@@ -2132,6 +2132,8 @@ try { Test-AtmSourceIntegrity -SourceDir $Source; 'INTEGRITY=OK' } catch { 'INTE
         # keeps the state pending.
         foreach ($which in @('primeiro passo', 'passo seguinte')) {
             $script:rb6Which = $which; $script:rb6Lock = $null; $script:rb6Msg = $null
+            # Intermediate copies that exist before this run (set aside by this test), to find the one it leaves.
+            $stgBefore = @(Get-ChildItem -LiteralPath $pf14 -Directory -Filter 'AgentTempManager.staging-*' | ForEach-Object { $_.Name })
             & {
                 function Invoke-AtmVerifyInstalled {
                     param([string]$InstallDir)
@@ -2150,7 +2152,7 @@ try { Test-AtmSourceIntegrity -SourceDir $Source; 'INTEGRITY=OK' } catch { 'INTE
                 if ($which -eq 'primeiro passo') {
                     Assert-True ((& $rb6Tag $inst) -eq '' -and $msg.Contains($inst)) 'reversao falhou (primeiro passo): nova versao com falha no lugar, informada'
                 } else {
-                    $failed = @(Get-ChildItem -LiteralPath $pf14 -Directory -Filter 'AgentTempManager.staging-*' | Where-Object { $_.Name -notmatch '^AgentTempManager\.staging-1000000' })
+                    $failed = @(Get-ChildItem -LiteralPath $pf14 -Directory -Filter 'AgentTempManager.staging-*' | Where-Object { $stgBefore -notcontains $_.Name })
                     Assert-True (-not (Test-Path -LiteralPath $inst) -and $failed.Count -eq 1 -and $msg.Contains($failed[0].FullName)) "reversao falhou (passo seguinte): nova versao guardada, nao apagada, informada ($msg)"
                 }
                 $pathHeld = & $pathSnap
