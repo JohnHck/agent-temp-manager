@@ -1,6 +1,7 @@
 # ADR-0011: File-based worktree diagnostics without Git
 
-Status: PROPOSED (for the maintainer's decision; nothing in this ADR is enabled)
+Status: PROPOSED (architecture approved in principle at the gate of 2026-10-24; stays PROPOSED until the next gate;
+nothing in this ADR is enabled and no capability may be activated on real repositories)
 Date: 2026-10-24
 Phase: P3 (P3-D)
 
@@ -35,11 +36,21 @@ the direction: prioritize safe, file-based diagnosis without running Git on real
    * Every path, each loose reference included, goes through the single resolver (text checks, fixed local drive, no
      reparse point), and the file is opened without following a reparse point, which is refused on the handle itself
      (a swap after the path check is refused, never followed).
-   * Reads share read, write and delete with everyone (`New-AtmGitSharedReadStream`), so they never block another
-     process. Bytes are read as Git reads them (no byte-order-mark detection: a UTF-16 file fails as it does in Git). Git writes by lockfile and rename, so a whole version is read; a torn read by another writer must fail the
-     strict parsers (a `packed-refs` without its final line break is refused).
+   * Reads share read, write and delete with everyone (`New-AtmGitSharedReadStream`), so they reduce interference with
+     other processes; they do not prevent replacements. Bytes are read as Git reads them (no byte-order-mark detection:
+     a UTF-16 file fails as it does in Git). Git writes by lockfile and rename, so usually a whole version is read; a
+     file partly rewritten by another kind of writer may still be syntactically valid (a `packed-refs` without its final
+     line break is refused, but nothing more can be guaranteed).
    * The file system is not assumed stable: references are read loose first, then `packed-refs` (a ref moved into
-     `packed-refs` meanwhile is seen in one of them), in two full passes that must agree; otherwise `UNSTABLE`.
+     `packed-refs` meanwhile is seen in one of them), in two full passes that must agree; otherwise `UNSTABLE`. Two equal
+     passes are not a transactional snapshot.
+   * **NOT RESOLVED - ancestor TOCTOU.** The chain is validated, then the file is opened by name; only the final
+     component is opened without following a reparse point. An ancestor directory replaced between the check and the
+     open (renamed, and a junction put in its place) redirects the read: proved on fixtures with a local junction. There
+     is therefore no guarantee that every read stays on the local volume under adversarial concurrency (a directory
+     symbolic link to a network path needs the symbolic-link privilege or Developer Mode; junctions cannot point to
+     network paths; no SMB authentication was attempted). Closing it would need handle-relative opening of each
+     component (not implemented). Until it is closed, the worktree diagnostics gate stays closed.
    * Unsupported formats (reftable, an unknown `packed-refs` trait: `NOT_OBSERVABLE`) and failures (a line it does not
      recognize, a read failure: `PARTIAL`) give `UNKNOWN` with a reason, never absence. Names Git ignores (starting with a
      dot, `.lock`) are ignored; a packed peeled id is used only when its packed entry is (a loose ref overriding it
@@ -47,9 +58,11 @@ the direction: prioritize safe, file-based diagnosis without running Git on real
    * HEAD is read per worktree after the references: a HEAD branch with no tip (unborn, moved meanwhile, or a symbolic
      branch) claims nothing (`HEAD_BRANCH_NOT_FOUND`), never "no commits". With `extensions.worktreeConfig` the upstream
      is also looked for in the worktree's `config.worktree`; when that cannot be read nothing is said about it.
-4. **What files can prove, and what they cannot.**
-   * Proven: the repository has **no** remote-tracking reference (complete, stable, supported read), so no commit of
-     a HEAD with commits is reachable from one: `UNPUBLISHED_COMMITS`.
+4. **What files can prove, and what they cannot.** Files give observations, never a publication state.
+   * Observed, never proof of non-publication: the repository holds no remote-tracking reference (complete, stable,
+     supported read): `NO_REMOTE_TRACKING_REFS`. Commits may have been pushed and the references removed, or pushed
+     without tracking references, so publication stays `UNKNOWN` (`PUBLICATION_UNKNOWN` with that reason) and
+     `UNPUBLISHED_COMMITS` is not given (gate decision of 2026-10-24).
    * Observed, never proof of publication: the tip equals a remote-tracking reference: `PUBLICATION_UNVERIFIED`.
    * Risk only: a detached tip that is no reference tip: `COMMITS_ONLY_IN_THIS_WORKTREE_POSSIBLE`.
    * Not provable without reading objects (commit graph): whether a tip is an ancestor of a remote-tracking reference,
@@ -76,8 +89,10 @@ the direction: prioritize safe, file-based diagnosis without running Git on real
 
 * With only the file gate open, local work is limited to in-progress operations and stashes; changes in the index or
   the work tree stay `UNKNOWN` (`LOCAL_WORK_UNKNOWN`), so no worktree is ever "clean".
-* Publication is limited to the proven case (no remote-tracking reference) and observations; most worktrees with
-  remotes stay `UNKNOWN` for publication (`REACHABILITY_NOT_READ`). Server publication is never proven.
+* Publication is limited to observations; every worktree stays `UNKNOWN` for publication (`NO_REMOTE_TRACKING_REFS`,
+  `REACHABILITY_NOT_READ`, or `PUBLICATION_UNVERIFIED`). Neither publication nor non-publication on a server is ever
+  proven from files.
+* None of the limits above, and no result of these reads, may be used as proof that a worktree can be discarded.
 * Reftable repositories are `UNKNOWN` for publication.
 * No process is started and nothing is pinned: no interference with other agents.
 

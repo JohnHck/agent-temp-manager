@@ -19,7 +19,7 @@ open decisions are listed in [V0.2-PLAN.md](../release/V0.2-PLAN.md#open-decisio
 | [ADR-0008](ADR-0008-provider-contract-v2.md) | Provider contract v2 and the Claude Desktop scenario | ACCEPTED | P1, P2 |
 | [ADR-0009](ADR-0009-diagnose-engine-command-schema.md) | Diagnose engine, command, JSON schema and layering | ACCEPTED (D-6 accepted) | P1, P5 |
 | [ADR-0010](ADR-0010-pseudonymization-of-exported-identifiers.md) | Pseudonymization of exported identifiers | ACCEPTED (D-7 = K1: no persistent key; D-8: partition findings ordered by pseudonym) | P1 |
-| [ADR-0011](ADR-0011-file-based-worktree-diagnostics.md) | File-based worktree diagnostics without Git (file gate and Git gate) | PROPOSED | P3 |
+| [ADR-0011](ADR-0011-file-based-worktree-diagnostics.md) | File-based worktree diagnostics without Git (file gate and Git gate) | PROPOSED (architecture approved in principle; nothing activated) | P3 |
 
 ## Template
 

@@ -168,7 +168,15 @@ called by `Invoke-AtmGitCommand`):
 * **Shared reads (P3-D):** every repository file the engine reads itself is opened with read, write and delete
   sharing, so reading never stops another process from rewriting or renaming over it, and without following a
   reparse point (refused on the handle, so a swap after the path check is never followed); bytes are read as Git reads
-  them; strict parsers refuse a torn read. References are read in two passes that must agree. Publication facts come from files only (no process); a
+  them; strict parsers refuse a torn read. References are read in two passes that must agree. Limits, recorded:
+  shared reads reduce interference but do not prevent replacements; two equal passes are not a transactional
+  snapshot; a partly rewritten file may still be syntactically valid; none of this may be used as proof that a
+  worktree can be discarded.
+* **NOT RESOLVED - ancestor TOCTOU of direct reads (P3-D).** The path chain is validated, then the file is opened by
+  name, and only the final component is opened without following a reparse point: an ancestor directory replaced in
+  between (renamed, a junction in its place) redirects the read, proved on fixtures with a local junction. There is no
+  guarantee that every read stays on the local volume under adversarial concurrency. No SMB authentication was
+  attempted. The worktree diagnostics gate stays closed. Publication facts come from files only (no process); a
   remote URL is never resolved or opened. ADR-0011 (PROPOSED) describes file-based diagnostics without Git.
 * **Local work is never complete:** `status` runs with `--ignore-submodules=all`, so changes inside a gitlink (which
   can exist without `.gitmodules`) are not seen, nor entries flagged assume-unchanged or skip-worktree; its coverage is

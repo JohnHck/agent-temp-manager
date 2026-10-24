@@ -139,3 +139,13 @@ Implementation notes recorded after the security closure of P3-C0; the decisions
   recursed).
 * Files that did not exist at the preflight cannot be pinned; the vectors left open are listed in
   `SECURITY-MODEL.md`. The worktree diagnostics gate stays closed until the maintainer decides.
+
+## Amendment (P3-D, 2026-10-24)
+
+Implementation notes; the decisions above are unchanged.
+
+* Rule 13 (`COMMITS_NOT_ON_REMOTE_TRACKING`) needs a reachability walk; publication facts read from files (P3-D,
+  ADR-0011 PROPOSED) do not walk objects, so this fact is not produced. The absence of remote-tracking references is
+  recorded as an observation (`NO_REMOTE_TRACKING_REFS`), never as proof of non-publication.
+* Rule 14: `UNPUBLISHED_COMMITS` keeps its place in the precedence, but no collector gives it yet; worktrees without
+  positive local work stay `UNKNOWN`.
