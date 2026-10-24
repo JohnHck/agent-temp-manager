@@ -84,6 +84,24 @@ the direction: prioritize safe, file-based diagnosis without running Git on real
    mapping, and that the volume-root handle itself is opened on a fixed drive. It changes how every repository file is
    opened, so it needs the maintainer's decision; until then the ancestor TOCTOU stays NOT RESOLVED.
 
+7. **Isolated prototype results (P1-C; test code only, `tests\prototypes\AtmHandleRelativeOpen.cs`; never shipped,
+   never used on a real repository).** Opening relative to a handle of the volume root (checked to be a fixed drive
+   first) with `OBJ_DONT_REPARSE` and `OBJ_CASE_INSENSITIVE`, on local fixtures with local junctions only:
+   * clean path: opened (`0x00000000`); case difference: opened; 8.3 name: opened; path longer than 260 characters
+     (without `\\?\`): opened; missing file: `STATUS_OBJECT_NAME_NOT_FOUND` (`0xC0000034`);
+   * ancestor replaced by a junction after the check: refused at open, `STATUS_REPARSE_POINT_ENCOUNTERED`
+     (`0xC000050B`); without the flag the same junction is followed (counter-proof);
+   * a directory junction as the final component of a file open: refused with `STATUS_FILE_IS_A_DIRECTORY`
+     (`0xC00000BA`), which the open checks first;
+   * network and relative paths: refused before any open;
+   * architectures exercised by CI (install e2e, every run): AMD64 (Windows Server 2022 and 2025) and ARM64 (Windows 11),
+     each with the clean open, the followed junction without the flag and the refusal with it.
+   Not established: the minimum Windows build that honours the flag (only the CI images above were observed); a
+   `subst` drive reports a fixed drive type and its root is opened without the flag, so reparse points above the
+   substituted folder are not checked (a real adoption must refuse `subst` and mounted-folder roots); file symbolic
+   links (they need a privilege or Developer Mode) were not tested. No network path was used and no SMB authentication
+   was attempted. A real adoption changes how every repository file is opened: a decision for the maintainer.
+
 ## Rejected alternatives
 
 * *Read pins as a guarantee (P3-C0):* creation cannot be prevented, and pinning interferes with other agents.
