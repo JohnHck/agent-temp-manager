@@ -5616,12 +5616,12 @@ try {
             $r2 = Get-AtmHandleEvidence -Nodes @($node) -Collection (Get-AtmProcessCollection -Source { @([pscustomobject]@{ ProcessId = 999999; ParentProcessId = 1; Name = 'x'; CreationDate = [datetime]::UtcNow.AddDays(-1) }) })
             Assert-True (@($r2.Evidence['claude-code/p-test'] | Where-Object { $_.Code -eq 'FILE_HELD_OPEN_UNVERIFIED' -and $_.Detail -eq ('pid:' + $c.Id) }).Count -eq 1 -and @($r2.Coverage.Reasons) -contains 'HANDLE_IDENTITY_UNVERIFIED') 'fora do snapshot: identidade nao verificada'
             $r3 = Get-AtmHandleEvidence -Nodes @($node) -Collection $coll -SelfKeys @{ $key = $true }
-            Assert-Eq @($r3.Evidence['claude-code/p-test'] | Where-Object { $_.Code -like 'FILE_HELD_OPEN*' }).Count 0 'processo do proprio ATM nunca reportado'
+            Assert-True (-not $r3.Evidence.ContainsKey('claude-code/p-test')) 'processo do proprio ATM nunca reportado (nada anexado)'
         } finally { if (-not $c.HasExited) { $c.Kill() }; $c.WaitForExit(10000) | Out-Null }
         # Exited: the same file is no longer held.
         $node = [pscustomobject]@{ Key = 'k'; Files = @($held); Capped = $false; Error = $null }
         $r4 = Get-AtmHandleEvidence -Nodes @($node) -Collection $null
-        Assert-True (@($r4.Evidence['k'] | Where-Object { $_.Code -like 'FILE_HELD_OPEN*' }).Count -eq 0 -and @($r4.Coverage.Reasons) -contains 'PROCESS_SNAPSHOT_UNAVAILABLE') 'processo encerrado: nada listado; sem snapshot declarado'
+        Assert-True ((-not $r4.Evidence.ContainsKey('k')) -and @($r4.Coverage.Reasons) -contains 'PROCESS_SNAPSHOT_UNAVAILABLE') 'processo encerrado: nada listado; sem snapshot declarado'
         # Injected queries: limits, failures, deadline.
         $n2 = @([pscustomobject]@{ Key = 'a'; Files = @('C:\x\1', 'C:\x\2'); Capped = $true; Error = $null }, [pscustomobject]@{ Key = 'b'; Files = @('C:\x\3'); Capped = $false; Error = $null })
         $okQ = { param($Files, $Max) [pscustomobject]@{ Status = 'OK'; Holders = @() } }
