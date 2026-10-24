@@ -4818,6 +4818,15 @@ try {
         Assert-Eq (Get-AtmGitConfigFindings -Entries $inc.Entries -BaseDir $base).Refuse 'GIT_PREFLIGHT_INCLUDE' 'includeIf em qualquer forma'
         $esc = Read-AtmGitConfigText -Text ("[core]`n`texcludesFile = \\\\" + $uncHost + "\\s\\x")
         Assert-Eq (Get-AtmGitConfigFindings -Entries $esc.Entries -BaseDir $base).Refuse 'GIT_PREFLIGHT_CONFIG_PATH' 'caminho UNC escrito com escapes decodificado e recusado'
+        # A value on a drive that is not fixed, in any key (stand-in: an unassigned letter; a real mapped drive is not used).
+        $freeL = @([char[]]'ZYXWVUTSRQPONMLKJIHG' | Where-Object { (New-Object IO.DriveInfo([string]$_)).DriveType -eq [IO.DriveType]::NoRootDirectory })
+        if ($freeL.Count -gt 0) {
+            $mapped = Read-AtmGitConfigText -Text ("[mailmap]`n`tfile = " + $freeL[0] + ":/share/mailmap")
+            Assert-Eq (Get-AtmGitConfigFindings -Entries $mapped.Entries -BaseDir $base).Refuse 'GIT_PREFLIGHT_CONFIG_NETWORK' 'valor em unidade nao fixa recusado em qualquer chave'
+        }
+        $sysL = $env:SystemDrive.Substring(0, 1)
+        $fixed = Read-AtmGitConfigText -Text ("[mailmap]`n`tfile = " + $sysL + ":/x/mailmap")
+        Assert-Eq (Get-AtmGitConfigFindings -Entries $fixed.Entries -BaseDir $base).Refuse $null 'valor em unidade fixa fora das chaves de caminho permitido'
     }
     Test-Case 'Git' 'P3-B0: cada vetor que leva o Git para fora do repositorio e provado com caminho local (contraprova) e recusado com caminho de rede antes de qualquer processo (espiao: zero)' {
         if (& $gitSkip) { return }

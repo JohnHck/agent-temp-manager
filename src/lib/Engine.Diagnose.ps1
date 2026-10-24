@@ -1705,6 +1705,12 @@ function Get-AtmGitConfigFindings {
         }
         # Any other value written as a network path (URLs of remotes are never opened: no transport is allowed).
         if (-not ($e.Section -eq 'remote' -and ($e.Key -eq 'url' -or $e.Key -eq 'pushurl')) -and $e.Section -ne 'url' -and $e.Value -match '^\s*(\\\\|//|/\\|\\/|file:)') { $refuse = 'GIT_PREFLIGHT_CONFIG_NETWORK'; break }
+        # Any value on a drive that is not fixed (a mapped network drive), whatever the key: the drive type is read
+        # without touching the drive.
+        if ($e.Value -match '^\s*([A-Za-z]):') {
+            $dt = $null; try { $dt = (New-Object IO.DriveInfo($Matches[1])).DriveType } catch { $dt = $null }
+            if ($dt -ne [IO.DriveType]::Fixed) { $refuse = 'GIT_PREFLIGHT_CONFIG_NETWORK'; break }
+        }
         # D-3: drivers configured in the repository can run commands during `status`.
         if ($e.Section -eq 'filter' -and $null -eq $block) { $block = 'D3_FILTER_DRIVER' }
         if ($e.Section -eq 'diff' -and $e.Key -eq 'textconv' -and $null -eq $block) { $block = 'D3_TEXTCONV' }
