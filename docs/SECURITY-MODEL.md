@@ -143,26 +143,32 @@ called by `Invoke-AtmGitCommand`):
   requires code running in the child, which the allow-list, the preflight and D-3 prevent); handles are inheritable
   for a short time while the child is created (the handle list requires it).
 * **Read pins (P3-C0):** for each Git call the runner opens, for reading and without write or delete sharing, every
-  file the preflight validated (`.git` file, `HEAD`, `commondir`, configuration files, alternates files) and every
-  alternate object directory, then runs a fresh preflight under those pins and requires it to agree; the pins are held
+  file the preflight validated (`.git` file, `HEAD`, `commondir`, configuration files, alternates files,
+  `packed-refs`) and the `objects`, `objects\info`, `refs` and alternate object directories, then runs a fresh
+  preflight under those pins and requires it to agree; the pins are held
   until Git exits. `GIT_COMMON_DIR` is set to the validated common directory. `worktree list` is not run. `status`
   always runs with `--ignore-submodules=all`.
 * **TOCTOU: NOT RESOLVED (partially mitigated).** Vector matrix, each row proved on fixtures with a local target:
 
   | Vector (created or changed after the preflight) | Result |
   |---|---|
-  | include or includeIf added to the configuration; configuration, `HEAD`, `.git` file replaced; `.git` or the repository renamed | prevented while pinned |
+  | include or includeIf added to the configuration; configuration, `HEAD`, `.git` file, `packed-refs` replaced; `.git`, the repository, `objects` or `refs` renamed (and replaced by a junction) | prevented while pinned |
   | `commondir` created in the Git directory | not read (`GIT_COMMON_DIR`) |
   | `config.worktree` created (extension off) | ignored by Git |
   | new administrative entry (`worktrees\<name>\gitdir`) | not reached (`worktree list` not run) |
   | `objects\info\alternates` created (any command that reads objects, such as `status`) | **open**: followed by Git |
   | `.git` file dropped in the work tree (untracked scan of `status`) | **open**: its target is resolved |
-  | file symbolic link to a network path created where a file was absent | **open**: needs the symbolic-link privilege or Developer Mode; junctions cannot point to network paths |
+  | file symbolic link to a network path created where a file was absent, or replacing a loose ref (not pinned, so that other processes can still commit) | **open**: needs the symbolic-link privilege or Developer Mode; junctions cannot point to network paths |
 
   A file that does not exist cannot be pinned, so creation cannot be prevented within the accepted architecture. The
   worktree diagnostics gate stays closed. **Interference:** while pinned, another process cannot rewrite the pinned
-  files (a concurrent `git config` write or `checkout` fails for the duration of one Git call, returned as
-  `PinnedMs`); index and ref updates are not blocked.
+  files (a concurrent `git config` write, `checkout` or rewrite of `packed-refs` fails for the duration of one Git
+  call, returned as `PinnedMs`; Git for Windows may retry or ask "Should I try again?" in a console); index and loose
+  ref updates and new objects are not blocked.
+* **Local work is never complete:** `status` runs with `--ignore-submodules=all`, so changes inside a gitlink (which
+  can exist without `.gitmodules`) are not seen, nor entries flagged assume-unchanged or skip-worktree; its coverage is
+  always `PARTIAL` (`HIDDEN_ENTRIES_NOT_OBSERVED`). A stash that cannot be attributed (detached or unreadable `HEAD`) or
+  a stash ref without its reflog makes the files coverage partial, never "no stash".
 
 ## Known limits (documented, not hidden)
 
