@@ -85,7 +85,10 @@ Decision 6 implemented: `src/providers/ClaudeDesktop.ps1` (id `claude-desktop`, 
   `Msvm_ComputerSystem`; no service -> worker relation is verifiable), temporary directories (none confirmed), and
   any installation version (none is read).
 * **Overlap with Claude Code:** both providers match `claude.exe` (Claude Code by image, Claude Desktop by image and
-  marker), so a package process is attributable to both and reported as ambiguous. Narrowing Claude Code's matcher
-  would change a P1 provider and is left to a later decision.
+  marker), so a package process is attributable to both and reported as ambiguous. A provider whose marker could not
+  be checked (unreadable command line) now takes part in the attribution (engine change of P2-C, review): the process
+  stays ambiguous instead of being resolved to Claude Code. Every `claude.exe` with an unreadable command line makes
+  `agent-processes` `PARTIAL`, also on machines without Claude Desktop. Narrowing Claude Code's matcher would change
+  a P1 provider and is left to a later decision.
 * **What the diagnose can say about Cowork:** a running `CoworkVMService` with a verified process (local service
   evidence); never that a Cowork VM runs or does not run, and nothing about Cowork in a remote environment.

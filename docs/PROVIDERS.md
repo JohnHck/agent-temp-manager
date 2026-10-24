@@ -99,8 +99,13 @@ read. Sources checked on 2026-10-24:
   its path carries that id. The marker is matched in memory and never stored. The agent helper (`claude.exe` under the
   user profile) carries no marker and is not matched here. Claude Code's own matcher (`claude.exe`, no marker) also
   matches the package's processes: such a process is reported as attributable to both providers
-  (`PROVIDER_ATTRIBUTION_AMBIGUOUS`), never resolved by guessing. A command line that cannot be read leaves the
-  process unchecked (`COMMAND_LINE_MARKER_UNAVAILABLE`).
+  (`PROVIDER_ATTRIBUTION_AMBIGUOUS`), never resolved by guessing; with Claude Code installed alongside, Claude Desktop
+  is therefore never the only provider of a process. A command line that cannot be read leaves the marker unchecked
+  (`COMMAND_LINE_MARKER_UNAVAILABLE`), and the process stays ambiguous, never resolved to Claude Code. A consequence for
+  every machine: a `claude.exe` whose command line cannot be read (another account's process, or no inventory snapshot)
+  now makes `agent-processes` `PARTIAL`. The marker is a substring of the whole command line, so an argument that
+  mentions the package path, or another package of the same publisher, also matches: the result is then ambiguous,
+  not a wrong attribution. A launch whose command line lacks the package path would not match.
 * **Service hint:** `CoworkVMService` (role `cowork-vm`), exact name. A running service with a verified process is
   positive evidence of the local Cowork service, not of a running VM; a service not listed is `UNKNOWN` (Cowork in a
   remote environment, the `.exe` installer, or a service the account cannot see), never "not installed".
@@ -109,7 +114,9 @@ read. Sources checked on 2026-10-24:
   no `ServiceOwner` relation (service -> worker process) is established. `vmmem`, `vmwp`, `vmcompute` and HCS
   processes are never attributed to Claude Desktop.
 * **No temp capability:** no per-session temporary directory of Claude Desktop is confirmed for this tool.
-* **Version:** not read from the installation; the hints apply to MSIX builds since the reported 1.1.3647.
+* **Version:** not read from the installation, and not exported: an executable inside a packaged app folder
+  (`\WindowsApps\`, which carries the version) is reported by file name only. The hints apply to MSIX builds since
+  the reported 1.1.3647.
 
 Adding another agent = one new file in `src/providers/` + tests. No engine, gate, report or TUI change is
 expected; the automated test "provider ficticio" demonstrates this with a test-only provider.

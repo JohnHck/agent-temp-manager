@@ -996,12 +996,12 @@ function Get-AtmAgentRuntimeFindingsRun {
     $cand = @{}
     $addCand = {
         param([string]$Key, $Process, [string]$Kind, $Evidence, $Providers, $SourceCoverage = @())
-        if (-not $cand.ContainsKey($Key)) { $cand[$Key] = [pscustomobject]@{ Process = $Process; Kind = $Kind; Evidence = (New-Object System.Collections.Generic.List[object]); AgentProviders = @{}; OtherProviders = @{}; SourceCoverage = @{} } }
+        if (-not $cand.ContainsKey($Key)) { $cand[$Key] = [pscustomobject]@{ Process = $Process; Kind = $Kind; Evidence = (New-Object System.Collections.Generic.List[object]); AgentProviders = @{}; OtherProviders = @{}; UncheckedProviders = @{}; SourceCoverage = @{} } }
         $c = $cand[$Key]
         # AGENT outranks UNCHECKED; UNVERIFIED keys (pid:<n>) never collide with verified ones.
         if ($Kind -ceq 'AGENT') { $c.Kind = 'AGENT' }
         $set = $(if ($Kind -ceq 'AGENT') { $c.AgentProviders } else { $c.OtherProviders })
-        foreach ($pv in @($Providers | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })) { Add-AtmProviderToSet -Set $set -Provider ([string]$pv) }
+        foreach ($pv in @($Providers | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })) { Add-AtmProviderToSet -Set $set -Provider ([string]$pv); if ($Kind -ceq 'UNCHECKED') { Add-AtmProviderToSet -Set $c.UncheckedProviders -Provider ([string]$pv) } }
         $sig = '{0}|{1}|{2}|{3}' -f $Evidence.Code, $Evidence.Source, $Evidence.Collector, $Evidence.Detail
         if (@($c.Evidence | Where-Object { ('{0}|{1}|{2}|{3}' -f $_.Code, $_.Source, $_.Collector, $_.Detail) -ceq $sig }).Count -eq 0) { $c.Evidence.Add($Evidence) }
         foreach ($sc in @($SourceCoverage | Where-Object { $null -ne $_ })) { if (-not $c.SourceCoverage.ContainsKey($sc.Collector)) { $c.SourceCoverage[$sc.Collector] = $sc } }
@@ -1174,7 +1174,10 @@ function Get-AtmAgentRuntimeFindingsRun {
     $attr = @{}
     foreach ($k in $candKeys) {
         $c = $cand[$k]
-        $attr[$k] = $(if ($c.Kind -ceq 'AGENT') { Get-AtmProviderAttribution -Sets @($c.AgentProviders) } else { Get-AtmProviderAttribution -Sets @($c.AgentProviders, $c.OtherProviders) })
+        # A provider whose marker could not be checked on this process may still own it (P2-C: Claude Code matches the
+        # image, Claude Desktop needs the marker): it takes part in the attribution, so the result is ambiguous, never
+        # resolved to the provider that did not need the command line.
+        $attr[$k] = $(if ($c.Kind -ceq 'AGENT') { Get-AtmProviderAttribution -Sets @($c.AgentProviders, $c.UncheckedProviders) } else { Get-AtmProviderAttribution -Sets @($c.AgentProviders, $c.OtherProviders) })
     }
 
     # 5. Verified descendants of every agent process. A descendant under several agent roots (nested roots) keeps every
@@ -3065,7 +3068,8 @@ function ConvertFrom-AtmServicePathName {
         $out.Name = $leaf
         if ($exe -match '^[A-Za-z]:\\' -and -not $exe.Contains('~')) {
             $plain = (@($exe.Substring(3).Split('\') | Where-Object { $_ -eq '' -or $_ -match '^\.+$|[\s.]$|^\s' }).Count -eq 0)
-            if ($plain) { foreach ($r in @($Roots)) { if ($exe.StartsWith($r, [StringComparison]::OrdinalIgnoreCase)) { $out.Path = $exe; break } } }
+            # A packaged app folder (\WindowsApps\) carries the package version and architecture: file name only.
+            if ($plain -and $exe.IndexOf('\WindowsApps\', [StringComparison]::OrdinalIgnoreCase) -lt 0) { foreach ($r in @($Roots)) { if ($exe.StartsWith($r, [StringComparison]::OrdinalIgnoreCase)) { $out.Path = $exe; break } } }
         }
     } catch { return $bad }
     return [pscustomobject]$out

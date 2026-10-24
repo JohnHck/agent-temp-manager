@@ -238,8 +238,8 @@ $ok = (@('COMPLETE', 'PARTIAL', 'DENIED', 'FAILED') -ccontains $q.PlatformCovera
 }
 
 Step 'provider-claude-desktop' {
-    # P2-C: the installed copy lists and loads the Claude Desktop provider (runtime only); on a runner without Claude
-    # Desktop its service is not listed and reads UNKNOWN, never absent.
+    # P2-C: the installed copy holds, lists and loads the Claude Desktop provider (runtime only). (The service state on
+    # a real machine is checked by the suite's CI-runner case.)
     Assert (Test-Path -LiteralPath (Join-Path $installDir 'providers\ClaudeDesktop.ps1') -PathType Leaf) 'provider Claude Desktop nao instalado'
     $r = Invoke-Agent 'version -Lang en-US' 'version-providers'
     Assert ($r.Code -eq 0 -and $r.Text -match 'providers: Claude Code, Claude Desktop') "version: $($r.Text)"

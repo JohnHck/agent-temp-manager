@@ -111,6 +111,8 @@ P2-B; the Claude Desktop hints are P2-C).
   may not hold white space (it would be ambiguous); `=`, `/`, a second `:`, variables other than the program
   folders, network and device forms (`\\server`, `\\.\`, `\\?\`) and a file name with white space give a code only.
   The command line is dropped when the row is read.
+* **Packaged apps (P2-C).** An executable inside a packaged app folder (`\WindowsApps\`) is reported by file name
+  only: the folder name carries the package version and architecture.
 * **Accounts (rule 6, replaced by ADR-0012).** Only the kind is exported, plus a standard identifier for
   `LocalSystem`, `NT AUTHORITY\LocalService` and `NT AUTHORITY\NetworkService`; user, managed, virtual and other
   built-in account names are never exported.

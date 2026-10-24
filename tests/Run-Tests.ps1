@@ -6393,13 +6393,20 @@ try {
         $m = @($both.Findings | Where-Object { $_.Key -ceq (& $b4Key 100 $b4T0) })[0]
         $amb = @($m.Evidence | Where-Object { $_.Code -ceq 'PROVIDER_ATTRIBUTION_AMBIGUOUS' } | ForEach-Object { $_.Detail })
         Assert-True ($null -eq $m.Provider -and ($amb -join ';') -ceq 'claude-code,claude-desktop') 'Claude Code (imagem) e Claude Desktop (marcador): atribuicao ambigua, nunca escolhida'
+        # Review P2-C: a command line that cannot be read (no V0.1 snapshot) leaves the marker unchecked; the process is
+        # then still ambiguous, never resolved to the provider that did not need the command line.
+        $nocl = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -ProviderHints @($ccHints, $cdHints)
+        $n = @($nocl.Findings | Where-Object { $_.Key -ceq (& $b4Key 100 $b4T0) })[0]
+        Assert-True ($null -eq $n.Provider -and (@($n.Evidence | Where-Object { $_.Code -ceq 'PROVIDER_ATTRIBUTION_AMBIGUOUS' } | ForEach-Object { $_.Detail }) -join ';') -ceq 'claude-code,claude-desktop' -and @($n.Evidence | Where-Object { $_.Code -ceq 'COMMAND_LINE_MARKER_UNAVAILABLE' }).Count -eq 1) 'linha de comando ilegivel: ambigua (claude-code,claude-desktop), nunca so claude-code'
+        $ccOnly = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -ProviderHints @($ccHints)
+        Assert-Eq @($ccOnly.Findings | Where-Object { $_.Key -ceq (& $b4Key 100 $b4T0) })[0].Provider 'claude-code' 'so Claude Code: atribuicao inalterada'
     }
     Test-Case 'Claude Desktop' 'P2-C: servico CoworkVMService - em execucao com processo verificado (Cowork local), parado (instalado sem executar), em execucao sem processo vinculado, nao listado (UNKNOWN), negado; dois providers declarando o mesmo servico' {
         $coll = & $svcProcs @((& $svcPRow 4 $svcT0.AddHours(-1)), (& $svcPRow 6100 $svcT0.AddMinutes(-20)))
         $run = & $svcRun $cdHints @((& $svcRow 'CoworkVMService' 'Running' 'Auto' $false 'LocalSystem' 6100 "`"C:\Program Files\WindowsApps\Claude_1.2.3.0_x64__pzs8sxrjxfjjc\cowork-svc.exe`"")) $coll
         $f = @($run.Findings)[0]
         Assert-True ($f.Key -ceq 'CoworkVMService' -and $f.State -ceq 'RUNNING' -and $f.Provider -ceq 'claude-desktop' -and (& $svcEv $f 'SERVICE_HINT')[0] -ceq 'claude-desktop:cowork-vm' -and (& $svcEv $f 'SERVICE_PROCESS_VERIFIED').Count -eq 1) 'em execucao com processo verificado: evidencia positiva de servico local do Cowork'
-        Assert-True ((& $svcEv $f 'SERVICE_EXECUTABLE')[0] -ceq 'C:\Program Files\WindowsApps\Claude_1.2.3.0_x64__pzs8sxrjxfjjc\cowork-svc.exe') 'pasta do pacote sob Program Files: caminho completo (identidade publica do pacote, nada pessoal), sem argumentos'
+        Assert-True ((& $svcEv $f 'SERVICE_EXECUTABLE_NAME')[0] -ceq 'cowork-svc.exe' -and (& $svcEv $f 'SERVICE_EXECUTABLE').Count -eq 0) 'pasta de pacote (WindowsApps, com a versao instalada): so o nome do executavel'
         $stopped = & $svcRun $cdHints @((& $svcRow 'CoworkVMService' 'Stopped' 'Manual' $false 'LocalSystem' 0)) $coll
         Assert-True (@($stopped.Findings)[0].State -ceq 'STOPPED' -and (& $svcEv @($stopped.Findings)[0] 'SERVICE_START_MODE')[0] -ceq 'MANUAL') 'parado (instalado, nao executando)'
         $nolink = & $svcRun $cdHints @((& $svcRow 'CoworkVMService' 'Running' 'Auto' $false 'LocalSystem' 0)) $coll
