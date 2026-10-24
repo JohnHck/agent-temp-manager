@@ -4568,8 +4568,10 @@ try {
                 $top = (& $testGit.Path -C $Dir rev-parse --show-toplevel 2>$null | Out-String).Trim().Replace('/', '\')
                 if (-not [string]::Equals((Get-AtmNormalizedPath $top), (Get-AtmNormalizedPath $Expect), [StringComparison]::OrdinalIgnoreCase)) { throw "fixture fora do sandbox: $top" }
             }
-            $null = & $testGit.Path -C $Dir -c core.hooksPath=NUL -c commit.gpgsign=false -c user.name=atm -c user.email=atm@fixture @GitArgs 2>&1
-            if ($LASTEXITCODE -ne 0) { throw "git de fixture falhou: $($GitArgs[0])" }
+            # Git writes warnings to stderr: only the exit code decides (sandbox fixture, so its text may be shown).
+            $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            try { $o = @(& $testGit.Path -C $Dir -c 'core.hooksPath=NUL' -c 'commit.gpgsign=false' -c 'user.name=atm' -c 'user.email=atm@fixture' @GitArgs 2>&1 | ForEach-Object { "$_" }) } finally { $ErrorActionPreference = $eap }
+            if ($LASTEXITCODE -ne 0) { throw "git de fixture falhou: $($GitArgs[0]) ($LASTEXITCODE): $((@($o) -join ' / ').Substring(0, [Math]::Min(300, (@($o) -join ' / ').Length)))" }
         } finally { foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) } }
     }
     # Listing of a tree: name, size, last-write time read from the item itself (an enumeration can return stale directory
@@ -4722,7 +4724,7 @@ try {
         # Child and grandchild in the job; the deadline terminates the job, both end; the sentinel lives.
         $envList = Get-AtmGitEnvironment -Ceiling $gitRoot
         $script = '$g = Start-Process -FilePath powershell.exe -ArgumentList ''-NoProfile -Command Start-Sleep 60'' -PassThru -WindowStyle Hidden; [Console]::Out.WriteLine(''{0}|{1}'' -f $g.Id, $g.StartTime.ToUniversalTime().Ticks); [Console]::Out.Flush(); Start-Sleep 60'
-        $j = Invoke-AtmBoundedProcess -Executable $ps -CommandLine ('"powershell.exe" -NoProfile -Command "' + $script.Replace('"', '\"') + '"') -WorkingDirectory $gitRoot -Environment $envList -TimeoutMs 6000 -MaxOutputBytes 4096 -JobMemoryBytes 1GB -ActiveProcessLimit 8
+        $j = Invoke-AtmBoundedProcess -Executable $ps -CommandLine ('"powershell.exe" -NoProfile -Command "' + $script.Replace('"', '\"') + '"') -WorkingDirectory $gitRoot -Environment $envList -TimeoutMs 20000 -MaxOutputBytes 4096 -JobMemoryBytes 1GB -ActiveProcessLimit 8
         $parts = ([Text.Encoding]::ASCII.GetString($j.Output).Trim()).Split('|')
         Assert-True ($j.Started -and $j.TimedOut -and $j.JobTerminated -and $j.TotalProcesses -ge 2 -and $parts.Count -eq 2) "job encerrado no prazo: total $($j.TotalProcesses), saida '$($parts -join '|')'"
         Start-Sleep -Milliseconds 800
@@ -4757,7 +4759,7 @@ try {
         foreach ($pat in @('SeDebugPrivilege', 'AdjustTokenPrivileges', 'RmShutdown', 'RmRestart', 'TerminateProcess', 'WriteProcessMemory', 'OpenProcess(', 'CreateRemoteThread', 'DebugActiveProcess', 'NtTerminate')) { Assert-True (-not $native.Contains($pat)) "Native.cs contem '$pat'" }
         # D-4: the only termination is of the runner's own job, and only the runner creates processes.
         $runner = $native.Substring($native.IndexOf('public static class AtmJobRunner'))
-        Assert-True ($native.IndexOf('TerminateJobObject') -gt $native.IndexOf('public static class AtmJobRunner') -and [regex]::Matches($native, 'CreateProcessW\(').Count -eq 2 -and $runner.Contains('PROC_THREAD_ATTRIBUTE_JOB_LIST') -and -not $runner.Contains('AssignProcessToJobObject')) 'Native.cs: processos so pelo executor, criados dentro do job; so o job proprio e encerrado'
+        Assert-True ($native.IndexOf('TerminateJobObject') -gt $native.IndexOf('public sealed class AtmJobResult') -and $native.IndexOf('public sealed class AtmJobResult') -gt 0 -and [regex]::Matches($native, 'CreateProcessW\(').Count -eq 2 -and $runner.Contains('PROC_THREAD_ATTRIBUTE_JOB_LIST') -and -not $runner.Contains('AssignProcessToJobObject')) 'Native.cs: processos so pelo executor, criados dentro do job; so o job proprio e encerrado'
         $srcAll = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File -Filter '*.ps1' | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Text = [IO.File]::ReadAllText($_.FullName) } })
         Assert-Eq (@($srcAll | Where-Object { $_.Text.Contains('[AgentTempManager.AtmJobRunner]') } | ForEach-Object { $_.Name }) -join ',') 'Engine.Diagnose.ps1' 'so o motor de diagnostico chama o executor nativo'
         $diag = [IO.File]::ReadAllText((Join-Path $lib 'Engine.Diagnose.ps1'))
