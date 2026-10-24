@@ -93,3 +93,12 @@ The decisions above are kept; the maintainer's review of PR #42 added:
   is not a positive answer: the enumeration may silently leave out services the caller may not query. The services
   collector therefore never gives `NOT_PRESENT` (ADR-0005 implementation record, P2-A-S); a source whose semantics
   tell a missing item from an inaccessible one is required for `NOT_PRESENT`.
+
+## Amendment (P2-B, 2026-10-24)
+
+* **New finding kind `VirtualizationPlatform`** (key `host`; states `PRESENT`, `NOT_PRESENT`, `UNKNOWN`). The platform
+  needs a state of its own, and a coverage record carries none; a new kind reuses the findings, JSON and report
+  machinery, which is a smaller contract change than a new top-level object. `PRESENT` only on a positive sign;
+  `NOT_PRESENT` is in the closed list but not produced (no source used proves absence, as for services).
+* **`VirtualMachine` states:** `RUNNING`, `OFF`, `SAVED`, `PAUSED`, `PENDING`, `UNKNOWN`, from the documented
+  `Msvm_ComputerSystem.EnabledState` values only.

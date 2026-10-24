@@ -127,6 +127,13 @@ called by `Invoke-AtmGitCommand`):
   (ADR-0012). A service PID is linked to a process only
   when the snapshot taken after the query holds it with a verified identity created before the query; no process is
   opened for it.
+* **Virtualization (P2-B, ADR-0005):** local read-only CIM queries only: the hypervisor flag, the `__NAMESPACE`
+  instances that list `root\virtualization\v2`, the `vmms` service state, and `Msvm_ComputerSystem` only when the
+  namespace is listed and `vmms` is running (its provider runs in `vmms.exe`; a stopped service is never started by
+  a query of this tool). No VM operation (`Start-VM`, `Stop-VM`, `Save-VM`, `Checkpoint-VM`, `RequestStateChange`),
+  no CIM method, no Hyper-V module, no remote CIM, no disk or configuration class (static tests). VM names, GUIDs,
+  the host name and raw worker process names never leave memory (keyed pseudonyms). No virtualization state
+  authorizes deleting anything, stopping a service or shutting down a virtual machine.
 * **Open-file diagnostics gate (P1-C-S):** the Restart Manager collector (`handles`, D-2) is behind
   `$script:AtmHandleDiagnosticsEnabled`, `$false` in every shipped copy (single assignment; no option, environment
   variable or configuration file; checked by the test suite and the install e2e). It is checked by the diagnose and

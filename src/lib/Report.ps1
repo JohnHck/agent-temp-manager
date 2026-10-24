@@ -354,6 +354,7 @@ function Show-AtmDiagnose {
 
     Show-AtmDiagnoseRuntime -Result $r
     Show-AtmDiagnoseServices -Result $r
+    Show-AtmDiagnoseVirtualization -Result $r
     Show-AtmDiagnoseWorktrees -Result $r
     Show-AtmDiagnoseHandles -Result $r
 
@@ -509,6 +510,49 @@ function Show-AtmDiagnoseServices {
     }
     if ($sf.Count -gt 0) { Write-Host ('  ' + (Get-AtmText 'diag.svcNotPresentNote')) }
     Write-Host ('  ' + (Get-AtmText 'diag.svcNoDelete')) -ForegroundColor Green
+}
+
+function Show-AtmDiagnoseVirtualization {
+    # Virtualization (P2-B): the platform state and how it was seen, virtual machines by state (pseudonymous keys, never
+    # names), worker processes by class with the totals that were read, coverage gaps and the meaning of the codes.
+    # Never says that no VM or no platform exists.
+    param($Result)
+    $r = $Result
+    $cov = @($r.Coverage | Where-Object { @('virtualization-platform', 'virtual-machines', 'virtualization-processes') -ccontains $_.Collector })
+    if ($cov.Count -eq 0) { return }
+    Write-AtmHeader (Get-AtmText 'diag.virtTitle')
+    $vf = @($r.Findings | Where-Object { $_.Kind -ceq 'VirtualizationPlatform' -or $_.Kind -ceq 'VirtualMachine' })
+    foreach ($p in @($vf | Where-Object { $_.Kind -ceq 'VirtualizationPlatform' })) {
+        Write-Host ('  ' + (Get-AtmText 'diag.virtPlatform' $p.State (Get-AtmText "state.VirtualizationPlatform.$($p.State)")))
+        $w = @($p.Evidence | Where-Object { $_.Code -ceq 'VIRTUALIZATION_WORKER' }).Count
+        $wu = @($p.Evidence | Where-Object { $_.Code -ceq 'VIRTUALIZATION_WORKER_UNVERIFIED' }).Count
+        Write-Host ('  ' + (Get-AtmText 'diag.virtWorkers' $w $wu))
+        foreach ($c in @('VIRTUALIZATION_WORKERS_WORKING_SET_BYTES', 'VIRTUALIZATION_WORKERS_PRIVATE_BYTES', 'VIRTUALIZATION_WORKERS_CPU_TIME_100NS')) {
+            $e = @($p.Evidence | Where-Object { $_.Code -ceq $c })
+            if ($e.Count -gt 0) { Write-Host ('    ' + (Get-AtmText 'diag.virtTotal' (Get-AtmText "evidence.$c") $e[0].Detail)) }
+        }
+    }
+    $vms = @($vf | Where-Object { $_.Kind -ceq 'VirtualMachine' })
+    $vc = @($cov | Where-Object { $_.Collector -ceq 'virtual-machines' })
+    if ($vms.Count -eq 0 -and $vc.Count -gt 0 -and $vc[0].Status -ceq 'COMPLETE') { Write-Host ('  ' + (Get-AtmText 'diag.virtNoVmObserved')) }
+    foreach ($st in @($script:AtmFindingStates['VirtualMachine'])) {
+        $n = @($vms | Where-Object { $_.State -ceq $st }).Count
+        if ($n -gt 0) { Write-Host ('  ' + (Get-AtmText 'diag.virtVmLine' $st $n (Get-AtmText "state.VirtualMachine.$st"))) }
+    }
+    foreach ($v in @($vms | Select-Object -First $script:AtmRuntimeListMax)) {
+        $who = $(if ($v.Provider) { $v.Provider } elseif (@($v.Evidence | Where-Object { $_.Code -ceq 'PROVIDER_ATTRIBUTION_AMBIGUOUS' }).Count -gt 0) { Get-AtmText 'diag.runtimeAmbiguousTag' (@($v.Evidence | Where-Object { $_.Code -ceq 'PROVIDER_ATTRIBUTION_AMBIGUOUS' })[0].Detail) } else { 'UNATTRIBUTED' })
+        Write-Host ('    ' + (Get-AtmText 'diag.virtVmItem' $v.Key $v.State $who))
+    }
+    foreach ($c in @($cov | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status })) { Write-Host ('  ' + (Get-AtmText 'diag.runtimeCoverageLine' $c.Collector $c.Status (@($c.Reasons) -join ', '))) -ForegroundColor Yellow }
+    $codes = New-Object System.Collections.Generic.List[string]
+    foreach ($x in @($cov | ForEach-Object { @($_.Reasons) })) { $tx = Get-AtmCodeText 'reason' $x; if ($tx -and -not $codes.Contains("$x|$tx")) { $codes.Add("$x|$tx") } }
+    foreach ($x in @($vf | ForEach-Object { @($_.Evidence | ForEach-Object { $_.Code }) })) { $tx = Get-AtmCodeText 'evidence' $x; if ($tx -and -not $codes.Contains("$x|$tx")) { $codes.Add("$x|$tx") } }
+    if ($codes.Count -gt 0) {
+        Write-Host ('  ' + (Get-AtmText 'diag.runtimeLegendTitle'))
+        foreach ($c in @($codes | Sort-Object)) { $i = $c.IndexOf('|'); Write-Host ('    ' + (Get-AtmText 'diag.runtimeLegendLine' $c.Substring(0, $i) $c.Substring($i + 1))) }
+    }
+    Write-Host ('  ' + (Get-AtmText 'diag.virtNotes'))
+    Write-Host ('  ' + (Get-AtmText 'diag.virtNoDelete')) -ForegroundColor Green
 }
 
 function Show-AtmDiagnoseHandles {

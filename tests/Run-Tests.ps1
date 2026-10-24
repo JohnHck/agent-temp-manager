@@ -3823,7 +3823,7 @@ try {
         foreach ($c in @('process-snapshot', 'sessions-claude-code', 'agent-processes', 'agent-resources')) { Assert-Eq $cs[$c].Status 'COMPLETE' "$c completo: $(@($cs[$c].Reasons) -join ',')" }
         Assert-Eq @($d.Coverage | Where-Object { $_.Collector -like 'sessions-*' }).Count 1 'um registro de sessoes por provider (dois perfis)'
         # P1-C: working directories are not observed and open files are a sample, so a diagnose is never complete.
-        Assert-True (-not $d.CoverageComplete -and (@($d.Coverage | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status } | ForEach-Object { $_.Collector } | Sort-Object) -join ',') -eq 'handles,process-cwd,service-properties,services') 'cobertura incompleta so por diretorios de trabalho, arquivos abertos (trava) e servicos (nenhum declarado)'
+        Assert-True (-not $d.CoverageComplete -and (@($d.Coverage | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status } | Where-Object { $_.Collector -notlike 'virtual*' } | ForEach-Object { $_.Collector } | Sort-Object) -join ',') -eq 'handles,process-cwd,service-properties,services') 'cobertura incompleta so por diretorios de trabalho, arquivos abertos (trava) e servicos (nenhum declarado); virtualizacao depende da maquina'
         $expect = @{ 200 = 'AGENT_PROCESS'; 202 = 'AGENT_PROCESS'; 201 = 'AGENT_DESCENDANT'; 203 = 'AGENT_DESCENDANT'; 3000 = 'SELF'; 3001 = 'SELF'; 1000 = '(none)'; 4 = '(none)' }
         foreach ($e in $expect.GetEnumerator()) { Assert-Eq (& $b4State $d $k[[int]$e.Key]) $e.Value "processo $($e.Key)" }
         # Sessions: one key per profile for the same session id; LIVE (exact identity) and absent from a complete collection.
@@ -4364,8 +4364,8 @@ try {
         $r1 = New-TestRoot -ProfileInfo $p
         $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -PseudonymKey $testPseudonymKey
         Assert-Eq $d.SchemaVersion 'atm.diagnose/2' 'schema'
-        Assert-Eq (@($d.Coverage | ForEach-Object { $_.Collector }) -join ',') 'identity,provider-claude-code,inventory,processes,temp-profiles,process-snapshot,sessions-claude-code,agent-processes,agent-resources,services,service-properties,process-cwd,handles' 'coletores (Claude Code v2: dicas de runtime lidas; runtime de agentes da P1-B4-c; P2-A; P1-C)'
-        foreach ($c in @($d.Coverage | Where-Object { $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' -and $_.Collector -notlike 'service*' })) { Assert-Eq $c.Status 'COMPLETE' "$($c.Collector) completo" }
+        Assert-Eq (@($d.Coverage | ForEach-Object { $_.Collector }) -join ',') 'identity,provider-claude-code,inventory,processes,temp-profiles,process-snapshot,sessions-claude-code,agent-processes,agent-resources,services,service-properties,virtualization-platform,virtual-machines,virtualization-processes,process-cwd,handles' 'coletores (Claude Code v2: dicas de runtime lidas; runtime de agentes da P1-B4-c; P2-A; P2-B; P1-C)'
+        foreach ($c in @($d.Coverage | Where-Object { $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' -and $_.Collector -notlike 'service*' -and $_.Collector -notlike 'virtual*' })) { Assert-Eq $c.Status 'COMPLETE' "$($c.Collector) completo" }
         $hc = @($d.Coverage | Where-Object { $_.Collector -eq 'handles' })[0]; $wc = @($d.Coverage | Where-Object { $_.Collector -eq 'process-cwd' })[0]
         $sv = @($d.Coverage | Where-Object { $_.Collector -like 'service*' })
         Assert-True ($sv.Count -eq 2 -and @($sv | Where-Object { $_.Status -ceq 'NOT_OBSERVABLE' -and @($_.Reasons) -ccontains 'SERVICE_HINTS_NONE' }).Count -eq 2) 'P2-A: nenhum servico declarado pelo Claude Code: servicos NOT_OBSERVABLE, nunca ausencia'
@@ -4409,7 +4409,7 @@ try {
             $control = ($n -eq 'controle')
             Assert-Eq ([bool]$d.Inventory.CoverageComplete) $control ("$n`: Inventory.CoverageComplete (bases $(@($d.Inventory.Bases | ForEach-Object { $_.Status }) -join ','); registros legiveis $(@($d.Inventory.Registries.Values | ForEach-Object { $_.Readable }) -join ','))")
             # P1-C: process-cwd (deferred) and handles (a sample) are never complete; apart from them the control is complete.
-            $incomplete = @($d.Coverage | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status -and $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' -and $_.Collector -notlike 'service*' })
+            $incomplete = @($d.Coverage | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status -and $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' -and $_.Collector -notlike 'service*' -and $_.Collector -notlike 'virtual*' })
             Assert-True (-not $d.CoverageComplete -and (($incomplete.Count -eq 0) -eq $control)) "$n`: diagnose incompleto; fora de process-cwd/handles, completo so no controle ($(@($incomplete | ForEach-Object { $_.Collector }) -join ','))"
             if (-not $control) {
                 $c = @($d.Coverage | Where-Object { $_.Collector -eq $row.Collector })[0]
@@ -4420,7 +4420,7 @@ try {
                 if ($n -eq 'inaccessible') { Assert-Eq @($d.Inventory.InaccessibleProfiles).Count 1 'perfil inacessivel no inventario' }
                 if ($n -eq 'unverified') { Assert-Eq @($d.Inventory.UnverifiedTempProfiles).Count 1 'TEMP nao verificavel no inventario' }
             } else {
-                foreach ($c in @($d.Coverage | Where-Object { $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' -and $_.Collector -notlike 'service*' })) { Assert-Eq $c.Status 'COMPLETE' "controle: $($c.Collector) completo" }
+                foreach ($c in @($d.Coverage | Where-Object { $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' -and $_.Collector -notlike 'service*' -and $_.Collector -notlike 'virtual*' })) { Assert-Eq $c.Status 'COMPLETE' "controle: $($c.Collector) completo" }
             }
             $j = (ConvertTo-AtmDiagnoseJson -Result $d) | ConvertFrom-Json
             Assert-Eq ([bool]$j.coverageComplete) $false "$n`: JSON coverageComplete (P1-C: nunca completo)"
@@ -6095,7 +6095,7 @@ try {
         $diag = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Diagnose.ps1'))
         foreach ($pat in @('Start-Service', 'Stop-Service', 'Set-Service', 'Restart-Service', 'Suspend-Service', 'Resume-Service', 'New-Service', 'Remove-Service', 'Invoke-CimMethod', 'Invoke-WmiMethod', 'Get-WmiObject', 'Set-WmiInstance', 'Set-CimInstance', 'New-CimSession', '-CimSession', '-ComputerName', 'Invoke-Expression', 'sc.exe', 'Start-Process')) { Assert-True (-not $diag.Contains($pat)) "motor sem '$pat'" }
         Assert-True (-not ($diag -match '(?i)\b(StartService|StopService|PauseService|ResumeService|ChangeStartMode|UserControlService|ControlService)\b')) 'nenhum metodo de controle de servico'
-        Assert-Eq ([regex]::Matches($diag, 'Get-CimInstance[^\r\n]*Win32_Service').Count) 1 'uma unica consulta Win32_Service'
+        Assert-Eq ([regex]::Matches($diag, 'Get-CimInstance[^\r\n]*Win32_Service').Count) 2 'Win32_Service: a consulta dos nomes declarados e a leitura do vmms (P2-B, so estado)'
         $sec = $diag.IndexOf('# Windows services (P2-A'); $end = $diag.IndexOf('# Open-file evidence (D-2')
         $outside = @([regex]::Matches($diag, 'PathName') | Where-Object { $_.Index -lt $sec -or $_.Index -gt $end })
         Assert-True ($sec -gt 0 -and $end -gt $sec -and $outside.Count -eq 0) 'PathName so dentro da secao de servicos'
@@ -6128,6 +6128,191 @@ try {
         Assert-Eq (& $svcEv $f['Winmgmt'] 'SERVICE_PROCESS_VERIFIED').Count 1 "Winmgmt: processo verificado ($(@(& $svcEv $f['Winmgmt'] 'SERVICE_PROCESS_UNVERIFIED') -join ','))"
         Assert-True ((& $svcEv $f['Winmgmt'] 'SERVICE_EXECUTABLE')[0] -like '*\svchost.exe' -and (& $svcEv $f['Winmgmt'] 'SERVICE_ACCOUNT_KIND')[0] -ceq 'LOCAL_SYSTEM') 'Winmgmt: svchost.exe em local conhecido, LocalSystem'
         $script:caseNote = "services $($q.Coverage.Status) em $($q.Coverage.ElapsedMs) ms; propriedades $((& $svcCov $r 'service-properties').Status) $(@((& $svcCov $r 'service-properties').Reasons) -join ',')"
+    }
+    # ------------------------------------------------------------------ P2-B (virtualization, ADR-0005 rules 7-9)
+    # CIM rows and process rows are injected; no VM is created, started or changed and no service is touched. Only the
+    # CI-runner case runs the real read-only queries.
+    $vT0 = [datetime]::UtcNow.AddMinutes(-30)
+    $vG1 = '11111111-2222-3333-4444-555555555555'; $vG2 = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'; $vG3 = '99999999-8888-7777-6666-555555555555'
+    $vHostRow = [pscustomobject]@{ Name = 'P2B-HOSTNAME'; Caption = 'Hosting Computer System'; Description = 'Microsoft Hosting Computer System'; ElementName = 'P2B-HOSTNAME'; EnabledState = 2; ProcessID = $null }
+    $vVmRow = { param([string]$Guid, [string]$Element, $State = 2, $ProcId = 0) [pscustomobject]@{ Name = $Guid; Caption = 'Virtual Machine'; Description = 'Microsoft Virtual Computer System'; ElementName = $Element; EnabledState = $State; ProcessID = $ProcId } }
+    $vBase = { param($Vms = @()) @{ Hypervisor = @([pscustomobject]@{ HypervisorPresent = $true }); NamespaceRoot = @([pscustomobject]@{ Name = 'virtualization' }); NamespaceV2 = @([pscustomobject]@{ Name = 'v2' }); Vmms = @([pscustomobject]@{ Name = 'vmms'; State = 'Running' }); Vms = @($Vms) } }
+    # A source from a table: a value that is a scriptblock is invoked (to throw), anything else returned; calls counted.
+    $vSrc = { param([hashtable]$T, [hashtable]$Calls = @{}) ({ param($Op) $Calls[$Op] = 1 + $(if ($Calls.ContainsKey($Op)) { $Calls[$Op] } else { 0 }); $v = $T[$Op]; if ($v -is [scriptblock]) { & $v } else { @($v) } }.GetNewClosure()) }
+    $vPRow = { param($ProcId, $Parent, [string]$Name, $Created, $Ws = 1000) [pscustomobject]@{ ProcessId = $ProcId; ParentProcessId = $Parent; Name = $Name; CreationDate = $Created; KernelModeTime = 10; UserModeTime = 20; WorkingSetSize = $Ws; PrivatePageCount = 500; HandleCount = 1; ReadTransferCount = 0; WriteTransferCount = 0; OtherTransferCount = 0 } }
+    $vColl = { param([object[]]$Rows) $vr = @($Rows); Get-AtmProcessCollection -Source ({ $vr }.GetNewClosure()) }
+    $vRun = { param([hashtable]$T, $Collection, $Hints = @(), $Services = @()) $q = Invoke-AtmVirtualizationQuery -Source (& $vSrc $T) -NowUtc $vT0; Get-AtmVirtualizationFindings -Query $q -Collection $Collection -Pseudonymizer $b4Pz -ProviderHints @($Hints) -ServiceFindings @($Services) }
+    $vEv = { param($F, [string]$Code) return , @($F.Evidence | Where-Object { $_.Code -ceq $Code } | ForEach-Object { [string]$_.Detail }) }
+    $vPlat = { param($R) @($R.Findings | Where-Object { $_.Kind -ceq 'VirtualizationPlatform' })[0] }
+    $vVms = { param($R) return , @($R.Findings | Where-Object { $_.Kind -ceq 'VirtualMachine' }) }
+    $vCov = { param($R, [string]$Collector) @($R.Coverage | Where-Object { $_.Collector -ceq $Collector })[0] }
+    $vKey = { param([string]$Guid) 'vm/v-' + (Get-AtmPseudonym -Pseudonymizer $b4Pz -Domain 'atm-virtual-machine/1' -Fields @($Guid.ToLowerInvariant())) }
+    $vHints = { param([string]$Provider, [object[]]$VHints, [object[]]$SHints = @()) [pscustomobject]@{ ProviderId = $Provider; ProcessMatchers = @(); ServiceHints = @($SHints); VirtualizationHints = @($VHints); Coverage = (New-AtmCoverage -Collector ('provider-' + $Provider) -Status 'COMPLETE') } }
+    Test-Case 'Virtualizacao' 'P2-B: plataforma presente, nao observavel, namespace indisponivel, acesso negado, falha; indicador de hipervisor so como evidencia; vmms parado nunca consultado (nenhuma consulta de VM)' {
+        $coll = & $vColl @((& $vPRow 4 0 'System' $vT0.AddHours(-2)))
+        $r = & $vRun (& $vBase) $coll
+        $pf = & $vPlat $r
+        Assert-True ($pf.State -ceq 'PRESENT' -and (& $vEv $pf 'VIRTUALIZATION_NAMESPACE_LISTED').Count -eq 1 -and (& $vEv $pf 'VMMS_SERVICE_STATE')[0] -ceq 'RUNNING' -and (& $vCov $r 'virtualization-platform').Status -ceq 'COMPLETE') 'plataforma presente (namespace e vmms listados)'
+        $none = (& $vBase); $none.NamespaceRoot = @(); $none.Vmms = @()
+        $r = & $vRun $none $coll
+        Assert-True ((& $vPlat $r).State -ceq 'UNKNOWN' -and @((& $vCov $r 'virtualization-platform').Reasons) -ccontains 'PLATFORM_NOT_OBSERVED' -and (& $vCov $r 'virtualization-platform').Status -ceq 'PARTIAL' -and (& $vCov $r 'virtual-machines').Status -ceq 'NOT_OBSERVABLE') 'nada listado: UNKNOWN (nunca NOT_PRESENT), VMs nao observaveis'
+        Assert-True ((& $vEv (& $vPlat $r) 'HYPERVISOR_PRESENT_FLAG')[0] -ceq 'TRUE' -and (& $vPlat $r).State -cne 'PRESENT') 'indicador de hipervisor sozinho nao torna a plataforma presente (verdadeiro tambem dentro de uma VM)'
+        $inv = (& $vBase); $inv.NamespaceV2 = { throw (New-Object Runtime.InteropServices.COMException('x', -2147217394)) }; $inv.Vmms = @()
+        $r = & $vRun $inv $coll
+        Assert-True ((& $vEv (& $vPlat $r) 'VIRTUALIZATION_NAMESPACE_NOT_LISTED')[0] -ceq 'NOT_LISTED_FOR_ACCOUNT' -and (& $vPlat $r).State -ceq 'UNKNOWN') 'namespace invalido: nao listado, nunca falha nem ausencia'
+        $den = (& $vBase); $den.NamespaceRoot = { throw (New-Object UnauthorizedAccessException('x')) }
+        $r = & $vRun $den $coll
+        Assert-True (@((& $vCov $r 'virtualization-platform').Reasons) -ccontains 'VIRTUALIZATION_NAMESPACE_DENIED' -and (& $vCov $r 'virtual-machines').Status -ceq 'NOT_OBSERVABLE' -and (& $vPlat $r).State -ceq 'PRESENT') 'namespace negado: declarado; vmms listado mantem a plataforma presente; VMs nao consultadas'
+        $allDen = @{ Hypervisor = { throw (New-Object UnauthorizedAccessException('x')) }; NamespaceRoot = { throw (New-Object UnauthorizedAccessException('x')) }; Vmms = { throw (New-Object UnauthorizedAccessException('x')) } }
+        Assert-Eq (Invoke-AtmVirtualizationQuery -Source (& $vSrc $allDen)).PlatformCoverage.Status 'DENIED' 'tudo negado: DENIED'
+        $allFail = @{ Hypervisor = { throw (New-Object IO.IOException('x')) }; NamespaceRoot = { throw (New-Object IO.IOException('p2b-secret')) }; Vmms = { throw (New-Object UnauthorizedAccessException('x')) } }
+        $qf = Invoke-AtmVirtualizationQuery -Source (& $vSrc $allFail)
+        Assert-True ($qf.PlatformCoverage.Status -ceq 'FAILED' -and -not ((@($qf.PlatformCoverage.Reasons) -join ' ') -match 'p2b-secret')) 'falhas: FAILED, so o tipo da excecao'
+        $calls = @{}
+        $stopped = (& $vBase @((& $vVmRow $vG1 'X'))); $stopped.Vmms = @([pscustomobject]@{ Name = 'vmms'; State = 'Stopped' })
+        $qs = Invoke-AtmVirtualizationQuery -Source (& $vSrc $stopped $calls)
+        Assert-True (-not $calls.ContainsKey('Vms') -and (@($qs.VmCoverage.Reasons) -join ',') -ceq 'VMMS_NOT_RUNNING' -and $qs.VmCoverage.Status -ceq 'NOT_OBSERVABLE') 'vmms parado: nenhuma consulta de VM (uma consulta poderia iniciar o servico)'
+        $calls2 = @{}; $nolist = (& $vBase @((& $vVmRow $vG1 'X'))); $nolist.NamespaceRoot = @()
+        $null = Invoke-AtmVirtualizationQuery -Source (& $vSrc $nolist $calls2)
+        Assert-True (-not $calls2.ContainsKey('Vms') -and -not $calls2.ContainsKey('NamespaceV2')) 'namespace nao listado: nenhuma conexao a root\virtualization\v2'
+    }
+    Test-Case 'Virtualizacao' 'P2-B: maquinas virtuais - existente, varias, consulta vazia (nunca ausencia), objeto do host, objeto sem identidade, estados documentados, limite, negada, falha; nomes e GUIDs nunca exportados' {
+        $coll = & $vColl @((& $vPRow 4 0 'System' $vT0.AddHours(-2)))
+        $rows = @($vHostRow, (& $vVmRow $vG1 'P2B-Secret-VM-Name' 2), (& $vVmRow $vG2 'Personal P2B VM' 3), (& $vVmRow $vG3 'Third' 32769))
+        $r = & $vRun (& $vBase $rows) $coll
+        $vms = & $vVms $r
+        Assert-True ($vms.Count -eq 3 -and (& $vCov $r 'virtual-machines').Status -ceq 'COMPLETE' -and (& $vCov $r 'virtual-machines').Observed -eq 3) 'tres VMs; host deixado de fora'
+        $byKey = @{}; foreach ($v in $vms) { $byKey[$v.Key] = $v }
+        Assert-True ($byKey[(& $vKey $vG1)].State -ceq 'RUNNING' -and $byKey[(& $vKey $vG2)].State -ceq 'OFF' -and $byKey[(& $vKey $vG3)].State -ceq 'SAVED') 'estados documentados por chave pseudonima'
+        $json = ConvertTo-Json -InputObject @($r.Findings + $r.Coverage) -Depth 6
+        foreach ($x in @('P2B-Secret-VM-Name', 'Personal P2B VM', 'P2B-HOSTNAME', $vG1, $vG2.ToUpperInvariant(), $vG2)) { Assert-True (-not $json.Contains($x)) 'nenhum nome, host ou GUID exportado' }
+        foreach ($cs in @(@(4, 'PENDING'), @(10, 'PENDING'), @(32768, 'PAUSED'), @(0, 'UNKNOWN'), @(9, 'UNKNOWN'), @(6, 'UNKNOWN'), @(32775, 'UNKNOWN'))) {
+            $rr = & $vRun (& $vBase @((& $vVmRow $vG1 'X' $cs[0]))) $coll
+            Assert-Eq (& $vVms $rr)[0].State $cs[1] "EnabledState $($cs[0])"
+        }
+        $rr = & $vRun (& $vBase @((& $vVmRow $vG1 'X' $null))) $coll
+        Assert-True ((& $vVms $rr)[0].State -ceq 'UNKNOWN' -and (& $vEv (& $vVms $rr)[0] 'VM_STATE_UNREADABLE').Count -eq 1) 'estado ilegivel'
+        $empty = & $vRun (& $vBase @($vHostRow)) $coll
+        Assert-True ((& $vVms $empty).Count -eq 0 -and (& $vCov $empty 'virtual-machines').Status -ceq 'COMPLETE' -and @($empty.Findings | Where-Object { $_.State -ceq 'NOT_PRESENT' -or $_.RequestedState -ceq 'NOT_PRESENT' }).Count -eq 0) 'consulta sem VMs: nenhum achado, nenhuma ausencia'
+        $amb = & $vRun (& $vBase @([pscustomobject]@{ Name = 'not-a-guid'; Caption = 'Virtual Machine'; Description = 'Microsoft Virtual Computer System'; ElementName = 'Y'; EnabledState = 2; ProcessID = 0 }, [pscustomobject]@{ Name = $vG1; Caption = 'Hosting Computer System'; Description = 'Microsoft Hosting Computer System'; ElementName = 'Z'; EnabledState = 2; ProcessID = 0 }, [pscustomobject]@{ Foo = 1 })) $coll
+        Assert-True ((& $vVms $amb).Count -eq 0 -and (& $vCov $amb 'virtual-machines').Status -ceq 'PARTIAL' -and @((& $vCov $amb 'virtual-machines').Reasons) -ccontains 'VM_ROW_AMBIGUOUS' -and @((& $vCov $amb 'virtual-machines').Reasons) -ccontains 'VM_ROW_MALFORMED') 'objeto sem identidade de VM ou ambiguo: deixado de fora, nunca contado'
+        $dup = & $vRun (& $vBase @((& $vVmRow $vG1 'A'), (& $vVmRow $vG1.ToUpperInvariant() 'B'))) $coll
+        Assert-True ((& $vVms $dup).Count -eq 1 -and (& $vVms $dup)[0].State -ceq 'UNKNOWN' -and (& $vEv (& $vVms $dup)[0] 'VM_KEY_COLLISION').Count -eq 1) 'mesma chave duas vezes: UNKNOWN'
+        $many = @(1..5 | ForEach-Object { & $vVmRow ('{0:D8}-0000-0000-0000-000000000000' -f $_) "vm$_" })
+        $q = Invoke-AtmVirtualizationQuery -Source (& $vSrc (& $vBase $many)) -MaxObjects 3
+        Assert-True (@($q.VmRows).Count -eq 3 -and $q.VmCoverage.Status -ceq 'PARTIAL' -and @($q.VmCoverage.Reasons) -ccontains 'VM_LIMIT_EXCEEDED') 'limite de objetos: PARTIAL'
+        $den = (& $vBase); $den.Vms = { throw (New-Object UnauthorizedAccessException('x')) }
+        $q = Invoke-AtmVirtualizationQuery -Source (& $vSrc $den)
+        Assert-True ($q.VmCoverage.Status -ceq 'DENIED' -and $q.VmCoverage.ElevationWouldHelp -ceq 'YES' -and @($q.VmRows).Count -eq 0) 'VMs negadas: DENIED (elevacao ajudaria), nunca "nenhuma VM"'
+        $fl = (& $vBase); $fl.Vms = { throw (New-Object IO.IOException('p2b-secret')) }
+        $q = Invoke-AtmVirtualizationQuery -Source (& $vSrc $fl)
+        Assert-True ($q.VmCoverage.Status -ceq 'FAILED' -and -not ((@($q.VmCoverage.Reasons) -join ' ') -match 'p2b-secret')) 'VMs com falha: FAILED, so o tipo'
+    }
+    Test-Case 'Virtualizacao' 'P2-B: processos de virtualizacao - vmmem e vmwp isolados (so a classe), identidade nao verificada, contadores lidos ou nao, vinculo VM-processo por prova temporal; snapshot indisponivel' {
+        $rows = @((& $vPRow 4 0 'System' $vT0.AddHours(-2)), (& $vPRow 700 4 'vmwp.exe' $vT0.AddMinutes(-10) 3000), (& $vPRow 800 4 'vmmemWSL' $vT0.AddMinutes(-5) 7000), (& $vPRow 900 4 'vmmem.P2BSecretVm' $null), (& $vPRow 950 4 'vmwp.exe' $vT0.AddMinutes(5)), (& $vPRow 960 4 'notepad.exe' $vT0.AddHours(-1)))
+        $coll = & $vColl $rows
+        $r = & $vRun (& $vBase @((& $vVmRow $vG1 'A' 2 700), (& $vVmRow $vG2 'B' 2 950), (& $vVmRow $vG3 'C' 2 960))) $coll
+        $pf = & $vPlat $r
+        Assert-True ((((& $vEv $pf 'VIRTUALIZATION_WORKER')) -join ';') -ceq ("VMMEM|" + (ConvertTo-AtmProcessKey -ProcessId 800 -CreationUtc $vT0.AddMinutes(-5)) + ";VMWP|" + (ConvertTo-AtmProcessKey -ProcessId 700 -CreationUtc $vT0.AddMinutes(-10)) + ";VMWP|" + (ConvertTo-AtmProcessKey -ProcessId 950 -CreationUtc $vT0.AddMinutes(5)))) "trabalhadores verificados por classe ($((& $vEv $pf 'VIRTUALIZATION_WORKER') -join ';'))"
+        Assert-True ((& $vEv $pf 'VIRTUALIZATION_WORKER_UNVERIFIED')[0] -ceq 'VMMEM|pid:900' -and @((& $vCov $r 'virtualization-processes').Reasons) -ccontains 'WORKER_IDENTITY_UNVERIFIED') 'sem horario: nao verificado'
+        Assert-True (-not ((ConvertTo-Json -InputObject @($r.Findings) -Depth 6) -match 'P2BSecretVm|notepad')) 'nome bruto do processo nunca exportado; outros processos ignorados'
+        Assert-True ((& $vEv $pf 'VIRTUALIZATION_WORKERS_WORKING_SET_BYTES')[0] -ceq '12000' -and (& $vEv $pf 'VIRTUALIZATION_WORKER_COUNTERS_INCOMPLETE').Count -eq 0) 'totais dos contadores lidos'
+        $byKey = @{}; foreach ($v in (& $vVms $r)) { $byKey[$v.Key] = $v }
+        Assert-Eq (& $vEv $byKey[(& $vKey $vG1)] 'VM_WORKER_VERIFIED')[0] (ConvertTo-AtmProcessKey -ProcessId 700 -CreationUtc $vT0.AddMinutes(-10)) 'VM ligada ao seu vmwp (criado antes da consulta)'
+        Assert-Eq (& $vEv $byKey[(& $vKey $vG2)] 'VM_WORKER_UNVERIFIED')[0] 'CREATED_AFTER_QUERY' 'PID reutilizado (criado depois da consulta): nunca ligado'
+        Assert-Eq (& $vEv $byKey[(& $vKey $vG3)] 'VM_WORKER_UNVERIFIED')[0] 'NOT_A_WORKER_PROCESS' 'PID de outro programa: nunca ligado'
+        $nc = @((& $vPRow 4 0 'System' $vT0.AddHours(-2)), [pscustomobject]@{ ProcessId = 701; ParentProcessId = 4; Name = 'vmwp.exe'; CreationDate = $vT0.AddMinutes(-3) })
+        $r2 = & $vRun (& $vBase) (& $vColl $nc)
+        Assert-True ((& $vEv (& $vPlat $r2) 'VIRTUALIZATION_WORKER_COUNTERS_INCOMPLETE')[0] -ceq '0/1' -and (& $vEv (& $vPlat $r2) 'VIRTUALIZATION_WORKERS_WORKING_SET_BYTES').Count -eq 0) 'contadores nao lidos: nenhum total (nunca 0)'
+        $r3 = & $vRun (& $vBase @((& $vVmRow $vG1 'A' 2 700))) $null
+        Assert-True ((& $vCov $r3 'virtualization-processes').Status -ceq 'NOT_OBSERVABLE' -and (& $vEv (& $vVms $r3)[0] 'VM_WORKER_UNVERIFIED')[0] -ceq 'PROCESS_SNAPSHOT_UNAVAILABLE') 'sem snapshot: processos nao observaveis, vinculo nao verificado'
+        foreach ($n in @('vmwp.exe', 'VMWP.EXE', 'vmmem', 'vmmem.exe', 'vmmemWSL', 'vmmem.foo')) { Assert-True ($null -ne (Get-AtmVirtualizationWorkerClass $n)) "classe de $n" }
+        foreach ($n in @('vmwpx.exe', 'myvmmem', 'vmcompute.exe', 'vmms.exe', $null, 5)) { Assert-True ($null -eq (Get-AtmVirtualizationWorkerClass $n)) 'outros nomes nao sao trabalhadores' }
+    }
+    Test-Case 'Virtualizacao' 'P2-B: atribuicao - nome de VM declarado, cadeia servico-processo confirmada e nao confirmada, dois providers, WSL2/Sandbox sem atribuicao, nenhum hint' {
+        $rows = @((& $vPRow 4 0 'System' $vT0.AddHours(-2)), (& $vPRow 600 4 'agentsvc.exe' $vT0.AddHours(-1)), (& $vPRow 700 600 'vmwp.exe' $vT0.AddMinutes(-10)), (& $vPRow 710 4 'vmwp.exe' $vT0.AddMinutes(-10)), (& $vPRow 800 4 'vmmemWSL' $vT0.AddMinutes(-5)))
+        $coll = & $vColl $rows
+        $svcRows = @([pscustomobject]@{ Name = 'AgentSvc'; State = 'Running'; StartMode = 'Auto'; DelayedAutoStart = $false; StartName = 'LocalSystem'; ProcessId = 600; PathName = 'agentsvc.exe' })
+        $sh = [pscustomobject]@{ ProviderId = 'prov-a'; ProcessMatchers = @(); ServiceHints = @([pscustomobject]@{ Name = 'AgentSvc'; Role = $null }); VirtualizationHints = @([pscustomobject]@{ Kind = 'ServiceOwner'; Value = 'AgentSvc' }); Coverage = (New-AtmCoverage -Collector 'provider-prov-a' -Status 'COMPLETE') }
+        $sq = Invoke-AtmServiceQuery -ProviderHints @($sh) -Source ({ param($Names) $svcRows }.GetNewClosure()) -NowUtc $vT0
+        $svc = (Get-AtmServiceFindings -Query $sq -Collection $coll).Findings
+        $vmRows = @((& $vVmRow $vG1 'Agent VM' 2 700), (& $vVmRow $vG2 'Other VM' 2 710))
+        $r = & $vRun (& $vBase $vmRows) $coll @($sh) $svc
+        $byKey = @{}; foreach ($v in (& $vVms $r)) { $byKey[$v.Key] = $v }
+        $a = $byKey[(& $vKey $vG1)]; $b = $byKey[(& $vKey $vG2)]
+        Assert-True ($a.Provider -ceq 'prov-a' -and (& $vEv $a 'VM_ATTRIBUTED_BY_SERVICE')[0] -ceq 'prov-a|AgentSvc') 'cadeia confirmada: vmwp verificado, pai verificado = processo do servico em execucao declarado pelo mesmo provider'
+        Assert-True ($null -eq $b.Provider -and (& $vEv $b 'VM_UNATTRIBUTED').Count -eq 1) 'outra VM (pai nao e o servico): nao atribuida'
+        $other = [pscustomobject]@{ ProviderId = 'prov-b'; ProcessMatchers = @(); ServiceHints = @(); VirtualizationHints = @([pscustomobject]@{ Kind = 'ServiceOwner'; Value = 'AgentSvc' }); Coverage = (New-AtmCoverage -Collector 'provider-prov-b' -Status 'COMPLETE') }
+        $r = & $vRun (& $vBase $vmRows) $coll @($other) $svc
+        Assert-True (@((& $vVms $r) | Where-Object { $_.Provider }).Count -eq 0) 'servico nao declarado pelo mesmo provider: nunca atribuido'
+        $stoppedSvc = @($svc | ForEach-Object { New-AtmFinding -Kind 'Service' -Key $_.Key -State 'STOPPED' -Evidence $_.Evidence -Coverage $_.Coverage -Provider $_.Provider })
+        $r = & $vRun (& $vBase $vmRows) $coll @($sh) $stoppedSvc
+        Assert-True (@((& $vVms $r) | Where-Object { $_.Provider }).Count -eq 0) 'servico parado: nunca atribuido'
+        $nh1 = & $vHints 'prov-a' @([pscustomobject]@{ Kind = 'VmName'; Value = 'agent vm' })
+        $nh2 = & $vHints 'prov-c' @([pscustomobject]@{ Kind = 'VmName'; Value = 'AGENT VM' }, [pscustomobject]@{ Kind = 'VmName'; Value = 'Never Seen VM' })
+        $r = & $vRun (& $vBase $vmRows) $coll @($nh1)
+        Assert-True (@((& $vVms $r) | Where-Object { $_.Provider -ceq 'prov-a' }).Count -eq 1 -and (& $vEv @((& $vVms $r) | Where-Object { $_.Provider -ceq 'prov-a' })[0] 'VM_ATTRIBUTED_BY_NAME')[0] -ceq 'prov-a') 'nome declarado (sem diferenca de caixa): atribuida; o nome nao e exportado'
+        $r = & $vRun (& $vBase $vmRows) $coll @($nh1, $nh2)
+        $amb = @((& $vVms $r) | Where-Object { (& $vEv $_ 'PROVIDER_ATTRIBUTION_AMBIGUOUS').Count -eq 1 })
+        Assert-True ($amb.Count -eq 1 -and $null -eq $amb[0].Provider -and (& $vEv $amb[0] 'PROVIDER_ATTRIBUTION_AMBIGUOUS')[0] -ceq 'prov-a,prov-c') 'dois providers na mesma VM: ambigua, provider null'
+        Assert-True ((& $vEv (& $vPlat $r) 'VM_HINT_NOT_OBSERVED') -contains 'prov-c' -and -not ((ConvertTo-Json -InputObject @($r.Findings) -Depth 6) -match 'Never Seen VM|Agent VM|Other VM')) 'nome declarado nao observado: so observacao, sem o nome'
+        # WSL 2 / Windows Sandbox: utility VMs are not in Msvm_ComputerSystem; vmmem is never attributed.
+        $r = & $vRun (& $vBase @($vHostRow)) $coll @($nh1, $sh) $svc
+        Assert-True ((& $vVms $r).Count -eq 0 -and (& $vPlat $r).Provider -eq $null -and (& $vEv (& $vPlat $r) 'VIRTUALIZATION_WORKER') -contains ('VMMEM|' + (ConvertTo-AtmProcessKey -ProcessId 800 -CreationUtc $vT0.AddMinutes(-5)))) 'vmmemWSL observado, nunca atribuido'
+        $r = & $vRun (& $vBase $vmRows) $coll
+        Assert-True (@((& $vVms $r) | Where-Object { $_.Provider -or (& $vEv $_ 'VM_UNATTRIBUTED').Count -ne 1 }).Count -eq 0) 'nenhum hint: todas UNATTRIBUTED'
+    }
+    Test-Case 'Virtualizacao' 'P2-B: prazo excedido, integracao ao diagnose (coberturas, JSON e relatorio sem nomes), privacidade' {
+        $calls = @{}
+        $q = Invoke-AtmVirtualizationQuery -Source (& $vSrc (& $vBase) $calls) -Deadline ([datetime]::UtcNow.AddSeconds(-1))
+        Assert-True ($calls.Count -eq 0 -and $q.PlatformCoverage.Status -ceq 'TIMEOUT' -and $q.VmCoverage.Status -ceq 'TIMEOUT') 'prazo: nada consultado, TIMEOUT'
+        $p = New-TestProfile 'p2b-int'
+        $null = New-TestRoot -ProfileInfo $p
+        $procRows = @([pscustomobject]@{ ProcessId = 4; ParentProcessId = 0; Name = 'System'; CreationDate = [datetime]::UtcNow.AddHours(-2) }, [pscustomobject]@{ ProcessId = 7000; ParentProcessId = 4; Name = 'vmwp.exe'; CreationDate = [datetime]::UtcNow.AddHours(-1) }, [pscustomobject]@{ ProcessId = 7100; ParentProcessId = 4; Name = 'vmmem.P2BSecretVm'; CreationDate = [datetime]::UtcNow.AddHours(-1) })
+        $vt = & $vBase @($vHostRow, (& $vVmRow $vG1 'P2B-Secret-VM-Name' 2 7000))
+        $rt = [pscustomobject]@{ Id = 'fake-virt'; DisplayName = 'F'; ContractVersion = 2; Capabilities = @('runtime'); GetVirtualizationHints = { @([pscustomobject]@{ Kind = 'VmName'; Value = 'P2B-Secret-VM-Name' }) } }
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0], $rt) -ProcessSource ({ $procRows }.GetNewClosure()) -CpuSampleMs 0 -PseudonymKey $testPseudonymKey -ServiceSource { param($Names) @() } -VirtualizationSource (& $vSrc $vt)
+        $cols = @($d.Coverage | ForEach-Object { $_.Collector })
+        Assert-True ($cols.IndexOf('virtualization-platform') -eq $cols.IndexOf('service-properties') + 1 -and $cols.IndexOf('virtual-machines') -eq $cols.IndexOf('virtualization-platform') + 1 -and $cols.IndexOf('virtualization-processes') -eq $cols.IndexOf('virtual-machines') + 1) "coberturas por camada ($($cols -join ','))"
+        $vm = @($d.Findings | Where-Object { $_.Kind -ceq 'VirtualMachine' })
+        Assert-True ($vm.Count -eq 1 -and $vm[0].State -ceq 'RUNNING' -and $vm[0].Provider -ceq 'fake-virt' -and (& $vEv $vm[0] 'VM_WORKER_VERIFIED').Count -eq 1 -and @($d.Findings | Where-Object { $_.Kind -ceq 'VirtualizationPlatform' -and $_.State -ceq 'PRESENT' }).Count -eq 1) 'VM no diagnose: em execucao, atribuida pelo nome, vmwp verificado (consulta antes do snapshot)'
+        Assert-True (@($d.Findings | Where-Object { $_.Kind -ceq 'TempPartition' -and $_.State -cne 'RUNTIME_NOT_DIAGNOSED' -and $_.State -cne 'UNKNOWN' }).Count -eq 0) 'virtualizacao nao muda estados de particoes'
+        $json = ConvertTo-AtmDiagnoseJson -Result $d
+        $txt = (Show-AtmDiagnose -Result $d 6>&1 | ForEach-Object { [string]$_ }) -join "`n"
+        foreach ($x in @('P2B-Secret-VM-Name', 'P2B-HOSTNAME', 'P2BSecretVm', $vG1)) { Assert-True (-not $json.Contains($x) -and -not $txt.Contains($x)) 'JSON e relatorio sem nome de VM, host, nome bruto de processo ou GUID' }
+        $j = $json | ConvertFrom-Json
+        Assert-True (@($j.findings | Where-Object { $_.kind -eq 'VirtualizationPlatform' -and $_.key -eq 'host' }).Count -eq 1 -and @($j.findings | Where-Object { $_.kind -eq 'VirtualMachine' -and $_.key -like 'vm/v-*' }).Count -eq 1) 'JSON: plataforma e VM com chave pseudonima'
+        Assert-True ($txt.Contains((Get-AtmText 'diag.virtTitle')) -and $txt.Contains((Get-AtmText 'diag.virtNoDelete'))) 'relatorio: secao de virtualizacao'
+        $d0 = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -DeadlineSeconds 0 -VirtualizationSource (& $vSrc $vt $calls)
+        Assert-True ($calls.Count -eq 0 -and @($d0.Coverage | Where-Object { $_.Collector -like 'virtual*' -and $_.Collector -cne 'virtualization-processes' -and $_.Status -cne 'TIMEOUT' }).Count -eq 0) 'prazo 0 no diagnose: nada consultado'
+    }
+    Test-Case 'Virtualizacao' 'P2-B (estatico): nenhuma operacao de VM, metodo CIM, acesso remoto, modulo Hyper-V ou elevacao; consultas so em Get-AtmVirtualizationRaw; CLI sem fonte injetada; textos nos dois idiomas' {
+        $diag = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Diagnose.ps1'))
+        foreach ($pat in @('Start-VM', 'Stop-VM', 'Save-VM', 'Checkpoint-VM', 'Remove-VM', 'New-VM', 'Set-VM', 'Get-VM', 'Import-Module', 'RequestStateChange', 'Invoke-CimMethod', 'Invoke-WmiMethod', 'New-CimSession', '-CimSession', '-ComputerName', 'Mount-VHD', 'Dismount-VHD', 'Start-Service', 'Stop-Service', 'Stop-Process', 'RunAs')) { Assert-True (-not $diag.Contains($pat)) "motor sem '$pat'" }
+        Assert-Eq ([regex]::Matches($diag, 'Msvm_ComputerSystem -Property').Count) 1 'uma unica consulta de VMs'
+        $raw = $diag.Substring($diag.IndexOf('function Get-AtmVirtualizationRaw'), $diag.IndexOf('function Test-AtmInvalidNamespaceException') - $diag.IndexOf('function Get-AtmVirtualizationRaw'))
+        Assert-True ($raw.Contains("Namespace 'root\virtualization\v2'") -and @([regex]::Matches($diag, "root\\virtualization\\v2' -ClassName") | Where-Object { $_.Index -lt $diag.IndexOf('function Get-AtmVirtualizationRaw') -or $_.Index -gt $diag.IndexOf('function Test-AtmInvalidNamespaceException') }).Count -eq 0) 'consultas de virtualizacao so na funcao de leitura'
+        Assert-True (-not ($diag -match '(?i)\b(Msvm_VirtualSystemManagementService|Msvm_VirtualSystemSettingData|Msvm_StorageAllocationSettingData|Msvm_ResourceAllocationSettingData)\b')) 'nenhuma classe de configuracao ou disco consultada'
+        foreach ($f in @('agent-temp.ps1', 'lib\Report.ps1', 'lib\Tui.ps1')) { $t = [IO.File]::ReadAllText((Join-Path $srcDir $f)); Assert-True (-not $t.Contains('VirtualizationSource')) "$f sem fonte injetada" }
+        foreach ($l in @('en-US', 'pt-BR')) {
+            foreach ($x in $script:AtmVirtReasonCodes) { Assert-True $script:AtmMessages[$l].ContainsKey("reason.$x") "reason.$x ($l)" }
+            foreach ($x in $script:AtmVirtEvidenceCodes) { Assert-True $script:AtmMessages[$l].ContainsKey("evidence.$x") "evidence.$x ($l)" }
+            foreach ($k in @('VirtualMachine', 'VirtualizationPlatform')) { foreach ($x in $script:AtmFindingStates[$k]) { Assert-True $script:AtmMessages[$l].ContainsKey("state.$k.$x") "state.$k.$x ($l)" } }
+        }
+        $sec = $diag.Substring($diag.IndexOf('# Virtualization (P2-B'), $diag.IndexOf('# Open-file evidence (D-2') - $diag.IndexOf('# Virtualization (P2-B'))
+        Assert-True (-not ($sec -match "-State\s+'NOT_PRESENT'|=\s*'NOT_PRESENT'")) 'o coletor nunca produz NOT_PRESENT'
+    }
+    Test-Case 'Virtualizacao' 'P2-B (runner de CI, somente leitura): consultas reais de plataforma, VMs e processos; estados permitidos; estado do vmms identico antes e depois' {
+        if ($env:GITHUB_ACTIONS -ne 'true') { $script:caseSkipped = $true; $script:caseNote = 'somente em runner de CI (consultas reais, somente leitura)'; return }
+        $snap = { (@(Get-CimInstance -ClassName Win32_Service -Filter "Name='vmms'" -Property Name, State, StartMode -ErrorAction Stop | ForEach-Object { '{0}/{1}' -f $_.State, $_.StartMode })) -join ',' }
+        $before = & $snap
+        $q = Invoke-AtmVirtualizationQuery
+        $r = Get-AtmVirtualizationFindings -Query $q -Collection (Get-AtmProcessCollection) -Pseudonymizer $b4Pz
+        $after = & $snap
+        Assert-Eq $after $before 'estado do vmms identico antes e depois'
+        Assert-True (@('COMPLETE', 'PARTIAL', 'DENIED', 'FAILED') -ccontains $q.PlatformCoverage.Status -and @('COMPLETE', 'PARTIAL', 'DENIED', 'FAILED', 'NOT_OBSERVABLE', 'TIMEOUT') -ccontains $q.VmCoverage.Status -and @('PRESENT', 'UNKNOWN') -ccontains (& $vPlat $r).State) "estados permitidos ($($q.PlatformCoverage.Status)/$($q.VmCoverage.Status)/$((& $vPlat $r).State))"
+        Assert-True ($q.VmCoverage.Status -cne 'COMPLETE' -or ($q.Namespace -ceq 'LISTED' -and $q.Vmms -ceq 'RUNNING')) 'VMs consultadas so com namespace listado e vmms em execucao'
+        $script:caseNote = "plataforma $($q.PlatformCoverage.Status) [$(@($q.PlatformCoverage.Reasons) -join ',')], namespace $($q.Namespace), vmms $($q.Vmms), hipervisor $($q.Hypervisor), VMs $($q.VmCoverage.Status) [$(@($q.VmCoverage.Reasons) -join ',')], trabalhadores $(@((& $vPlat $r).Evidence | Where-Object { $_.Code -like 'VIRTUALIZATION_WORKER*' }).Count)"
     }
     Test-Case 'I18n' 'P1-C: todo motivo e evidencia de arquivos abertos tem texto nos dois idiomas' {
         foreach ($l in @('en-US', 'pt-BR')) {

@@ -119,3 +119,45 @@ P2-B; the Claude Desktop hints are P2-C).
   service control manager. Since P2-A-S such a name reads `UNKNOWN`, the same as a name that does not exist
   (simulated with an injected source; a real hidden service was not created, since that needs a modified security
   descriptor).
+
+## Implementation (P2-B, 2026-10-24)
+
+Rules 7 to 9 as implemented; the decisions above are unchanged. The Claude Desktop hints (`CoworkVMService`, VM names)
+are P2-C.
+
+* **Platform (`virtualization-platform`).** `Win32_ComputerSystem.HypervisorPresent` (only that value is kept; it is
+  true inside a virtual machine too, so it is evidence, never `PRESENT`), the namespace `root\virtualization\v2`
+  listed (static `__NAMESPACE` instances under `root` and `root\virtualization`; `InvalidNamespace` reads as not
+  listed) and the state of `vmms` (one exact-name `Win32_Service` read of `Name` and `State`; an engine-owned name,
+  read for the platform only and never used to attribute anything). `PRESENT` when the namespace or `vmms` is listed;
+  otherwise `UNKNOWN` (`PLATFORM_NOT_OBSERVED`): as with services (P2-A-S), a namespace or service not listed for the
+  account is not proof that it does not exist.
+* **Virtual machines (`virtual-machines`).** The provider of `root\virtualization\v2` is hosted by `vmms.exe`
+  (Microsoft documentation of `Msvm_ComputerSystem`); whether a query can start a stopped `vmms` was not established,
+  so the VM query runs only when the namespace is listed and `vmms` is running (otherwise `NOT_OBSERVABLE` with the
+  reason). One query of `Msvm_ComputerSystem` with `Name`, `Caption`, `Description`, `ElementName`, `EnabledState`
+  and `ProcessID`, at most 256 objects (`PARTIAL` beyond). A row is a VM only when `Name` is a GUID, `Caption` is
+  `Virtual Machine` and `Description` is `Microsoft Virtual Computer System`; the host row (`Hosting Computer System`,
+  `Microsoft Hosting Computer System`, not a GUID) is left out; anything else is `VM_ROW_AMBIGUOUS` or
+  `VM_ROW_MALFORMED` and never counted. States: the documented `EnabledState` values (2, 3, 4, 10, 32768, 32769);
+  any other value is `UNKNOWN`. Denied: `DENIED` with `ElevationWouldHelp = YES` (Hyper-V Administrators or an
+  elevated administrator), never "no VMs". No configuration, disk or settings class is queried.
+* **Worker processes (`virtualization-processes`).** From the run's process snapshot: `vmwp.exe` (`VMWP`) and
+  `vmmem`, `vmmem.<suffix>`, `vmmemWSL` (`VMMEM`); the raw name is never exported. Verified and unverified identities
+  are told apart; working set, private bytes and CPU time are summed over the workers whose counters were read
+  (absent, never 0, when none was read). A worker is never attributed by its name: WSL 2 and Windows Sandbox use the
+  same processes, and their utility VMs are not in `Msvm_ComputerSystem`.
+* **VM and worker.** `Msvm_ComputerSystem.ProcessID` names the VM's `vmwp.exe`; it is linked with the temporal proof
+  of the services collector (`Resolve-AtmTemporalProcessLink`: the VM query runs before the snapshot, the snapshot
+  starts after the query ended, the process is verified and created at least 1 us before the query started) and
+  only to a `vmwp.exe`.
+* **Attribution (rule 8).** A `VmName` hint matches the in-memory `ElementName` exactly (without regard to case); a
+  `ServiceOwner` hint attributes a VM only through a verified chain: its worker is verified, the worker's parent link
+  is verified, and the parent is the verified process of a running service that the same provider declares in
+  `GetServiceHints`. Otherwise `VM_UNATTRIBUTED`; two providers: provider `null` with
+  `PROVIDER_ATTRIBUTION_AMBIGUOUS`. A declared VM name that is not observed is an observation on the platform finding
+  (`VM_HINT_NOT_OBSERVED`), never an absence.
+* **Privacy (ADR-0010).** The VM key is a keyed pseudonym of the GUID (`atm-virtual-machine/1`); the display name,
+  the GUID, the host name and raw worker names never leave memory.
+* **Safety (rule 9).** No VM operation, CIM method, Hyper-V module, remote CIM or CIM session (static tests); queries
+  only; a stopped `vmms` is never queried through the namespace.

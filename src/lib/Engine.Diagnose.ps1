@@ -14,7 +14,7 @@ Set-StrictMode -Version 2.0
 $script:AtmCoverageStatuses = @('COMPLETE', 'PARTIAL', 'DENIED', 'TIMEOUT', 'NOT_PRESENT', 'NOT_OBSERVABLE', 'UNAVAILABLE', 'FAILED')
 $script:AtmConclusiveCoverage = @('COMPLETE', 'NOT_PRESENT')
 $script:AtmElevationHelpValues = @('YES', 'NO', 'UNKNOWN')
-$script:AtmFindingKinds = @('Process', 'Service', 'VirtualMachine', 'Worktree', 'Repository', 'AgentSession', 'TempPartition')
+$script:AtmFindingKinds = @('Process', 'Service', 'VirtualMachine', 'VirtualizationPlatform', 'Worktree', 'Repository', 'AgentSession', 'TempPartition')
 # States meaning "nothing depends on it". New-AtmFinding replaces them with UNKNOWN unless every coverage record of
 # the finding is conclusive. There is no option to change this.
 $script:AtmNoDependencyStates = @('NO_DEPENDENCY_OBSERVED', 'CLEAN_AND_PUBLISHED_UNKNOWN')
@@ -27,12 +27,15 @@ $script:AtmAbsenceStates = @('SESSION_PROCESS_NOT_FOUND', 'NOT_PRESENT')
 # the state reported by the service control manager for a provider-declared name (P2-A, ADR-0005); NOT_PRESENT stays
 # in the list for a future source that tells a missing service from one the account may not see, and the current
 # collector never produces it (P2-A-S). The other kinds have no state yet: each later phase adds its
-# own, with tests. UNKNOWN is in every list because New-AtmFinding may replace a requested state with it. No Process,
+# own, with tests. VirtualMachine: the documented EnabledState of an observed VM (P2-B); VirtualizationPlatform (P2-B,
+# ADR-0001 amendment): PRESENT on a positive sign only, NOT_PRESENT never produced (no source proves absence). UNKNOWN
+# is in every list because New-AtmFinding may replace a requested state with it. No Process,
 # AgentSession or Service state says anything about a temporary directory.
 $script:AtmFindingStates = @{
     'Process'        = @('SELF', 'AGENT_PROCESS', 'AGENT_DESCENDANT', 'IDENTITY_UNVERIFIED', 'UNKNOWN')
     'Service'        = @('RUNNING', 'STOPPED', 'PAUSED', 'PENDING', 'NOT_PRESENT', 'UNKNOWN')
-    'VirtualMachine' = @('UNKNOWN')
+    'VirtualMachine' = @('RUNNING', 'OFF', 'SAVED', 'PAUSED', 'PENDING', 'UNKNOWN')
+    'VirtualizationPlatform' = @('PRESENT', 'NOT_PRESENT', 'UNKNOWN')
     'Worktree'       = @('IN_USE', 'LOCAL_WORK', 'UNPUBLISHED_COMMITS', 'APPARENT_ORPHAN', 'CLEAN_AND_PUBLISHED_UNKNOWN', 'UNKNOWN')
     'Repository'     = @('UNKNOWN')
     'AgentSession'   = @('LIVE', 'PID_REUSED', 'IDENTITY_UNVERIFIED', 'SESSION_PROCESS_NOT_FOUND', 'UNKNOWN')
@@ -3193,7 +3196,15 @@ function Invoke-AtmServiceQuery {
 }
 
 function Resolve-AtmServiceProcess {
-    # Link of a running service's PID to a process of a snapshot taken after the query (see the section header).
+    # The services name of Resolve-AtmTemporalProcessLink (kept for its callers and tests).
+    param($Collection, $ProcessId, $QueryUtc, $QueryEndUtc = $null)
+    return (Resolve-AtmTemporalProcessLink -Collection $Collection -ProcessId $ProcessId -QueryUtc $QueryUtc -QueryEndUtc $QueryEndUtc)
+}
+
+function Resolve-AtmTemporalProcessLink {
+    # Link of a PID reported by a source without creation time (a running service, a VM's worker) to a process of a
+    # snapshot taken after the query: the process must be verified and created at least 1 us before the query started,
+    # and the snapshot must start after the query ended, so the process owned the PID during the whole query.
     # Returns Result MATCH (with Process) or a code of AtmServiceLinkCodes.
     param($Collection, $ProcessId, $QueryUtc, $QueryEndUtc = $null)
     $id = ConvertTo-AtmProcessId $ProcessId
@@ -3282,6 +3293,308 @@ function Get-AtmServiceFindings {
     }
     $sorted = @(Get-AtmOrdinalSorted -Items $findings.ToArray() -Signature { param($f) $f.Key })
     return [pscustomobject]@{ Findings = $sorted; Coverage = @($svcCov, $pc) }
+}
+
+# ---------------------------------------------------------------------------------------------
+# Virtualization (P2-B, ADR-0005 rules 7-9). Three layers, each with its own coverage record, all read-only and local:
+#  * platform ('virtualization-platform'): Win32_ComputerSystem.HypervisorPresent (true inside a virtual machine too:
+#    evidence only), the WMI namespace root\virtualization\v2 listed (static namespace instances, no provider) and the
+#    state of the Hyper-V management service vmms (one exact-name Win32_Service read, engine-owned, never used to
+#    attribute anything). PRESENT only on a positive sign; a namespace or service not listed is UNKNOWN, never absent.
+#  * virtual machines ('virtual-machines'): one Msvm_ComputerSystem query, only when the namespace is listed and vmms is
+#    running (its provider is hosted by vmms.exe; a stopped service is never started by a query of this tool). A row is
+#    a virtual machine only when its Name is a GUID and Caption and Description are the documented VM values; the host
+#    row is left out. Display names and GUIDs never leave memory (keyed pseudonyms, ADR-0010).
+#  * worker processes ('virtualization-processes'): vmwp.exe and vmmem* from the process snapshot of the run (class
+#    only, never the raw name), with the ADR-0003 counters as observed. A worker is never attributed by its name.
+# The VM query runs before the process snapshot: a VM's ProcessID is linked to its worker with the same temporal proof
+# as services. A VM is attributed to a provider only by an exact VmName hint or by a verified chain (VM -> worker ->
+# parent -> process of a running service the same provider declares with ServiceOwner and GetServiceHints). Nothing
+# is started, stopped, saved, checkpointed or configured; no VM state authorizes anything.
+# ---------------------------------------------------------------------------------------------
+
+$script:AtmVirtTimeoutSec = 30
+$script:AtmVmMaxObjects = 256
+$script:AtmVmCimProperties = @('Name', 'Caption', 'Description', 'ElementName', 'EnabledState', 'ProcessID')
+# Documented EnabledState values (Msvm_ComputerSystem); any other value is UNKNOWN.
+$script:AtmVmStateMap = @{ 2 = 'RUNNING'; 3 = 'OFF'; 4 = 'PENDING'; 10 = 'PENDING'; 32768 = 'PAUSED'; 32769 = 'SAVED' }
+$script:AtmVirtReasonCodes = @('HYPERVISOR_FLAG_UNREADABLE', 'VIRTUALIZATION_NAMESPACE_NOT_LISTED', 'VIRTUALIZATION_NAMESPACE_DENIED', 'VIRTUALIZATION_NAMESPACE_FAILED',
+    'VMMS_NOT_LISTED', 'VMMS_NOT_RUNNING', 'VMMS_QUERY_DENIED', 'VMMS_QUERY_FAILED', 'VM_QUERY_DENIED', 'VM_QUERY_FAILED', 'VM_QUERY_TIMEOUT', 'VM_LIMIT_EXCEEDED', 'VM_ROW_AMBIGUOUS',
+    'VM_ROW_MALFORMED', 'VM_KEY_COLLISION', 'VM_WORKER_UNVERIFIED', 'VM_PROPERTY_UNREADABLE', 'PLATFORM_NOT_OBSERVED', 'WORKER_IDENTITY_UNVERIFIED', 'WORKER_COUNTERS_UNREADABLE',
+    'PROCESS_SNAPSHOT_INCOMPLETE', 'PROCESS_SNAPSHOT_UNAVAILABLE')
+$script:AtmVirtEvidenceCodes = @('HYPERVISOR_PRESENT_FLAG', 'HYPERVISOR_FLAG_UNREADABLE', 'VIRTUALIZATION_NAMESPACE_LISTED', 'VIRTUALIZATION_NAMESPACE_NOT_LISTED', 'VIRTUALIZATION_NAMESPACE_NOT_QUERIED',
+    'VMMS_SERVICE_STATE', 'VMMS_SERVICE_NOT_LISTED', 'VMMS_NOT_QUERIED', 'VIRTUALIZATION_WORKER', 'VIRTUALIZATION_WORKER_UNVERIFIED', 'VIRTUALIZATION_WORKERS_WORKING_SET_BYTES',
+    'VIRTUALIZATION_WORKERS_PRIVATE_BYTES', 'VIRTUALIZATION_WORKERS_CPU_TIME_100NS', 'VIRTUALIZATION_WORKER_COUNTERS_INCOMPLETE', 'VM_HINT_NOT_OBSERVED', 'VM_ENABLED_STATE', 'VM_STATE_UNREADABLE',
+    'VM_WORKER_VERIFIED', 'VM_WORKER_UNVERIFIED', 'VM_ATTRIBUTED_BY_NAME', 'VM_ATTRIBUTED_BY_SERVICE', 'VM_UNATTRIBUTED', 'VM_KEY_COLLISION')
+
+function Get-AtmVirtualizationRaw {
+    # One local read-only CIM query per call (-Op), bounded by the CIM operation timeout (enforced by CIM; not a
+    # guaranteed cancellation). Never a method, never another machine.
+    param([string]$Op, [int]$TimeoutSec)
+    switch ($Op) {
+        'NamespaceRoot' { return @(Get-CimInstance -Namespace 'root' -ClassName '__NAMESPACE' -Filter "Name='virtualization'" -OperationTimeoutSec $TimeoutSec -ErrorAction Stop | ForEach-Object { [pscustomobject]@{ Name = [string]$_.Name } }) }
+        'NamespaceV2' { return @(Get-CimInstance -Namespace 'root\virtualization' -ClassName '__NAMESPACE' -Filter "Name='v2'" -OperationTimeoutSec $TimeoutSec -ErrorAction Stop | ForEach-Object { [pscustomobject]@{ Name = [string]$_.Name } }) }
+        'Vmms' { return @(Get-CimInstance -ClassName Win32_Service -Property Name, State -Filter "Name='vmms'" -OperationTimeoutSec $TimeoutSec -ErrorAction Stop | ForEach-Object { [pscustomobject]@{ Name = $_.Name; State = $_.State } }) }
+        # Only HypervisorPresent is kept: the row's other values (the computer name) never leave this line.
+        'Hypervisor' { return @(Get-CimInstance -ClassName Win32_ComputerSystem -Property HypervisorPresent -OperationTimeoutSec $TimeoutSec -ErrorAction Stop | ForEach-Object { [pscustomobject]@{ HypervisorPresent = $_.HypervisorPresent } }) }
+        'Vms' {
+            return @(Get-CimInstance -Namespace 'root\virtualization\v2' -ClassName Msvm_ComputerSystem -Property $script:AtmVmCimProperties -OperationTimeoutSec $TimeoutSec -ErrorAction Stop | ForEach-Object {
+                    $row = [ordered]@{}
+                    foreach ($p in $script:AtmVmCimProperties) { $row[$p] = $_.$p }
+                    [pscustomobject]$row
+                })
+        }
+    }
+    throw (New-Object ArgumentException('op'))
+}
+
+function Test-AtmInvalidNamespaceException {
+    # WBEM_E_INVALID_NAMESPACE (0x8004100E) or the CIM code InvalidNamespace: the namespace is not there for this query.
+    param($Exception)
+    if ($null -eq $Exception) { return $false }
+    $nc = $Exception.PSObject.Properties['NativeErrorCode']
+    if ($null -ne $nc -and [string]$nc.Value -ceq 'InvalidNamespace') { return $true }
+    return ([int]$Exception.HResult -eq -2147217394)
+}
+
+function Invoke-AtmVirtualizationQuery {
+    <#
+      The platform and VM queries of a run (before its process snapshot). -Source (tests): param($Op) returning rows
+      or throwing, Op one of Hypervisor, NamespaceRoot, NamespaceV2, Vmms, Vms. -NowUtc (tests): the VM query start.
+      Returns the observations (no display name or GUID leaves the function except inside VmRows, in memory) and the
+      coverage records 'virtualization-platform' and 'virtual-machines'.
+    #>
+    param([scriptblock]$Source = $null, $Deadline = $null, [int]$TimeoutSec = $script:AtmVirtTimeoutSec, [int]$MaxObjects = $script:AtmVmMaxObjects, $NowUtc = $null)
+    $out = [ordered]@{ Hypervisor = $null; Namespace = 'NOT_QUERIED'; Vmms = 'NOT_QUERIED'; VmRows = @(); VmQueryUtc = $null; VmQueryEndUtc = $null; HostRows = 0; PlatformCoverage = $null; VmCoverage = $null }
+    $run = { param([string]$Op) if ($null -ne $Source) { @(& $Source $Op) } else { Get-AtmVirtualizationRaw -Op $Op -TimeoutSec $TimeoutSec } }
+    if ($null -ne $Deadline -and [datetime]::UtcNow -ge $Deadline) {
+        $out.PlatformCoverage = New-AtmDeadlineCoverage 'virtualization-platform'; $out.VmCoverage = New-AtmDeadlineCoverage 'virtual-machines'
+        return [pscustomobject]$out
+    }
+    $started = [datetime]::UtcNow
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $pr = New-Object System.Collections.Generic.List[string]
+    $outcomes = New-Object System.Collections.Generic.List[string]
+    # Hypervisor flag (evidence only).
+    try {
+        $h = @(& $run 'Hypervisor')
+        $v = $(if ($h.Count -eq 1) { Get-AtmHintProperty -Item $h[0] -Name 'HypervisorPresent' } else { $null })
+        if ($v -is [bool]) { $out.Hypervisor = $v; $outcomes.Add('OK') } else { $pr.Add('HYPERVISOR_FLAG_UNREADABLE'); $outcomes.Add('UNREADABLE') }
+    } catch { $pr.Add('HYPERVISOR_FLAG_UNREADABLE'); $outcomes.Add($(if (Test-AtmAccessDeniedException $_.Exception) { 'DENIED' } else { 'FAILED' })) }
+    # Namespace root\virtualization\v2: listed, not listed, denied or failed.
+    if ($null -ne $Deadline -and [datetime]::UtcNow -ge $Deadline) { $pr.Add('DEADLINE_EXCEEDED') }
+    else {
+        try {
+            $ns = 'NOT_LISTED'
+            if (@(& $run 'NamespaceRoot' | Where-Object { [string](Get-AtmHintProperty -Item $_ -Name 'Name') -ieq 'virtualization' }).Count -gt 0) {
+                try { if (@(& $run 'NamespaceV2' | Where-Object { [string](Get-AtmHintProperty -Item $_ -Name 'Name') -ieq 'v2' }).Count -gt 0) { $ns = 'LISTED' } }
+                catch { if (-not (Test-AtmInvalidNamespaceException $_.Exception)) { throw } }
+            }
+            $out.Namespace = $ns; $outcomes.Add('OK')
+            if ($ns -ceq 'NOT_LISTED') { $pr.Add('VIRTUALIZATION_NAMESPACE_NOT_LISTED') }
+        } catch {
+            if (Test-AtmInvalidNamespaceException $_.Exception) { $out.Namespace = 'NOT_LISTED'; $pr.Add('VIRTUALIZATION_NAMESPACE_NOT_LISTED'); $outcomes.Add('OK') }
+            elseif (Test-AtmAccessDeniedException $_.Exception) { $out.Namespace = 'DENIED'; $pr.Add('VIRTUALIZATION_NAMESPACE_DENIED'); $outcomes.Add('DENIED') }
+            else { $out.Namespace = 'FAILED'; $pr.Add('VIRTUALIZATION_NAMESPACE_FAILED'); $pr.Add((ConvertTo-AtmExceptionCode $_.Exception.GetType().Name)); $outcomes.Add('FAILED') }
+        }
+    }
+    # The management service vmms (exact name, state only).
+    if ($null -ne $Deadline -and [datetime]::UtcNow -ge $Deadline) { $pr.Add('DEADLINE_EXCEEDED') }
+    else {
+        try {
+            $rows = @(& $run 'Vmms' | Where-Object { [string](Get-AtmHintProperty -Item $_ -Name 'Name') -ieq 'vmms' })
+            if ($rows.Count -eq 0) { $out.Vmms = 'NOT_LISTED'; $pr.Add('VMMS_NOT_LISTED') }
+            else {
+                $st = Get-AtmHintProperty -Item $rows[0] -Name 'State'
+                $out.Vmms = $(if ($st -is [string] -and @($script:AtmServiceStateMap.Keys) -ccontains $st) { $script:AtmServiceStateMap[$st] } else { 'UNREADABLE' })
+            }
+            $outcomes.Add('OK')
+        } catch {
+            if (Test-AtmAccessDeniedException $_.Exception) { $out.Vmms = 'DENIED'; $pr.Add('VMMS_QUERY_DENIED'); $outcomes.Add('DENIED') }
+            else { $out.Vmms = 'FAILED'; $pr.Add('VMMS_QUERY_FAILED'); $pr.Add((ConvertTo-AtmExceptionCode $_.Exception.GetType().Name)); $outcomes.Add('FAILED') }
+        }
+    }
+    $sw.Stop()
+    if ($out.Namespace -cne 'LISTED' -and $out.Vmms -ceq 'NOT_LISTED') { $pr.Add('PLATFORM_NOT_OBSERVED') }
+    $bad = @($outcomes | Where-Object { $_ -ceq 'DENIED' -or $_ -ceq 'FAILED' })
+    $pst = $(if ($pr.Count -eq 0) { 'COMPLETE' } elseif ($outcomes.Count -gt 0 -and $bad.Count -eq $outcomes.Count) { if (@($bad | Where-Object { $_ -ceq 'FAILED' }).Count -eq 0) { 'DENIED' } else { 'FAILED' } } else { 'PARTIAL' })
+    $out.PlatformCoverage = New-AtmCoverage -Collector 'virtualization-platform' -Status $pst -Reasons @(Get-AtmSortedCodes $pr) -ElevationWouldHelp $(if ($pst -ceq 'COMPLETE') { 'NO' } else { 'UNKNOWN' }) -StartedUtc $started -ElapsedMs $sw.ElapsedMilliseconds
+    # Virtual machines: only with the namespace listed and vmms running (no query may start the service).
+    if ($out.Namespace -cne 'LISTED' -or $out.Vmms -cne 'RUNNING') {
+        $why = $(if ($out.Namespace -ceq 'DENIED' -or $out.Namespace -ceq 'FAILED') { 'VIRTUALIZATION_NAMESPACE_' + $out.Namespace } elseif ($out.Namespace -cne 'LISTED') { 'VIRTUALIZATION_NAMESPACE_NOT_LISTED' } elseif ($out.Vmms -ceq 'NOT_LISTED') { 'VMMS_NOT_LISTED' } elseif ($out.Vmms -ceq 'DENIED') { 'VMMS_QUERY_DENIED' } elseif ($out.Vmms -ceq 'FAILED') { 'VMMS_QUERY_FAILED' } elseif (@($pr) -ccontains 'DEADLINE_EXCEEDED') { 'DEADLINE_EXCEEDED' } else { 'VMMS_NOT_RUNNING' })
+        $out.VmCoverage = New-AtmCoverage -Collector 'virtual-machines' -Status 'NOT_OBSERVABLE' -Reasons @($why) -ElevationWouldHelp 'UNKNOWN'
+        return [pscustomobject]$out
+    }
+    if ($null -ne $Deadline -and [datetime]::UtcNow -ge $Deadline) { $out.VmCoverage = New-AtmDeadlineCoverage 'virtual-machines'; return [pscustomobject]$out }
+    $vStarted = $(if ($null -ne $NowUtc) { ([datetime]$NowUtc).ToUniversalTime() } else { [datetime]::UtcNow })
+    $out.VmQueryUtc = $vStarted
+    $budgetMs = [long]$TimeoutSec * 1000
+    $vsw = [Diagnostics.Stopwatch]::StartNew()
+    $raw = $null; $ex = $null
+    try { $raw = @(& $run 'Vms') } catch { $ex = $_.Exception }
+    $vsw.Stop()
+    $out.VmQueryEndUtc = $vStarted.AddTicks($vsw.Elapsed.Ticks)
+    if ($null -ne $ex) {
+        $code = ConvertTo-AtmExceptionCode $ex.GetType().Name
+        if (Test-AtmAccessDeniedException $ex) { $out.VmCoverage = New-AtmCoverage -Collector 'virtual-machines' -Status 'DENIED' -Reasons @('VM_QUERY_DENIED', $code) -ElevationWouldHelp 'YES' -StartedUtc $vStarted -ElapsedMs $vsw.ElapsedMilliseconds -BudgetMs $budgetMs }
+        elseif ($vsw.ElapsedMilliseconds -ge $budgetMs) { $out.VmCoverage = New-AtmCoverage -Collector 'virtual-machines' -Status 'TIMEOUT' -Reasons @('VM_QUERY_TIMEOUT', $code) -ElevationWouldHelp 'NO' -StartedUtc $vStarted -ElapsedMs $vsw.ElapsedMilliseconds -BudgetMs $budgetMs }
+        else { $out.VmCoverage = New-AtmCoverage -Collector 'virtual-machines' -Status 'FAILED' -Reasons @('VM_QUERY_FAILED', $code) -ElevationWouldHelp 'UNKNOWN' -StartedUtc $vStarted -ElapsedMs $vsw.ElapsedMilliseconds -BudgetMs $budgetMs }
+        return [pscustomobject]$out
+    }
+    $vr = New-Object System.Collections.Generic.List[string]
+    $rows = @($raw | Where-Object { $null -ne $_ })
+    if ($rows.Count -gt $MaxObjects) { $vr.Add('VM_LIMIT_EXCEEDED'); $rows = @($rows[0..($MaxObjects - 1)]) }
+    $vms = New-Object System.Collections.Generic.List[object]
+    $hosts = 0
+    foreach ($r in $rows) {
+        $name = Get-AtmHintProperty -Item $r -Name 'Name'; $cap = Get-AtmHintProperty -Item $r -Name 'Caption'; $desc = Get-AtmHintProperty -Item $r -Name 'Description'
+        $guid = ($name -is [string] -and $name -match '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$')
+        if ($cap -ceq 'Hosting Computer System' -and $desc -ceq 'Microsoft Hosting Computer System' -and -not $guid) { $hosts++; continue }
+        if (-not ($guid -and $cap -ceq 'Virtual Machine' -and $desc -ceq 'Microsoft Virtual Computer System')) {
+            $vr.Add($(if ($name -is [string] -or $cap -is [string]) { 'VM_ROW_AMBIGUOUS' } else { 'VM_ROW_MALFORMED' })); continue
+        }
+        $es = Get-AtmHintProperty -Item $r -Name 'EnabledState'; $esn = ConvertTo-AtmProcessCounter $es
+        $en = Get-AtmHintProperty -Item $r -Name 'ElementName'
+        $vms.Add([pscustomobject]@{ Guid = $name.ToLowerInvariant(); ElementName = $(if (Test-AtmHintText -Value $en -Max 256) { $en } else { $null }); EnabledState = $esn; ProcessId = (Get-AtmHintProperty -Item $r -Name 'ProcessID') })
+    }
+    $out.VmRows = $vms.ToArray(); $out.HostRows = $hosts
+    $vst = $(if ($vr.Count -gt 0) { 'PARTIAL' } else { 'COMPLETE' })
+    $out.VmCoverage = New-AtmCoverage -Collector 'virtual-machines' -Status $vst -Reasons @(Get-AtmSortedCodes $vr) -ElevationWouldHelp $(if ($vst -ceq 'COMPLETE') { 'NO' } else { 'UNKNOWN' }) -Observed $vms.Count -Expected $null -StartedUtc $vStarted -ElapsedMs $vsw.ElapsedMilliseconds -BudgetMs $budgetMs
+    return [pscustomobject]$out
+}
+
+function Get-AtmVirtualizationWorkerClass {
+    # VMWP (vmwp.exe) or VMMEM (vmmem, vmmem.<suffix>, vmmemWSL); $null for any other name. The raw name is never kept.
+    param($Name)
+    if (-not ($Name -is [string])) { return $null }
+    if ($Name -ieq 'vmwp.exe') { return 'VMWP' }
+    if ($Name -match '(?i)^vmmem(wsl)?(\.exe)?$' -or $Name -match '(?i)^vmmem\.[^\\/]+$') { return 'VMMEM' }
+    return $null
+}
+
+function Get-AtmVirtualizationFindings {
+    <#
+      Findings of the run from its virtualization query and the process snapshot taken after it: one
+      VirtualizationPlatform finding (key 'host') and one VirtualMachine finding per VM (key 'vm/v-<32 hex>', keyed
+      pseudonym of the VM GUID; colliding keys are one UNKNOWN finding). -ProviderHints: Get-AtmProviderRuntimeHints
+      results; -ServiceFindings: the run's Service findings (for ServiceOwner chains). Coverage adds
+      'virtualization-processes'.
+    #>
+    param($Query, $Collection = $null, $Pseudonymizer, $ProviderHints = @(), $ServiceFindings = @())
+    $now = $(if ($null -ne $Query.VmQueryUtc) { $Query.VmQueryUtc } else { [datetime]::UtcNow })
+    $ev = { param([string]$Code, [string]$Collector, $Detail) New-AtmEvidence -Code $Code -Source 'virtualization' -Collector $Collector -ObservedUtc $now -Detail $Detail }
+    # Worker processes (layer 3).
+    $wr = New-Object System.Collections.Generic.List[string]
+    $plat = New-Object System.Collections.Generic.List[object]
+    $workers = New-Object System.Collections.Generic.List[object]
+    if ($null -eq $Collection -or $Collection.Failed) {
+        $pc = New-AtmCoverage -Collector 'virtualization-processes' -Status 'NOT_OBSERVABLE' -Reasons @('PROCESS_SNAPSHOT_UNAVAILABLE') -ElevationWouldHelp 'UNKNOWN'
+    } else {
+        if ($Collection.Coverage.Status -cne 'COMPLETE') { $wr.Add('PROCESS_SNAPSHOT_INCOMPLETE') }
+        foreach ($p in @($Collection.Processes)) { $cls = Get-AtmVirtualizationWorkerClass $p.Name; if ($cls) { $workers.Add([pscustomobject]@{ Class = $cls; Process = $p }) } }
+        $sums = [ordered]@{ WorkingSetBytes = 0L; PrivateBytes = 0L; Cpu = 0L }; $known = 0; $incomplete = $false
+        foreach ($w in @(Get-AtmOrdinalSorted -Items $workers.ToArray() -Signature { param($x) '{0}|{1:D10}' -f $x.Class, $x.Process.Pid })) {
+            $p = $w.Process
+            if ($p.IdentityStatus -ceq 'VERIFIED' -and $p.Key) { $plat.Add((& $ev 'VIRTUALIZATION_WORKER' 'virtualization-processes' ($w.Class + '|' + $p.Key))) }
+            else { $plat.Add((& $ev 'VIRTUALIZATION_WORKER_UNVERIFIED' 'virtualization-processes' ($w.Class + '|pid:' + $p.Pid))); $wr.Add('WORKER_IDENTITY_UNVERIFIED') }
+            $rs = $p.Resources
+            $ws = $(if ($null -ne $rs) { $rs.WorkingSetBytes } else { $null }); $pb = $(if ($null -ne $rs) { $rs.PrivateBytes } else { $null })
+            $kt = $(if ($null -ne $rs) { $rs.KernelTime100ns } else { $null }); $ut = $(if ($null -ne $rs) { $rs.UserTime100ns } else { $null })
+            if ($null -eq $ws -or $null -eq $pb -or $null -eq $kt -or $null -eq $ut) { $incomplete = $true; continue }
+            $sums.WorkingSetBytes += [long]$ws; $sums.PrivateBytes += [long]$pb; $sums.Cpu += ([long]$kt + [long]$ut); $known++
+        }
+        if ($workers.Count -gt 0) {
+            # Totals over the workers whose counters were read; never 0 for an unread value (no total when none was read).
+            if ($known -gt 0) {
+                $plat.Add((& $ev 'VIRTUALIZATION_WORKERS_WORKING_SET_BYTES' 'virtualization-processes' ([string]$sums.WorkingSetBytes)))
+                $plat.Add((& $ev 'VIRTUALIZATION_WORKERS_PRIVATE_BYTES' 'virtualization-processes' ([string]$sums.PrivateBytes)))
+                $plat.Add((& $ev 'VIRTUALIZATION_WORKERS_CPU_TIME_100NS' 'virtualization-processes' ([string]$sums.Cpu)))
+            }
+            if ($incomplete) { $plat.Add((& $ev 'VIRTUALIZATION_WORKER_COUNTERS_INCOMPLETE' 'virtualization-processes' ('{0}/{1}' -f $known, $workers.Count))); $wr.Add('WORKER_COUNTERS_UNREADABLE') }
+        }
+        $wst = $(if ($wr.Count -gt 0) { 'PARTIAL' } else { 'COMPLETE' })
+        $pc = New-AtmCoverage -Collector 'virtualization-processes' -Status $wst -Reasons @(Get-AtmSortedCodes $wr) -ElevationWouldHelp $(if ($wst -ceq 'COMPLETE') { 'NO' } else { 'UNKNOWN' }) -Observed $workers.Count -Expected $null
+    }
+    # Platform finding (layer 1).
+    $pe = New-Object System.Collections.Generic.List[object]
+    if ($null -ne $Query.Hypervisor) { $pe.Add((& $ev 'HYPERVISOR_PRESENT_FLAG' 'virtualization-platform' $(if ($Query.Hypervisor) { 'TRUE' } else { 'FALSE' }))) }
+    elseif ($Query.PlatformCoverage.Status -cne 'TIMEOUT') { $pe.Add((& $ev 'HYPERVISOR_FLAG_UNREADABLE' 'virtualization-platform' $null)) }
+    switch ($Query.Namespace) {
+        'LISTED' { $pe.Add((& $ev 'VIRTUALIZATION_NAMESPACE_LISTED' 'virtualization-platform' 'root\virtualization\v2')) }
+        'NOT_LISTED' { $pe.Add((& $ev 'VIRTUALIZATION_NAMESPACE_NOT_LISTED' 'virtualization-platform' 'NOT_LISTED_FOR_ACCOUNT')) }
+        default { $pe.Add((& $ev 'VIRTUALIZATION_NAMESPACE_NOT_QUERIED' 'virtualization-platform' ([string]$Query.Namespace))) }
+    }
+    if ($Query.Vmms -ceq 'NOT_LISTED') { $pe.Add((& $ev 'VMMS_SERVICE_NOT_LISTED' 'virtualization-platform' 'NOT_LISTED_FOR_ACCOUNT')) }
+    elseif (@('NOT_QUERIED', 'DENIED', 'FAILED') -ccontains [string]$Query.Vmms) { $pe.Add((& $ev 'VMMS_NOT_QUERIED' 'virtualization-platform' ([string]$Query.Vmms))) }
+    else { $pe.Add((& $ev 'VMMS_SERVICE_STATE' 'virtualization-platform' ([string]$Query.Vmms))) }
+    $present = ($Query.Namespace -ceq 'LISTED' -or @('RUNNING', 'STOPPED', 'PAUSED', 'PENDING', 'UNREADABLE') -ccontains [string]$Query.Vmms)
+    foreach ($e in $plat) { $pe.Add($e) }
+    # Virtual machines (layer 2) and attribution.
+    $hintsBy = @{}
+    foreach ($h in @($ProviderHints | Where-Object { $null -ne $_ })) { foreach ($vh in @($h.VirtualizationHints)) { $hintsBy[[string]$h.ProviderId] = @(@($hintsBy[[string]$h.ProviderId]) + @($vh) | Where-Object { $null -ne $_ }) } }
+    $svcByName = @{}; foreach ($sf in @($ServiceFindings | Where-Object { $null -ne $_ })) { $svcByName[$sf.Key.ToUpperInvariant()] = $sf }
+    $vmCov = $Query.VmCoverage
+    $byKey = @{}
+    $matchedNames = @{}
+    foreach ($vm in @($Query.VmRows)) {
+        $key = 'vm/v-' + (Get-AtmPseudonym -Pseudonymizer $Pseudonymizer -Domain 'atm-virtual-machine/1' -Fields @($vm.Guid))
+        $list = New-Object System.Collections.Generic.List[object]
+        $state = 'UNKNOWN'
+        if ($null -ne $vm.EnabledState) {
+            $list.Add((& $ev 'VM_ENABLED_STATE' 'virtual-machines' ([string]$vm.EnabledState)))
+            if ($script:AtmVmStateMap.ContainsKey([int]$vm.EnabledState)) { $state = $script:AtmVmStateMap[[int]$vm.EnabledState] }
+        } else { $list.Add((& $ev 'VM_STATE_UNREADABLE' 'virtual-machines' $null)) }
+        # Worker link (temporal proof) and the verified worker process.
+        $worker = $null
+        $vpid = ConvertTo-AtmProcessId $vm.ProcessId
+        if ($null -ne $vpid -and $vpid -ne 0) {
+            $lk = Resolve-AtmTemporalProcessLink -Collection $Collection -ProcessId $vpid -QueryUtc $Query.VmQueryUtc -QueryEndUtc $Query.VmQueryEndUtc
+            if ($lk.Result -ceq 'MATCH' -and (Get-AtmVirtualizationWorkerClass $lk.Process.Name) -ceq 'VMWP') { $worker = $lk.Process; $list.Add((& $ev 'VM_WORKER_VERIFIED' 'virtualization-processes' $lk.Process.Key)) }
+            else { $list.Add((& $ev 'VM_WORKER_UNVERIFIED' 'virtualization-processes' $(if ($lk.Result -ceq 'MATCH') { 'NOT_A_WORKER_PROCESS' } else { $lk.Result }))) }
+        }
+        # Attribution: exact VmName, or the verified ServiceOwner chain.
+        $provs = New-Object System.Collections.Generic.List[string]
+        foreach ($pid0 in @(Get-AtmOrdinalSorted -Items @($hintsBy.Keys) -Signature { param($x) $x })) {
+            foreach ($vh in @($hintsBy[$pid0])) {
+                if ($vh.Kind -ceq 'VmName' -and $null -ne $vm.ElementName -and [string]::Equals([string]$vh.Value, $vm.ElementName, [StringComparison]::OrdinalIgnoreCase)) {
+                    $matchedNames[$pid0 + '|' + ([string]$vh.Value).ToUpperInvariant()] = $true
+                    if (-not $provs.Contains($pid0)) { $provs.Add($pid0) }
+                    $list.Add((& $ev 'VM_ATTRIBUTED_BY_NAME' 'virtual-machines' $pid0))
+                }
+                if ($vh.Kind -ceq 'ServiceOwner' -and $null -ne $worker) {
+                    $sf = $svcByName[([string]$vh.Value).ToUpperInvariant()]
+                    if ($null -eq $sf -or $sf.State -cne 'RUNNING') { continue }
+                    $declared = @($sf.Evidence | Where-Object { $_.Code -ceq 'SERVICE_HINT' -and ([string]$_.Detail -ceq $pid0 -or ([string]$_.Detail).StartsWith($pid0 + ':', [StringComparison]::Ordinal)) }).Count -gt 0
+                    $svcKey = @($sf.Evidence | Where-Object { $_.Code -ceq 'SERVICE_PROCESS_VERIFIED' } | ForEach-Object { [string]$_.Detail })
+                    $parent = Get-AtmProcessParentLink -Collection $Collection -Process $worker
+                    if ($declared -and $svcKey.Count -eq 1 -and $parent.Result -ceq 'VERIFIED' -and $parent.Parent.Key -ceq $svcKey[0]) {
+                        if (-not $provs.Contains($pid0)) { $provs.Add($pid0) }
+                        $list.Add((& $ev 'VM_ATTRIBUTED_BY_SERVICE' 'virtual-machines' ($pid0 + '|' + $sf.Key)))
+                    }
+                }
+            }
+        }
+        $prov = $null
+        if ($provs.Count -eq 1) { $prov = $provs[0] }
+        elseif ($provs.Count -gt 1) { $list.Add((New-AtmEvidence -Code 'PROVIDER_ATTRIBUTION_AMBIGUOUS' -Source 'diagnose' -Collector 'virtual-machines' -ObservedUtc $now -Detail (@(Get-AtmOrdinalSorted -Items $provs.ToArray() -Signature { param($x) $x }) -join ','))) }
+        else { $list.Add((& $ev 'VM_UNATTRIBUTED' 'virtual-machines' $null)) }
+        if ($byKey.ContainsKey($key)) { $byKey[$key].Collision = $true; continue }
+        $byKey[$key] = [pscustomobject]@{ Key = $key; State = $state; Evidence = $list.ToArray(); Provider = $prov; Collision = $false }
+    }
+    $findings = New-Object System.Collections.Generic.List[object]
+    # Declared VM names that no observed VM carries: an observation on the platform finding, never an absence.
+    foreach ($pid0 in @(Get-AtmOrdinalSorted -Items @($hintsBy.Keys) -Signature { param($x) $x })) {
+        foreach ($vh in @($hintsBy[$pid0] | Where-Object { $_.Kind -ceq 'VmName' })) {
+            if (-not $matchedNames.ContainsKey($pid0 + '|' + ([string]$vh.Value).ToUpperInvariant())) { $pe.Add((& $ev 'VM_HINT_NOT_OBSERVED' 'virtual-machines' $pid0)) }
+        }
+    }
+    $findings.Add((New-AtmFinding -Kind 'VirtualizationPlatform' -Key 'host' -State $(if ($present) { 'PRESENT' } else { 'UNKNOWN' }) -Evidence $pe.ToArray() -Coverage @($Query.PlatformCoverage, $pc)))
+    foreach ($k in @(Get-AtmOrdinalSorted -Items @($byKey.Keys) -Signature { param($x) $x })) {
+        $v = $byKey[$k]
+        if ($v.Collision) { $findings.Add((New-AtmFinding -Kind 'VirtualMachine' -Key $k -State 'UNKNOWN' -Evidence @((& $ev 'VM_KEY_COLLISION' 'virtual-machines' $null)) -Coverage @($vmCov, $pc))); continue }
+        $findings.Add((New-AtmFinding -Kind 'VirtualMachine' -Key $k -State $v.State -Evidence $v.Evidence -Coverage @($vmCov, $pc) -Provider $v.Provider))
+    }
+    return [pscustomobject]@{ Findings = $findings.ToArray(); Coverage = @($Query.PlatformCoverage, $vmCov, $pc) }
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -3439,16 +3752,18 @@ function Invoke-AtmDiagnose {
       the key is ephemeral. The key lives only in this call: the pseudonymizer is closed (HMAC disposed, buffer cleared)
       when it returns or throws. -PartitionKeyFunction: test override of the partition key.
       Services (P2-A): -ServiceSource: test override of the Win32_Service rows (param($Names)).
+      Virtualization (P2-B): -VirtualizationSource: test override of the platform and VM queries (param($Op)).
     #>
     param([hashtable]$InventoryArgs = @{}, [scriptblock]$IdentitySource, $Providers, [int]$DeadlineSeconds = $script:AtmDiagnoseDefaultDeadlineSeconds,
         [scriptblock]$ProcessSource = $null, [int]$CpuSampleMs = $script:AtmDiagnoseCpuSampleMs, $SelfPid = $PID, $SelfCreationUtc = $null,
-        [byte[]]$PseudonymKey = $null, [scriptblock]$PartitionKeyFunction = $null, [string[]]$RepositoryPaths = @(), [scriptblock]$HandleQuery = $null, [scriptblock]$ServiceSource = $null)
+        [byte[]]$PseudonymKey = $null, [scriptblock]$PartitionKeyFunction = $null, [string[]]$RepositoryPaths = @(), [scriptblock]$HandleQuery = $null, [scriptblock]$ServiceSource = $null,
+        [scriptblock]$VirtualizationSource = $null)
     if ($DeadlineSeconds -lt 0) { throw (Get-AtmText 'err.diagDeadline' $DeadlineSeconds) }
     if ($CpuSampleMs -ne 0 -and ($CpuSampleMs -lt $script:AtmCpuSampleMinMs -or $CpuSampleMs -gt $script:AtmCpuSampleMaxMs)) { throw (Get-AtmText 'err.diagProcess' "CpuSampleMs $CpuSampleMs") }
     $pz = New-AtmPseudonymizer -Key $PseudonymKey
     try {
         $runArgs = @{ InventoryArgs = $InventoryArgs; IdentitySource = $IdentitySource; Providers = $Providers; DeadlineSeconds = $DeadlineSeconds; ProcessSource = $ProcessSource
-            CpuSampleMs = $CpuSampleMs; SelfPid = $SelfPid; SelfCreationUtc = $SelfCreationUtc; Pseudonymizer = $pz; PartitionKeyFunction = $PartitionKeyFunction; RepositoryPaths = $RepositoryPaths; HandleQuery = $HandleQuery; ServiceSource = $ServiceSource }
+            CpuSampleMs = $CpuSampleMs; SelfPid = $SelfPid; SelfCreationUtc = $SelfCreationUtc; Pseudonymizer = $pz; PartitionKeyFunction = $PartitionKeyFunction; RepositoryPaths = $RepositoryPaths; HandleQuery = $HandleQuery; ServiceSource = $ServiceSource; VirtualizationSource = $VirtualizationSource }
         return (Invoke-AtmDiagnoseRun @runArgs)
     } finally { Close-AtmPseudonymizer $pz }
 }
@@ -3456,7 +3771,8 @@ function Invoke-AtmDiagnose {
 function Invoke-AtmDiagnoseRun {
     # The body of Invoke-AtmDiagnose, with its pseudonymizer (parameters already checked there).
     param([hashtable]$InventoryArgs, [scriptblock]$IdentitySource, $Providers, [int]$DeadlineSeconds, [scriptblock]$ProcessSource, [int]$CpuSampleMs, $SelfPid, $SelfCreationUtc,
-        $Pseudonymizer, [scriptblock]$PartitionKeyFunction, [string[]]$RepositoryPaths = @(), [scriptblock]$HandleQuery = $null, [scriptblock]$ServiceSource = $null)
+        $Pseudonymizer, [scriptblock]$PartitionKeyFunction, [string[]]$RepositoryPaths = @(), [scriptblock]$HandleQuery = $null, [scriptblock]$ServiceSource = $null,
+        [scriptblock]$VirtualizationSource = $null)
     $started = [datetime]::UtcNow
     $deadline = $started.AddSeconds($DeadlineSeconds)
     $coverage = New-Object System.Collections.Generic.List[object]
@@ -3523,6 +3839,8 @@ function Invoke-AtmDiagnoseRun {
     # declared by providers; none declared: nothing is queried.
     $svcIncomplete = (@($coverage | Where-Object { $_.Collector.StartsWith('provider-', [StringComparison]::Ordinal) -and ($_.Status -ceq 'TIMEOUT' -or @($_.Reasons) -ccontains 'PROVIDER_CONTRACT_INVALID') }).Count -gt 0)
     $svcQuery = Invoke-AtmServiceQuery -ProviderHints $hints.ToArray() -Source $ServiceSource -Deadline $deadline -HintsIncomplete:$svcIncomplete
+    # Virtualization (P2-B): platform and VM queries here too, before the snapshot (VM worker links).
+    $virtQuery = Invoke-AtmVirtualizationQuery -Source $VirtualizationSource -Deadline $deadline
 
     # Agent runtime (P1-B4-c): a process collection with a CPU sample, the session registries of every profile, SELF,
     # the agent findings (P1-B4-b) and the resource totals. Each collector has exactly one record, TIMEOUT when the
@@ -3576,6 +3894,10 @@ function Invoke-AtmDiagnoseRun {
     $svc = Get-AtmServiceFindings -Query $svcQuery -Collection $procCollection
     foreach ($c in $svc.Coverage) { $coverage.Add($c) }
     foreach ($f in $svc.Findings) { $findings.Add($f) }
+    # Virtualization findings: the platform, then VMs by key; worker processes from the same snapshot.
+    $virt = Get-AtmVirtualizationFindings -Query $virtQuery -Collection $procCollection -Pseudonymizer $Pseudonymizer -ProviderHints $hints.ToArray() -ServiceFindings @($svc.Findings)
+    foreach ($c in $virt.Coverage) { $coverage.Add($c) }
+    foreach ($f in $virt.Findings) { $findings.Add($f) }
 
     $wtNodes = @()
     # Worktrees (P3-B): only with the worktree diagnostics gate open (closed in every shipped copy). Closed, the output is

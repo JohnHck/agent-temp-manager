@@ -210,6 +210,33 @@ $link = @($wm.Evidence | Where-Object { $_.Code -eq 'SERVICE_PROCESS_VERIFIED' }
     "$($summary.arch) ($InstallerShell): query PARTIAL (a declared name not listed), EventLog/Winmgmt RUNNING, unknown name UNKNOWN (never NOT_PRESENT), Winmgmt process verified, state and start mode unchanged"
 }
 
+Step 'virtualization-read-only' {
+    # P2-B (ADR-0005 rules 7-9): the installed engine reads the platform, the VMs (only with the namespace listed and
+    # vmms running) and the worker processes, read-only, in the installer's shell; the vmms state is identical before
+    # and after, and every status is one that never claims an absence. Nothing is created, started or changed.
+    $probe = @'
+param([string]$Lib)
+$ErrorActionPreference = 'Stop'
+. (Join-Path $Lib 'Engine.Audit.ps1')
+. (Join-Path $Lib 'Engine.Diagnose.ps1')
+$snap = { (@(Get-CimInstance -ClassName Win32_Service -Filter "Name='vmms'" -Property Name, State, StartMode | ForEach-Object { '{0}/{1}' -f $_.State, $_.StartMode })) -join ',' }
+$before = & $snap
+$pz = New-AtmPseudonymizer
+$q = Invoke-AtmVirtualizationQuery
+$r = Get-AtmVirtualizationFindings -Query $q -Collection (Get-AtmProcessCollection) -Pseudonymizer $pz
+$after = & $snap
+$plat = @($r.Findings | Where-Object { $_.Kind -eq 'VirtualizationPlatform' })[0]
+$ok = (@('COMPLETE', 'PARTIAL', 'DENIED', 'FAILED') -ccontains $q.PlatformCoverage.Status) -and (@('COMPLETE', 'PARTIAL', 'DENIED', 'FAILED', 'NOT_OBSERVABLE', 'TIMEOUT') -ccontains $q.VmCoverage.Status) -and (@('PRESENT', 'UNKNOWN') -ccontains $plat.State) -and ($q.VmCoverage.Status -cne 'COMPLETE' -or ($q.Namespace -ceq 'LISTED' -and $q.Vmms -ceq 'RUNNING')) -and (@($r.Findings | Where-Object { $_.State -eq 'NOT_PRESENT' }).Count -eq 0)
+'{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}' -f [int]$ok, [int]($before -ceq $after), $q.PlatformCoverage.Status, $q.Namespace, $q.Vmms, $q.Hypervisor, $q.VmCoverage.Status, @($r.Findings | Where-Object { $_.Kind -eq 'VirtualMachine' }).Count
+'@
+    $probeFile = Join-Path $OutDir 'virtualization-probe.ps1'
+    [IO.File]::WriteAllText($probeFile, $probe)
+    $line = (& $installerExe -NoProfile -ExecutionPolicy Bypass -File $probeFile -Lib (Join-Path $installDir 'lib') 2>&1 | Select-Object -Last 1) -as [string]
+    $p = $line.Split('|')
+    Assert ($p.Count -eq 8 -and $p[0] -eq '1' -and $p[1] -eq '1') "virtualization: $line"
+    "$($summary.arch) ($InstallerShell): platform $($p[2]), namespace $($p[3]), vmms $($p[4]), hypervisor flag $($p[5]), VMs $($p[6]) ($($p[7]) observed), vmms state unchanged, no absence claimed"
+}
+
 Step 'shipped-release-gate' {
     $clean = [IO.File]::ReadAllText((Join-Path $installDir 'lib\Engine.Clean.ps1'))
     Assert ([regex]::Matches($clean, '\$script:AtmRealDeletionEnabled\s*=').Count -eq 1) 'mais de uma atribuicao da trava'
