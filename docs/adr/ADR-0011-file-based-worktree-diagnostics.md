@@ -32,14 +32,21 @@ the direction: prioritize safe, file-based diagnosis without running Git on real
    * in-progress operation markers and the stash reflog (P3-C);
    * `FETCH_HEAD` time (informative only).
 3. **Reading rules.**
-   * Every path goes through the single resolver (text checks, fixed local drive, no reparse point).
+   * Every path, each loose reference included, goes through the single resolver (text checks, fixed local drive, no
+     reparse point), and the file is opened without following a reparse point, which is refused on the handle itself
+     (a swap after the path check is refused, never followed).
    * Reads share read, write and delete with everyone (`New-AtmGitSharedReadStream`), so they never block another
-     process. Git writes by lockfile and rename, so a whole version is read; a torn read by another writer must fail the
+     process. Bytes are read as Git reads them (no byte-order-mark detection: a UTF-16 file fails as it does in Git). Git writes by lockfile and rename, so a whole version is read; a torn read by another writer must fail the
      strict parsers (a `packed-refs` without its final line break is refused).
    * The file system is not assumed stable: references are read loose first, then `packed-refs` (a ref moved into
      `packed-refs` meanwhile is seen in one of them), in two full passes that must agree; otherwise `UNSTABLE`.
-   * Unsupported formats (reftable, an unknown `packed-refs` trait, a line it does not recognize) and any read failure
-     give `UNKNOWN` with a reason, never absence.
+   * Unsupported formats (reftable, an unknown `packed-refs` trait: `NOT_OBSERVABLE`) and failures (a line it does not
+     recognize, a read failure: `PARTIAL`) give `UNKNOWN` with a reason, never absence. Names Git ignores (starting with a
+     dot, `.lock`) are ignored; a packed peeled id is used only when its packed entry is (a loose ref overriding it
+     makes it stale); branch names are compared case-sensitively.
+   * HEAD is read per worktree after the references: a HEAD branch with no tip (unborn, moved meanwhile, or a symbolic
+     branch) claims nothing (`HEAD_BRANCH_NOT_FOUND`), never "no commits". With `extensions.worktreeConfig` the upstream
+     is also looked for in the worktree's `config.worktree`; when that cannot be read nothing is said about it.
 4. **What files can prove, and what they cannot.**
    * Proven: the repository has **no** remote-tracking reference (complete, stable, supported read), so no commit of
      a HEAD with commits is reachable from one: `UNPUBLISHED_COMMITS`.
