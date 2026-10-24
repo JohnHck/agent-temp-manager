@@ -5184,6 +5184,8 @@ try {
             Assert-Eq (& $try { [IO.File]::Copy((Join-Path $other.Repo '.git\HEAD'), (Join-Path $fx.Repo '.git\HEAD'), $true) }) 'BLOCKED' 'HEAD substituido: bloqueado'
             Assert-Eq (& $try { [IO.Directory]::Move((Join-Path $fx.Repo '.git'), (Join-Path $fx.Repo '.git-moved')) }) 'BLOCKED' '.git renomeado: bloqueado'
             Assert-Eq (& $try { [IO.Directory]::Move($fx.Repo, $fx.Repo + '-moved') }) 'BLOCKED' 'repositorio renomeado: bloqueado'
+            Assert-Eq (& $try { [IO.Directory]::Move((Join-Path $fx.Repo '.git\objects'), (Join-Path $fx.Repo '.git\objects-moved')) }) 'BLOCKED' 'objects renomeado (para trocar por uma juncao): bloqueado'
+            Assert-Eq (& $try { [IO.Directory]::Move((Join-Path $fx.Repo '.git\refs'), (Join-Path $fx.Repo '.git\refs-moved')) }) 'BLOCKED' 'refs renomeado: bloqueado'
             # Other processes' index and ref updates are not blocked (only the pinned files are).
             [IO.File]::WriteAllText((Join-Path $fx.Repo '.git\refs\heads\main.lock'), (Get-Content -LiteralPath (Join-Path $fx.Repo '.git\refs\heads\main') -Raw))
             Assert-Eq (& $try { [IO.File]::Replace((Join-Path $fx.Repo '.git\refs\heads\main.lock'), (Join-Path $fx.Repo '.git\refs\heads\main'), [NullString]::Value) }) 'SUCCEEDED' 'atualizacao de ref por outro processo nao e bloqueada'
@@ -5271,13 +5273,23 @@ try {
             Assert-True (@(& $ev $submod 'SUBMODULES') -contains 'DECLARED' -and @(& $ev $submod 'LOCAL_WORK_NOT_OBSERVED') -contains 'D3_SUBMODULES' -and (& $f $submod).State -eq 'UNKNOWN') 'submodulos declarados: status nao executado, trabalho local nao observado'
             Assert-Eq @($res.Findings | Where-Object { $_.State -eq 'CLEAN_AND_PUBLISHED_UNKNOWN' }).Count 0 'nenhum estado limpo e publicado'
             $stc = @($res.Coverage | Where-Object { $_.Collector -eq 'local-work-status' })[0]
-            Assert-True ($stc.Status -eq 'PARTIAL' -and @($stc.Reasons) -contains 'D3_SUBMODULES' -and $stc.Expected -eq 9 -and $stc.Observed -eq 8) "cobertura do status por worktree: $($stc.Status) $($stc.Observed)/$($stc.Expected)"
+            Assert-True ($stc.Status -eq 'PARTIAL' -and @($stc.Reasons) -contains 'D3_SUBMODULES' -and @($stc.Reasons) -contains 'HIDDEN_ENTRIES_NOT_OBSERVED' -and $stc.Expected -eq 9 -and $stc.Observed -eq 8) "cobertura do status nunca completa (gitlinks, assume-unchanged, skip-worktree): $($stc.Status) $($stc.Observed)/$($stc.Expected)"
             Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'local-work-files' })[0].Status 'COMPLETE' 'cobertura dos arquivos completa'
             $st = @($log | Where-Object { $_.Arguments -ccontains 'status' })
             Assert-True ($st.Count -eq 8 -and @($st | Where-Object { $_.Arguments -cnotcontains '--ignore-submodules=all' -or $_.Pins -lt 2 }).Count -eq 0) "status sempre sem submodulos e com travas ($($st.Count))"
             Assert-Eq @($st | Where-Object { [string]::Equals($_.WorkingDirectory, (Get-AtmNormalizedPath $submod), [StringComparison]::OrdinalIgnoreCase) }).Count 0 'status nunca roda com submodulos declarados'
             $json = (@{ F = $res.Findings; C = $res.Coverage } | ConvertTo-Json -Depth 8)
             foreach ($x in @($lwBase, 'build', 'out.bin', 'keep', 'u.txt', 'c.txt')) { Assert-True (-not $json.Contains($x) -and -not $json.Contains($x.Replace('\', '\\'))) "nada sensivel nos achados: $(Split-Path -Leaf $x)" }
+            # A stash that cannot be attributed (detached HEAD) and a stash ref without its log are never "none".
+            $det = & $plain 'stash-detached'; [IO.File]::WriteAllText((Join-Path $det 'a.txt'), "8`n"); & $gitFx $det @('stash', 'push', '-q') $det; & $gitFx $det @('checkout', '-q', '--detach') $det
+            $nolog = & $plain 'stash-nolog'; & $gitFx $nolog @('update-ref', 'refs/stash', 'HEAD') $nolog
+            $script:AtmWorktreeDiagnosticsEnabled = $true
+            try { $res2 = Get-AtmWorktreeDiscovery -RepositoryPaths @($det, $nolog) -Git $testGit -Pseudonymizer $pz }
+            finally { $script:AtmWorktreeDiagnosticsEnabled = $false }
+            $f2 = { param($d) @($res2.Findings | Where-Object { $_.Kind -eq 'Worktree' -and $_.Key -ceq (& $wk $d) })[0] }
+            Assert-True (@((& $f2 $det).Evidence | Where-Object { $_.Code -eq 'LOCAL_WORK_NOT_OBSERVED' -and $_.Detail -eq 'STASH_NOT_ATTRIBUTABLE' }).Count -eq 1 -and @((& $f2 $det).Evidence | Where-Object { $_.Code -eq 'LOCAL_WORK_NONE_OBSERVED' }).Count -eq 0) 'HEAD destacado com stash no repositorio: nao atribuivel, nunca "nenhum"'
+            Assert-True (@((& $f2 $nolog).Evidence | Where-Object { $_.Code -eq 'LOCAL_WORK_UNKNOWN' }).Count -eq 1 -and @((& $f2 $nolog).Evidence | Where-Object { $_.Code -eq 'LOCAL_WORK_NONE_OBSERVED' }).Count -eq 0) 'ref de stash sem log: trabalho local desconhecido'
+            Assert-True (@($res2.Coverage | Where-Object { $_.Collector -eq 'local-work-files' })[0].Status -eq 'PARTIAL') 'cobertura dos arquivos parcial'
             $closed = Get-AtmWorktreeLocalWork -WorkTree $clean -Git $testGit
             Assert-True ($closed.StatusCoverage.Status -eq 'NOT_OBSERVABLE' -and $closed.StatusCoverage.Reason -eq 'WORKTREE_DIAGNOSTICS_GATE_CLOSED' -and @($closed.Evidence).Count -eq 0) 'trava fechada: nada lido'
         } finally { Close-AtmPseudonymizer $pz }
