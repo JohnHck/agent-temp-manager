@@ -647,6 +647,8 @@ namespace AgentTempManager
             if (string.IsNullOrEmpty(path) || path.Length < 3 || !char.IsLetter(path[0]) || path[0] > 'z' || path[1] != ':' || path[2] != '\\') return "INVALID";
             string root = path.Substring(0, 3);
             if (GetDriveTypeW(root) != 3) { at = root; return "UNSUPPORTED_DRIVE"; }
+            // Longer than the plain API reads: refused (never reported as missing, which callers may accept).
+            if (path.Length >= 260) return "INACCESSIBLE";
             string cur = root;
             foreach (string p in path.Substring(3).Split('\\'))
             {

@@ -1852,18 +1852,26 @@ function Get-AtmGitCommonPreflight {
       AlternatesReason, PinsAfter, Alternates, AdminReason, Admin (the caller applies them in the original order).
     #>
     param([string]$CommonDir, [hashtable]$Cache = $null)
-    $key = $CommonDir.ToLowerInvariant()
+    # The key is the path as written (ordinal): two spellings never share an entry (they are just computed twice).
+    $key = 'common|' + $CommonDir
     $fpr = $null
     if ($null -ne $Cache) {
         $fpr = Get-AtmGitCommonFingerprint -CommonDir $CommonDir
         if ($Cache.ContainsKey($key)) {
-            if ([string]::Equals($Cache[$key].Fingerprint, $fpr, [StringComparison]::Ordinal)) { $script:AtmScaleStats.CommonCacheHits++; return $Cache[$key].Result }
+            $hit = $Cache[$key]
+            # Besides the fixed names, the alternates files and alternate object directories found last time.
+            $watch = $(if (@($hit.Watch).Count -gt 0) { [AgentTempManager.AtmPathCheck]::Fingerprint('', [string[]]@($hit.Watch)) } else { '' })
+            if ([string]::Equals($hit.Fingerprint, $fpr, [StringComparison]::Ordinal) -and [string]::Equals($hit.WatchPrint, $watch, [StringComparison]::Ordinal)) { $script:AtmScaleStats.CommonCacheHits++; return $hit.Result }
             $script:AtmScaleStats.CommonCacheInvalidations++
         }
     }
     $script:AtmScaleStats.CommonPreflights++
     $r = Get-AtmGitCommonPreflightUncached -CommonDir $CommonDir
-    if ($null -ne $Cache) { $Cache[$key] = @{ Fingerprint = $fpr; Result = $r } }
+    if ($null -ne $Cache) {
+        $w = New-Object System.Collections.Generic.List[string]
+        foreach ($x in @($r.PinsAfter)) { $w.Add($x); $w.Add((Join-Path $x 'info\alternates')) }
+        $Cache[$key] = @{ Fingerprint = $fpr; Result = $r; Watch = $w.ToArray(); WatchPrint = $(if ($w.Count -gt 0) { [AgentTempManager.AtmPathCheck]::Fingerprint('', $w.ToArray()) } else { '' }) }
+    }
     return $r
 }
 
@@ -2092,7 +2100,7 @@ $script:AtmWorktreeEvidenceCodes = @('REPOSITORY_DISCOVERED', 'REPOSITORY_PREFLI
     'STAGED', 'UNSTAGED', 'UNTRACKED', 'IGNORED', 'CONFLICTS', 'SUBMODULES', 'OPERATION_IN_PROGRESS', 'STASHES_IN_REPOSITORY', 'STASH_MENTIONS_BRANCH',
     'LOCAL_WORK_NONE_OBSERVED', 'LOCAL_WORK_NOT_OBSERVED', 'PUBLICATION_NOT_DIAGNOSED',
     'HEAD_STATE', 'UPSTREAM_CONFIGURED', 'NO_UPSTREAM', 'NO_REMOTE_TRACKING_REFS', 'PUBLICATION_UNVERIFIED', 'PUBLICATION_UNKNOWN', 'PUBLICATION_NOT_OBSERVED',
-    'DETACHED_TIP_REFERENCED', 'COMMITS_ONLY_IN_THIS_WORKTREE_POSSIBLE', 'LAST_FETCH_AGE_DAYS')
+    'DETACHED_TIP_REFERENCED', 'COMMITS_ONLY_IN_THIS_WORKTREE_POSSIBLE', 'LAST_FETCH_AGE_DAYS', 'REPOSITORY_NOT_EXAMINED')
 # P3-C: local work (ADR-0006 rules 9 and 12). Operation markers in a worktree's Git directory, read as files.
 $script:AtmGitOperationMarkers = [ordered]@{ 'MERGE_HEAD' = 'MERGE'; 'rebase-merge' = 'REBASE'; 'rebase-apply' = 'REBASE'; 'CHERRY_PICK_HEAD' = 'CHERRY_PICK'; 'REVERT_HEAD' = 'REVERT'; 'BISECT_LOG' = 'BISECT'; 'sequencer' = 'SEQUENCER' }
 $script:AtmGitStashLogMaxBytes = 1048576
@@ -2515,6 +2523,7 @@ function Get-AtmWorktreeDiscovery {
     Reset-AtmScaleStats
     $pfCache = $(if ($NoPreflightCache) { $null } else { @{} })
     $pfByDir = @{}
+    $reusePf = -not $NoPreflightCache
     $budgetHit = { if ($script:AtmScaleStats.BytesRead -gt $MaxBytesRead) { if (-not $reasons.Contains('READ_BUDGET')) { $reasons.Add('READ_BUDGET') }; return $true }; return $false }
     $pz = { param([string]$Domain, [string]$Value) Get-AtmPseudonym -Pseudonymizer $Pseudonymizer -Domain $Domain -Fields @($Value.TrimEnd('\').ToLowerInvariant()) }
     $repoKey = { param([string]$CommonDir) 'git/r-' + (& $pz 'atm-repository/1' $CommonDir) }
@@ -2565,7 +2574,7 @@ function Get-AtmWorktreeDiscovery {
         if ($null -ne $Deadline -and [datetime]::UtcNow -ge $Deadline) { $reasons.Add('DEADLINE_EXCEEDED'); break }
         if (& $budgetHit) { break }
         $pf = Get-AtmGitPreflight -Target $c.Dir -Cache $pfCache
-        $pfByDir[$c.Dir.ToLowerInvariant()] = $pf
+        if ($reusePf) { $pfByDir[$c.Dir.ToLowerInvariant()] = $pf }
         if ($pf.Status -eq 'NOT_A_REPOSITORY') { continue }
         if ($pf.Status -ne 'OK') {
             # A worktree directory whose administrative entry is positively absent: apparent orphan (local work unknown).
@@ -2601,8 +2610,11 @@ function Get-AtmWorktreeDiscovery {
         $rr = Resolve-AtmGitReferencedPath -Value $P.Replace('/', '\') -BaseDir $Base
         if ($rr.Status -ceq 'OK' -or $rr.Status -ceq 'MISSING') { Get-AtmNormalizedPath $rr.Path } else { $null } }
     foreach ($r in $repos.Values) {
-        if (& $budgetHit) { break }
-        if ($null -ne $Deadline -and [datetime]::UtcNow -ge $Deadline) { if (-not $reasons.Contains('DEADLINE_EXCEEDED')) { $reasons.Add('DEADLINE_EXCEEDED') }; break }
+        # A stop (read budget or deadline) never drops a repository already discovered: it is still reported from its
+        # preflight (registration, alternates), marked REPOSITORY_NOT_EXAMINED; nothing more is read for it.
+        $stopReason = $null
+        if (& $budgetHit) { $stopReason = 'READ_BUDGET' }
+        elseif ($null -ne $Deadline -and [datetime]::UtcNow -ge $Deadline) { if (-not $reasons.Contains('DEADLINE_EXCEEDED')) { $reasons.Add('DEADLINE_EXCEEDED') }; $stopReason = 'DEADLINE_EXCEEDED' }
         $pf = $r.Preflight
         $rKey = & $repoKey (Get-AtmNormalizedPath $pf.CommonDir)
         $rev = New-Object System.Collections.Generic.List[object]
@@ -2625,6 +2637,7 @@ function Get-AtmWorktreeDiscovery {
             if ($a.Gitdir.Status -eq 'MISSING') { $wts[$k].Codes.Add(@('WORKTREE_DIRECTORY_MISSING', $null)) }
         }
         $rev.Add((New-AtmEvidence -Code 'WORKTREES_REGISTERED' -Source 'worktree-discovery' -Collector 'worktree-discovery' -ObservedUtc $now -Detail ([string]@($pf.AdminEntries).Count)))
+        if ($stopReason) { $rev.Add((New-AtmEvidence -Code 'REPOSITORY_NOT_EXAMINED' -Source 'worktree-discovery' -Collector 'worktree-discovery' -ObservedUtc $now -Detail $stopReason)) }
         # Confirmation by Git, through the runner, with this repository's preflight.
         # A repository reached only through a worktree's gitdir (its main worktree outside the sources) is registered
         # from its files but never given to Git: Git runs only where a source led.
@@ -2632,7 +2645,8 @@ function Get-AtmWorktreeDiscovery {
         $ledSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
         foreach ($x in $r.Dirs) { [void]$ledSet.Add($x) }
         $inSources = ($mainDir -and $ledSet.Contains($mainDir))
-        if ($gitUsable -and $mainDir -and -not $inSources) { $rev.Add((New-AtmEvidence -Code 'GIT_NOT_RUN' -Source 'worktree-discovery' -Collector 'worktree-discovery' -ObservedUtc $now -Detail 'REPOSITORY_OUTSIDE_SOURCES')) }
+        if ($stopReason) { }
+        elseif ($gitUsable -and $mainDir -and -not $inSources) { $rev.Add((New-AtmEvidence -Code 'GIT_NOT_RUN' -Source 'worktree-discovery' -Collector 'worktree-discovery' -ObservedUtc $now -Detail 'REPOSITORY_OUTSIDE_SOURCES')) }
         elseif ($gitUsable -and $mainDir -and $null -ne $Deadline -and [datetime]::UtcNow -ge $Deadline) { $reasons.Add('DEADLINE_EXCEEDED') }
         elseif ($gitUsable -and $mainDir) {
             $mpf = $(if ($pfByDir.ContainsKey($mainDir.ToLowerInvariant())) { $pfByDir[$mainDir.ToLowerInvariant()] } else { Get-AtmGitPreflight -Target $mainDir -Cache $pfCache })
@@ -2653,10 +2667,11 @@ function Get-AtmWorktreeDiscovery {
             } else { $gitFailed++; $rev.Add((New-AtmEvidence -Code 'GIT_NOT_RUN' -Source 'worktree-discovery' -Collector 'git' -ObservedUtc $now -Detail $rp.Reason)) }
         } elseif (-not $gitUsable) { $rev.Add((New-AtmEvidence -Code 'GIT_NOT_RUN' -Source 'worktree-discovery' -Collector 'git' -ObservedUtc $now -Detail $(if ($null -ne $Git) { [string]$Git.Reason } else { 'GIT_NOT_FOUND' }))) }
         # Stashes belong to the repository (ADR-0006 rule 12): counted once, attributed to a worktree only by branch.
-        $stash = Get-AtmGitStashSummary -CommonDir $pf.CommonDir
+        $stash = $(if ($stopReason) { $null } else { Get-AtmGitStashSummary -CommonDir $pf.CommonDir })
         # P3-D: the shared references, read once per repository (two passes) and used for each of its worktrees.
-        $refStore = Get-AtmGitRefStore -CommonDir $pf.CommonDir
-        if ($stash.Status -ceq 'COMPLETE' -and $stash.Count -gt 0) { $rev.Add((New-AtmEvidence -Code 'STASHES_IN_REPOSITORY' -Source 'local-work' -Collector 'local-work-files' -ObservedUtc $now -Detail ([string]$stash.Count))) }
+        $refStore = $(if ($stopReason) { $null } else { Get-AtmGitRefStore -CommonDir $pf.CommonDir })
+        if ($null -eq $stash) { }
+        elseif ($stash.Status -ceq 'COMPLETE' -and $stash.Count -gt 0) { $rev.Add((New-AtmEvidence -Code 'STASHES_IN_REPOSITORY' -Source 'local-work' -Collector 'local-work-files' -ObservedUtc $now -Detail ([string]$stash.Count))) }
         elseif ($stash.Status -cne 'COMPLETE' -and $stash.Status -cne 'NOT_PRESENT') { $lwFiles.Add('FILES_INCOMPLETE') }
         $findings.Add([pscustomobject]@{ Kind = 'Repository'; Key = $rKey; State = 'UNKNOWN'; Evidence = $rev.ToArray() })
         foreach ($w in $wts.Values) {
@@ -2666,7 +2681,7 @@ function Get-AtmWorktreeDiscovery {
             $state = 'UNKNOWN'
             # Local work only where a source led (the same rule as for Git); elsewhere it stays unknown.
             $led = $ledSet.Contains($w.Dir)
-            if ($led -and @($w.Codes | Where-Object { $_[0] -ceq 'WORKTREE_DIRECTORY_MISSING' }).Count -eq 0) {
+            if (-not $stopReason -and $led -and @($w.Codes | Where-Object { $_[0] -ceq 'WORKTREE_DIRECTORY_MISSING' }).Count -eq 0) {
                 $wpf = $(if ($pfByDir.ContainsKey($w.Dir.ToLowerInvariant())) { $pfByDir[$w.Dir.ToLowerInvariant()] } else { Get-AtmGitPreflight -Target $w.Dir -Cache $pfCache })
                 $lw = Get-AtmWorktreeLocalWork -WorkTree $w.Dir -Git $(if ($gitUsable) { $Git } else { $null }) -Stash $stash -Deadline $Deadline -Preflight $wpf
                 foreach ($e in $lw.Evidence) { $ev.Add($e) }
@@ -2685,7 +2700,7 @@ function Get-AtmWorktreeDiscovery {
                 # P3-D gives no publication state from files: UNPUBLISHED_COMMITS needs a proof files cannot give.
                 if ($lw.LocalWork) { $state = 'LOCAL_WORK' }
             } else {
-                $ev.Add((New-AtmEvidence -Code 'LOCAL_WORK_UNKNOWN' -Source 'worktree-discovery' -Collector 'worktree-discovery' -ObservedUtc $now -Detail $(if ($led) { $null } else { 'WORKTREE_OUTSIDE_SOURCES' })))
+                $ev.Add((New-AtmEvidence -Code 'LOCAL_WORK_UNKNOWN' -Source 'worktree-discovery' -Collector 'worktree-discovery' -ObservedUtc $now -Detail $(if ($stopReason) { $stopReason } elseif ($led) { $null } else { 'WORKTREE_OUTSIDE_SOURCES' })))
             }
             # Where no publication fact was read (outside the sources, or refused), publication stays undiagnosed.
             if (@($ev | Where-Object { $_.Collector -ceq 'publication-files' }).Count -eq 0) { $ev.Add((New-AtmEvidence -Code 'PUBLICATION_NOT_DIAGNOSED' -Source 'worktree-discovery' -Collector 'worktree-discovery' -ObservedUtc $now)) }
