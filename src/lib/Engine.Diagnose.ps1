@@ -3038,15 +3038,18 @@ function ConvertFrom-AtmServicePathName {
             $end = $s.IndexOf('"', 1)
             if ($end -gt 1) { $exe = $s.Substring(1, $end - 1); $quoted = $true }
         } else {
-            $m = [regex]::Match($s, '^(.+?\.exe)(?=\s|$)', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            # Windows splits a command line only on space and tab.
+            $m = [regex]::Match($s, '^(.+?\.exe)(?=[ \t]|$)', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
             if ($m.Success) { $exe = $m.Groups[1].Value }
         }
         if ($null -eq $exe) { return $bad }
         if ($exe.StartsWith('\??\') -and $exe -match '^\\\?\?\\[A-Za-z]:\\') { $exe = $exe.Substring(4) }
-        if ($exe.StartsWith('\\') -or $exe -match '[\x00-\x1f"*?<>|=/]') { return $bad }
+        # No control, format or line/paragraph separator characters (display spoofing), no list separators.
+        if ($exe.StartsWith('\\') -or $exe -match '[\x00-\x1f"*?<>|=/,;]' -or $exe -match '[\p{C}\p{Zl}\p{Zp}]') { return $bad }
         if ($quoted) {
-            # ".exe" once, at the end: a misquoted command line ("...svc.exe --x run.exe") is never taken apart.
-            if ([regex]::Matches($exe, '\.exe', [Text.RegularExpressions.RegexOptions]::IgnoreCase).Count -ne 1 -or $exe -notmatch '(?i)\.exe$') { return $bad }
+            # ".exe" once, at the end, and no switch-like " -": a misquoted command line is never taken apart.
+            if ([regex]::Matches($exe, '\.exe', [Text.RegularExpressions.RegexOptions]::IgnoreCase).Count -ne 1 -or $exe -notmatch '(?i)\.exe$' -or $exe -match '\s-') { return $bad }
+            if ($exe -match '[^\S ]') { return $bad }
         } elseif ($exe -match '\s') { return $bad }
         $map = [ordered]@{ '\SystemRoot\' = $env:SystemRoot; '%SystemRoot%\' = $env:SystemRoot; '%windir%\' = $env:SystemRoot; '%ProgramFiles%\' = $env:ProgramFiles; '%ProgramFiles(x86)%\' = ${env:ProgramFiles(x86)}; '%ProgramW6432%\' = $env:ProgramW6432 }
         foreach ($k in $map.Keys) {
@@ -3074,6 +3077,8 @@ function ConvertTo-AtmServiceAccount {
     if (-not (Test-AtmHintText -Value $StartName -Max 256)) { return $null }
     $u = $StartName.Trim().ToUpperInvariant()
     if (-not $u) { return $null }
+    # One of: name, domain\name, name@domain (no empty part, no second separator, no other control or format character).
+    if ($u -notmatch '^(?:[^\\@]+|[^\\@]+\\[^\\@]+|[^\\@]+@[^\\@]+)$' -or $u -match '[\p{C}\p{Zl}\p{Zp}]') { return $null }
     if ($u -ceq 'LOCALSYSTEM' -or $u -ceq 'NT AUTHORITY\SYSTEM' -or $u -ceq '.\LOCALSYSTEM') { return [pscustomobject]@{ Kind = 'LOCAL_SYSTEM'; Account = 'LocalSystem' } }
     if ($u -ceq 'NT AUTHORITY\LOCALSERVICE' -or $u -ceq 'NT AUTHORITY\LOCAL SERVICE') { return [pscustomobject]@{ Kind = 'LOCAL_SERVICE'; Account = 'NT AUTHORITY\LocalService' } }
     if ($u -ceq 'NT AUTHORITY\NETWORKSERVICE' -or $u -ceq 'NT AUTHORITY\NETWORK SERVICE') { return [pscustomobject]@{ Kind = 'NETWORK_SERVICE'; Account = 'NT AUTHORITY\NetworkService' } }
@@ -3211,7 +3216,7 @@ function Get-AtmServiceFindings {
       Service findings of a run from its query (Invoke-AtmServiceQuery) and the process snapshot taken after it.
       One finding per declared name, ordered by key (ordinal); key = the declared name. Provider: the declaring
       provider, or $null with PROVIDER_ATTRIBUTION_AMBIGUOUS when several declare it. Coverage: 'services' (the query;
-      NOT_PRESENT depends on it alone) and 'service-properties' (unreadable values and unverified links: a value that
+      a name not listed is UNKNOWN, never NOT_PRESENT) and 'service-properties' (unreadable values and unverified links: a value that
       cannot be read is absent from the evidence with an _UNREADABLE code, never 0 or false).
     #>
     param($Query, $Collection = $null)

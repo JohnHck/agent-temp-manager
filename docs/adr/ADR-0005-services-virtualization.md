@@ -90,8 +90,7 @@ P2-B; the Claude Desktop hints are P2-C).
   `PARTIAL` (declared names incomplete because a provider's member failed or a provider was not read, names capped,
   unexpected or repeated rows, or a declared name not listed: `SERVICE_NOT_LISTED_FOR_ACCOUNT`) or `COMPLETE` (every
   declared name listed; never with a reason). Only the exception type is kept. `service-properties` (one per run) carries unreadable values and
-  unverified process links, so an unreadable value of one service never turns another service's absence into
-  `UNKNOWN`.
+  unverified process links, so an unreadable value of one service never changes the query's own record.
 * **States.** `Service`: `RUNNING`, `STOPPED`, `PAUSED`, `PENDING`, `NOT_PRESENT`, `UNKNOWN`. Since P2-A-S the
   collector never produces (or requests) `NOT_PRESENT`: a declared name that the service control manager does not
   list is `UNKNOWN` with `SERVICE_NOT_LISTED` (an observation), because `EnumServicesStatusEx` may silently leave out

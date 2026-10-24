@@ -5844,6 +5844,7 @@ try {
             Assert-True ($a.Kind -ceq $cs[1] -and $a.Account -ceq $cs[2]) "conta '$($cs[1])': $($a.Kind) $($a.Account)"
         }
         Assert-True ($null -eq (ConvertTo-AtmServiceAccount $null) -and $null -eq (ConvertTo-AtmServiceAccount '') -and $null -eq (ConvertTo-AtmServiceAccount '   ') -and $null -eq (ConvertTo-AtmServiceAccount 5) -and $null -eq (ConvertTo-AtmServiceAccount ('a' * 300)) -and $null -eq (ConvertTo-AtmServiceAccount "a`tb")) 'conta ausente, vazia, longa, com controle ou de outro tipo: ilegivel'
+        foreach ($m in @('\', '@', 'CORPDOM\', '\p2a-acct', 'CORPDOM\\p2a-acct', 'a@b@c', 'a\b\c', "p2a$([char]0x202E)acct")) { Assert-True ($null -eq (ConvertTo-AtmServiceAccount $m)) "conta malformada: ilegivel ($($m.Length) caracteres)" }
     }
     Test-Case 'Servicos' 'P2-A: propriedade ausente ou ilegivel vira null com service-properties PARTIAL (nunca 0 ou false); a consulta nao herda esses motivos' {
         $h = & $svcHints 'fake' @((& $svcHint 'OddSvc'), (& $svcHint 'GoneSvc'))
@@ -6008,7 +6009,18 @@ try {
             @('svc.exe', $null, 'svc.exe', $null),
             @('.exe', $null, $null, 'EXECUTABLE_UNPARSEABLE'),
             @('C:svc.exe', $null, $null, 'EXECUTABLE_UNPARSEABLE'),
-            @('run.bat --x', $null, $null, 'EXECUTABLE_UNPARSEABLE'))
+            @('run.bat --x', $null, $null, 'EXECUTABLE_UNPARSEABLE'),
+            # Review P2-A-S: switch-like text inside quotes, Unicode format and separator characters, splitting only on
+            # space and tab, list separators.
+            @("`"$pf\Agent\agent.cmd --token tok123 --run\svc.exe`" x", $null, $null, 'EXECUTABLE_UNPARSEABLE'),
+            @("`"$pf\App$([char]0x202E)x\svc.exe`"", $null, $null, 'EXECUTABLE_UNPARSEABLE'),
+            @("`"$pf\App$([char]0x2028)x\svc.exe`"", $null, $null, 'EXECUTABLE_UNPARSEABLE'),
+            @("`"$pf\App$([char]0x00A0)x\svc.exe`"", $null, $null, 'EXECUTABLE_UNPARSEABLE'),
+            @("$env:SystemRoot\System32\svc.exe$([char]0x0085)S3cr3t-P2A", $null, $null, 'EXECUTABLE_UNPARSEABLE'),
+            @("$env:SystemRoot\System32\svc.exe$([char]0x00A0)S3cr3t-P2A", $null, $null, 'EXECUTABLE_UNPARSEABLE'),
+            @("$env:SystemRoot\System32\svc.exe`t-k x", "$env:SystemRoot\System32\svc.exe", 'svc.exe', $null),
+            @('C:\tools\svc.exe,S3cr3t-P2A.exe', $null, $null, 'EXECUTABLE_UNPARSEABLE'),
+            @('C:\tools\svc.exe;S3cr3t-P2A.exe', $null, $null, 'EXECUTABLE_UNPARSEABLE'))
         for ($ci = 0; $ci -lt $cases.Count; $ci++) {
             $cs = $cases[$ci]
             $x = ConvertFrom-AtmServicePathName $cs[0]
