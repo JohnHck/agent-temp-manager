@@ -5269,7 +5269,7 @@ try {
             $kStash = 'git/r-' + (Get-AtmPseudonym -Pseudonymizer $pz -Domain 'atm-repository/1' -Fields @((Get-AtmNormalizedPath (Join-Path $stash '.git')).ToLowerInvariant()))
             Assert-True (@(@($res.Findings | Where-Object { $_.Key -ceq $kStash })[0].Evidence | Where-Object { $_.Code -ceq 'STASHES_IN_REPOSITORY' -and $_.Detail -eq '1' }).Count -eq 1) 'stash contado no repositorio'
             Assert-True (@(& $ev $stash 'STASH_MENTIONS_BRANCH') -contains '1' -and (& $f $stash).State -eq 'LOCAL_WORK') 'stash atribuido a worktree pelo branch'
-            Assert-True ((& $f $clean).State -eq 'UNPUBLISHED_COMMITS' -and @(& $ev $clean 'LOCAL_WORK_NONE_OBSERVED').Count -eq 1 -and @(& $ev $clean 'COMMITS_NOT_ON_REMOTE_TRACKING') -contains 'NO_REMOTE_TRACKING_REFS') 'sem trabalho local observado e sem referencias remotas: commits nao publicados (P3-D)'
+            Assert-True ((& $f $clean).State -eq 'UNKNOWN' -and @(& $ev $clean 'LOCAL_WORK_NONE_OBSERVED').Count -eq 1 -and @(& $ev $clean 'NO_REMOTE_TRACKING_REFS').Count -eq 1) 'sem trabalho local observado e sem referencias remotas: desconhecido (ausencia de referencias nao prova nao publicacao)'
             Assert-True (@(& $ev $submod 'SUBMODULES') -contains 'DECLARED' -and @(& $ev $submod 'LOCAL_WORK_NOT_OBSERVED') -contains 'D3_SUBMODULES' -and @(& $ev $submod 'LOCAL_WORK_UNKNOWN').Count -eq 1) 'submodulos declarados: status nao executado, trabalho local desconhecido'
             Assert-Eq @($res.Findings | Where-Object { $_.State -eq 'CLEAN_AND_PUBLISHED_UNKNOWN' }).Count 0 'nenhum estado limpo e publicado'
             $stc = @($res.Coverage | Where-Object { $_.Collector -eq 'local-work-status' })[0]
@@ -5316,7 +5316,16 @@ try {
         $wtc = & $mk 'worktree-config'; & $gitFx $wtc @('update-ref', 'refs/remotes/origin/main', 'HEAD') $wtc; & $gitFx $wtc @('config', 'extensions.worktreeConfig', 'true') $wtc; & $gitFx $wtc @('config', '--worktree', 'branch.main.merge', 'refs/heads/main') $wtc
         # A name starting with a dot under refs/remotes is not a reference (Git ignores it).
         $dot = & $mk 'dot-name'; $dotId = (& $gitFxOut $dot @('rev-parse', 'HEAD') $dot).Out.Trim(); [void][IO.Directory]::CreateDirectory((Join-Path $dot '.git\refs\remotes')); [IO.File]::WriteAllText((Join-Path $dot '.git\refs\remotes\.hidden'), "$dotId`n")
-        $all = @($none, $equal, $ahead, $packed, $detRef, $detNew, $unborn, $reftab, $symb, $stale, $wtc, $dot)
+        # A: pushed to a local fixture server (file path, no network), then the remote-tracking reference removed.
+        $server = Join-Path $pb 'server.git'; [void][IO.Directory]::CreateDirectory($server); & $gitFx $server @('init', '-q', '--bare') $null
+        $pushed = & $mk 'pushed'; & $gitFx $pushed @('remote', 'add', 'origin', $server) $pushed; & $gitFx $pushed @('push', '-q', 'origin', 'main') $pushed
+        Assert-True ([IO.File]::Exists((Join-Path $pushed '.git\refs\remotes\origin\main'))) 'fixture: o push criou a referencia remota'
+        & $gitFx $pushed @('update-ref', '-d', 'refs/remotes/origin/main') $pushed
+        # B: remote configured, no remote-tracking reference.
+        $remoteOnly = & $mk 'remote-only'; & $gitFx $remoteOnly @('remote', 'add', 'origin', $server) $remoteOnly
+        # D: detached, no remote-tracking reference, a new commit.
+        $detNoRemote = & $mk 'detached-no-remote'; & $gitFx $detNoRemote @('checkout', '-q', '--detach') $detNoRemote; & $next $detNoRemote '2'
+        $all = @($none, $equal, $ahead, $packed, $detRef, $detNew, $unborn, $reftab, $symb, $stale, $wtc, $dot, $pushed, $remoteOnly, $detNoRemote)
         $pz = New-AtmPseudonymizer -Key $testPseudonymKey
         try {
             Start-Sleep -Milliseconds 1100
@@ -5331,7 +5340,12 @@ try {
             $wk = { param($d) 'git/w-' + (Get-AtmPseudonym -Pseudonymizer $pz -Domain 'atm-worktree/1' -Fields @((Get-AtmNormalizedPath $d).ToLowerInvariant())) }
             $f = { param($d) @($res.Findings | Where-Object { $_.Kind -eq 'Worktree' -and $_.Key -ceq (& $wk $d) })[0] }
             $ev = { param($d, [string]$c) @((& $f $d).Evidence | Where-Object { $_.Code -ceq $c } | ForEach-Object { [string]$_.Detail }) }
-            Assert-True ((& $f $none).State -eq 'UNPUBLISHED_COMMITS' -and @(& $ev $none 'COMMITS_NOT_ON_REMOTE_TRACKING') -contains 'NO_REMOTE_TRACKING_REFS') 'sem referencias remotas: commits nao publicados'
+            # Absence of remote-tracking references is never proof that the commits were never published (A-D).
+            foreach ($c in @(@($none, 'C: sem remote configurado'), @($pushed, 'A: enviado a um servidor de fixture, referencias remotas removidas depois'), @($remoteOnly, 'B: remote configurado sem referencias remotas'), @($detNoRemote, 'D: destacado sem referencias remotas'))) {
+                Assert-True ((& $f $c[0]).State -eq 'UNKNOWN' -and @(& $ev $c[0] 'NO_REMOTE_TRACKING_REFS').Count -eq 1 -and @(& $ev $c[0] 'PUBLICATION_UNKNOWN') -contains 'NO_REMOTE_TRACKING_REFS') "$($c[1]): publicacao desconhecida, nunca nao publicado"
+            }
+            Assert-True (@(& $ev $detNoRemote 'COMMITS_ONLY_IN_THIS_WORKTREE_POSSIBLE').Count -eq 1) 'D: commit destacado novo: possivelmente so nesta worktree (risco, nao prova)'
+            Assert-Eq @($res.Findings | Where-Object { $_.State -eq 'UNPUBLISHED_COMMITS' }).Count 0 'nenhum estado UNPUBLISHED_COMMITS inferido de arquivos'
             Assert-True ((& $f $equal).State -eq 'UNKNOWN' -and @(& $ev $equal 'PUBLICATION_UNVERIFIED') -contains 'HEAD_TIP_ON_REMOTE_TRACKING' -and @(& $ev $equal 'UPSTREAM_CONFIGURED').Count -eq 1) 'ponta igual a remota: publicacao NAO verificada (nunca publicada), estado desconhecido'
             Assert-True ((& $f $ahead).State -eq 'UNKNOWN' -and @(& $ev $ahead 'PUBLICATION_UNKNOWN') -contains 'REACHABILITY_NOT_READ' -and @(& $ev $ahead 'NO_UPSTREAM').Count -eq 1) 'a frente da remota: alcancabilidade nao lida, desconhecido (nunca publicado)'
             Assert-True (@(& $ev $packed 'PUBLICATION_UNVERIFIED') -contains 'HEAD_TIP_ON_REMOTE_TRACKING') 'referencias compactadas lidas'
@@ -5341,12 +5355,12 @@ try {
             Assert-True ((& $f $symb).State -eq 'UNKNOWN' -and @(& $ev $symb 'PUBLICATION_NOT_OBSERVED') -contains 'HEAD_BRANCH_NOT_FOUND') 'branch simbolico: nada afirmado'
             Assert-True (@(& $ev $stale 'COMMITS_ONLY_IN_THIS_WORKTREE_POSSIBLE').Count -eq 1 -and @(& $ev $stale 'DETACHED_TIP_REFERENCED').Count -eq 0) 'id descascado obsoleto (tag recriada solta) nao conta como referencia'
             Assert-True (@(& $ev $wtc 'UPSTREAM_CONFIGURED').Count -eq 1 -and @(& $ev $wtc 'NO_UPSTREAM').Count -eq 0) 'upstream em config.worktree reconhecido (nunca "sem upstream" falso)'
-            Assert-True ((& $f $dot).State -eq 'UNPUBLISHED_COMMITS') 'nome iniciado por ponto ignorado como o Git ignora'
+            Assert-True ((& $f $dot).State -eq 'UNKNOWN' -and @(& $ev $dot 'NO_REMOTE_TRACKING_REFS').Count -eq 1) 'nome iniciado por ponto ignorado como o Git ignora'
             Assert-True (@(& $ev $equal 'LOCAL_WORK_UNKNOWN').Count -eq 1) 'sem Git: trabalho local desconhecido sempre declarado'
             Assert-True ((& $f $reftab).State -eq 'UNKNOWN' -and @(& $ev $reftab 'PUBLICATION_NOT_OBSERVED') -contains 'REF_STORE_UNSUPPORTED') 'reftable: nao suportado, desconhecido (nunca nao publicado)'
             Assert-True (@($res.Findings | Where-Object { @($_.Evidence | Where-Object { $_.Code -match 'PUBLISHED$' -and $_.Code -notmatch 'UNPUBLISHED' }).Count -gt 0 }).Count -eq 0 -and @($res.Findings | Where-Object { $_.State -eq 'CLEAN_AND_PUBLISHED_UNKNOWN' }).Count -eq 0) 'nenhum codigo ou estado de publicado'
             $pc = @($res.Coverage | Where-Object { $_.Collector -eq 'publication-files' })[0]
-            Assert-True ($pc.Status -eq 'PARTIAL' -and @($pc.Reasons) -contains 'REF_STORE_UNSUPPORTED' -and @($pc.Reasons) -contains 'HEAD_BRANCH_NOT_FOUND' -and $pc.Expected -eq 12) "cobertura de publicacao: $($pc.Status) $($pc.Observed)/$($pc.Expected)"
+            Assert-True ($pc.Status -eq 'PARTIAL' -and @($pc.Reasons) -contains 'REF_STORE_UNSUPPORTED' -and @($pc.Reasons) -contains 'HEAD_BRANCH_NOT_FOUND' -and $pc.Expected -eq 15) "cobertura de publicacao: $($pc.Status) $($pc.Observed)/$($pc.Expected)"
             $json = (@{ F = $res.Findings; C = $res.Coverage } | ConvertTo-Json -Depth 8)
             foreach ($x in @($pb, 'origin', 'refs/heads', 'refs/remotes', 'main')) { Assert-True (-not $json.Contains($x) -and -not $json.Contains($x.Replace('\', '\\'))) "nada sensivel nos achados: $(Split-Path -Leaf $x)" }
         } finally { Close-AtmPseudonymizer $pz }
@@ -5375,8 +5389,11 @@ try {
         $lock = [IO.File]::Open($pr, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
         try { $bl = Get-AtmGitRefStore -CommonDir $cd } finally { $lock.Dispose() }
         Assert-True ($bl.Status -eq 'FAILED' -and $bl.RemoteCount -eq 0) 'packed-refs bloqueado: falha (nunca "sem remotas")'
-        $pub = Get-AtmWorktreePublication -GitDir $cd -RefStore $bl -CommonDir $cd
-        Assert-True (-not $pub.Unpublished -and @($pub.Evidence | Where-Object { $_.Code -eq 'PUBLICATION_NOT_OBSERVED' }).Count -eq 1) 'leitura falha: publicacao nao observada, nunca "nao publicado"'
+        # E: unreadable or unstable references: never even the absence observation.
+        foreach ($st in @(@($bl, 'ilegivel'), @($u, 'instavel'))) {
+            $pub = Get-AtmWorktreePublication -GitDir $cd -RefStore $st[0] -CommonDir $cd
+            Assert-True (@($pub.Evidence | Where-Object { $_.Code -eq 'PUBLICATION_NOT_OBSERVED' }).Count -eq 1 -and @($pub.Evidence | Where-Object { $_.Code -eq 'NO_REMOTE_TRACKING_REFS' }).Count -eq 0) "E: referencias $($st[1]): publicacao nao observada, nenhuma ausencia afirmada"
+        }
         # Shared reads never block another process's rename over the file; a non-shared read would (counter-proof).
         $target = Join-Path $pb 'shared.txt'; [IO.File]::WriteAllText($target, "old`n")
         $try = { param([scriptblock]$B) try { & $B; return 'SUCCEEDED' } catch { return 'BLOCKED' } }
@@ -5398,6 +5415,17 @@ try {
         $jn = Join-Path $pb 'jn'; New-Junction -Link $jn -Target $pb
         $thrown = $false; try { $x = New-AtmGitSharedReadStream -Path $jn; $x.Dispose() } catch { $thrown = $true }
         Assert-True ($thrown -and $null -eq (Read-AtmGitSmallFile -Path $jn)) 'leitura compartilhada recusa reparse point'
+        # NOT RESOLVED (recorded): an ANCESTOR directory replaced between the path check and the open redirects the read.
+        # Only the final component is opened without following a reparse point. Local junction only (never a network path).
+        $real = Join-Path $pb 'anc-real'; $evil = Join-Path $pb 'anc-evil'
+        foreach ($x in @((Join-Path $real 'anc'), (Join-Path $evil 'anc'))) { [void][IO.Directory]::CreateDirectory($x) }
+        [IO.File]::WriteAllText((Join-Path $real 'anc\ref'), "real`n"); [IO.File]::WriteAllText((Join-Path $evil 'anc\ref'), "redirected`n")
+        $chk = Resolve-AtmGitReferencedPath -Value 'anc\ref' -BaseDir $real
+        Assert-Eq $chk.Status 'OK' 'caminho validado'
+        [IO.Directory]::Move((Join-Path $real 'anc'), (Join-Path $real 'anc-old'))
+        New-Junction -Link (Join-Path $real 'anc') -Target (Join-Path $evil 'anc')
+        Assert-Eq ((Read-AtmGitSmallFile -Path $chk.Path) -replace "`n", '') 'redirected' 'NAO RESOLVIDO (provado): ancestral trocado depois da validacao redireciona a leitura (juncao local)'
+        Assert-Eq (Resolve-AtmGitReferencedPath -Value 'anc\ref' -BaseDir $real).Reason 'GIT_REF_PATH_REPARSE' 'uma nova validacao detecta a troca (protecao so no momento da checagem)'
         # HEAD through the resolver: a directory (junction) named HEAD is never read as a branch.
         $fakeGd = Join-Path $pb 'fake-gitdir'; [void][IO.Directory]::CreateDirectory($fakeGd)
         New-Junction -Link (Join-Path $fakeGd 'HEAD') -Target $pb
