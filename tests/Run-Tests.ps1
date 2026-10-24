@@ -4478,7 +4478,7 @@ try {
         $after = Get-TreeListing $p.ProfilePath
         $diff = @(Compare-Object ($before -split "`n") ($after -split "`n") | ForEach-Object { $_.SideIndicator + ' ' + ($_.InputObject -replace '^.*\\(Users\d+)', '$1') })
         Assert-Eq $diff.Count 0 ('listagem identica: ' + ($diff -join ' ; '))
-        Assert-Eq @($d.Findings).Count 2 'duas particoes diagnosticadas'
+        Assert-Eq @($d.Findings | Where-Object { $_.Kind -cne 'VirtualizationPlatform' -and $_.Kind -cne 'VirtualMachine' }).Count 2 'duas particoes diagnosticadas (virtualizacao depende da maquina)'
     }
     Test-Case 'Diagnose' 'JSON atm.diagnose/2: campos iguais ao documento do schema; identico nos dois idiomas (exceto language); horarios ISO UTC; listas sempre arrays' {
         $p = New-TestProfile 'diagjson'
@@ -6207,6 +6207,28 @@ try {
         $fl = (& $vBase); $fl.Vms = { throw (New-Object IO.IOException('p2b-secret')) }
         $q = Invoke-AtmVirtualizationQuery -Source (& $vSrc $fl)
         Assert-True ($q.VmCoverage.Status -ceq 'FAILED' -and -not ((@($q.VmCoverage.Reasons) -join ' ') -match 'p2b-secret')) 'VMs com falha: FAILED, so o tipo'
+        # Review P2-B.
+        $q = Invoke-AtmVirtualizationQuery -Source (& $vSrc $den) -Elevated $true
+        Assert-Eq $q.VmCoverage.ElevationWouldHelp 'UNKNOWN' 'administrador elevado negado: elevacao nao ajudaria com certeza'
+        foreach ($bad in @(99999999999, '2', $true, -1)) {
+            $rr = & $vRun (& $vBase @((& $vVmRow $vG1 'X' $bad))) $coll
+            Assert-True ((& $vVms $rr)[0].State -ceq 'UNKNOWN') "EnabledState fora do tipo ou da faixa: UNKNOWN, nunca erro ($bad)"
+        }
+        $alt = & $vRun (& $vBase @([pscustomobject]@{ Name = $vG1; Caption = 'Virtual Machine'; Description = 'Microsoft Virtual Machine'; ElementName = 'A'; EnabledState = 2; ProcessID = 0 })) $coll
+        Assert-Eq (& $vVms $alt).Count 1 'descricao "Microsoft Virtual Machine" tambem aceita'
+        Assert-True ((& $vCov $dup 'virtual-machines').Status -ceq 'PARTIAL' -and @((& $vCov $dup 'virtual-machines').Reasons) -ccontains 'VM_KEY_COLLISION') 'colisao: cobertura de VMs PARTIAL'
+        Assert-True ((& $vCov $rr 'virtual-machines').Status -ceq 'PARTIAL' -and @((& $vCov $rr 'virtual-machines').Reasons) -ccontains 'VM_PROPERTY_UNREADABLE') 'estado ilegivel: cobertura de VMs PARTIAL'
+        $ord = & $vRun (& $vBase $rows) $coll
+        $sig = @($ord.Findings | ForEach-Object { $_.Kind + '|' + $_.Key }); $srt = [string[]]$sig.Clone(); [Array]::Sort($srt, [StringComparer]::Ordinal)
+        Assert-Eq ($sig -join ',') ($srt -join ',') 'ordem ordinal por Kind e Key (VMs antes da plataforma)'
+        $uv = (& $vBase); $uv.Vmms = @([pscustomobject]@{ Name = 'vmms'; State = 'Weird' })
+        $q = Invoke-AtmVirtualizationQuery -Source (& $vSrc $uv)
+        Assert-True ($q.PlatformCoverage.Status -ceq 'PARTIAL' -and @($q.PlatformCoverage.Reasons) -ccontains 'VMMS_STATE_UNREADABLE' -and (@($q.VmCoverage.Reasons) -join ',') -ceq 'VMMS_STATE_UNREADABLE') 'estado do vmms ilegivel: plataforma PARTIAL, VMs nao consultadas pelo motivo certo'
+        $late = (& $vBase); $late.Hypervisor = { Start-Sleep -Milliseconds 1200; @([pscustomobject]@{ HypervisorPresent = $true }) }
+        $q = Invoke-AtmVirtualizationQuery -Source (& $vSrc $late) -Deadline ([datetime]::UtcNow.AddMilliseconds(600))
+        Assert-True ($q.VmCoverage.Status -ceq 'TIMEOUT' -and $q.Namespace -ceq 'NOT_QUERIED') 'prazo no meio: VMs TIMEOUT, namespace nao consultado'
+        $none = Get-AtmVirtualizationFindings -Query (Invoke-AtmVirtualizationQuery -Source (& $vSrc (& $vBase)) -Deadline ([datetime]::UtcNow.AddSeconds(-1))) -Collection $null -Pseudonymizer $b4Pz
+        Assert-Eq @($none.Findings).Count 0 'prazo antes da plataforma: nenhum achado inventado'
     }
     Test-Case 'Virtualizacao' 'P2-B: processos de virtualizacao - vmmem e vmwp isolados (so a classe), identidade nao verificada, contadores lidos ou nao, vinculo VM-processo por prova temporal; snapshot indisponivel' {
         $rows = @((& $vPRow 4 0 'System' $vT0.AddHours(-2)), (& $vPRow 700 4 'vmwp.exe' $vT0.AddMinutes(-10) 3000), (& $vPRow 800 4 'vmmemWSL' $vT0.AddMinutes(-5) 7000), (& $vPRow 900 4 'vmmem.P2BSecretVm' $null), (& $vPRow 950 4 'vmwp.exe' $vT0.AddMinutes(5)), (& $vPRow 960 4 'notepad.exe' $vT0.AddHours(-1)))
@@ -6261,6 +6283,17 @@ try {
         Assert-True ((& $vVms $r).Count -eq 0 -and (& $vPlat $r).Provider -eq $null -and (& $vEv (& $vPlat $r) 'VIRTUALIZATION_WORKER') -contains ('VMMEM|' + (ConvertTo-AtmProcessKey -ProcessId 800 -CreationUtc $vT0.AddMinutes(-5)))) 'vmmemWSL observado, nunca atribuido'
         $r = & $vRun (& $vBase $vmRows) $coll
         Assert-True (@((& $vVms $r) | Where-Object { $_.Provider -or (& $vEv $_ 'VM_UNATTRIBUTED').Count -ne 1 }).Count -eq 0) 'nenhum hint: todas UNATTRIBUTED'
+        # Review P2-B: a display name carried by two VMs identifies neither; a hint not observed only when VMs were
+        # looked at, once per provider and name.
+        $twin = @((& $vVmRow $vG1 'Twin VM' 2 0), (& $vVmRow $vG2 'twin vm' 3 0))
+        $r = & $vRun (& $vBase $twin) $coll @((& $vHints 'prov-a' @([pscustomobject]@{ Kind = 'VmName'; Value = 'Twin VM' })))
+        Assert-True (@((& $vVms $r) | Where-Object { $_.Provider }).Count -eq 0 -and @((& $vVms $r) | Where-Object { (& $vEv $_ 'VM_NAME_NOT_UNIQUE').Count -eq 1 }).Count -eq 2) 'nome repetido em duas VMs: nenhuma atribuida'
+        $dupHint = & $vHints 'prov-z' @([pscustomobject]@{ Kind = 'VmName'; Value = 'Missing VM' }, [pscustomobject]@{ Kind = 'VmName'; Value = 'MISSING VM' })
+        $r = & $vRun (& $vBase $vmRows) $coll @($dupHint)
+        Assert-Eq (& $vEv (& $vPlat $r) 'VM_HINT_NOT_OBSERVED').Count 1 'hint nao observado: uma vez por provider e nome'
+        $denT = (& $vBase); $denT.Vms = { throw (New-Object UnauthorizedAccessException('x')) }
+        $r = & $vRun $denT $coll @($dupHint)
+        Assert-Eq (& $vEv (& $vPlat $r) 'VM_HINT_NOT_OBSERVED').Count 0 'VMs nao consultadas: nenhum "nao observado"'
     }
     Test-Case 'Virtualizacao' 'P2-B: prazo excedido, integracao ao diagnose (coberturas, JSON e relatorio sem nomes), privacidade' {
         $calls = @{}

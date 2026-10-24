@@ -137,11 +137,18 @@ are P2-C.
   so the VM query runs only when the namespace is listed and `vmms` is running (otherwise `NOT_OBSERVABLE` with the
   reason). One query of `Msvm_ComputerSystem` with `Name`, `Caption`, `Description`, `ElementName`, `EnabledState`
   and `ProcessID`, at most 256 objects (`PARTIAL` beyond). A row is a VM only when `Name` is a GUID, `Caption` is
-  `Virtual Machine` and `Description` is `Microsoft Virtual Computer System`; the host row (`Hosting Computer System`,
+  `Virtual Machine` and `Description` is `Microsoft Virtual Computer System` (the documented value) or `Microsoft
+  Virtual Machine` (a wording reported by Hyper-V hosts; not verified on a real VM in this phase: the CI runners have
+  Hyper-V with no VM); the host row (`Hosting Computer System`,
   `Microsoft Hosting Computer System`, not a GUID) is left out; anything else is `VM_ROW_AMBIGUOUS` or
-  `VM_ROW_MALFORMED` and never counted. States: the documented `EnabledState` values (2, 3, 4, 10, 32768, 32769);
-  any other value is `UNKNOWN`. Denied: `DENIED` with `ElevationWouldHelp = YES` (Hyper-V Administrators or an
-  elevated administrator), never "no VMs". No configuration, disk or settings class is queried.
+  `VM_ROW_MALFORMED` and never counted. States: the `EnabledState` values whose meaning for a VM the documentation
+  states (2, 3, 4 and 10 in its table; 32768 paused and 32769 suspended in its text); any other value, including 6
+  and 9, is `UNKNOWN`, and an unreadable or out-of-range value never aborts the run. Denied: `DENIED` with
+  `ElevationWouldHelp = YES` (Hyper-V Administrators or an elevated administrator; `UNKNOWN` when the account is
+  already an elevated administrator), never "no VMs". An unreadable VM state, an unverified worker or a key collision
+  makes the record `PARTIAL`. The VM query is skipped (`NOT_OBSERVABLE`, `VMMS_STATE_UNREADABLE`) when the `vmms`
+  state cannot be read, and is `TIMEOUT` when the deadline came first. The CIM timeouts (30 s per read) are not
+  shortened to the time left before the deadline (as for services). No configuration, disk or settings class is queried.
 * **Worker processes (`virtualization-processes`).** From the run's process snapshot: `vmwp.exe` (`VMWP`) and
   `vmmem`, `vmmem.<suffix>`, `vmmemWSL` (`VMMEM`); the raw name is never exported. Verified and unverified identities
   are told apart; working set, private bytes and CPU time are summed over the workers whose counters were read
@@ -155,8 +162,9 @@ are P2-C.
   `ServiceOwner` hint attributes a VM only through a verified chain: its worker is verified, the worker's parent link
   is verified, and the parent is the verified process of a running service that the same provider declares in
   `GetServiceHints`. Otherwise `VM_UNATTRIBUTED`; two providers: provider `null` with
-  `PROVIDER_ATTRIBUTION_AMBIGUOUS`. A declared VM name that is not observed is an observation on the platform finding
-  (`VM_HINT_NOT_OBSERVED`), never an absence.
+  `PROVIDER_ATTRIBUTION_AMBIGUOUS`; a declared name carried by several VMs attributes none (`VM_NAME_NOT_UNIQUE`). A
+  declared VM name that is not observed is an observation on the platform finding (`VM_HINT_NOT_OBSERVED`, only when
+  the VM query ran, once per provider and name), never an absence.
 * **Privacy (ADR-0010).** The VM key is a keyed pseudonym of the GUID (`atm-virtual-machine/1`); the display name,
   the GUID, the host name and raw worker names never leave memory.
 * **Safety (rule 9).** No VM operation, CIM method, Hyper-V module, remote CIM or CIM session (static tests); queries

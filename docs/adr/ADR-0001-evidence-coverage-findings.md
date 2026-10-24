@@ -100,5 +100,6 @@ The decisions above are kept; the maintainer's review of PR #42 added:
   needs a state of its own, and a coverage record carries none; a new kind reuses the findings, JSON and report
   machinery, which is a smaller contract change than a new top-level object. `PRESENT` only on a positive sign;
   `NOT_PRESENT` is in the closed list but not produced (no source used proves absence, as for services).
-* **`VirtualMachine` states:** `RUNNING`, `OFF`, `SAVED`, `PAUSED`, `PENDING`, `UNKNOWN`, from the documented
-  `Msvm_ComputerSystem.EnabledState` values only.
+* **`VirtualMachine` states:** `RUNNING`, `OFF`, `SAVED`, `PAUSED`, `PENDING`, `UNKNOWN`, only from
+  `Msvm_ComputerSystem.EnabledState` values whose meaning for a VM the Microsoft page states (2, 3, 4 and 10 in its
+  table; 32768 and 32769 in its text); any other value is `UNKNOWN`.
