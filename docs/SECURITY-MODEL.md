@@ -91,6 +91,27 @@ Deletion itself (`AtmDeleter`) never trusts names between checks:
 * it aborts before deleting anything on a reparse point, protected file or enumeration error, and stops at
   the first failure; entries created after planning make the parent removal fail instead of being deleted.
 
+## Process control (V0.2, D-4)
+
+The diagnostics engine runs Git (ADR-0006) only through one native runner (`AtmJobRunner` in `lib\Native.cs`,
+called by `Invoke-AtmGitCommand`):
+
+* Each run creates a Windows job object of its own. The child is created **inside** that job
+  (`PROC_THREAD_ATTRIBUTE_JOB_LIST`): when that is not possible nothing runs, so no process ever exists outside the
+  job. The job kills its processes when its handle is closed, limits job memory and active processes, allows no
+  breakaway, and its limits are read back before anything starts. The child inherits only stdin (`NUL`), stdout and
+  stderr.
+* On timeout the runner terminates **that job** (`TerminateJobObject` on the handle it created), and the job's
+  processes end when the handle is closed at the end of every run. This is the only termination in the product: no
+  other process is opened, signalled or terminated (`TerminateProcess`, `OpenProcess`, `CreateRemoteThread` are
+  absent from `Native.cs`, checked by the layering test). Pre-existing processes are never affected.
+* Only allow-listed, read-only Git commands are started, with `--no-optional-locks` and no network
+  (`protocol.allow=never`, `GIT_NO_LAZY_FETCH=1`), so terminating one leaves no lock file behind (tested on suite
+  fixtures).
+* An elevated run starts `git.exe` only if the file and its directory pass the installer's ACL rule (only SYSTEM,
+  Administrators, TrustedInstaller and CREATOR OWNER may own or write them). The check covers the resolved launcher
+  (`cmd\git.exe` in Git for Windows); the program it starts is not checked.
+
 ## Known limits (documented, not hidden)
 
 * **TOCTOU**: a process may open a file between the last check and the deletion. The window is reduced to a
