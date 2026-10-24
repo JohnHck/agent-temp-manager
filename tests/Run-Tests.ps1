@@ -4883,14 +4883,41 @@ try {
         & $gitFx $fx.Repo @('config', 'core.worktree', $alt.Replace('\', '/')) $fx.Repo
         $tl = (& $gitFxOut $fx.Repo @('rev-parse', '--show-toplevel') $null).Out.Trim().Replace('/', '\')
         Assert-True ([string]::Equals((Get-AtmNormalizedPath $tl), (Get-AtmNormalizedPath $alt), [StringComparison]::OrdinalIgnoreCase)) 'contraprova: core.worktree leva o Git a outro diretorio'
+        Assert-Eq (Get-AtmGitPreflight -Target $fx.Repo).Reason 'GIT_PREFLIGHT_CORE_WORKTREE' 'core.worktree recusado mesmo local (o Git o resolve a partir do diretorio Git)'
+        Assert-Eq (& $refusedRun $fx.Repo) 0 'core.worktree: nenhum processo Git'
+        & $gitFx $fx.Repo @('config', '--unset', 'core.worktree') $null
         $cfgFile = Join-Path $fx.Repo '.git\config'
-        foreach ($c in @(@("[core]`n`tworktree = \\\\$uncHost\\share", 'GIT_PREFLIGHT_CONFIG_PATH'), @("[core]`n`texcludesFile = //$uncHost/s/ignore", 'GIT_PREFLIGHT_CONFIG_PATH'), @("[core]`n`tattributesFile = ~/attr", 'GIT_PREFLIGHT_CONFIG_PATH'),
+        foreach ($c in @(@("[core]`n`tworktree = \\\\$uncHost\\share", 'GIT_PREFLIGHT_CORE_WORKTREE'), @("[core]`n`tworktree = ../lnk", 'GIT_PREFLIGHT_CORE_WORKTREE'), @("[core]`n`thooksPath = hooks-rel", 'GIT_PREFLIGHT_CONFIG_PATH'), @("[core]`n`texcludesFile = //$uncHost/s/ignore", 'GIT_PREFLIGHT_CONFIG_PATH'), @("[core]`n`tattributesFile = ~/attr", 'GIT_PREFLIGHT_CONFIG_PATH'),
                 @("[atm]`n`tsomething = \\\\$uncHost\\x", 'GIT_PREFLIGHT_CONFIG_NETWORK'), @("[core]`n`tbroken = a \`n`tb", 'GIT_CONFIG_UNPARSEABLE'))) {
             $orig = [IO.File]::ReadAllText($cfgFile)
             [IO.File]::WriteAllText($cfgFile, $orig + "`n" + $c[0] + "`n")
             Assert-Eq (Get-AtmGitPreflight -Target $fx.Repo).Reason $c[1] "configuracao recusada: $($c[1])"
             [IO.File]::WriteAllText($cfgFile, $orig)
         }
+        # Bare fallback: when <dir>\.git is not a Git directory, Git reads <dir> itself as a bare repository (its config
+        # included). Proved locally, then refused.
+        $bareX = Join-Path $out 'bare-fallback'
+        foreach ($d in @('.git', 'objects', 'refs')) { [void][IO.Directory]::CreateDirectory((Join-Path $bareX $d)) }
+        [IO.File]::WriteAllText((Join-Path $bareX 'HEAD'), "ref: refs/heads/main`n"); [IO.File]::WriteAllText((Join-Path $bareX 'config'), "[atm]`n`tprobe = from-target-config`n")
+        Assert-Eq (& $gitFxOut $bareX @('config', '--get', 'atm.probe') $null).Out.Trim() 'from-target-config' 'contraprova: o Git le o proprio alvo como repositorio bare'
+        Assert-Eq (Get-AtmGitPreflight -Target $bareX).Reason 'GIT_PREFLIGHT_TARGET_IS_GITDIR' 'alvo com HEAD recusado'
+        Assert-Eq (& $refusedRun $bareX) 0 'alvo bare: nenhum processo Git'
+        $badHead = Join-Path $out 'bad-head'
+        foreach ($d in @('.git\objects', '.git\refs')) { [void][IO.Directory]::CreateDirectory((Join-Path $badHead $d)) }
+        [IO.File]::WriteAllText((Join-Path $badHead '.git\HEAD'), "garbage`n")
+        Assert-Eq (Get-AtmGitPreflight -Target $badHead).Reason 'GIT_PREFLIGHT_GITDIR_INVALID' 'diretorio .git sem HEAD valido recusado'
+        $noObj = Join-Path $out 'no-objects'; [void][IO.Directory]::CreateDirectory((Join-Path $noObj '.git\refs'))
+        [IO.File]::WriteAllText((Join-Path $noObj '.git\HEAD'), "ref: refs/heads/main`n")
+        Assert-Eq (Get-AtmGitPreflight -Target $noObj).Reason 'GIT_PREFLIGHT_GITDIR_INVALID' 'diretorio .git sem objects recusado'
+        # Reserved device names never reach the file system.
+        foreach ($v in @('C:\x\COM1', 'C:\x\nul.txt', 'AUX', 'C:\x\LPT9\y', 'C:\x\conout')) { Assert-Eq (Resolve-AtmGitReferencedPath -Value $v -BaseDir $out).Reason 'GIT_REF_PATH_INVALID' "nome de dispositivo recusado: $v" }
+        # A forged preflight is not enough: the runner takes its own.
+        $forged = [pscustomobject]@{ Status = 'OK'; WorkTree = (Get-AtmNormalizedPath $bareX); GitDir = (Join-Path $bareX '.git'); CommonDir = (Join-Path $bareX '.git'); StatusAllowed = $true }
+        $n = & $gitSpy { $script:fr = & $gitOpen { Invoke-AtmGitCommand -Git $testGit -Arguments @('rev-parse', '--show-toplevel') -WorkingDirectory $bareX -Preflight $forged } }
+        Assert-True ($n -eq 0 -and $script:fr.Reason -eq 'GIT_PREFLIGHT_REQUIRED') "pre-verificacao forjada recusada sem processo: $($script:fr.Reason)"
+        # A PATH entry on a drive that is not fixed is skipped before any file-system call.
+        $free = @([char[]]'ZYXWVUTSRQPONMLKJIHG' | Where-Object { (New-Object IO.DriveInfo([string]$_)).DriveType -eq [IO.DriveType]::NoRootDirectory })
+        if ($free.Count -gt 0) { Assert-Eq (Resolve-AtmGitExecutable -PathVariable ("$($free[0]):\Git\cmd") -Elevated $false).Reason 'GIT_NOT_FOUND' 'entrada do PATH em unidade nao fixa ignorada' }
         $script:caseNote = 'host UNC de teste em .invalid; nenhum valor de rede chega a uma chamada de sistema de arquivos'
     }
     Test-Case 'Git' 'P3-B0: configuracao isolada (so opcoes de linha de comando) e D-3 (filtro do repositorio bloqueia status; atributo sem driver e filtro global nao executam), com contraprovas' {
@@ -5025,6 +5052,8 @@ try {
         [void][IO.Directory]::CreateDirectory((Join-Path $R 'deep\deeper'))
         & $gitFx $partB @('init', '-q', '-b', 'main') $null
         $S = Join-Path $base 'stranger'; [void][IO.Directory]::CreateDirectory($S); & $gitFx $S @('init', '-q', '-b', 'main') $null
+        [IO.File]::WriteAllText((Join-Path $S 's.txt'), "s`n"); & $gitFx $S @('add', 's.txt') $S; & $gitFx $S @('commit', '-q', '-m', 's') $S
+        $sWt = Join-Path $partA 'stranger-wt'; & $gitFx $S @('worktree', 'add', '-q', $sWt, '-b', 'swt') $S
         # A worktree directory whose administrative entry does not exist (positive not found) under partition A, and one
         # whose .git points to a network path (refused, never an orphan).
         $orph = Join-Path $partA 'orphan'; [void][IO.Directory]::CreateDirectory($orph)
@@ -5059,11 +5088,15 @@ try {
             Assert-True ($fo.Count -eq 1 -and $fo[0].State -eq 'APPARENT_ORPHAN' -and @($fo[0].Evidence | ForEach-Object { $_.Code }) -contains 'LOCAL_WORK_UNKNOWN') 'orfa aparente so com entrada administrativa positivamente ausente, trabalho local desconhecido'
             Assert-Eq @($wts | Where-Object { $_.State -eq 'APPARENT_ORPHAN' }).Count 1 'nenhum outro orfao (a de rede e recusada, nao orfa)'
             Assert-True (@($repos | Where-Object { @($_.Evidence | Where-Object { $_.Code -eq 'REPOSITORY_PREFLIGHT_REFUSED' -and $_.Detail -eq 'GIT_PREFLIGHT_GITDIR_NETWORK' }).Count -eq 1 }).Count -eq 1) 'gitdir de rede: recusado antes do Git'
-            Assert-Eq @($repos | Where-Object { @($_.Evidence | Where-Object { $_.Code -eq 'REPOSITORY_DISCOVERED' }).Count -gt 0 }).Count 2 'repositorios R e Q (raiz da particao B)'
+            Assert-Eq @($repos | Where-Object { @($_.Evidence | Where-Object { $_.Code -eq 'REPOSITORY_DISCOVERED' }).Count -gt 0 }).Count 3 'repositorios R, Q (raiz da particao B) e S (so pela worktree na particao A)'
+            $kS = 'git/r-' + (Get-AtmPseudonym -Pseudonymizer $pz -Domain 'atm-repository/1' -Fields @((Get-AtmNormalizedPath (Join-Path $S '.git')).ToLowerInvariant()))
+            $fS = @($repos | Where-Object { $_.Key -ceq $kS })
+            Assert-True ($fS.Count -eq 1 -and @($fS[0].Evidence | Where-Object { $_.Code -eq 'GIT_NOT_RUN' -and $_.Detail -eq 'REPOSITORY_OUTSIDE_SOURCES' }).Count -eq 1 -and @($fS[0].Evidence | Where-Object { $_.Code -eq 'REPOSITORY_CONFIRMED_BY_GIT' }).Count -eq 0) 'repositorio alcancado so por gitdir: registrado pelos arquivos, sem Git'
+            Assert-True ((& $codes (& $wk $sWt)) -contains 'WORKTREE_REGISTERED') 'worktree de S na particao registrada'
             Assert-True (@($wts | ForEach-Object { @($_.Evidence | Where-Object { $_.Code -eq 'LOCAL_WORK_UNKNOWN' }).Count } | Where-Object { $_ -ne 1 }).Count -eq 0 -and @($res.Findings | Where-Object { $_.State -eq 'CLEAN_AND_PUBLISHED_UNKNOWN' }).Count -eq 0) 'toda worktree declara trabalho local desconhecido; nada limpo/publicado'
             $sN = Get-AtmNormalizedPath $S
             Assert-Eq @($log | Where-Object { [string]::Equals($_.WorkingDirectory, $sN, [StringComparison]::OrdinalIgnoreCase) }).Count 0 'repositorio nunca citado nunca recebe o Git (espiao)'
-            Assert-Eq @($log | Where-Object { $_.WorkingDirectory -like "*net-wt*" -or $_.WorkingDirectory -like "*orphan*" }).Count 0 'alvos recusados ou orfaos nunca recebem o Git'
+            Assert-Eq @($log | Where-Object { $_.WorkingDirectory -like "*net-wt*" -or $_.WorkingDirectory -like "*orphan*" -or $_.WorkingDirectory -like "*stranger*" }).Count 0 'alvos recusados, orfaos e repositorios fora das fontes nunca recebem o Git'
             $dc = @($res.Coverage | Where-Object { $_.Collector -eq 'worktree-discovery' })[0]
             Assert-True ($dc.Status -eq 'PARTIAL' -and @($dc.Reasons) -contains 'DISCOVERY_BOUNDED' -and @($dc.Reasons) -contains 'EXPLICIT_PATH_INVALID' -and @($dc.Reasons) -contains 'PREFLIGHT_REFUSED_TARGETS') "cobertura limitada: $(@($dc.Reasons) -join ',')"
             Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'git' })[0].Status 'COMPLETE' 'chamadas ao Git completas'
@@ -5075,9 +5108,11 @@ try {
             try {
                 $one = Get-AtmWorktreeDiscovery -Partitions $parts -Git $testGit -Pseudonymizer $pz -MaxRepositories 1
                 $walk = Get-AtmWorktreeDiscovery -RepositoryPaths @((Join-Path $R 'deep\deeper')) -Git $null -Pseudonymizer $pz -MaxWalkLevels 1
+                $capC = Get-AtmWorktreeDiscovery -Partitions $parts -Git $null -Pseudonymizer $pz -MaxCandidates 2
             } finally { $script:AtmWorktreeDiagnosticsEnabled = $false }
             Assert-True (@($one.Coverage[0].Reasons) -contains 'REPOSITORY_LIMIT' -and @($one.Findings | Where-Object { $_.Kind -eq 'Repository' -and @($_.Evidence | Where-Object { $_.Code -eq 'REPOSITORY_DISCOVERED' }).Count -gt 0 }).Count -eq 1) 'limite de repositorios: PARTIAL'
             Assert-True (@($walk.Coverage[0].Reasons) -contains 'WALK_LIMIT' -and @($walk.Findings).Count -eq 0) 'limite de subida: PARTIAL, nada inventado'
+            Assert-True (@($capC.Coverage[0].Reasons) -contains 'CANDIDATE_LIMIT') 'limite de diretorios examinados (recusados incluidos): PARTIAL'
             Assert-True (@($walk.Coverage | Where-Object { $_.Collector -eq 'git' })[0].Status -eq 'UNAVAILABLE') 'sem Git: cobertura git indisponivel'
             # Integrated: closed gate leaves diagnose unchanged; open gate adds the two collectors.
             $p = New-TestProfile 'disc-int'
