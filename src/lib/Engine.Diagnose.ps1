@@ -2975,24 +2975,32 @@ $script:AtmHandleMaxFilesPerNode = 16
 $script:AtmHandleMaxFilesPerRun = 256
 $script:AtmHandleMaxSessions = 64
 $script:AtmHandleMaxHolders = 64
-$script:AtmHandleReasonCodes = @('HANDLES_SAMPLED', 'HANDLE_FILES_CAPPED', 'HANDLE_SESSION_LIMIT', 'HANDLE_QUERY_FAILED', 'HANDLE_HOLDERS_CAPPED', 'HANDLE_IDENTITY_UNVERIFIED',
+$script:AtmHandleReasonCodes = @('HANDLES_SAMPLED', 'HANDLE_NO_FILES', 'HANDLE_FILES_CAPPED', 'HANDLE_SESSION_LIMIT', 'HANDLE_QUERY_FAILED', 'HANDLE_HOLDERS_CAPPED', 'HANDLE_IDENTITY_UNVERIFIED',
     'HANDLE_NODE_UNREADABLE', 'HANDLE_NO_NODE', 'PROCESS_SNAPSHOT_UNAVAILABLE', 'WORKING_DIRECTORY_DEFERRED')
 $script:AtmHandleEvidenceCodes = @('FILE_HELD_OPEN', 'FILE_HELD_OPEN_UNVERIFIED', 'OPEN_FILES_SAMPLED')
 
 function Get-AtmHandleSampleFiles {
-    # Up to -Max regular files directly in -Dir (never recursive), every path through the resolver (local fixed drive,
-    # no reparse point). Capped is $true when more files exist than were taken. Error: HANDLE_NODE_UNREADABLE.
+    # Up to -Max regular files directly in -Dir (never recursive). -Dir must be drive-absolute on a fixed drive with no
+    # reparse point in its chain (native check); a file name is taken as listed (no expansion, so names such as
+    # ~$doc.docx are kept) unless it holds a control character or a colon, and its own chain is checked natively. At
+    # most 4 x -Max entries are looked at. Capped is $true when more files exist than were taken. Error:
+    # HANDLE_NODE_UNREADABLE.
     param([string]$Dir, [int]$Max = $script:AtmHandleMaxFilesPerNode)
     $out = [ordered]@{ Files = @(); Capped = $false; Error = $null }
-    $r = Resolve-AtmGitReferencedPath -Value $Dir -BaseDir $null
-    if ($r.Status -ne 'OK') { $out.Error = 'HANDLE_NODE_UNREADABLE'; return [pscustomobject]$out }
+    if ([string]::IsNullOrWhiteSpace($Dir) -or $Dir -notmatch '^[A-Za-z]:\\' -or $Dir -match '[\x00-\x1f]' -or $Dir.IndexOf(':', 2) -ge 0) { $out.Error = 'HANDLE_NODE_UNREADABLE'; return [pscustomobject]$out }
+    $dirPath = $Dir.TrimEnd('\')
+    if ((Test-AtmGitPathChain $dirPath).Status -cne 'OK') { $out.Error = 'HANDLE_NODE_UNREADABLE'; return [pscustomobject]$out }
     $files = New-Object System.Collections.Generic.List[string]
+    $seen = 0
     try {
-        foreach ($fi in (New-Object IO.DirectoryInfo($r.Path)).EnumerateFiles()) {
+        foreach ($fi in (New-Object IO.DirectoryInfo($dirPath)).EnumerateFiles()) {
+            $seen++
+            if ($seen -gt 4 * $Max) { $out.Capped = $true; break }
             if (($fi.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
             if ($files.Count -ge $Max) { $out.Capped = $true; break }
-            $fr = Resolve-AtmGitReferencedPath -Value $fi.Name -BaseDir $r.Path
-            if ($fr.Status -eq 'OK') { $files.Add($fr.Path) }
+            if ($fi.Name -match '[\x00-\x1f:]') { continue }
+            $fp = $dirPath + '\' + $fi.Name
+            if ($fp.Length -lt 260 -and (Test-AtmGitPathChain $fp).Status -ceq 'OK') { $files.Add($fp) }
         }
     } catch { $out.Error = 'HANDLE_NODE_UNREADABLE' }
     $out.Files = $files.ToArray()
@@ -3014,9 +3022,11 @@ function Get-AtmHandleEvidence {
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $reasons = New-Object System.Collections.Generic.List[string]
     $evidence = @{}
-    $nodes = @($Nodes | Where-Object { $null -ne $_ } | Sort-Object Key)
+    # One node per key (the first kept), in ordinal order (caps cut the same nodes on every machine).
+    $byKey = [ordered]@{}
+    foreach ($x in @($Nodes | Where-Object { $null -ne $_ })) { if (-not $byKey.Contains([string]$x.Key)) { $byKey[[string]$x.Key] = $x } }
+    $nodes = @(Get-AtmOrdinalSorted -Items @($byKey.Values) -Signature { param($x) [string]$x.Key })
     if ($nodes.Count -eq 0) { return [pscustomobject]@{ Evidence = $evidence; Coverage = (New-AtmCoverage -Collector 'handles' -Status 'NOT_OBSERVABLE' -Reasons @('HANDLE_NO_NODE') -ElevationWouldHelp 'NO') } }
-    $reasons.Add('HANDLES_SAMPLED')
     if ($null -eq $Collection -or $Collection.Failed) { $reasons.Add('PROCESS_SNAPSHOT_UNAVAILABLE') }
     $self = @{}; if ($null -ne $SelfKeys) { foreach ($k in @($SelfKeys.Keys)) { if ($k) { $self[$k] = $true } } }
     $q = $(if ($null -ne $Query) { $Query } else { { param($Files, $Max) $h = $null; $st = [AgentTempManager.AtmRestartManager]::Query([string[]]$Files, $Max, [ref]$h); [pscustomobject]@{ Status = $st; Holders = @($h) } } })
@@ -3040,10 +3050,16 @@ function Get-AtmHandleEvidence {
         $list = New-Object System.Collections.Generic.List[object]
         if ([string]$res.Status -notin @('OK', 'PARTIAL')) { $reasons.Add('HANDLE_QUERY_FAILED'); continue }
         $queried++
-        if ($res.Status -ceq 'PARTIAL') { $reasons.Add('HANDLE_HOLDERS_CAPPED') }
+        if ($res.Status -ceq 'PARTIAL') {
+            $reasons.Add('HANDLE_HOLDERS_CAPPED')
+            # More holders than could be listed: the item is held; who holds it is only partly known.
+            if (@($res.Holders).Count -eq 0) { $list.Add((New-AtmEvidence -Code 'FILE_HELD_OPEN_UNVERIFIED' -Source 'restart-manager' -Collector 'handles' -ObservedUtc $now -Detail 'HOLDERS_CAPPED')) }
+        }
         $list.Add((New-AtmEvidence -Code 'OPEN_FILES_SAMPLED' -Source 'restart-manager' -Collector 'handles' -ObservedUtc $now -Detail ([string]$files.Count)))
         $seen = @{}
-        foreach ($h in @($res.Holders)) {
+        $holders = @($res.Holders)
+        if ($holders.Count -gt $MaxHolders) { $reasons.Add('HANDLE_HOLDERS_CAPPED'); $holders = @($holders[0..($MaxHolders - 1)]) }
+        foreach ($h in $holders) {
             $parts = ([string]$h).Split('|')
             if ($parts.Count -ne 2) { continue }
             $hpid = ConvertTo-AtmProcessId $parts[0]
@@ -3063,7 +3079,8 @@ function Get-AtmHandleEvidence {
         if (@($list | Where-Object { $_.Code -like 'FILE_HELD_OPEN*' }).Count -gt 0) { $evidence[[string]$n.Key] = @(Get-AtmOrdinalSorted -Items $list.ToArray() -Signature { param($e) '{0}|{1}' -f $e.Code, $e.Detail }) }
     }
     $sw.Stop()
-    $cov = New-AtmCoverage -Collector 'handles' -Status 'PARTIAL' -Reasons @(Get-AtmSortedCodes $reasons) -ElevationWouldHelp 'UNKNOWN' -Observed $queried -Expected $nodes.Count -StartedUtc $started -ElapsedMs $sw.ElapsedMilliseconds
+    if ($queried -gt 0) { $reasons.Add('HANDLES_SAMPLED') } elseif ($reasons.Count -eq 0) { $reasons.Add('HANDLE_NO_FILES') }
+    $cov = New-AtmCoverage -Collector 'handles' -Status $(if ($queried -gt 0) { 'PARTIAL' } else { 'NOT_OBSERVABLE' }) -Reasons @(Get-AtmSortedCodes $reasons) -ElevationWouldHelp 'UNKNOWN' -Observed $queried -Expected $nodes.Count -StartedUtc $started -ElapsedMs $sw.ElapsedMilliseconds
     return [pscustomobject]@{ Evidence = $evidence; Coverage = $cov }
 }
 
@@ -3108,6 +3125,8 @@ function Invoke-AtmDiagnoseRun {
     $deadline = $started.AddSeconds($DeadlineSeconds)
     $coverage = New-Object System.Collections.Generic.List[object]
     $findings = New-Object System.Collections.Generic.List[object]
+    # Set by the agent runtime part when it runs (used by the open-file collector).
+    $procCollection = $null; $selfKeys = $null
 
     # Identity always runs: it reads only the own token, and every other coverage record is explained by it.
     $identity = Get-AtmIdentityState -Source $IdentitySource
@@ -3211,8 +3230,6 @@ function Invoke-AtmDiagnoseRun {
         foreach ($f in $runtime.Findings) { $findings.Add($f) }
     }
 
-    $procCollection = $(if (Test-Path variable:procCollection) { $procCollection } else { $null })
-    $selfKeys = $(if (Test-Path variable:selfKeys) { $selfKeys } else { $null })
     $wtNodes = @()
     # Worktrees (P3-B): only with the worktree diagnostics gate open (closed in every shipped copy). Closed, the output is
     # unchanged, except an explicit repository list, which is reported as not observable.
@@ -3235,6 +3252,7 @@ function Invoke-AtmDiagnoseRun {
         if ($null -ne $inv) {
             $keyFn = $(if ($null -ne $PartitionKeyFunction) { $PartitionKeyFunction } else { { param($Provider, $Path) ConvertTo-AtmPartitionKey -Pseudonymizer $Pseudonymizer -Provider $Provider -Path $Path } })
             foreach ($part in @($inv.Partitions | Where-Object { $null -ne $_ -and $_.Kind -ne 'NotScanned' })) {
+                if ([datetime]::UtcNow -ge $deadline) { break }
                 $smp = Get-AtmHandleSampleFiles -Dir ([string]$part.Path)
                 $nodes.Add([pscustomobject]@{ Key = [string](& $keyFn $part.Provider $part.Path); Files = $smp.Files; Capped = $smp.Capped; Error = $smp.Error })
             }

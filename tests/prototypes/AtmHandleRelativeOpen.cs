@@ -39,6 +39,7 @@ namespace AgentTempManagerPrototype
         public static int Open(string path, bool dontReparse)
         {
             if (string.IsNullOrEmpty(path) || path.Length < 4 || path[1] != ':' || path[2] != '\\' || !char.IsLetter(path[0])) return -1;
+            if (path.Length > 32000) return -1; // UNICODE_STRING lengths are 16-bit byte counts
             string rootPath = path.Substring(0, 3);
             if (GetDriveTypeW(rootPath) != 3) return -2;
             // The volume root is opened normally: the drive letter is an object-manager link, which OBJ_DONT_REPARSE

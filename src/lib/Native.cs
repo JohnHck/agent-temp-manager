@@ -790,6 +790,8 @@ namespace AgentTempManager
         [DllImport("rstrtmgr.dll")]
         private static extern int RmEndSession(uint sessionHandle);
 
+        private const uint HardMax = 4096;
+
         public static string Query(string[] files, int maxProcesses, out string[] holders)
         {
             holders = new string[0];
@@ -807,7 +809,18 @@ namespace AgentTempManager
                 RmProcessInfo[] info = new RmProcessInfo[maxProcesses];
                 rc = RmGetList(session, out needed, ref count, info, out reasons);
                 bool partial = false;
-                if (rc == 234) { partial = true; count = 0; } // ERROR_MORE_DATA: more holders than the cap
+                if (rc == 234)
+                {
+                    // ERROR_MORE_DATA: once more with the size Restart Manager reports (at most HardMax); still more
+                    // holders after that is PARTIAL with no list (the caller marks the item held, holders capped).
+                    uint size = needed > HardMax ? HardMax : needed;
+                    info = new RmProcessInfo[size];
+                    count = size;
+                    rc = RmGetList(session, out needed, ref count, info, out reasons);
+                    if (rc == 234) { partial = true; count = 0; }
+                    else if (rc != 0) return "FAILED_LIST_" + rc;
+                    else if (needed > count) partial = true;
+                }
                 else if (rc != 0) return "FAILED_LIST_" + rc;
                 List<string> list = new List<string>();
                 for (int i = 0; i < count && i < info.Length; i++)
