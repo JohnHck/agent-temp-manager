@@ -3008,9 +3008,9 @@ function Get-AtmHandleEvidence {
       Coverage: never COMPLETE (a sample of files; directories and working directories are not seen by Restart Manager).
     #>
     param($Nodes = @(), $Collection = $null, $SelfKeys = $null, [int]$MaxFilesPerRun = $script:AtmHandleMaxFilesPerRun, [int]$MaxSessions = $script:AtmHandleMaxSessions,
-        [int]$MaxHolders = $script:AtmHandleMaxHolders, $Deadline = $null, [scriptblock]$Query = $null)
-    $now = [datetime]::UtcNow
-    $started = $now
+        [int]$MaxHolders = $script:AtmHandleMaxHolders, $Deadline = $null, [scriptblock]$Query = $null, $ObservedUtc = $null)
+    $started = [datetime]::UtcNow
+    $now = $(if ($null -ne $ObservedUtc) { [datetime]$ObservedUtc } else { $started })
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $reasons = New-Object System.Collections.Generic.List[string]
     $evidence = @{}
@@ -3059,7 +3059,8 @@ function Get-AtmHandleEvidence {
             $seen[$code + $detail] = $true
             $list.Add((New-AtmEvidence -Code $code -Source 'restart-manager' -Collector 'handles' -ObservedUtc $now -Detail $detail))
         }
-        $evidence[[string]$n.Key] = @(Get-AtmOrdinalSorted -Items $list.ToArray() -Signature { param($e) '{0}|{1}' -f $e.Code, $e.Detail })
+        # A node with no holder gets nothing on its finding (absence proves nothing; the coverage record says "sampled").
+        if (@($list | Where-Object { $_.Code -like 'FILE_HELD_OPEN*' }).Count -gt 0) { $evidence[[string]$n.Key] = @(Get-AtmOrdinalSorted -Items $list.ToArray() -Signature { param($e) '{0}|{1}' -f $e.Code, $e.Detail }) }
     }
     $sw.Stop()
     $cov = New-AtmCoverage -Collector 'handles' -Status 'PARTIAL' -Reasons @(Get-AtmSortedCodes $reasons) -ElevationWouldHelp 'UNKNOWN' -Observed $queried -Expected $nodes.Count -StartedUtc $started -ElapsedMs $sw.ElapsedMilliseconds
@@ -3239,7 +3240,8 @@ function Invoke-AtmDiagnoseRun {
             }
         }
         foreach ($wn in $wtNodes) { $nodes.Add($wn) }
-        $he = Get-AtmHandleEvidence -Nodes $nodes.ToArray() -Collection $procCollection -SelfKeys $selfKeys -Deadline $deadline -Query $HandleQuery
+        $obs = @($findings | Where-Object { $_.Kind -ceq 'TempPartition' } | ForEach-Object { @($_.Evidence) } | Select-Object -First 1)
+        $he = Get-AtmHandleEvidence -Nodes $nodes.ToArray() -Collection $procCollection -SelfKeys $selfKeys -Deadline $deadline -Query $HandleQuery -ObservedUtc $(if ($obs.Count -gt 0) { $obs[0].ObservedUtc } else { $null })
         $coverage.Add($he.Coverage)
         for ($i = 0; $i -lt $findings.Count; $i++) {
             $f = $findings[$i]
