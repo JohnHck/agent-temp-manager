@@ -5117,9 +5117,9 @@ try {
             Assert-True (@($fR[0].Evidence | Where-Object { $_.Code -eq 'REPOSITORY_CONFIRMED_BY_GIT' }).Count -eq 1) 'confirmado pelo Git (rev-parse)'
             $wk = { param($d) 'git/w-' + (Get-AtmPseudonym -Pseudonymizer $pz -Domain 'atm-worktree/1' -Fields @((Get-AtmNormalizedPath $d).ToLowerInvariant())) }
             $codes = { param($k) @(@($wts | Where-Object { $_.Key -ceq $k })[0].Evidence | ForEach-Object { $_.Code }) }
-            Assert-True ((& $codes (& $wk $R)) -contains 'WORKTREE_MAIN' -and (& $codes (& $wk $R)) -contains 'WORKTREE_LISTED_BY_GIT') 'worktree principal registrada e listada pelo Git'
+            Assert-True ((& $codes (& $wk $R)) -contains 'WORKTREE_MAIN' -and (& $codes (& $wk $R)) -contains 'LOCAL_WORK_NONE_OBSERVED') 'worktree principal registrada; trabalho local observado (nenhum)'
             Assert-True ((& $codes (& $wk $wtL)) -contains 'WORKTREE_LOCKED' -and (& $codes (& $wk $wtL)) -contains 'WORKTREE_REGISTERED') 'worktree trancada'
-            Assert-True ((& $codes (& $wk (Join-Path $base 'ghost-wt'))) -contains 'WORKTREE_DIRECTORY_MISSING' -and (& $codes (& $wk (Join-Path $base 'ghost-wt'))) -contains 'WORKTREE_PRUNABLE') 'entrada administrativa sem diretorio: ausente e prunable (nao orfa)'
+            Assert-True ((& $codes (& $wk (Join-Path $base 'ghost-wt'))) -contains 'WORKTREE_DIRECTORY_MISSING' -and (& $codes (& $wk (Join-Path $base 'ghost-wt'))) -contains 'LOCAL_WORK_UNKNOWN') 'entrada administrativa sem diretorio: ausente (nao orfa), trabalho local desconhecido'
             $fo = @($wts | Where-Object { $_.Key -ceq (& $wk $orph) })
             Assert-True ($fo.Count -eq 1 -and $fo[0].State -eq 'APPARENT_ORPHAN' -and @($fo[0].Evidence | ForEach-Object { $_.Code }) -contains 'LOCAL_WORK_UNKNOWN') 'orfa aparente so com entrada administrativa positivamente ausente, trabalho local desconhecido'
             Assert-Eq @($wts | Where-Object { $_.State -eq 'APPARENT_ORPHAN' }).Count 1 'nenhum outro orfao (a de rede e recusada, nao orfa)'
@@ -5129,10 +5129,11 @@ try {
             $fS = @($repos | Where-Object { $_.Key -ceq $kS })
             Assert-True ($fS.Count -eq 1 -and @($fS[0].Evidence | Where-Object { $_.Code -eq 'GIT_NOT_RUN' -and $_.Detail -eq 'REPOSITORY_OUTSIDE_SOURCES' }).Count -eq 1 -and @($fS[0].Evidence | Where-Object { $_.Code -eq 'REPOSITORY_CONFIRMED_BY_GIT' }).Count -eq 0) 'repositorio alcancado so por gitdir: registrado pelos arquivos, sem Git'
             Assert-True ((& $codes (& $wk $sWt)) -contains 'WORKTREE_REGISTERED') 'worktree de S na particao registrada'
-            Assert-True (@($wts | ForEach-Object { @($_.Evidence | Where-Object { $_.Code -eq 'LOCAL_WORK_UNKNOWN' }).Count } | Where-Object { $_ -ne 1 }).Count -eq 0 -and @($res.Findings | Where-Object { $_.State -eq 'CLEAN_AND_PUBLISHED_UNKNOWN' }).Count -eq 0) 'toda worktree declara trabalho local desconhecido; nada limpo/publicado'
+            Assert-True (@($wts | ForEach-Object { @($_.Evidence | Where-Object { $_.Code -eq 'LOCAL_WORK_UNKNOWN' -or $_.Code -eq 'LOCAL_WORK_NONE_OBSERVED' }).Count } | Where-Object { $_ -ne 1 }).Count -eq 0 -and @($res.Findings | Where-Object { $_.State -eq 'CLEAN_AND_PUBLISHED_UNKNOWN' }).Count -eq 0) 'toda worktree declara trabalho local desconhecido ou nenhum observado; nada limpo/publicado'
+            Assert-True ((& $codes (& $wk $wtL)) -contains 'LOCAL_WORK_UNKNOWN' -and @(@($wts | Where-Object { $_.Key -ceq (& $wk $wtL) })[0].Evidence | Where-Object { $_.Detail -eq 'WORKTREE_OUTSIDE_SOURCES' }).Count -eq 1) 'worktree fora das fontes: trabalho local nao observado'
             $sN = Get-AtmNormalizedPath $S
             Assert-Eq @($log | Where-Object { [string]::Equals($_.WorkingDirectory, $sN, [StringComparison]::OrdinalIgnoreCase) }).Count 0 'repositorio nunca citado nunca recebe o Git (espiao)'
-            Assert-Eq @($log | Where-Object { $_.WorkingDirectory -like "*net-wt*" -or $_.WorkingDirectory -like "*orphan*" -or $_.WorkingDirectory -like "*stranger*" }).Count 0 'alvos recusados, orfaos e repositorios fora das fontes nunca recebem o Git'
+            Assert-Eq @($log | Where-Object { $_.WorkingDirectory -like "*net-wt*" -or $_.WorkingDirectory -like "*orphan*" -or $_.WorkingDirectory -like "*wt-locked*" }).Count 0 'alvos recusados, orfaos e worktrees fora das fontes nunca recebem o Git'
             $dc = @($res.Coverage | Where-Object { $_.Collector -eq 'worktree-discovery' })[0]
             Assert-True ($dc.Status -eq 'PARTIAL' -and @($dc.Reasons) -contains 'DISCOVERY_BOUNDED' -and @($dc.Reasons) -contains 'EXPLICIT_PATH_INVALID' -and @($dc.Reasons) -contains 'PREFLIGHT_REFUSED_TARGETS') "cobertura limitada: $(@($dc.Reasons) -join ',')"
             Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'git' })[0].Status 'COMPLETE' 'chamadas ao Git completas'
@@ -5167,10 +5168,134 @@ try {
             Assert-True (-not $txt.Contains($R) -and -not (ConvertTo-AtmDiagnoseJson -Result $d2).Contains($R.Replace('\', '\\'))) 'relatorio e JSON sem caminhos de repositorio'
         } finally { Close-AtmPseudonymizer $pz }
     }
+    Test-Case 'Git' 'P3-C0: travas de leitura impedem alterar, substituir ou renomear o que a pre-verificacao validou durante a chamada; GIT_COMMON_DIR fixado; vetores por ausencia provados e registrados como abertos' {
+        if (& $gitSkip) { return }
+        $fx = & $gitNewFixture 'c0-pin'
+        $pf = Get-AtmGitPreflight -Target $fx.Repo
+        Assert-True ($pf.Status -eq 'OK' -and @($pf.PinPaths) -contains (Join-Path $fx.Repo '.git\config') -and @($pf.PinPaths) -contains (Join-Path $fx.Repo '.git\HEAD')) 'pre-verificacao lista config e HEAD para travar'
+        $other = & $gitNewFixture 'c0-other'
+        $otherBlob = (& $gitFxOut $other.Repo @('rev-parse', 'HEAD:a.txt') $other.Repo).Out.Trim()
+        $pins = Open-AtmGitReadPins -Paths @($pf.PinPaths)
+        try {
+            Assert-True ($null -eq $pins.Error -and @($pins.Handles).Count -eq @($pf.PinPaths).Count) 'todas as travas abertas'
+            $try = { param([scriptblock]$B) try { & $B; return 'SUCCEEDED' } catch { return 'BLOCKED' } }
+            Assert-Eq (& $try { [IO.File]::AppendAllText((Join-Path $fx.Repo '.git\config'), "[include]`n`tpath = x`n") }) 'BLOCKED' 'include acrescentado durante a chamada: bloqueado'
+            Assert-Eq (& $try { [IO.File]::Copy((Join-Path $other.Repo '.git\config'), (Join-Path $fx.Repo '.git\config'), $true) }) 'BLOCKED' 'config substituido: bloqueado'
+            Assert-Eq (& $try { [IO.File]::Copy((Join-Path $other.Repo '.git\HEAD'), (Join-Path $fx.Repo '.git\HEAD'), $true) }) 'BLOCKED' 'HEAD substituido: bloqueado'
+            Assert-Eq (& $try { [IO.Directory]::Move((Join-Path $fx.Repo '.git'), (Join-Path $fx.Repo '.git-moved')) }) 'BLOCKED' '.git renomeado: bloqueado'
+            Assert-Eq (& $try { [IO.Directory]::Move($fx.Repo, $fx.Repo + '-moved') }) 'BLOCKED' 'repositorio renomeado: bloqueado'
+            # Other processes' index and ref updates are not blocked (only the pinned files are).
+            [IO.File]::WriteAllText((Join-Path $fx.Repo '.git\refs\heads\main.lock'), (Get-Content -LiteralPath (Join-Path $fx.Repo '.git\refs\heads\main') -Raw))
+            Assert-Eq (& $try { [IO.File]::Replace((Join-Path $fx.Repo '.git\refs\heads\main.lock'), (Join-Path $fx.Repo '.git\refs\heads\main'), [NullString]::Value) }) 'SUCCEEDED' 'atualizacao de ref por outro processo nao e bloqueada'
+            # Open (recorded, not resolved): a file that did not exist cannot be pinned. Proved locally: alternates created
+            # during the call are followed by Git.
+            Assert-Eq (& $try { [IO.File]::WriteAllText((Join-Path $fx.Repo '.git\objects\info\alternates'), (Join-Path $other.Repo '.git\objects') + "`n") }) 'SUCCEEDED' 'aberto: alternates criado durante a chamada nao e impedido'
+            Assert-Eq (& $gitFxOut $fx.Repo @('cat-file', '-e', $otherBlob) $fx.Repo).Code 0 'aberto (contraprova local): o Git segue o alternates criado depois'
+        } finally { foreach ($h in @($pins.Handles)) { $h.Dispose() } }
+        # Someone holding a validated file open for writing: refused, no process.
+        $fxB = & $gitNewFixture 'c0-busy'
+        $pfB = Get-AtmGitPreflight -Target $fxB.Repo
+        $fs = [IO.File]::Open((Join-Path $fxB.Repo '.git\config'), [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::ReadWrite)
+        try { $n = & $gitSpy { $script:c0r = & $gitOpen { Invoke-AtmGitCommand -Git $testGit -Arguments @('rev-parse', '--show-toplevel') -WorkingDirectory $fxB.Repo -Preflight $pfB } } }
+        finally { $fs.Dispose() }
+        Assert-True ($n -eq 0 -and $script:c0r.Reason -eq 'GIT_PIN_BUSY') "config aberto para escrita: recusado sem processo ($($script:c0r.Reason))"
+        # A commondir planted after the caller's preflight: the fresh preflight under the pins sees it; Git never runs.
+        $pfW = Get-AtmGitPreflight -Target $fxB.Worktree
+        $admW = Join-Path $fxB.Repo '.git\worktrees\wt'
+        [IO.File]::WriteAllText((Join-Path $other.Repo '.git\config'), [IO.File]::ReadAllText((Join-Path $other.Repo '.git\config')) + "[atm]`n`tprobe = from-other`n")
+        Assert-Eq (& $gitFxOut $fxB.Worktree @('config', '--get', 'atm.probe') $null).Out.Trim() '' 'antes: sem a sonda'
+        [IO.File]::WriteAllText((Join-Path $admW 'commondir'), (Join-Path $other.Repo '.git') + "`n")
+        Assert-Eq (& $gitFxOut $fxB.Worktree @('config', '--get', 'atm.probe') $null).Out.Trim() 'from-other' 'contraprova: o Git segue o commondir plantado'
+        Assert-Eq (& $gitFxOut $fxB.Worktree @('config', '--get', 'atm.probe') $null @{ GIT_COMMON_DIR = (Join-Path $fxB.Repo '.git') }).Out.Trim() '' 'GIT_COMMON_DIR fixado: o commondir plantado nao e lido'
+        $n = & $gitSpy { $script:c0w = & $gitOpen { Invoke-AtmGitCommand -Git $testGit -Arguments @('rev-parse', '--show-toplevel') -WorkingDirectory $fxB.Worktree -Preflight $pfW } }
+        Assert-True ($n -eq 0 -and $script:c0w.Reason -eq 'GIT_PREFLIGHT_REQUIRED') "commondir plantado apos a pre-verificacao: recusado sem processo ($($script:c0w.Reason))"
+        Assert-True (@(Get-AtmGitEnvironment -Ceiling $gitRoot -IsolatedHome 'C:\x' -CommonDir (Join-Path $fxB.Repo '.git')) -contains ('GIT_COMMON_DIR=' + (Join-Path $fxB.Repo '.git'))) 'ambiente do Git com GIT_COMMON_DIR da pre-verificacao'
+        # Open (recorded, not resolved): status follows a .git file dropped in the work tree (untracked scan).
+        $fxN = & $gitNewFixture 'c0-nested'
+        $nest = Join-Path $fxN.Repo 'nested'; [void][IO.Directory]::CreateDirectory($nest)
+        [IO.File]::WriteAllText((Join-Path $nest '.git'), 'gitdir: ' + (Join-Path $gitRoot 'c0-missing') + "`n")
+        $o1 = (& $gitFxOut $fxN.Repo @('--no-optional-locks', 'status', '--porcelain=v2', '-uall') $fxN.Repo).Out
+        [IO.File]::WriteAllText((Join-Path $nest '.git'), 'gitdir: ' + (Join-Path $other.Repo '.git') + "`n")
+        $o2 = (& $gitFxOut $fxN.Repo @('--no-optional-locks', 'status', '--porcelain=v2', '-uall') $fxN.Repo).Out
+        Assert-True ($o1 -ne $o2) 'aberto (contraprova local): o status resolve o alvo de um arquivo .git aninhado na work tree'
+        # The pinned window covers the whole Git process.
+        $fxT = & $gitNewFixture 'c0-time'
+        $rt = & $gitOpen { & $gitRun @('rev-parse', '--show-toplevel') $fxT.Repo }
+        Assert-True ($rt.Status -eq 'COMPLETE' -and $rt.PinnedMs -ge $rt.ElapsedMs) "travas durante toda a chamada (travado $($rt.PinnedMs) ms, Git $($rt.ElapsedMs) ms)"
+        $script:caseNote = 'vetores por ausencia (alternates criado, .git aninhado, entradas administrativas novas) provados localmente e registrados como abertos'
+    }
+    Test-Case 'Git' 'P3-C: trabalho local (preparado, nao preparado, nao rastreado, ignorado, conflitos, operacoes, stash) por fixtures; cobertura por fato; somente leitura; nenhum estado limpo' {
+        if (& $gitSkip) { return }
+        $lwBase = Join-Path $gitRoot 'lwp'
+        $plain = { param([string]$Name) $d = Join-Path $lwBase $Name; [void][IO.Directory]::CreateDirectory($d); & $gitFx $d @('init', '-q', '-b', 'main') $null; [IO.File]::WriteAllText((Join-Path $d 'a.txt'), "1`n"); & $gitFx $d @('add', 'a.txt') $d; & $gitFx $d @('commit', '-q', '-m', 'base') $d; return $d }
+        $edit = { param([string]$D, [string]$V, [string]$M) [IO.File]::WriteAllText((Join-Path $D 'a.txt'), "$V`n"); & $gitFx $D @('commit', '-q', '-a', '-m', $M) $D }
+        $fx = & $gitNewFixture 'lw'
+        [IO.File]::AppendAllText((Join-Path $fx.Repo '.git\info\exclude'), "build/`n"); [void][IO.Directory]::CreateDirectory((Join-Path $fx.Repo 'build')); [IO.File]::WriteAllText((Join-Path $fx.Repo 'build\out.bin'), 'x')
+        $merge = & $plain 'merge'; & $gitFx $merge @('checkout', '-q', '-b', 'x') $merge; & $edit $merge '2' 'x'; & $gitFx $merge @('checkout', '-q', 'main') $merge; & $edit $merge '3' 'main'
+        $null = & $gitFxOut $merge @('merge', '-q', '--no-edit', 'x') $merge
+        $rebase = & $plain 'rebase'; & $gitFx $rebase @('checkout', '-q', '-b', 'y') $rebase; & $edit $rebase '2' 'y'; & $gitFx $rebase @('checkout', '-q', 'main') $rebase; & $edit $rebase '3' 'main'; & $gitFx $rebase @('checkout', '-q', 'y') $rebase
+        $null = & $gitFxOut $rebase @('rebase', 'main') $rebase
+        $pick = & $plain 'pick'; & $gitFx $pick @('checkout', '-q', '-b', 'z') $pick; & $edit $pick '2' 'z'; $zc = (& $gitFxOut $pick @('rev-parse', 'HEAD') $pick).Out.Trim(); & $gitFx $pick @('checkout', '-q', 'main') $pick; & $edit $pick '3' 'main'
+        $null = & $gitFxOut $pick @('cherry-pick', $zc) $pick
+        $revert = & $plain 'revert'; & $edit $revert '2' 'c1'; $c1 = (& $gitFxOut $revert @('rev-parse', 'HEAD') $revert).Out.Trim(); & $edit $revert '3' 'c2'
+        $null = & $gitFxOut $revert @('revert', '--no-edit', $c1) $revert
+        $bisect = & $plain 'bisect'; & $gitFx $bisect @('bisect', 'start') $bisect
+        $stash = & $plain 'stash'; [IO.File]::WriteAllText((Join-Path $stash 'a.txt'), "9`n"); & $gitFx $stash @('stash', 'push', '-q', '-m', 'keep') $stash
+        $clean = & $plain 'clean'
+        $submod = & $plain 'submod'; [IO.File]::WriteAllText((Join-Path $submod '.gitmodules'), "[submodule `"s`"]`n`tpath = s`n`turl = ./s`n")
+        $all = @($fx.Repo, $merge, $rebase, $pick, $revert, $bisect, $stash, $clean, $submod)
+        $pz = New-AtmPseudonymizer -Key $testPseudonymKey
+        try {
+            Start-Sleep -Milliseconds 1100
+            $snapA = & $gitSnap (Join-Path $gitRoot 'lw'); $snapB = & $gitSnap $lwBase
+            $script:AtmGitInvocationLog = New-Object System.Collections.Generic.List[object]
+            $script:AtmWorktreeDiagnosticsEnabled = $true
+            try { $res = Get-AtmWorktreeDiscovery -RepositoryPaths $all -Git $testGit -Pseudonymizer $pz; $log = $script:AtmGitInvocationLog.ToArray() }
+            finally { $script:AtmWorktreeDiagnosticsEnabled = $false; $script:AtmGitInvocationLog = $null }
+            Start-Sleep -Milliseconds 300
+            Assert-Eq (@(Compare-Object ($snapA -split "`n") ((& $gitSnap (Join-Path $gitRoot 'lw')) -split "`n")).Count + @(Compare-Object ($snapB -split "`n") ((& $gitSnap $lwBase) -split "`n")).Count) 0 'trabalho local lido sem alterar nada (.git e index incluidos)'
+            $wk = { param($d) 'git/w-' + (Get-AtmPseudonym -Pseudonymizer $pz -Domain 'atm-worktree/1' -Fields @((Get-AtmNormalizedPath $d).ToLowerInvariant())) }
+            $f = { param($d) @($res.Findings | Where-Object { $_.Kind -eq 'Worktree' -and $_.Key -ceq (& $wk $d) })[0] }
+            $ev = { param($d, [string]$c) @((& $f $d).Evidence | Where-Object { $_.Code -ceq $c } | ForEach-Object { [string]$_.Detail }) }
+            Assert-True ((& $f $fx.Repo).State -eq 'LOCAL_WORK' -and @(& $ev $fx.Repo 'STAGED').Count -eq 1 -and @(& $ev $fx.Repo 'UNSTAGED').Count -eq 1 -and @(& $ev $fx.Repo 'UNTRACKED').Count -eq 1 -and @(& $ev $fx.Repo 'IGNORED').Count -eq 1) 'preparado, nao preparado, nao rastreado e ignorado: LOCAL_WORK'
+            Assert-True ((& $f $fx.Worktree).State -eq 'UNKNOWN' -and @(& $ev $fx.Worktree 'LOCAL_WORK_UNKNOWN') -contains 'WORKTREE_OUTSIDE_SOURCES') 'worktree vinculada nao citada: desconhecida'
+            Assert-True (@(& $ev $merge 'OPERATION_IN_PROGRESS') -contains 'MERGE' -and @(& $ev $merge 'CONFLICTS').Count -eq 1 -and (& $f $merge).State -eq 'LOCAL_WORK') 'merge em andamento com conflito'
+            Assert-True (@(& $ev $rebase 'OPERATION_IN_PROGRESS') -contains 'REBASE') 'rebase em andamento'
+            Assert-True (@(& $ev $pick 'OPERATION_IN_PROGRESS') -contains 'CHERRY_PICK') 'cherry-pick em andamento'
+            Assert-True (@(& $ev $revert 'OPERATION_IN_PROGRESS') -contains 'REVERT') 'revert em andamento'
+            Assert-True (@(& $ev $bisect 'OPERATION_IN_PROGRESS') -contains 'BISECT' -and (& $f $bisect).State -eq 'LOCAL_WORK') 'bisect em andamento'
+            $kStash = 'git/r-' + (Get-AtmPseudonym -Pseudonymizer $pz -Domain 'atm-repository/1' -Fields @((Get-AtmNormalizedPath (Join-Path $stash '.git')).ToLowerInvariant()))
+            Assert-True (@(@($res.Findings | Where-Object { $_.Key -ceq $kStash })[0].Evidence | Where-Object { $_.Code -ceq 'STASHES_IN_REPOSITORY' -and $_.Detail -eq '1' }).Count -eq 1) 'stash contado no repositorio'
+            Assert-True (@(& $ev $stash 'STASH_MENTIONS_BRANCH') -contains '1' -and (& $f $stash).State -eq 'LOCAL_WORK') 'stash atribuido a worktree pelo branch'
+            Assert-True ((& $f $clean).State -eq 'UNKNOWN' -and @(& $ev $clean 'LOCAL_WORK_NONE_OBSERVED').Count -eq 1 -and @(& $ev $clean 'PUBLICATION_NOT_DIAGNOSED').Count -eq 1) 'limpa: nenhum trabalho local observado, publicacao nao diagnosticada, estado desconhecido'
+            Assert-True (@(& $ev $submod 'SUBMODULES') -contains 'DECLARED' -and @(& $ev $submod 'LOCAL_WORK_NOT_OBSERVED') -contains 'D3_SUBMODULES' -and (& $f $submod).State -eq 'UNKNOWN') 'submodulos declarados: status nao executado, trabalho local nao observado'
+            Assert-Eq @($res.Findings | Where-Object { $_.State -eq 'CLEAN_AND_PUBLISHED_UNKNOWN' }).Count 0 'nenhum estado limpo e publicado'
+            $stc = @($res.Coverage | Where-Object { $_.Collector -eq 'local-work-status' })[0]
+            Assert-True ($stc.Status -eq 'PARTIAL' -and @($stc.Reasons) -contains 'D3_SUBMODULES' -and $stc.Expected -eq 9 -and $stc.Observed -eq 8) "cobertura do status por worktree: $($stc.Status) $($stc.Observed)/$($stc.Expected)"
+            Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'local-work-files' })[0].Status 'COMPLETE' 'cobertura dos arquivos completa'
+            $st = @($log | Where-Object { $_.Arguments -ccontains 'status' })
+            Assert-True ($st.Count -eq 8 -and @($st | Where-Object { $_.Arguments -cnotcontains '--ignore-submodules=all' -or $_.Pins -lt 2 }).Count -eq 0) "status sempre sem submodulos e com travas ($($st.Count))"
+            Assert-Eq @($st | Where-Object { [string]::Equals($_.WorkingDirectory, (Get-AtmNormalizedPath $submod), [StringComparison]::OrdinalIgnoreCase) }).Count 0 'status nunca roda com submodulos declarados'
+            $json = (@{ F = $res.Findings; C = $res.Coverage } | ConvertTo-Json -Depth 8)
+            foreach ($x in @($lwBase, 'build', 'out.bin', 'keep', 'u.txt', 'c.txt')) { Assert-True (-not $json.Contains($x) -and -not $json.Contains($x.Replace('\', '\\'))) "nada sensivel nos achados: $(Split-Path -Leaf $x)" }
+            $closed = Get-AtmWorktreeLocalWork -WorkTree $clean -Git $testGit
+            Assert-True ($closed.StatusCoverage.Status -eq 'NOT_OBSERVABLE' -and $closed.StatusCoverage.Reason -eq 'WORKTREE_DIAGNOSTICS_GATE_CLOSED' -and @($closed.Evidence).Count -eq 0) 'trava fechada: nada lido'
+        } finally { Close-AtmPseudonymizer $pz }
+    }
+    Test-Case 'Diagnose' 'P3-C: contagem de status porcelain v2 por fonte injetada (renomeacao, conflito, submodulo, ignorado); registro irreconhecivel nunca vira zero' {
+        $z = [char]0
+        $t = "# branch.oid abc$z" + "1 M. N... 100644 100644 100644 h1 h2 a b.txt$z" + "1 .M N... 100644 100644 100644 h1 h2 c.txt$z" + "2 R. N... 100644 100644 100644 h1 h2 R100 new name$z" + "old name$z" +
+            "u UU N... 100644 100644 100644 100644 h1 h2 h3 d.txt$z" + "? x y$z" + "! build/$z" + "1 .M S.M. 160000 160000 160000 h1 h2 sub$z"
+        $c = ConvertFrom-AtmGitStatusV2 -Text $t
+        Assert-True ($null -eq $c.Error -and $c.Staged -eq 2 -and $c.Unstaged -eq 2 -and $c.Untracked -eq 1 -and $c.Ignored -eq 1 -and $c.Conflicts -eq 1 -and $c.Submodules -eq 1) "contagens: $($c.Staged)/$($c.Unstaged)/$($c.Untracked)/$($c.Ignored)/$($c.Conflicts)/$($c.Submodules)"
+        Assert-Eq (ConvertFrom-AtmGitStatusV2 -Text '').Staged 0 'vazio: nada'
+        foreach ($bad in @("1 M. N...$z", "Z foo$z", "2 R. N... 100644 100644 100644 h1 h2 R100 new", "1 MM. N... 100644 100644 100644 h1 h2 x$z", "u UU N... 1 2 3$z")) { Assert-Eq (ConvertFrom-AtmGitStatusV2 -Text $bad).Error 'GIT_STATUS_UNPARSEABLE' "irreconhecivel: $($bad.Replace([string]$z, '\0'))" }
+    }
     Test-Case 'I18n' 'Worktrees (P3-B): todo motivo e evidencia da descoberta tem texto nos dois idiomas' {
         foreach ($l in @('en-US', 'pt-BR')) {
             foreach ($x in $script:AtmWorktreeReasonCodes) { Assert-True $script:AtmMessages[$l].ContainsKey("reason.$x") "reason.$x ($l)" }
             foreach ($x in $script:AtmWorktreeEvidenceCodes) { Assert-True $script:AtmMessages[$l].ContainsKey("evidence.$x") "evidence.$x ($l)" }
+            foreach ($x in $script:AtmLocalWorkReasonCodes) { Assert-True $script:AtmMessages[$l].ContainsKey("reason.$x") "reason.$x ($l)" }
         }
     }
     Test-Case 'Camadas' 'Motor de diagnostico somente leitura, sem saida no terminal nem controle de processos/servicos/VMs; codigo nativo sem privilegios' {
