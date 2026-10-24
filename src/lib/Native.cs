@@ -8,6 +8,8 @@
 //  * The scanner and the lock probe never write to the filesystem.
 //  * The job runner (Git, docs/adr/ADR-0006) creates its child inside a job object of its own and only ever
 //    terminates that job; it never opens, signals or terminates any other process.
+//  * Read pins (P3-C0) open files and directories for reading only, without write or delete sharing, and never
+//    write; they refuse reparse points.
 //  * The deleter never forces: no attribute changes, no ACL changes, no
 //    ownership changes, no privileges. It pins ancestors and the tree by handle
 //    (no FILE_SHARE_DELETE) so names cannot be redirected, deletes by handle, aborts
@@ -621,6 +623,51 @@ namespace AgentTempManager
         public long PeakJobMemory;
         public long JobMemoryLimit;     // read back from the job
         public int ActiveProcessLimit;  // read back from the job
+    }
+
+    // Read pins (P3-C0, docs/SECURITY-MODEL.md): a handle opened for reading WITHOUT write or delete sharing on a file
+    // or directory a Git call reads, held for the whole call. While it is held no process can change, replace, rename
+    // or delete that item, or rename a directory above it. A file that does not exist cannot be pinned (creation is not
+    // prevented). The item itself must not be a reparse point (it is opened without following one).
+    public static class AtmReadPin
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ByHandleFileInformation
+        {
+            public uint FileAttributes;
+            public long CreationTime;
+            public long LastAccessTime;
+            public long LastWriteTime;
+            public uint VolumeSerialNumber;
+            public uint FileSizeHigh;
+            public uint FileSizeLow;
+            public uint NumberOfLinks;
+            public uint FileIndexHigh;
+            public uint FileIndexLow;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetFileInformationByHandle(SafeFileHandle file, out ByHandleFileInformation info);
+
+        // GENERIC_READ (share access is only recorded for data access), FILE_SHARE_READ only, OPEN_EXISTING,
+        // FILE_FLAG_BACKUP_SEMANTICS (directories) | FILE_FLAG_OPEN_REPARSE_POINT. Returns null with -error NOT_FOUND,
+        // REPARSE or WIN32_<code> (32: someone else holds it open for writing).
+        public static SafeFileHandle Open(string path, out string error)
+        {
+            error = null;
+            SafeFileHandle h = AtmNative.CreateFileW(path, 0x80000000, 0x00000001, IntPtr.Zero, 3, 0x02000000 | 0x00200000, IntPtr.Zero);
+            if (h.IsInvalid)
+            {
+                int e = Marshal.GetLastWin32Error();
+                error = (e == 2 || e == 3) ? "NOT_FOUND" : ("WIN32_" + e);
+                h.Dispose();
+                return null;
+            }
+            ByHandleFileInformation info;
+            if (!GetFileInformationByHandle(h, out info)) { error = "WIN32_" + Marshal.GetLastWin32Error(); h.Dispose(); return null; }
+            if ((info.FileAttributes & 0x400) != 0) { error = "REPARSE"; h.Dispose(); return null; }
+            return h;
+        }
     }
 
     // Bounded execution of one program inside a job object created for that run (docs/adr/ADR-0006 rules 10-11, D-4).

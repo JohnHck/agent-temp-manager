@@ -1369,7 +1369,7 @@ function Test-AtmGitArguments {
         'worktree' { if (($rest -join ' ') -ceq 'list --porcelain -z') { return $null }; return 'GIT_VERB_NOT_ALLOWED' }
         'status' {
             if ($rest -cnotcontains '--porcelain=v2' -or $rest -cnotcontains '-z') { return 'GIT_ARGUMENT_REFUSED' }
-            $opts = @('--porcelain=v2', '-z', '--branch', '--show-stash', '--ahead-behind', '--no-ahead-behind', '--no-renames', '--untracked-files=no', '--untracked-files=normal', '--untracked-files=all', '--ignored=no', '--ignored=traditional', '--ignored=matching')
+            $opts = @('--porcelain=v2', '-z', '--branch', '--show-stash', '--ahead-behind', '--no-ahead-behind', '--no-renames', '--untracked-files=no', '--untracked-files=normal', '--untracked-files=all', '--ignored=no', '--ignored=traditional', '--ignored=matching', '--ignore-submodules=all')
             foreach ($x in $rest) { if ($opts -cnotcontains $x) { return 'GIT_ARGUMENT_REFUSED' } }
             return $null
         }
@@ -1404,9 +1404,10 @@ function Get-AtmGitEnvironment {
       the C locale (stderr is classified by its text). Configuration is isolated (P3-B0): no global file
       (GIT_CONFIG_GLOBAL=NUL, which also covers the XDG file), no system configuration or attributes, and HOME,
       USERPROFILE and XDG_CONFIG_HOME pointing to -IsolatedHome, a directory that does not exist inside the Git
-      installation.
+      installation. P3-C0: -CommonDir (the preflight's validated common directory) is given as GIT_COMMON_DIR, so a
+      `commondir` file created after the preflight is never read.
     #>
-    param([string]$Ceiling, [string]$IsolatedHome)
+    param([string]$Ceiling, [string]$IsolatedHome, [string]$CommonDir)
     $vars = @{}
     foreach ($e in [Environment]::GetEnvironmentVariables().GetEnumerator()) {
         $k = [string]$e.Key
@@ -1418,6 +1419,7 @@ function Get-AtmGitEnvironment {
         GIT_CONFIG_GLOBAL = 'NUL'; GIT_CONFIG_NOSYSTEM = '1'; GIT_ATTR_NOSYSTEM = '1' }
     if ($Ceiling) { $set['GIT_CEILING_DIRECTORIES'] = $Ceiling }
     if ($IsolatedHome) { $set['HOME'] = $IsolatedHome; $set['USERPROFILE'] = $IsolatedHome; $set['XDG_CONFIG_HOME'] = $IsolatedHome }
+    if ($CommonDir) { $set['GIT_COMMON_DIR'] = $CommonDir }
     foreach ($k in $set.Keys) { $vars[$k] = $set[$k] }
     $keys = [string[]]@($vars.Keys)
     [Array]::Sort($keys, [StringComparer]::OrdinalIgnoreCase)
@@ -1446,7 +1448,7 @@ function Invoke-AtmGitCommand {
     #>
     param($Git, [string[]]$Arguments, [string]$WorkingDirectory, $Preflight = $null, [int]$TimeoutMs = $script:AtmGitDefaultTimeoutMs, [int]$MaxOutputBytes = $script:AtmGitDefaultMaxOutputBytes,
         [long]$JobMemoryBytes = $script:AtmGitDefaultJobMemoryBytes, [int]$ActiveProcessLimit = $script:AtmGitDefaultActiveProcessLimit)
-    $out = [ordered]@{ Status = 'REFUSED'; Reason = $null; ExitCode = $null; Output = $null; OutputTruncated = $false; ElapsedMs = 0; TotalProcesses = 0; MatchCount = $null }
+    $out = [ordered]@{ Status = 'REFUSED'; Reason = $null; ExitCode = $null; Output = $null; OutputTruncated = $false; ElapsedMs = 0; TotalProcesses = 0; MatchCount = $null; PinnedMs = 0 }
     $code = Test-AtmGitArguments -Arguments $Arguments
     if ($null -ne $code) { $out.Reason = $code; return [pscustomobject]$out }
     $versionOnly = (@($Arguments).Count -eq 1 -and $Arguments[0] -ceq '--version')
@@ -1462,21 +1464,39 @@ function Invoke-AtmGitCommand {
     $wd = Get-AtmNormalizedPath $WorkingDirectory
     if (-not $wd -or (Test-AtmPathChain $wd).Status -cne 'OK') { $out.Reason = 'GIT_WORKDIR_INVALID'; return [pscustomobject]$out }
     if (-not $versionOnly) {
-        if ($null -eq $Preflight -or $Preflight.Status -cne 'OK' -or -not [string]::Equals([string]$Preflight.WorkTree, $wd, [StringComparison]::OrdinalIgnoreCase)) { $out.Reason = 'GIT_PREFLIGHT_REQUIRED'; return [pscustomobject]$out }
-        # The caller's preflight is not trusted on its own: a fresh one, taken immediately before this run, must agree
-        # with it (it narrows, without closing, the time between the file checks and Git reading the same files).
-        $fresh = Get-AtmGitPreflight -Target $wd
-        $same = { param($a, $b) [string]::Equals([string]$a, [string]$b, [StringComparison]::OrdinalIgnoreCase) }
-        if ($fresh.Status -cne 'OK' -or -not (& $same $fresh.WorkTree $wd) -or -not (& $same $fresh.GitDir $Preflight.GitDir) -or -not (& $same $fresh.CommonDir $Preflight.CommonDir)) { $out.Reason = 'GIT_PREFLIGHT_REQUIRED'; return [pscustomobject]$out }
-        if ($Arguments[0] -ceq 'status' -and -not ($fresh.StatusAllowed -and $Preflight.StatusAllowed)) { $out.Reason = 'GIT_STATUS_PRECONDITION'; return [pscustomobject]$out }
+        if ($null -eq $Preflight -or @($Preflight.PSObject.Properties.Name) -cnotcontains 'PinPaths' -or $Preflight.Status -cne 'OK' -or -not [string]::Equals([string]$Preflight.WorkTree, $wd, [StringComparison]::OrdinalIgnoreCase)) { $out.Reason = 'GIT_PREFLIGHT_REQUIRED'; return [pscustomobject]$out }
     }
-    $parent = [IO.Path]::GetDirectoryName($wd.TrimEnd('\'))
-    $ceiling = $(if ($parent) { Get-AtmNormalizedPath $parent } else { $null })
-    $vector = @($script:AtmGitGlobalArguments) + @($Arguments)
-    $commandLine = '"' + [string]$Git.Path + '" ' + ($vector -join ' ')
-    if ($null -ne $script:AtmGitInvocationLog) { $script:AtmGitInvocationLog.Add([pscustomobject]@{ Arguments = [string[]]$vector; WorkingDirectory = $wd }) }
-    $childEnv = Get-AtmGitEnvironment -Ceiling $ceiling -IsolatedHome ([string]$Git.IsolatedHome)
-    $r = Invoke-AtmBoundedProcess -Executable ([string]$Git.Path) -CommandLine $commandLine -WorkingDirectory $wd -Environment $childEnv -TimeoutMs $TimeoutMs -MaxOutputBytes $MaxOutputBytes -JobMemoryBytes $JobMemoryBytes -ActiveProcessLimit $ActiveProcessLimit
+    # P3-C0: every file and directory the preflight validated for this call is pinned (read handle without write or
+    # delete sharing) for the whole call, then a fresh preflight runs UNDER the pins and must agree with the caller's:
+    # what it reads can no longer change, be replaced or be renamed until Git has exited. A file created after the
+    # preflight cannot be prevented (an absence cannot be pinned): see SECURITY-MODEL.md for the vectors left open.
+    $pins = $(if ($versionOnly) { [pscustomobject]@{ Handles = @(); Error = $null } } else { Open-AtmGitReadPins -Paths @($Preflight.PinPaths) })
+    if ($pins.Error) { $out.Reason = $pins.Error; return [pscustomobject]$out }
+    $pinWatch = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $commonDir = $null
+        if (-not $versionOnly) {
+            $fresh = Get-AtmGitPreflight -Target $wd
+            $same = { param($a, $b) [string]::Equals([string]$a, [string]$b, [StringComparison]::OrdinalIgnoreCase) }
+            if ($fresh.Status -cne 'OK' -or -not (& $same $fresh.WorkTree $wd) -or -not (& $same $fresh.GitDir $Preflight.GitDir) -or -not (& $same $fresh.CommonDir $Preflight.CommonDir) -or
+                (@($fresh.PinPaths) -join '|') -ine (@($Preflight.PinPaths) -join '|')) { $out.Reason = 'GIT_PREFLIGHT_REQUIRED'; return [pscustomobject]$out }
+            if ($Arguments[0] -ceq 'status' -and -not ($fresh.StatusAllowed -and $Preflight.StatusAllowed)) { $out.Reason = 'GIT_STATUS_PRECONDITION'; return [pscustomobject]$out }
+            $commonDir = $fresh.CommonDir
+        }
+        $parent = [IO.Path]::GetDirectoryName($wd.TrimEnd('\'))
+        $ceiling = $(if ($parent) { Get-AtmNormalizedPath $parent } else { $null })
+        # `status` never looks into submodules (a gitlink's .git file would be another path to follow).
+        $args2 = @($Arguments)
+        if ($Arguments[0] -ceq 'status' -and $args2 -cnotcontains '--ignore-submodules=all') { $args2 += '--ignore-submodules=all' }
+        $vector = @($script:AtmGitGlobalArguments) + $args2
+        $commandLine = '"' + [string]$Git.Path + '" ' + ($vector -join ' ')
+        if ($null -ne $script:AtmGitInvocationLog) { $script:AtmGitInvocationLog.Add([pscustomobject]@{ Arguments = [string[]]$vector; WorkingDirectory = $wd; Pins = @($pins.Handles).Count }) }
+        $childEnv = Get-AtmGitEnvironment -Ceiling $ceiling -IsolatedHome ([string]$Git.IsolatedHome) -CommonDir $commonDir
+        $r = Invoke-AtmBoundedProcess -Executable ([string]$Git.Path) -CommandLine $commandLine -WorkingDirectory $wd -Environment $childEnv -TimeoutMs $TimeoutMs -MaxOutputBytes $MaxOutputBytes -JobMemoryBytes $JobMemoryBytes -ActiveProcessLimit $ActiveProcessLimit
+    } finally {
+        foreach ($h in @($pins.Handles)) { $h.Dispose() }
+        $out.PinnedMs = $pinWatch.ElapsedMilliseconds
+    }
     $out.ElapsedMs = $r.ElapsedMs; $out.TotalProcesses = $r.TotalProcesses; $out.ExitCode = $(if ($r.Started) { $r.ExitCode } else { $null })
     if (-not $r.Started) { $out.Status = 'FAILED'; $out.Reason = $(if ($r.Error -like 'JOB_*') { 'GIT_JOB_UNAVAILABLE' } else { 'GIT_START_FAILED' }); return [pscustomobject]$out }
     if ($r.TimedOut) { $out.Status = 'TIMEOUT'; $out.Reason = 'GIT_TIMEOUT'; return [pscustomobject]$out }
@@ -1721,6 +1741,25 @@ function Get-AtmGitConfigFindings {
     return [pscustomobject]@{ Refuse = $refuse; StatusBlock = $block }
 }
 
+function Open-AtmGitReadPins {
+    # P3-C0: AtmReadPin on every path of -Paths (the preflight's PinPaths, all validated by the resolver and existing
+    # when it ran). Any failure (gone, now a reparse point, held open for writing by someone else) closes what was
+    # opened and returns Error (GIT_PIN_CHANGED, GIT_PIN_REPARSE, GIT_PIN_BUSY); nothing is retried.
+    param([string[]]$Paths)
+    $hs = New-Object System.Collections.Generic.List[object]
+    foreach ($p in @($Paths)) {
+        $err = $null
+        $h = [AgentTempManager.AtmReadPin]::Open($p, [ref]$err)
+        if ($null -eq $h) {
+            foreach ($x in $hs) { $x.Dispose() }
+            $code = $(if ($err -ceq 'NOT_FOUND') { 'GIT_PIN_CHANGED' } elseif ($err -ceq 'REPARSE') { 'GIT_PIN_REPARSE' } elseif ($err -ceq 'WIN32_32') { 'GIT_PIN_BUSY' } else { 'GIT_PIN_FAILED' })
+            return [pscustomobject]@{ Handles = @(); Error = $code }
+        }
+        $hs.Add($h)
+    }
+    return [pscustomobject]@{ Handles = $hs.ToArray(); Error = $null }
+}
+
 function Get-AtmGitExactPathText {
     # A path stored in a Git file (gitfile after "gitdir: ", commondir, an administrative gitdir) exactly as Git reads
     # it: only trailing CR/LF are dropped. Leading or trailing blanks, an inner line break or an empty value give $null
@@ -1772,7 +1811,11 @@ function Get-AtmGitPreflight {
       exported: callers turn this into codes and pseudonyms.
     #>
     param([string]$Target)
-    $out = [ordered]@{ Status = 'REFUSED'; Reason = $null; WorkTree = $null; GitDir = $null; CommonDir = $null; StatusAllowed = $false; StatusBlock = $null; AdminEntries = @(); Alternates = 0; Bare = $false }
+    $out = [ordered]@{ Status = 'REFUSED'; Reason = $null; WorkTree = $null; GitDir = $null; CommonDir = $null; StatusAllowed = $false; StatusBlock = $null; AdminEntries = @(); Alternates = 0; Bare = $false; PinPaths = @() }
+    # P3-C0: the files (and alternate object directories) Git reads to set up the repository and its configuration, in
+    # the order checked; the runner pins them for the whole call. Pinning files, not their directories, still prevents
+    # renaming any directory above them, and leaves index and ref updates by other processes possible.
+    $pin = New-Object System.Collections.Generic.List[string]
     $t = Resolve-AtmGitReferencedPath -Value $Target -BaseDir $null
     if ($t.Status -ne 'OK') { $out.Reason = $(if ($t.Status -eq 'MISSING') { 'GIT_PREFLIGHT_TARGET_MISSING' } else { $t.Reason }); return [pscustomobject]$out }
     $target = $t.Path
@@ -1789,6 +1832,7 @@ function Get-AtmGitPreflight {
     try { $isDir = (([IO.File]::GetAttributes($dotGit.Path) -band [IO.FileAttributes]::Directory) -ne 0) } catch { $out.Reason = 'GIT_REF_PATH_UNREADABLE'; return [pscustomobject]$out }
     if ($isDir) { $gitDir = $dotGit.Path }
     else {
+        $pin.Add($dotGit.Path)
         $txt = Read-AtmGitSmallFile -Path $dotGit.Path -MaxBytes 4096
         $gv = $(if ($null -ne $txt -and $txt.StartsWith('gitdir: ')) { Get-AtmGitExactPathText $txt.Substring(8) } else { $null })
         if ($null -eq $gv) { $out.Reason = 'GIT_PREFLIGHT_GITFILE_INVALID'; return [pscustomobject]$out }
@@ -1801,6 +1845,7 @@ function Get-AtmGitPreflight {
     $cd = Resolve-AtmGitReferencedPath -Value 'commondir' -BaseDir $gitDir
     if ($cd.Status -eq 'OK') {
         $ctext = Read-AtmGitSmallFile -Path $cd.Path -MaxBytes 4096
+        $pin.Add($cd.Path)
         $cv = Get-AtmGitExactPathText $ctext
         if ($null -eq $cv) { $out.Reason = 'GIT_PREFLIGHT_COMMONDIR_INVALID'; return [pscustomobject]$out }
         $c = Resolve-AtmGitReferencedPath -Value $cv -BaseDir $gitDir
@@ -1812,6 +1857,7 @@ function Get-AtmGitPreflight {
     $head = Resolve-AtmGitReferencedPath -Value 'HEAD' -BaseDir $gitDir
     $htext = $(if ($head.Status -eq 'OK') { Read-AtmGitSmallFile -Path $head.Path -MaxBytes 4096 } else { $null })
     if ($null -eq $htext -or $htext.Trim() -notmatch '^(ref: refs/\S+|[0-9a-f]{40}|[0-9a-f]{64})$') { $out.Reason = 'GIT_PREFLIGHT_GITDIR_INVALID'; return [pscustomobject]$out }
+    $pin.Add($head.Path)
     $refsCode = Test-AtmGitRefStore -CommonDir $commonDir
     if ($null -ne $refsCode) { $out.Reason = $refsCode; return [pscustomobject]$out }
     foreach ($sub in @('objects', 'refs')) {
@@ -1826,6 +1872,7 @@ function Get-AtmGitPreflight {
         $f = Resolve-AtmGitReferencedPath -Value $pair[1] -BaseDir $pair[0]
         if ($f.Status -eq 'MISSING') { continue }
         if ($f.Status -ne 'OK') { $out.Reason = $f.Reason; return [pscustomobject]$out }
+        $pin.Add($f.Path)
         $text = Read-AtmGitSmallFile -Path $f.Path -MaxBytes $script:AtmGitConfigMaxBytes
         if ($null -eq $text) { $out.Reason = 'GIT_CONFIG_UNREADABLE'; return [pscustomobject]$out }
         $parsed = Read-AtmGitConfigText -Text $text
@@ -1844,6 +1891,7 @@ function Get-AtmGitPreflight {
         $af = Resolve-AtmGitReferencedPath -Value 'info\alternates' -BaseDir $objDir
         if ($af.Status -eq 'MISSING') { continue }
         if ($af.Status -ne 'OK') { $out.Reason = $af.Reason; return [pscustomobject]$out }
+        $pin.Add($af.Path)
         $atext = Read-AtmGitSmallFile -Path $af.Path
         if ($null -eq $atext) { $out.Reason = 'GIT_PREFLIGHT_ALTERNATES_UNREADABLE'; return [pscustomobject]$out }
         foreach ($line in $atext.Replace("`r`n", "`n").Split("`n")) {
@@ -1853,6 +1901,7 @@ function Get-AtmGitPreflight {
             $a = Resolve-AtmGitReferencedPath -Value $l -BaseDir $objDir
             if ($a.Status -ne 'OK') { $out.Reason = $(if ($a.Status -eq 'MISSING') { 'GIT_PREFLIGHT_ALTERNATE_MISSING' } else { 'GIT_PREFLIGHT_ALTERNATE_' + $a.Reason.Substring('GIT_REF_PATH_'.Length) }); return [pscustomobject]$out }
             $alts++
+            $pin.Add($a.Path)
             if ($alts -gt $script:AtmGitAlternatesMax -or $depth + 1 -gt $script:AtmGitAlternatesMaxDepth) { $out.Reason = 'GIT_PREFLIGHT_ALTERNATES_LIMIT'; return [pscustomobject]$out }
             $k = $a.Path.ToLowerInvariant()
             if (-not $seen.ContainsKey($k)) { $seen[$k] = $true; $queue.Enqueue(@($a.Path, ($depth + 1))) }
@@ -1893,7 +1942,7 @@ function Get-AtmGitPreflight {
         if ($gm.Status -eq 'OK') { $block = 'D3_SUBMODULES' } elseif ($gm.Status -eq 'REFUSED') { $block = 'D3_GITMODULES_UNREADABLE' }
     }
     $out.Status = 'OK'; $out.Reason = $null; $out.WorkTree = $(if ($bare) { $null } else { $target }); $out.GitDir = $gitDir; $out.CommonDir = $commonDir
-    $out.StatusAllowed = ($null -eq $block -and -not $bare); $out.StatusBlock = $(if ($bare) { 'D3_BARE_REPOSITORY' } else { $block }); $out.AdminEntries = $admin.ToArray(); $out.Alternates = $alts; $out.Bare = $bare
+    $out.StatusAllowed = ($null -eq $block -and -not $bare); $out.StatusBlock = $(if ($bare) { 'D3_BARE_REPOSITORY' } else { $block }); $out.AdminEntries = $admin.ToArray(); $out.Alternates = $alts; $out.Bare = $bare; $out.PinPaths = $pin.ToArray()
     return [pscustomobject]$out
 }
 
@@ -1916,7 +1965,14 @@ $script:AtmWorktreeReasonCodes = @('DISCOVERY_BOUNDED', 'WORKTREE_DIAGNOSTICS_GA
     'WALK_LIMIT', 'WALK_REFUSED', 'PARTITION_UNREADABLE', 'GIT_NOT_FOUND', 'GIT_VERSION_TOO_OLD', 'GIT_LOCATION_NOT_TRUSTED', 'GIT_VERSION_UNREADABLE', 'GIT_CALLS_INCOMPLETE',
     'DEADLINE_EXCEEDED', 'CANDIDATE_LIMIT')
 $script:AtmWorktreeEvidenceCodes = @('REPOSITORY_DISCOVERED', 'REPOSITORY_PREFLIGHT_REFUSED', 'REPOSITORY_CONFIRMED_BY_GIT', 'REPOSITORY_MISMATCH', 'GIT_NOT_RUN', 'ALTERNATES', 'WORKTREES_REGISTERED',
-    'WORKTREE_MAIN', 'WORKTREE_REGISTERED', 'WORKTREE_LISTED_BY_GIT', 'WORKTREE_LOCKED', 'WORKTREE_PRUNABLE', 'WORKTREE_DIRECTORY_MISSING', 'ADMINISTRATIVE_ENTRY_NOT_FOUND', 'LOCAL_WORK_UNKNOWN', 'IN_REPOSITORY')
+    'WORKTREE_MAIN', 'WORKTREE_REGISTERED', 'WORKTREE_LOCKED', 'WORKTREE_DIRECTORY_MISSING', 'ADMINISTRATIVE_ENTRY_NOT_FOUND', 'LOCAL_WORK_UNKNOWN', 'IN_REPOSITORY',
+    'STAGED', 'UNSTAGED', 'UNTRACKED', 'IGNORED', 'CONFLICTS', 'SUBMODULES', 'OPERATION_IN_PROGRESS', 'STASHES_IN_REPOSITORY', 'STASH_MENTIONS_BRANCH',
+    'LOCAL_WORK_NONE_OBSERVED', 'LOCAL_WORK_NOT_OBSERVED', 'PUBLICATION_NOT_DIAGNOSED')
+# P3-C: local work (ADR-0006 rules 9 and 12). Operation markers in a worktree's Git directory, read as files.
+$script:AtmGitOperationMarkers = [ordered]@{ 'MERGE_HEAD' = 'MERGE'; 'rebase-merge' = 'REBASE'; 'rebase-apply' = 'REBASE'; 'CHERRY_PICK_HEAD' = 'CHERRY_PICK'; 'REVERT_HEAD' = 'REVERT'; 'BISECT_LOG' = 'BISECT'; 'sequencer' = 'SEQUENCER' }
+$script:AtmGitStashLogMaxBytes = 1048576
+$script:AtmGitStatusArguments = @('status', '--porcelain=v2', '-z', '--untracked-files=normal', '--ignored=matching', '--ignore-submodules=all', '--no-renames')
+$script:AtmLocalWorkReasonCodes = @('STATUS_NOT_RUN', 'STATUS_INCOMPLETE', 'FILES_INCOMPLETE', 'WORKTREE_OUTSIDE_SOURCES')
 
 function Find-AtmGitStart {
     # The first directory at or above -Start whose `.git` resolves (Resolve-AtmGitReferencedPath), at most -MaxLevels
@@ -1935,21 +1991,144 @@ function Find-AtmGitStart {
     return [pscustomobject]@{ Status = 'LIMIT'; Path = $null }
 }
 
-function ConvertFrom-AtmWorktreeList {
-    # Records of `worktree list --porcelain -z`: Path (normalized), Locked, Prunable, Bare. In memory only.
+function ConvertFrom-AtmGitStatusV2 {
+    # Counts from `status --porcelain=v2 -z` (in memory only: no path, branch or name leaves this function): Staged,
+    # Unstaged, Untracked, Ignored, Conflicts, Submodules (entries, so an untracked or ignored directory counts once).
+    # Error is GIT_STATUS_UNPARSEABLE for any record it does not recognize; the counts are then not to be used.
     param([string]$Text)
-    $out = New-Object System.Collections.Generic.List[object]
-    $cur = $null
-    foreach ($tok in $Text.Split([char]0)) {
-        if ($tok -eq '') { if ($null -ne $cur) { $out.Add([pscustomobject]$cur); $cur = $null }; continue }
-        if ($tok.StartsWith('worktree ')) { if ($null -ne $cur) { $out.Add([pscustomobject]$cur) }; $cur = [ordered]@{ Path = $tok.Substring(9).Replace('/', '\').TrimEnd('\'); Locked = $false; Prunable = $false; Bare = $false }; continue }
-        if ($null -eq $cur) { continue }
-        if ($tok -ceq 'locked' -or $tok.StartsWith('locked ')) { $cur.Locked = $true }
-        elseif ($tok -ceq 'prunable' -or $tok.StartsWith('prunable ')) { $cur.Prunable = $true }
-        elseif ($tok -ceq 'bare') { $cur.Bare = $true }
+    $c = [ordered]@{ Staged = 0; Unstaged = 0; Untracked = 0; Ignored = 0; Conflicts = 0; Submodules = 0; Error = $null }
+    $toks = ([string]$Text).Split([char]0)
+    $i = 0
+    while ($i -lt $toks.Length) {
+        $t = $toks[$i]; $i++
+        if ($t -eq '' -or $t.StartsWith('# ')) { continue }
+        if ($t.Length -lt 3 -or $t[1] -ne ' ') { $c.Error = 'GIT_STATUS_UNPARSEABLE'; break }
+        switch -CaseSensitive ([string]$t[0]) {
+            '?' { $c.Untracked++ }
+            '!' { $c.Ignored++ }
+            'u' {
+                $f = $t.Split(' ', 11)
+                if ($f.Length -lt 11 -or $f[2].Length -ne 4) { $c.Error = 'GIT_STATUS_UNPARSEABLE'; break }
+                $c.Conflicts++
+                if ($f[2][0] -eq 'S') { $c.Submodules++ }
+            }
+            default {
+                # 1: ordinary change (9 fields); 2: rename or copy (10 fields, then the original path as its own record).
+                $n = $(if ($t[0] -eq '1') { 9 } elseif ($t[0] -eq '2') { 10 } else { 0 })
+                $f = $(if ($n -gt 0) { $t.Split(' ', $n) } else { @() })
+                if ($n -eq 0 -or $f.Length -lt $n -or $f[1].Length -ne 2 -or $f[2].Length -ne 4) { $c.Error = 'GIT_STATUS_UNPARSEABLE'; break }
+                if ($f[1][0] -ne '.') { $c.Staged++ }
+                if ($f[1][1] -ne '.') { $c.Unstaged++ }
+                if ($f[2][0] -eq 'S') { $c.Submodules++ }
+                if ($n -eq 10) { if ($i -ge $toks.Length) { $c.Error = 'GIT_STATUS_UNPARSEABLE'; break }; $i++ }
+            }
+        }
+        if ($c.Error) { break }
     }
-    if ($null -ne $cur) { $out.Add([pscustomobject]$cur) }
-    return $out.ToArray()
+    return [pscustomobject]$c
+}
+
+function Get-AtmGitStashSummary {
+    # The stash reflog of a repository (<common>\logs\refs\stash), read as a file through the resolver (ADR-0006 rule 9):
+    # Status COMPLETE | NOT_PRESENT | PARTIAL (larger than AtmGitStashLogMaxBytes) | FAILED (refused or unreadable),
+    # Count (entries), Branches (the branch each entry was made on, from "WIP on <b>:" / "On <b>:", in memory only).
+    param([string]$CommonDir)
+    $out = [ordered]@{ Status = 'FAILED'; Reason = $null; Count = 0; Branches = @() }
+    $f = Resolve-AtmGitReferencedPath -Value 'logs\refs\stash' -BaseDir $CommonDir
+    if ($f.Status -eq 'MISSING') { $out.Status = 'NOT_PRESENT'; return [pscustomobject]$out }
+    if ($f.Status -ne 'OK') { $out.Reason = $f.Reason; return [pscustomobject]$out }
+    try { $len = (New-Object IO.FileInfo($f.Path)).Length } catch { $out.Reason = 'GIT_REF_PATH_UNREADABLE'; return [pscustomobject]$out }
+    if ($len -gt $script:AtmGitStashLogMaxBytes) { $out.Status = 'PARTIAL'; $out.Reason = 'STASH_LOG_TOO_LARGE'; return [pscustomobject]$out }
+    $text = Read-AtmGitSmallFile -Path $f.Path -MaxBytes $script:AtmGitStashLogMaxBytes
+    if ($null -eq $text) { $out.Reason = 'GIT_REF_PATH_UNREADABLE'; return [pscustomobject]$out }
+    $br = New-Object System.Collections.Generic.List[string]
+    foreach ($line in $text.Replace("`r`n", "`n").Split("`n")) {
+        if ($line -eq '') { continue }
+        $out.Count++
+        $tab = $line.IndexOf("`t")
+        $msg = $(if ($tab -ge 0) { $line.Substring($tab + 1) } else { '' })
+        if ($msg -match '^(?:WIP on|On) ([^:]+):') { $br.Add($Matches[1]) } else { $br.Add('') }
+    }
+    $out.Status = 'COMPLETE'; $out.Branches = $br.ToArray()
+    return [pscustomobject]$out
+}
+
+function Get-AtmWorktreeLocalWork {
+    <#
+      Local work facts of one worktree directory (P3-C; ADR-0006 rules 9 and 12), behind the worktree diagnostics gate.
+      Files (through the resolver): in-progress operation markers in its Git directory, its branch (HEAD) to attribute
+      stashes (-Stash: Get-AtmGitStashSummary of its repository; only entries that name its branch). Git (only with -Git
+      usable, a preflight that allows `status` and before -Deadline): `status --porcelain=v2 -z`, counted in memory.
+      Returns Evidence (codes and counts only), LocalWork ($true when any fact is positive), StatusCoverage and
+      FilesCoverage (each Status + Reason). A fact that could not be observed is never zero.
+    #>
+    param([string]$WorkTree, $Git = $null, $Stash = $null, $Deadline = $null)
+    if (-not $script:AtmWorktreeDiagnosticsEnabled) {
+        return [pscustomobject]@{ Evidence = @(); LocalWork = $false; StatusCoverage = [pscustomobject]@{ Status = 'NOT_OBSERVABLE'; Reason = 'WORKTREE_DIAGNOSTICS_GATE_CLOSED' }; FilesCoverage = [pscustomobject]@{ Status = 'NOT_OBSERVABLE'; Reason = 'WORKTREE_DIAGNOSTICS_GATE_CLOSED' } }
+    }
+    $now = [datetime]::UtcNow
+    $ev = New-Object System.Collections.Generic.List[object]
+    $add = { param([string]$Code, [string]$Collector, [string]$Detail) $ev.Add((New-AtmEvidence -Code $Code -Source 'local-work' -Collector $Collector -ObservedUtc $now -Detail $Detail)) }
+    $res = [ordered]@{ Evidence = $null; LocalWork = $false; StatusCoverage = $null; FilesCoverage = $null }
+    $pf = Get-AtmGitPreflight -Target $WorkTree
+    if ($pf.Status -cne 'OK') {
+        & $add 'LOCAL_WORK_NOT_OBSERVED' 'local-work-files' $(if ($pf.Reason) { [string]$pf.Reason } else { 'GIT_PREFLIGHT_REFUSED' })
+        $res.StatusCoverage = [pscustomobject]@{ Status = 'NOT_OBSERVABLE'; Reason = 'STATUS_NOT_RUN' }
+        $res.FilesCoverage = [pscustomobject]@{ Status = 'NOT_OBSERVABLE'; Reason = 'FILES_INCOMPLETE' }
+        $res.Evidence = $ev.ToArray(); return [pscustomobject]$res
+    }
+    # Files: operation markers and the branch.
+    $filesOk = $true
+    $ops = New-Object System.Collections.Generic.List[string]
+    foreach ($m in $script:AtmGitOperationMarkers.Keys) {
+        $r = Resolve-AtmGitReferencedPath -Value $m -BaseDir $pf.GitDir
+        if ($r.Status -eq 'OK') { $op = $script:AtmGitOperationMarkers[$m]; if (-not $ops.Contains($op)) { $ops.Add($op) } }
+        elseif ($r.Status -ne 'MISSING') { $filesOk = $false }
+    }
+    foreach ($op in $ops) { & $add 'OPERATION_IN_PROGRESS' 'local-work-files' $op }
+    if ($null -ne $Stash) {
+        if ($Stash.Status -ceq 'COMPLETE' -and $Stash.Count -gt 0) {
+            $head = Read-AtmGitSmallFile -Path (Join-Path $pf.GitDir 'HEAD') -MaxBytes 4096
+            if ($null -ne $head -and $head.Trim() -match '^ref: refs/heads/(.+)$') {
+                $b = $Matches[1]
+                $n = @($Stash.Branches | Where-Object { [string]::Equals($_, $b, [StringComparison]::Ordinal) }).Count
+                if ($n -gt 0) { & $add 'STASH_MENTIONS_BRANCH' 'local-work-files' ([string]$n) }
+            }
+        } elseif ($Stash.Status -cne 'COMPLETE' -and $Stash.Status -cne 'NOT_PRESENT') { $filesOk = $false }
+    }
+    $res.FilesCoverage = [pscustomobject]@{ Status = $(if ($filesOk) { 'COMPLETE' } else { 'PARTIAL' }); Reason = $(if ($filesOk) { $null } else { 'FILES_INCOMPLETE' }) }
+    $positive = ($ops.Count -gt 0 -or @($ev | Where-Object { $_.Code -ceq 'STASH_MENTIONS_BRANCH' }).Count -gt 0)
+    # Git: status counts.
+    $statusDone = $false
+    if ($null -eq $Git -or $Git.Status -cne 'COMPLETE') {
+        $res.StatusCoverage = [pscustomobject]@{ Status = 'UNAVAILABLE'; Reason = $(if ($null -ne $Git -and $Git.Reason) { [string]$Git.Reason } else { 'GIT_NOT_FOUND' }) }
+    } elseif (-not $pf.StatusAllowed) {
+        if ($pf.StatusBlock -ceq 'D3_SUBMODULES') { & $add 'SUBMODULES' 'local-work-status' 'DECLARED' }
+        & $add 'LOCAL_WORK_NOT_OBSERVED' 'local-work-status' ([string]$pf.StatusBlock)
+        $res.StatusCoverage = [pscustomobject]@{ Status = 'NOT_OBSERVABLE'; Reason = [string]$pf.StatusBlock }
+    } elseif ($null -ne $Deadline -and [datetime]::UtcNow -ge $Deadline) {
+        $res.StatusCoverage = [pscustomobject]@{ Status = 'TIMEOUT'; Reason = 'DEADLINE_EXCEEDED' }
+    } else {
+        $st = Invoke-AtmGitCommand -Git $Git -Arguments $script:AtmGitStatusArguments -WorkingDirectory $pf.WorkTree -Preflight $pf
+        if ($st.Status -ceq 'COMPLETE' -or $st.Status -ceq 'PARTIAL') {
+            $c = ConvertFrom-AtmGitStatusV2 -Text $st.Output
+            if ($c.Error) { $res.StatusCoverage = [pscustomobject]@{ Status = 'FAILED'; Reason = $c.Error } }
+            else {
+                # Truncated output: what was read is positive evidence (a lower bound); the rest is unknown.
+                foreach ($k in @('Staged', 'Unstaged', 'Untracked', 'Ignored', 'Conflicts', 'Submodules')) { if ($c.$k -gt 0) { & $add $k.ToUpperInvariant() 'local-work-status' ([string]$c.$k) } }
+                if ($c.Staged + $c.Unstaged + $c.Untracked + $c.Ignored + $c.Conflicts -gt 0) { $positive = $true }
+                $res.StatusCoverage = [pscustomobject]@{ Status = $st.Status; Reason = $(if ($st.Status -ceq 'PARTIAL') { 'GIT_OUTPUT_TRUNCATED' } else { $null }) }
+                $statusDone = ($st.Status -ceq 'COMPLETE')
+            }
+        } else { $res.StatusCoverage = [pscustomobject]@{ Status = $(if ($st.Status -ceq 'TIMEOUT') { 'TIMEOUT' } elseif ($st.Status -ceq 'REFUSED') { 'NOT_OBSERVABLE' } else { 'FAILED' }); Reason = [string]$st.Reason } }
+    }
+    $res.LocalWork = $positive
+    if (-not $positive) {
+        if ($statusDone -and $filesOk) { & $add 'LOCAL_WORK_NONE_OBSERVED' 'local-work-status' $null }
+        else { & $add 'LOCAL_WORK_UNKNOWN' 'local-work-status' $null }
+    }
+    $res.Evidence = $ev.ToArray()
+    return [pscustomobject]$res
 }
 
 function Get-AtmWorktreeDiscovery {
@@ -2044,6 +2223,9 @@ function Get-AtmWorktreeDiscovery {
     }
     $gitUsable = ($null -ne $Git -and $Git.Status -ceq 'COMPLETE')
     $gitCalls = 0; $gitFailed = 0
+    # Local work coverage (P3-C): one record per collector over every worktree observed.
+    $lwCount = 0; $lwStatusOk = 0
+    $lwStatus = New-Object System.Collections.Generic.List[string]; $lwFiles = New-Object System.Collections.Generic.List[string]
     # Every path Git reports goes through the single resolver (text checks, fixed local drive, no reparse point) before
     # anything touches it; $null when refused.
     $gitPath = { param([string]$P, [string]$Base)
@@ -2090,33 +2272,36 @@ function Get-AtmWorktreeDiscovery {
                     $ok = ($null -ne $top -and $null -ne $gd -and $null -ne $cd -and [string]::Equals($top, $mainDir, [StringComparison]::OrdinalIgnoreCase) -and [string]::Equals($gd, (Get-AtmNormalizedPath $mpf.GitDir), [StringComparison]::OrdinalIgnoreCase) -and [string]::Equals($cd, (Get-AtmNormalizedPath $pf.CommonDir), [StringComparison]::OrdinalIgnoreCase))
                 }
                 $rev.Add((New-AtmEvidence -Code $(if ($ok) { 'REPOSITORY_CONFIRMED_BY_GIT' } else { 'REPOSITORY_MISMATCH' }) -Source 'worktree-discovery' -Collector 'git' -ObservedUtc $now))
-                if ($ok) {
-                    $gitCalls++
-                    $wl = Invoke-AtmGitCommand -Git $Git -Arguments @('worktree', 'list', '--porcelain', '-z') -WorkingDirectory $mainDir -Preflight $mpf
-                    if ($wl.Status -ceq 'COMPLETE') {
-                        $listRefused = 0
-                        foreach ($rec in @(ConvertFrom-AtmWorktreeList -Text $wl.Output)) {
-                            # A prunable entry is listed by its raw gitdir value ("\.git" kept when written with backslashes).
-                            $lp = $rec.Path; if ($lp -match '\\.git$') { $lp = $lp.Substring(0, $lp.Length - 5) }
-                            $np = & $gitPath $lp $mainDir
-                            if ($null -eq $np) { $listRefused++; continue }
-                            $k = $np.ToLowerInvariant()
-                            if (-not $wts.Contains($k)) { $wts[$k] = [pscustomobject]@{ Dir = $np; Codes = (New-Object System.Collections.Generic.List[object]) } }
-                            $wts[$k].Codes.Add(@('WORKTREE_LISTED_BY_GIT', $null))
-                            if ($rec.Prunable) { $wts[$k].Codes.Add(@('WORKTREE_PRUNABLE', $null)) }
-                        }
-                        if ($listRefused -gt 0) { $rev.Add((New-AtmEvidence -Code 'REPOSITORY_MISMATCH' -Source 'worktree-discovery' -Collector 'git' -ObservedUtc $now -Detail 'GIT_LISTED_PATH_REFUSED')) }
-                    } else { $gitFailed++ }
-                }
+                # P3-C0: `worktree list` is not run. It enumerates the administrative entries and follows each gitdir, so
+                # an entry created after the preflight would be followed (an absence cannot be pinned); registration
+                # comes from the files only (a missing worktree directory is WORKTREE_DIRECTORY_MISSING).
             } else { $gitFailed++; $rev.Add((New-AtmEvidence -Code 'GIT_NOT_RUN' -Source 'worktree-discovery' -Collector 'git' -ObservedUtc $now -Detail $rp.Reason)) }
         } elseif (-not $gitUsable) { $rev.Add((New-AtmEvidence -Code 'GIT_NOT_RUN' -Source 'worktree-discovery' -Collector 'git' -ObservedUtc $now -Detail $(if ($null -ne $Git) { [string]$Git.Reason } else { 'GIT_NOT_FOUND' }))) }
+        # Stashes belong to the repository (ADR-0006 rule 12): counted once, attributed to a worktree only by branch.
+        $stash = Get-AtmGitStashSummary -CommonDir $pf.CommonDir
+        if ($stash.Status -ceq 'COMPLETE' -and $stash.Count -gt 0) { $rev.Add((New-AtmEvidence -Code 'STASHES_IN_REPOSITORY' -Source 'local-work' -Collector 'local-work-files' -ObservedUtc $now -Detail ([string]$stash.Count))) }
+        elseif ($stash.Status -cne 'COMPLETE' -and $stash.Status -cne 'NOT_PRESENT') { $lwFiles.Add('FILES_INCOMPLETE') }
         $findings.Add([pscustomobject]@{ Kind = 'Repository'; Key = $rKey; State = 'UNKNOWN'; Evidence = $rev.ToArray() })
         foreach ($w in $wts.Values) {
             $ev = New-Object System.Collections.Generic.List[object]
-            foreach ($cd in $w.Codes) { $ev.Add((New-AtmEvidence -Code $cd[0] -Source 'worktree-discovery' -Collector $(if ($cd[0] -like 'WORKTREE_LISTED*' -or $cd[0] -eq 'WORKTREE_PRUNABLE') { 'git' } else { 'worktree-discovery' }) -ObservedUtc $now -Detail $cd[1])) }
+            foreach ($cd in $w.Codes) { $ev.Add((New-AtmEvidence -Code $cd[0] -Source 'worktree-discovery' -Collector 'worktree-discovery' -ObservedUtc $now -Detail $cd[1])) }
             $ev.Add((New-AtmEvidence -Code 'IN_REPOSITORY' -Source 'worktree-discovery' -Collector 'worktree-discovery' -ObservedUtc $now -Detail $rKey))
-            $ev.Add((New-AtmEvidence -Code 'LOCAL_WORK_UNKNOWN' -Source 'worktree-discovery' -Collector 'worktree-discovery' -ObservedUtc $now))
-            $findings.Add([pscustomobject]@{ Kind = 'Worktree'; Key = (& $wtKey $w.Dir); State = 'UNKNOWN'; Evidence = $ev.ToArray() })
+            $state = 'UNKNOWN'
+            # Local work only where a source led (the same rule as for Git); elsewhere it stays unknown.
+            $led = @($r.Dirs | Where-Object { [string]::Equals($_, $w.Dir, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+            if ($led -and @($w.Codes | Where-Object { $_[0] -ceq 'WORKTREE_DIRECTORY_MISSING' }).Count -eq 0) {
+                $lw = Get-AtmWorktreeLocalWork -WorkTree $w.Dir -Git $(if ($gitUsable) { $Git } else { $null }) -Stash $stash -Deadline $Deadline
+                foreach ($e in $lw.Evidence) { $ev.Add($e) }
+                $lwCount++
+                if ($script:AtmConclusiveCoverage -cnotcontains $lw.StatusCoverage.Status) { $lwStatus.Add($(if ($lw.StatusCoverage.Reason) { [string]$lw.StatusCoverage.Reason } else { 'STATUS_INCOMPLETE' })) } else { $lwStatusOk++ }
+                if ($script:AtmConclusiveCoverage -cnotcontains $lw.FilesCoverage.Status) { $lwFiles.Add('FILES_INCOMPLETE') }
+                if ($lw.LocalWork) { $state = 'LOCAL_WORK' }
+            } else {
+                $ev.Add((New-AtmEvidence -Code 'LOCAL_WORK_UNKNOWN' -Source 'worktree-discovery' -Collector 'worktree-discovery' -ObservedUtc $now -Detail $(if ($led) { $null } else { 'WORKTREE_OUTSIDE_SOURCES' })))
+            }
+            # Publication is P3-D: a worktree without local work is never "clean and published" yet.
+            if ($state -ceq 'UNKNOWN') { $ev.Add((New-AtmEvidence -Code 'PUBLICATION_NOT_DIAGNOSED' -Source 'worktree-discovery' -Collector 'worktree-discovery' -ObservedUtc $now)) }
+            $findings.Add([pscustomobject]@{ Kind = 'Worktree'; Key = (& $wtKey $w.Dir); State = $state; Evidence = $ev.ToArray() })
         }
     }
     # Coverage records and findings (one per key: a key seen twice keeps the first, its evidence merged).
@@ -2125,11 +2310,18 @@ function Get-AtmWorktreeDiscovery {
     if (-not $gitUsable) { $gitCov = New-AtmCoverage -Collector 'git' -Status 'UNAVAILABLE' -Reasons @($(if ($null -ne $Git -and $Git.Reason) { [string]$Git.Reason } else { 'GIT_NOT_FOUND' })) -ElevationWouldHelp 'NO' }
     elseif ($gitFailed -gt 0) { $gitCov = New-AtmCoverage -Collector 'git' -Status 'PARTIAL' -Reasons @('GIT_CALLS_INCOMPLETE') -ElevationWouldHelp 'UNKNOWN' -Observed ($gitCalls - $gitFailed) -Expected $gitCalls }
     else { $gitCov = New-AtmCoverage -Collector 'git' -Status 'COMPLETE' -ElevationWouldHelp 'NO' -Observed $gitCalls -Expected $gitCalls }
+    $stCov = $(if ($lwCount -eq 0) { New-AtmCoverage -Collector 'local-work-status' -Status 'NOT_OBSERVABLE' -Reasons @('STATUS_NOT_RUN') -ElevationWouldHelp 'NO' }
+        elseif ($lwStatus.Count -eq 0) { New-AtmCoverage -Collector 'local-work-status' -Status 'COMPLETE' -ElevationWouldHelp 'NO' -Observed $lwStatusOk -Expected $lwCount }
+        else { New-AtmCoverage -Collector 'local-work-status' -Status 'PARTIAL' -Reasons @(Get-AtmSortedCodes $lwStatus) -ElevationWouldHelp 'UNKNOWN' -Observed $lwStatusOk -Expected $lwCount })
+    $fiCov = $(if ($lwFiles.Count -eq 0) { New-AtmCoverage -Collector 'local-work-files' -Status 'COMPLETE' -ElevationWouldHelp 'NO' -Observed $lwCount -Expected $lwCount }
+        else { New-AtmCoverage -Collector 'local-work-files' -Status 'PARTIAL' -Reasons @(Get-AtmSortedCodes $lwFiles) -ElevationWouldHelp 'UNKNOWN' })
     $byKey = [ordered]@{}
     foreach ($f in $findings) {
         if (-not $byKey.Contains($f.Key)) { $byKey[$f.Key] = [pscustomobject]@{ Kind = $f.Kind; Key = $f.Key; State = $f.State; Evidence = (New-Object System.Collections.Generic.List[object]) } }
         $t = $byKey[$f.Key]
-        if ($t.State -eq 'UNKNOWN' -and $f.State -ne 'UNKNOWN') { $t.State = $f.State }
+        # Precedence of ADR-0006 rule 14 among the states this phase can give.
+        $rank = @{ 'LOCAL_WORK' = 3; 'APPARENT_ORPHAN' = 2; 'UNKNOWN' = 1 }
+        if ($rank[[string]$f.State] -gt $rank[[string]$t.State]) { $t.State = $f.State }
         foreach ($e in $f.Evidence) { if (@($t.Evidence | Where-Object { $_.Code -ceq $e.Code -and $_.Detail -ceq $e.Detail }).Count -eq 0) { $t.Evidence.Add($e) } }
     }
     $built = New-Object System.Collections.Generic.List[object]
@@ -2137,11 +2329,15 @@ function Get-AtmWorktreeDiscovery {
         # An apparent orphan that turns out to be registered somewhere else is not an orphan.
         $state = $t.State
         if ($state -eq 'APPARENT_ORPHAN' -and @($t.Evidence | Where-Object { $_.Code -eq 'WORKTREE_REGISTERED' }).Count -gt 0) { $state = 'UNKNOWN' }
-        $cov = @($disc) + $(if (@($t.Evidence | Where-Object { $_.Collector -eq 'git' }).Count -gt 0) { @($gitCov) } else { @() })
+        # A positive local work observation removes the generic "unknown" marker of the same worktree (seen twice).
+        if ($state -ceq 'LOCAL_WORK') { $t.Evidence = [System.Collections.Generic.List[object]]@($t.Evidence | Where-Object { $_.Code -cne 'LOCAL_WORK_UNKNOWN' -and $_.Code -cne 'PUBLICATION_NOT_DIAGNOSED' }) }
+        $cov = @($disc) + $(if (@($t.Evidence | Where-Object { $_.Collector -eq 'git' }).Count -gt 0) { @($gitCov) } else { @() }) +
+            $(if (@($t.Evidence | Where-Object { $_.Collector -eq 'local-work-status' }).Count -gt 0) { @($stCov) } else { @() }) +
+            $(if (@($t.Evidence | Where-Object { $_.Collector -eq 'local-work-files' }).Count -gt 0) { @($fiCov) } else { @() })
         $built.Add((New-AtmFinding -Kind $t.Kind -Key $t.Key -State $state -Evidence (@(Get-AtmOrdinalSorted -Items $t.Evidence.ToArray() -Signature { param($e) '{0}|{1}' -f $e.Code, $e.Detail })) -Coverage $cov))
     }
     $sorted = @(Get-AtmOrdinalSorted -Items $built.ToArray() -Signature { param($f) [string]$f.Kind + [char]1 + [string]$f.Key })
-    return [pscustomobject]@{ Findings = $sorted; Coverage = @($disc, $gitCov) }
+    return [pscustomobject]@{ Findings = $sorted; Coverage = @($disc, $gitCov, $stCov, $fiCov) }
 }
 
 # ---------------------------------------------------------------------------------------------
