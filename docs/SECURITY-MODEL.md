@@ -114,6 +114,13 @@ called by `Invoke-AtmGitCommand`):
 * **Worktree diagnostics gate (P3-B0):** reading repositories and running Git in them are both behind
   `$script:AtmWorktreeDiagnosticsEnabled`, `$false` in every shipped copy (checked by the test suite and the install
   e2e). Only `git --version` runs while it is closed. Opening it for real repositories is a maintainer decision.
+* **Open-file diagnostics gate (P1-C-S):** the Restart Manager collector (`handles`, D-2) is behind
+  `$script:AtmHandleDiagnosticsEnabled`, `$false` in every shipped copy (single assignment; no option, environment
+  variable or configuration file; checked by the test suite and the install e2e). It is checked by the diagnose and
+  again by the sampler and the collector. Closed, no file is listed and no Restart Manager session is started;
+  `handles` is `NOT_OBSERVABLE` (`HANDLE_SECURITY_GATE_CLOSED`). Reason: a sampled path is checked and then handed to
+  `RmRegisterResources` as text, and a concurrent replacement of an ancestor in that window is not excluded (TOCTOU,
+  not resolved).
 * **Preflight (P3-B0), before any Git call on a target:** the files Git would follow are read directly (the `.git`
   file, `commondir`, the configuration with a strict parser, every administrative `gitdir`, the alternates chain), and
   every path in them goes through one resolver before any file-system call: UNC and device forms, URLs, `~` and other
@@ -204,7 +211,11 @@ called by `Invoke-AtmGitCommand`):
   access are not detected by the probe. Process working directories and environment variables are not
   observable (V0.1; in V0.2 the D-1 working-directory reading is deferred, ADR-0004 amendment: the diagnose reports it
   as `NOT_OBSERVABLE`).
-* **Open-file evidence (V0.2 diagnose, D-2):** Restart Manager lists the processes holding a bounded sample of files
+* **Open-file evidence (V0.2 diagnose, D-2; closed by the open-file diagnostics gate, validated on fixtures only):**
+  sampled paths are validated and then registered with Restart Manager by name; no guarantee was demonstrated against
+  a concurrent replacement of an ancestor component between the check and `RmRegisterResources` (TOCTOU of text
+  paths, NOT RESOLVED; what Restart Manager does with a redirected path was not established). When the gate is opened
+  (tests only), Restart Manager lists the processes holding a bounded sample of files
   of each indexed item (start session, register, list, end session; never shut down or restart; sessions always
   ended). It sees files only (not directories nor working directories), so a sample never proves an item free; a
   holder is identified by PID and start time against the process snapshot, otherwise reported as unverified; no file

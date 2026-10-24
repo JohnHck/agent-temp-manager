@@ -4367,7 +4367,7 @@ try {
         Assert-Eq (@($d.Coverage | ForEach-Object { $_.Collector }) -join ',') 'identity,provider-claude-code,inventory,processes,temp-profiles,process-snapshot,sessions-claude-code,agent-processes,agent-resources,process-cwd,handles' 'coletores (Claude Code v2: dicas de runtime lidas; runtime de agentes da P1-B4-c; P1-C)'
         foreach ($c in @($d.Coverage | Where-Object { $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' })) { Assert-Eq $c.Status 'COMPLETE' "$($c.Collector) completo" }
         $hc = @($d.Coverage | Where-Object { $_.Collector -eq 'handles' })[0]; $wc = @($d.Coverage | Where-Object { $_.Collector -eq 'process-cwd' })[0]
-        Assert-True ($hc.Status -eq 'PARTIAL' -and @($hc.Reasons) -contains 'HANDLES_SAMPLED' -and $wc.Status -eq 'NOT_OBSERVABLE' -and @($wc.Reasons) -contains 'WORKING_DIRECTORY_DEFERRED' -and -not $d.CoverageComplete) 'P1-C: arquivos abertos por amostra (PARTIAL), diretorios de trabalho nao observados; cobertura nunca completa'
+        Assert-True ($hc.Status -eq 'NOT_OBSERVABLE' -and (@($hc.Reasons) -join ',') -eq 'HANDLE_SECURITY_GATE_CLOSED' -and $wc.Status -eq 'NOT_OBSERVABLE' -and @($wc.Reasons) -contains 'WORKING_DIRECTORY_DEFERRED' -and -not $d.CoverageComplete) 'P1-C-S: arquivos abertos nao observados (trava fechada), diretorios de trabalho nao observados; cobertura nunca completa'
         Assert-True ($null -eq @($d.Coverage | Where-Object { $_.Collector -eq 'inventory' })[0].BudgetMs) 'inventario V0.1 sem orcamento declarado (nao interrompivel)'
         $f = @($d.Findings | Where-Object { $_.Key -ceq (& $b4PKey $r1) })
         Assert-Eq $f.Count 1 'achado da particao (pela chave pseudonima)'
@@ -5600,6 +5600,9 @@ try {
         $hx = $null; Assert-Eq ([AgentTempManager.AtmRestartManager]::Query([string[]]@(), 4, [ref]$hx)) 'OK' 'nenhum arquivo: nada consultado'
     }
     Test-Case 'Processos' 'P1-C D-2: coletor handles - identidade verificada pelo snapshot, nao verificada, proprio processo excluido, processo encerrado, limites, falha de registro, prazo; nunca COMPLETE' {
+        # P1-C-S: the gate is opened for this harness fixture only and closed again, even on error.
+        $script:AtmHandleDiagnosticsEnabled = $true
+        try {
         $d = Join-Path $sandbox 'rm-coll'; [void][IO.Directory]::CreateDirectory($d)
         $held = Join-Path $d 'held.txt'; [IO.File]::WriteAllText($held, "x`n")
         $c = & $rmHolder $held
@@ -5640,8 +5643,19 @@ try {
         $dl = Get-AtmHandleEvidence -Nodes $n2 -Query $okQ -Deadline ([datetime]::UtcNow.AddSeconds(-1))
         Assert-True (@($dl.Coverage.Reasons) -contains 'DEADLINE_EXCEEDED' -and $dl.Coverage.Observed -eq 0) 'prazo: nada consultado depois dele'
         Assert-Eq (Get-AtmHandleEvidence -Nodes @()).Coverage.Status 'NOT_OBSERVABLE' 'sem itens: nao observavel'
+        # Observation time (P1-C-S): one instant for the whole batch, the start of the batch (= coverage StartedUtc),
+        # even when the queries of the nodes run at different times.
+        $slowQ = { param($Files, $Max) Start-Sleep -Milliseconds 30; [pscustomobject]@{ Status = 'OK'; Holders = @('424242|' + [datetime]::UtcNow.AddMinutes(-5).Ticks) } }
+        $tb = Get-AtmHandleEvidence -Nodes $n2 -Query $slowQ
+        $tt = @(@($tb.Evidence['a']) + @($tb.Evidence['b']) | ForEach-Object { $_.ObservedUtc.Ticks } | Select-Object -Unique)
+        Assert-True ($tt.Count -eq 1 -and $tt[0] -eq $tb.Coverage.StartedUtc.Ticks -and $tb.Coverage.ElapsedMs -ge 50) "horario do lote: um so, igual ao inicio da cobertura handles ($($tt.Count) valores)"
+        Assert-True (@((Get-Command Get-AtmHandleEvidence).Parameters.Keys) -notcontains 'ObservedUtc') 'horario de outra coleta nao pode ser imposto ao lote'
+        } finally { $script:AtmHandleDiagnosticsEnabled = $false }
     }
     Test-Case 'Processos' 'P1-C D-2: amostra de arquivos por item (nunca recursiva, sem reparse point, limitada) e integracao ao diagnose sem caminhos; estado da particao inalterado; diretorios de trabalho nao observados' {
+        # P1-C-S: the gate is opened for this harness fixture only and closed again, even on error.
+        $script:AtmHandleDiagnosticsEnabled = $true
+        try {
         $d = Join-Path $sandbox 'rm-sample'; [void][IO.Directory]::CreateDirectory((Join-Path $d 'sub'))
         foreach ($n in @('a.txt', 'b.txt', 'c.txt')) { [IO.File]::WriteAllText((Join-Path $d $n), 'x') }
         $od = Join-Path $sandbox 'rm-office'; [void][IO.Directory]::CreateDirectory($od); [IO.File]::WriteAllText((Join-Path $od '~$doc.docx'), 'x')
@@ -5664,6 +5678,85 @@ try {
         $txt = (Show-AtmDiagnose -Result $res 6>&1 | Out-String)
         Assert-True ($txt.Contains((Get-AtmText 'diag.hTitle')) -and $txt.Contains((Get-AtmText 'diag.hCwd')) -and -not $txt.Contains($marker) -and -not $txt.Contains($root)) 'relatorio: secao de arquivos abertos, sem caminhos'
         Assert-True (@($res.Coverage | Where-Object { $_.Collector -eq 'process-cwd' -and $_.Status -eq 'NOT_OBSERVABLE' }).Count -eq 1) 'diretorios de trabalho: NOT_OBSERVABLE (D-1 adiado)'
+        # Observation time (P1-C-S): handle evidence carries the start of the handle batch (its coverage StartedUtc);
+        # the partition evidence keeps its own single time (D-8); neither gives the enumeration order back.
+        $hcov = @($res.Coverage | Where-Object { $_.Collector -eq 'handles' })[0]
+        $hT = @($tp | ForEach-Object { @($_.Evidence) } | Where-Object { $_.Collector -ceq 'handles' } | ForEach-Object { $_.ObservedUtc.Ticks } | Select-Object -Unique)
+        $pT = @($tp | ForEach-Object { @($_.Evidence) } | Where-Object { $_.Collector -cne 'handles' } | ForEach-Object { $_.ObservedUtc.Ticks } | Select-Object -Unique)
+        Assert-True ($hT.Count -eq 1 -and $hT[0] -eq $hcov.StartedUtc.Ticks -and $pT.Count -eq 1 -and $hT[0] -ge $pT[0]) "horarios: lote handles = inicio da sua cobertura; particoes com um horario proprio ($($hT.Count)/$($pT.Count))"
+        $jo = $json | ConvertFrom-Json
+        $jh = @($jo.findings | Where-Object { $_.kind -eq 'TempPartition' } | ForEach-Object { @($_.evidence) } | Where-Object { $_.collector -eq 'handles' } | ForEach-Object { [string]$_.observedUtc } | Select-Object -Unique)
+        Assert-Eq $jh.Count 1 'JSON: um horario de observacao para as evidencias de arquivos abertos'
+        } finally { $script:AtmHandleDiagnosticsEnabled = $false }
+    }
+    Test-Case 'Processos' 'P1-C-S: trava de arquivos abertos fechada por padrao - diagnose sem listar arquivos nem chamar o Restart Manager; coletor direto recusado; NOT_OBSERVABLE; sem caminhos; estados inalterados' {
+        Assert-Eq $script:AtmHandleDiagnosticsEnabled $false 'trava fechada fora dos testes'
+        $diag = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Diagnose.ps1'))
+        Assert-Eq ([regex]::Matches($diag, '\$script:AtmHandleDiagnosticsEnabled\s*=').Count) 1 'uma unica atribuicao da trava no motor'
+        Assert-True ($diag -match '\$script:AtmHandleDiagnosticsEnabled = \$false') 'a trava distribuida e $false'
+        $srcAll = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1', '.psd1', '.cs', '.json', '.cmd', '.bat') } | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Text = [IO.File]::ReadAllText($_.FullName) } })
+        Assert-Eq (@($srcAll | Where-Object { $_.Name -ne 'Engine.Diagnose.ps1' -and $_.Text.Contains('AtmHandleDiagnosticsEnabled') }).Count) 0 'nenhum outro arquivo (CLI, TUI, configuracao) menciona a trava: nenhuma opcao publica a abre'
+        Assert-True (-not ($diag -match '\$env:[A-Za-z_]*Handle')) 'nenhuma variavel de ambiente abre a trava'
+        # The only Restart Manager reference in PowerShell is inside the collector, after its gate check.
+        $rmRefs = @($srcAll | Where-Object { $_.Name -like '*.ps1' -and $_.Text.Contains('[AgentTempManager.AtmRestartManager]') } | ForEach-Object { $_.Name })
+        $he = $diag.Substring($diag.IndexOf('function Get-AtmHandleEvidence'), $diag.IndexOf('function Add-AtmFindingEvidence') - $diag.IndexOf('function Get-AtmHandleEvidence'))
+        Assert-True (($rmRefs -join ',') -eq 'Engine.Diagnose.ps1' -and [regex]::Matches($diag, '\[AgentTempManager\.AtmRestartManager\]').Count -eq 1 -and $he.IndexOf('if (-not $script:AtmHandleDiagnosticsEnabled)') -gt 0 -and $he.IndexOf('[AgentTempManager.AtmRestartManager]') -gt $he.IndexOf('if (-not $script:AtmHandleDiagnosticsEnabled)')) 'Restart Manager so dentro do coletor, depois da trava'
+        $smpFn = $diag.Substring($diag.IndexOf('function Get-AtmHandleSampleFiles'), $diag.IndexOf('function Get-AtmHandleEvidence') - $diag.IndexOf('function Get-AtmHandleSampleFiles'))
+        Assert-True ($smpFn.IndexOf('if (-not $script:AtmHandleDiagnosticsEnabled)') -gt 0 -and $smpFn.IndexOf('EnumerateFiles') -gt $smpFn.IndexOf('if (-not $script:AtmHandleDiagnosticsEnabled)')) 'listagem de arquivos so depois da trava'
+        $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        Assert-True (-not $cli.Contains('HandleQuery')) 'CLI nunca passa uma consulta de arquivos abertos'
+        # D: direct calls with the gate closed are refused (even an injected query is never called).
+        $calls = @{ N = 0 }
+        $countQ = ({ param($Files, $Max) $calls.N++; [pscustomobject]@{ Status = 'OK'; Holders = @('424242|1') } }.GetNewClosure())
+        $gd = Join-Path $sandbox 'rm-gate'; [void][IO.Directory]::CreateDirectory($gd); [IO.File]::WriteAllText((Join-Path $gd 'x.txt'), 'x')
+        $direct = Get-AtmHandleEvidence -Nodes @([pscustomobject]@{ Key = 'k'; Files = @((Join-Path $gd 'x.txt')); Capped = $false; Error = $null }) -Query $countQ
+        Assert-True ($calls.N -eq 0 -and $direct.Evidence.Count -eq 0 -and $direct.Coverage.Status -ceq 'NOT_OBSERVABLE' -and (@($direct.Coverage.Reasons) -join ',') -ceq 'HANDLE_SECURITY_GATE_CLOSED') 'coletor chamado diretamente com a trava fechada: recusado, nenhuma consulta'
+        $ds = Get-AtmHandleSampleFiles -Dir $gd
+        Assert-True (@($ds.Files).Count -eq 0 -and $ds.Error -ceq 'HANDLE_SECURITY_GATE_CLOSED') 'amostra chamada diretamente com a trava fechada: nada listado'
+        # A/B/C/F/H: the diagnose with a file of the partition held by a harness helper: nothing listed, no Restart
+        # Manager query (native or injected), NOT_OBSERVABLE, no held evidence, no path; the helper is the harness's own.
+        $p = New-TestProfile 'p1cs-gate'
+        $root = New-TestRoot -ProfileInfo $p
+        $marker = 'p1cs-secret-name'
+        $held = Join-Path $root "$marker.txt"; [IO.File]::WriteAllText($held, 'x')
+        $diagArgs = @{ InventoryArgs = (Get-InvArgs -Profiles @($p)); IdentitySource = $diagIdUser; ProcessSource = { @([pscustomobject]@{ ProcessId = 1; ParentProcessId = 0; Name = 'x'; CreationDate = [datetime]::UtcNow.AddDays(-1) }) }; CpuSampleMs = 0; PseudonymKey = $testPseudonymKey }
+        $c = & $rmHolder $held
+        try {
+            $script:AtmHandleInvocationLog = New-Object System.Collections.Generic.List[object]
+            try {
+                $closedNative = Invoke-AtmDiagnose @diagArgs
+                $closedInjected = Invoke-AtmDiagnose @diagArgs -HandleQuery $countQ
+                $log = @($script:AtmHandleInvocationLog)
+            } finally { $script:AtmHandleInvocationLog = $null }
+            Assert-True ($log.Count -eq 0 -and $calls.N -eq 0) "trava fechada: nenhuma listagem de arquivos e nenhuma consulta Restart Manager pelo diagnose ($($log.Count) registros)"
+            Assert-True (-not $c.HasExited) 'processo auxiliar do proprio harness segue ativo'
+        } finally { if (-not $c.HasExited) { $c.Kill() }; $c.WaitForExit(10000) | Out-Null }
+        foreach ($r in @($closedNative, $closedInjected)) {
+            $hc = @($r.Coverage | Where-Object { $_.Collector -eq 'handles' })
+            Assert-True ($hc.Count -eq 1 -and $hc[0].Status -ceq 'NOT_OBSERVABLE' -and (@($hc[0].Reasons) -join ',') -ceq 'HANDLE_SECURITY_GATE_CLOSED' -and $hc[0].ElevationWouldHelp -ceq 'NO') 'handles NOT_OBSERVABLE (trava), nunca NOT_PRESENT nem COMPLETE'
+            Assert-True (-not $r.CoverageComplete) 'cobertura do diagnose incompleta'
+            Assert-Eq @($r.Findings | ForEach-Object { @($_.Evidence) } | Where-Object { $_.Collector -ceq 'handles' }).Count 0 'nenhuma evidencia de arquivos abertos anexada'
+            Assert-Eq @($r.Findings | Where-Object { @($_.Coverage | Where-Object { $_.Collector -ceq 'handles' }).Count -gt 0 }).Count 0 'nenhum achado recebe a cobertura handles'
+        }
+        # The spy sees the collector when the gate is open (the closed result above is the gate, not a missing spy).
+        $script:AtmHandleDiagnosticsEnabled = $true
+        $script:AtmHandleInvocationLog = New-Object System.Collections.Generic.List[object]
+        try {
+            $open = Invoke-AtmDiagnose @diagArgs -HandleQuery ({ param($Files, $Max) [pscustomobject]@{ Status = 'OK'; Holders = @() } })
+            $openLog = @($script:AtmHandleInvocationLog)
+        } finally { $script:AtmHandleInvocationLog = $null; $script:AtmHandleDiagnosticsEnabled = $false }
+        Assert-True (@($openLog | Where-Object { $_.Op -eq 'LIST' }).Count -ge 1 -and @($openLog | Where-Object { $_.Op -eq 'QUERY' }).Count -ge 1) 'contraprova: com a trava aberta o espiao registra listagem e consulta'
+        # I: no state changes because of missing evidence: the same states and evidence codes, closed or open with no holder.
+        $sig = { param($R) @($R.Findings | Where-Object { $_.Kind -eq 'TempPartition' } | ForEach-Object { '{0}|{1}|{2}' -f $_.Key, $_.State, (@($_.Evidence | Where-Object { $_.Collector -cne 'handles' } | ForEach-Object { $_.Code + '/' + $_.Detail }) -join '+') }) -join "`n" }
+        Assert-True ((& $sig $closedNative) -ceq (& $sig $open) -and @($open.Findings | Where-Object { $_.Kind -eq 'TempPartition' }).Count -ge 1) 'estados e evidencias das particoes iguais com a trava fechada e aberta sem processo'
+        Assert-Eq @($open.Findings | ForEach-Object { @($_.Evidence) } | Where-Object { $_.Collector -ceq 'handles' }).Count 0 'sem processo: nada anexado (ausencia nao vira evidencia)'
+        # H: JSON and report without paths or names; the report says "not observed", never a count of held items.
+        $json = ConvertTo-AtmDiagnoseJson -Result $closedNative
+        foreach ($x in @($marker, $root, $root.Replace('\', '\\'))) { Assert-True (-not $json.Contains($x)) "JSON sem caminho nem nome de arquivo: $(Split-Path -Leaf $x)" }
+        Assert-True ($json.Contains('HANDLE_SECURITY_GATE_CLOSED')) 'JSON com o motivo da trava'
+        $txt = (Show-AtmDiagnose -Result $closedNative 6>&1 | Out-String)
+        $lineHead = (Get-AtmText 'diag.hLine' 0 0).Split(':')[0]
+        Assert-True ($txt.Contains((Get-AtmText 'diag.hGate')) -and -not $txt.Contains($lineHead) -and -not $txt.Contains((Get-AtmText 'diag.hSample')) -and -not $txt.Contains($marker) -and -not $txt.Contains($root)) 'relatorio: arquivos abertos nao observados (trava), sem contagem de itens livres, sem caminhos'
     }
     Test-Case 'Prototipo' 'ADR-0011 (estudo isolado, so codigo de teste): abertura relativa a raiz do volume com OBJ_DONT_REPARSE recusa reparse point em qualquer componente na propria abertura; caixa, 8.3, caminho longo, inexistente' {
         if (-not ('AgentTempManagerPrototype.AtmHandleRelativeOpen' -as [type])) { Add-Type -Path (Join-Path $testsDir 'prototypes\AtmHandleRelativeOpen.cs') }

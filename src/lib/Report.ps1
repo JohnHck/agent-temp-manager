@@ -481,11 +481,16 @@ function Show-AtmDiagnoseHandles {
     $cov = @($r.Coverage | Where-Object { $_.Collector -ceq 'handles' -or $_.Collector -ceq 'process-cwd' })
     if ($cov.Count -eq 0) { return }
     Write-AtmHeader (Get-AtmText 'diag.hTitle')
-    $items = @($r.Findings | Where-Object { $_.Kind -ceq 'TempPartition' -or $_.Kind -ceq 'Worktree' })
-    $held = @($items | Where-Object { @($_.Evidence | Where-Object { $_.Code -ceq 'FILE_HELD_OPEN' -or $_.Code -ceq 'FILE_HELD_OPEN_UNVERIFIED' }).Count -gt 0 })
-    Write-Host ('  ' + (Get-AtmText 'diag.hLine' $held.Count $items.Count))
+    # Not queried (security gate closed): no count is shown, so nothing reads as "no item held".
+    $gate = (@($cov | Where-Object { $_.Collector -ceq 'handles' -and @($_.Reasons) -ccontains 'HANDLE_SECURITY_GATE_CLOSED' }).Count -gt 0)
+    if ($gate) { Write-Host ('  ' + (Get-AtmText 'diag.hGate')) -ForegroundColor Yellow }
+    else {
+        $items = @($r.Findings | Where-Object { $_.Kind -ceq 'TempPartition' -or $_.Kind -ceq 'Worktree' })
+        $held = @($items | Where-Object { @($_.Evidence | Where-Object { $_.Code -ceq 'FILE_HELD_OPEN' -or $_.Code -ceq 'FILE_HELD_OPEN_UNVERIFIED' }).Count -gt 0 })
+        Write-Host ('  ' + (Get-AtmText 'diag.hLine' $held.Count $items.Count))
+    }
     foreach ($c in @($cov | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status })) { Write-Host ('  ' + (Get-AtmText 'diag.runtimeCoverageLine' $c.Collector $c.Status (@($c.Reasons) -join ', '))) -ForegroundColor Yellow }
-    Write-Host ('  ' + (Get-AtmText 'diag.hSample'))
+    if (-not $gate) { Write-Host ('  ' + (Get-AtmText 'diag.hSample')) }
     Write-Host ('  ' + (Get-AtmText 'diag.hCwd'))
     Write-Host ('  ' + (Get-AtmText 'diag.hState')) -ForegroundColor Green
 }

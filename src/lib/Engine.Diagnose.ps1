@@ -2685,9 +2685,12 @@ function Get-AtmWorktreeDiscovery {
             if (-not $stopReason -and $led -and @($w.Codes | Where-Object { $_[0] -ceq 'WORKTREE_DIRECTORY_MISSING' }).Count -eq 0) {
                 $wpf = $(if ($pfByDir.ContainsKey($w.Dir.ToLowerInvariant())) { $pfByDir[$w.Dir.ToLowerInvariant()] } else { Get-AtmGitPreflight -Target $w.Dir -Cache $pfCache })
                 if ($wpf.Status -ceq 'OK') {
-                    # P1-C: the worktree's index is the file sampled for open-file evidence (D-2).
-                    $ix = Resolve-AtmGitReferencedPath -Value 'index' -BaseDir $wpf.GitDir
-                    $handleNodes.Add([pscustomobject]@{ Key = (& $wtKey $w.Dir); Files = $(if ($ix.Status -eq 'OK') { @($ix.Path) } else { @() }); Capped = $false; Error = $null })
+                    # P1-C: the worktree's index is the file sampled for open-file evidence (D-2), only with the
+                    # handle diagnostics gate open.
+                    if ($script:AtmHandleDiagnosticsEnabled) {
+                        $ix = Resolve-AtmGitReferencedPath -Value 'index' -BaseDir $wpf.GitDir
+                        $handleNodes.Add([pscustomobject]@{ Key = (& $wtKey $w.Dir); Files = $(if ($ix.Status -eq 'OK') { @($ix.Path) } else { @() }); Capped = $false; Error = $null })
+                    }
                 }
                 $lw = Get-AtmWorktreeLocalWork -WorkTree $w.Dir -Git $(if ($gitUsable) { $Git } else { $null }) -Stash $stash -Deadline $Deadline -Preflight $wpf
                 foreach ($e in $lw.Evidence) { $ev.Add($e) }
@@ -2971,11 +2974,19 @@ function Get-AtmInventoryCoverage {
 # authorizes anything, and no file path or process name leaves memory: findings get FILE_HELD_OPEN with a process key.
 # ---------------------------------------------------------------------------------------------
 
+# P1-C-S security gate: closed in every shipped copy (single assignment; no option, environment variable or file opens
+# it). A sampled path is checked and then handed to Restart Manager by name; a concurrent replacement of an ancestor in
+# that window is not excluded (TOCTOU, not resolved). Closed, no file of any node is listed and Restart Manager is never
+# called: 'handles' is NOT_OBSERVABLE (HANDLE_SECURITY_GATE_CLOSED), never an absence. Tests open it for fixtures only.
+$script:AtmHandleDiagnosticsEnabled = $false
+# Test spy: when it is a list, every file listing and every Restart Manager query of the collector is added to it
+# (operation and count only).
+$script:AtmHandleInvocationLog = $null
 $script:AtmHandleMaxFilesPerNode = 16
 $script:AtmHandleMaxFilesPerRun = 256
 $script:AtmHandleMaxSessions = 64
 $script:AtmHandleMaxHolders = 64
-$script:AtmHandleReasonCodes = @('HANDLES_SAMPLED', 'HANDLE_NO_FILES', 'HANDLE_FILES_CAPPED', 'HANDLE_SESSION_LIMIT', 'HANDLE_QUERY_FAILED', 'HANDLE_HOLDERS_CAPPED', 'HANDLE_IDENTITY_UNVERIFIED',
+$script:AtmHandleReasonCodes = @('HANDLE_SECURITY_GATE_CLOSED', 'HANDLES_SAMPLED', 'HANDLE_NO_FILES', 'HANDLE_FILES_CAPPED', 'HANDLE_SESSION_LIMIT', 'HANDLE_QUERY_FAILED', 'HANDLE_HOLDERS_CAPPED', 'HANDLE_IDENTITY_UNVERIFIED',
     'HANDLE_NODE_UNREADABLE', 'HANDLE_NO_NODE', 'PROCESS_SNAPSHOT_UNAVAILABLE', 'WORKING_DIRECTORY_DEFERRED')
 $script:AtmHandleEvidenceCodes = @('FILE_HELD_OPEN', 'FILE_HELD_OPEN_UNVERIFIED', 'OPEN_FILES_SAMPLED')
 
@@ -2984,14 +2995,16 @@ function Get-AtmHandleSampleFiles {
     # reparse point in its chain (native check); a file name is taken as listed (no expansion, so names such as
     # ~$doc.docx are kept) unless it holds a control character or a colon, and its own chain is checked natively. At
     # most 4 x -Max entries are looked at. Capped is $true when more files exist than were taken. Error:
-    # HANDLE_NODE_UNREADABLE.
+    # HANDLE_NODE_UNREADABLE; HANDLE_SECURITY_GATE_CLOSED (gate closed: nothing is listed).
     param([string]$Dir, [int]$Max = $script:AtmHandleMaxFilesPerNode)
     $out = [ordered]@{ Files = @(); Capped = $false; Error = $null }
+    if (-not $script:AtmHandleDiagnosticsEnabled) { $out.Error = 'HANDLE_SECURITY_GATE_CLOSED'; return [pscustomobject]$out }
     if ([string]::IsNullOrWhiteSpace($Dir) -or $Dir -notmatch '^[A-Za-z]:\\' -or $Dir -match '[\x00-\x1f]' -or $Dir.IndexOf(':', 2) -ge 0) { $out.Error = 'HANDLE_NODE_UNREADABLE'; return [pscustomobject]$out }
     $dirPath = $Dir.TrimEnd('\')
     if ((Test-AtmGitPathChain $dirPath).Status -cne 'OK') { $out.Error = 'HANDLE_NODE_UNREADABLE'; return [pscustomobject]$out }
     $files = New-Object System.Collections.Generic.List[string]
     $seen = 0
+    if ($null -ne $script:AtmHandleInvocationLog) { $script:AtmHandleInvocationLog.Add([pscustomobject]@{ Op = 'LIST'; Files = 0 }) }
     try {
         foreach ($fi in (New-Object IO.DirectoryInfo($dirPath)).EnumerateFiles()) {
             $seen++
@@ -3014,11 +3027,15 @@ function Get-AtmHandleEvidence {
       sessions (one per node, one at a time), holders per query; -Deadline stops before the next node. -Query (tests):
       param($Files, $MaxHolders) returning Status and Holders ("pid|startTicksUtc"). Returns Evidence (Key -> list) and
       Coverage: never COMPLETE (a sample of files; directories and working directories are not seen by Restart Manager).
+      Observation time: every evidence entry of the batch carries the instant the batch started (before its first
+      query), which is also the coverage StartedUtc; never the time of another collector. The gate is checked first:
+      closed, nothing is queried (not even an injected -Query) and the coverage is NOT_OBSERVABLE.
     #>
     param($Nodes = @(), $Collection = $null, $SelfKeys = $null, [int]$MaxFilesPerRun = $script:AtmHandleMaxFilesPerRun, [int]$MaxSessions = $script:AtmHandleMaxSessions,
-        [int]$MaxHolders = $script:AtmHandleMaxHolders, $Deadline = $null, [scriptblock]$Query = $null, $ObservedUtc = $null)
+        [int]$MaxHolders = $script:AtmHandleMaxHolders, $Deadline = $null, [scriptblock]$Query = $null)
+    if (-not $script:AtmHandleDiagnosticsEnabled) { return [pscustomobject]@{ Evidence = @{}; Coverage = (New-AtmCoverage -Collector 'handles' -Status 'NOT_OBSERVABLE' -Reasons @('HANDLE_SECURITY_GATE_CLOSED') -ElevationWouldHelp 'NO') } }
     $started = [datetime]::UtcNow
-    $now = $(if ($null -ne $ObservedUtc) { [datetime]$ObservedUtc } else { $started })
+    $now = $started
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $reasons = New-Object System.Collections.Generic.List[string]
     $evidence = @{}
@@ -3046,6 +3063,7 @@ function Get-AtmHandleEvidence {
         }
         $sessions++; $filesUsed += $files.Count
         $res = $null
+        if ($null -ne $script:AtmHandleInvocationLog) { $script:AtmHandleInvocationLog.Add([pscustomobject]@{ Op = 'QUERY'; Files = $files.Count }) }
         try { $res = & $q $files $MaxHolders } catch { $res = [pscustomobject]@{ Status = 'FAILED_' + (ConvertTo-AtmExceptionCode $_.Exception.GetType().Name); Holders = @() } }
         $list = New-Object System.Collections.Generic.List[object]
         if ([string]$res.Status -notin @('OK', 'PARTIAL')) { $reasons.Add('HANDLE_QUERY_FAILED'); continue }
@@ -3245,8 +3263,11 @@ function Invoke-AtmDiagnoseRun {
 
     # Working directories (D-1): deferred (ADR-0004 amendment); never observed, so never an absence.
     $coverage.Add((New-AtmCoverage -Collector 'process-cwd' -Status 'NOT_OBSERVABLE' -Reasons @('WORKING_DIRECTORY_DEFERRED') -ElevationWouldHelp 'NO'))
-    # Open files (D-2): a bounded sample of files of each temporary partition (and worktree, when discovery ran).
-    if ([datetime]::UtcNow -ge $deadline) { $coverage.Add((New-AtmDeadlineCoverage 'handles')) }
+    # Open files (D-2): a bounded sample of files of each temporary partition (and worktree, when discovery ran), only
+    # with the handle diagnostics gate open (closed in every shipped copy: no file is listed, Restart Manager is not
+    # called, and 'handles' is NOT_OBSERVABLE). Checked before the deadline, so a closed gate is always reported as such.
+    if (-not $script:AtmHandleDiagnosticsEnabled) { $coverage.Add((New-AtmCoverage -Collector 'handles' -Status 'NOT_OBSERVABLE' -Reasons @('HANDLE_SECURITY_GATE_CLOSED') -ElevationWouldHelp 'NO')) }
+    elseif ([datetime]::UtcNow -ge $deadline) { $coverage.Add((New-AtmDeadlineCoverage 'handles')) }
     else {
         $nodes = New-Object System.Collections.Generic.List[object]
         if ($null -ne $inv) {
@@ -3258,8 +3279,8 @@ function Invoke-AtmDiagnoseRun {
             }
         }
         foreach ($wn in $wtNodes) { $nodes.Add($wn) }
-        $obs = @($findings | Where-Object { $_.Kind -ceq 'TempPartition' } | ForEach-Object { @($_.Evidence) } | Select-Object -First 1)
-        $he = Get-AtmHandleEvidence -Nodes $nodes.ToArray() -Collection $procCollection -SelfKeys $selfKeys -Deadline $deadline -Query $HandleQuery -ObservedUtc $(if ($obs.Count -gt 0) { $obs[0].ObservedUtc } else { $null })
+        # Handle evidence carries the start of the handle batch (the coverage StartedUtc), not the partitions' time.
+        $he = Get-AtmHandleEvidence -Nodes $nodes.ToArray() -Collection $procCollection -SelfKeys $selfKeys -Deadline $deadline -Query $HandleQuery
         $coverage.Add($he.Coverage)
         for ($i = 0; $i -lt $findings.Count; $i++) {
             $f = $findings[$i]

@@ -196,6 +196,18 @@ Step 'shipped-worktree-diagnostics-gate' {
     Assert ($diag -match '\$script:AtmWorktreeDiagnosticsEnabled = \$false') 'trava de worktrees instalada nao e $false'
     'installed worktree diagnostics gate = $false (single assignment)'
 }
+Step 'shipped-handle-diagnostics-gate' {
+    # P1-C-S: open-file evidence (Restart Manager) stays closed in every shipped copy; the installed diagnose reports it
+    # as not observed (the gate is checked before any file is listed or any Restart Manager call).
+    $diag = [IO.File]::ReadAllText((Join-Path $installDir 'lib\Engine.Diagnose.ps1'))
+    Assert ([regex]::Matches($diag, '\$script:AtmHandleDiagnosticsEnabled\s*=').Count -eq 1) 'mais de uma atribuicao da trava de arquivos abertos'
+    Assert ($diag -match '\$script:AtmHandleDiagnosticsEnabled = \$false') 'trava de arquivos abertos instalada nao e $false'
+    $r = Invoke-Agent 'diagnose -NoProgress -Lang en-US -DeadlineSeconds 120' 'diagnose-handle-gate'
+    Assert ($r.Code -eq 0) "diagnose exit $($r.Code)"
+    Assert ($r.Text -match 'handles\W+NOT_OBSERVABLE\W+HANDLE_SECURITY_GATE_CLOSED') 'diagnose instalado sem handles NOT_OBSERVABLE / HANDLE_SECURITY_GATE_CLOSED'
+    Assert ($r.Text.Contains('Open files are not observed') -and -not $r.Text.Contains('Items with a file held open')) 'relatorio instalado sem a linha da trava ou com contagem de itens'
+    'installed handle diagnostics gate = $false (single assignment); installed diagnose: handles NOT_OBSERVABLE (HANDLE_SECURITY_GATE_CLOSED)'
+}
 foreach ($c in @(@('verify', 'verify', 0), @('version -Lang en-US', 'version', 0), @('audit -NoProgress -Lang en-US', 'audit', 0),
                  @('preview -NoProgress -Lang en-US', 'preview', 0), @('help', 'help', 0), @('', 'tui-noninteractive', 6))) {
     $argLine = $c[0]; $tag = $c[1]; $expect = $c[2]

@@ -102,3 +102,28 @@ The decisions above are kept as history; this records what P1-C did with them.
   name is taken as listed (names such as `~$doc.docx` are kept), its chain checked natively; at most four times the
   sample size of entries is looked at. `RmStartSession` writes a transient session key under
   `HKCU\Software\Microsoft\RestartManager`, removed by `RmEndSession`; no file is written.
+
+## Amendment (P1-C-S security correction, 2026-10-24)
+
+The amendment above is kept as written; the maintainer's review of PR #41 added the following.
+
+* **D-1: DEFERRED** (unchanged). `process-cwd` stays `NOT_OBSERVABLE` (`WORKING_DIRECTORY_DEFERRED`).
+* **D-2: implemented and validated on fixtures, blocked for real use.** The collector checks a sampled path (text
+  rules and the native reparse-point chain) and then hands the path, as text, to `RmRegisterResources`. No guarantee
+  was demonstrated against a concurrent replacement of an ancestor component between that check and the registration
+  (the same kind of TOCTOU that P3-D showed for reads by text path). **TOCTOU of text paths given to Restart Manager:
+  NOT RESOLVED.** What Restart Manager does with a path redirected in that window was not established either way.
+* **Security gate.** `$script:AtmHandleDiagnosticsEnabled = $false` (single assignment in `Engine.Diagnose.ps1`; no
+  option, environment variable or configuration file opens it; checked by the suite and by the install e2e on every
+  runner). It is checked in the diagnose before the deadline, in `Get-AtmHandleSampleFiles` before any path check or
+  listing, and in `Get-AtmHandleEvidence` before any query (an injected test query included); worktree discovery adds
+  no open-file node while it is closed. Closed, no file of any partition is listed and `RmStartSession`,
+  `RmRegisterResources` and `RmGetList` are never called by the diagnose; `handles` is `NOT_OBSERVABLE` with
+  `HANDLE_SECURITY_GATE_CLOSED`, which is never an absence of dependency, and the report says that open files are not
+  observed (no count of items). The tests open it only for disposable fixtures of the harness and close it again in
+  `finally`. Opening it for real directories needs a demonstrated solution and a maintainer decision.
+* **Observation time.** Every open-file evidence entry carries one instant: the start of the handle batch, before its
+  first query, which is also the `startedUtc` of the `handles` coverage record. It no longer reuses the time of the
+  partition observation. The order of evidence and of partition findings (D-8) is unchanged, and one time per
+  collector for every item gives no enumeration order back.
+* **OBJ_DONT_REPARSE** stays an isolated prototype (test code only); ADR-0011 stays `PROPOSED`.
