@@ -356,6 +356,7 @@ function Show-AtmDiagnose {
     Show-AtmDiagnoseServices -Result $r
     Show-AtmDiagnoseVirtualization -Result $r
     Show-AtmDiagnoseWorktrees -Result $r
+    Show-AtmDiagnoseGraph -Result $r
     Show-AtmDiagnoseHandles -Result $r
 
     Write-AtmHeader (Get-AtmText 'diag.summaryTitle')
@@ -612,6 +613,50 @@ function ConvertTo-AtmAgentResourcesJson {
     return [ordered]@{ collected = $true; processes = $Totals.Processes; complete = [bool]$Totals.Complete; reasons = @($Totals.Reasons); cpuIntervalMs = $Totals.CpuIntervalMs; counters = $counters }
 }
 
+function ConvertTo-AtmGraphJson {
+    # graph (docs/DIAGNOSE-SCHEMA.md, P4-A): finding keys, relations, strengths and codes only; every list is an array.
+    param($Graph)
+    if ($null -eq $Graph) { return $null }
+    return [ordered]@{
+        nodes     = @(@($Graph.Nodes) | ForEach-Object { [ordered]@{ kind = $_.Kind; key = $_.Key; finding = [bool]$_.Finding } })
+        edges     = @(@($Graph.Edges) | ForEach-Object { [ordered]@{ relation = $_.Relation; fromKind = $_.FromKind; from = $_.From; toKind = $_.ToKind; to = $_.To; strength = $_.Strength
+                    evidence = @(@($_.Evidence) | ForEach-Object { [ordered]@{ code = $_.Code; collector = $_.Collector; detail = $_.Detail } }) } })
+        summaries = @(@($Graph.Summaries) | ForEach-Object { [ordered]@{ kind = $_.Kind; key = $_.Key; dependency = $_.Dependency; strength = $_.Strength; incoming = $_.Incoming
+                    roots = @($_.Roots); incompleteCoverage = @($_.IncompleteCoverage); reasons = @($_.Reasons) } })
+        coverage  = [ordered]@{ status = $Graph.Coverage.Status; reasons = @($Graph.Coverage.Reasons); nodes = $Graph.Coverage.Nodes; edges = $Graph.Coverage.Edges; droppedEdges = $Graph.Coverage.DroppedEdges
+            startedUtc = (Format-AtmUtcIso $Graph.Coverage.StartedUtc); elapsedMs = $Graph.Coverage.ElapsedMs }
+    }
+}
+
+function Show-AtmDiagnoseGraph {
+    # Dependency graph (P4-A): edges by relation and strength, the summaries of temporary partitions and worktrees, the
+    # graph coverage and what it means. Never states that an item is free, and never changes a state.
+    param($Result)
+    $g = $Result.Graph
+    if ($null -eq $g) { return }
+    Write-AtmHeader (Get-AtmText 'diag.graphTitle')
+    Write-Host ('  ' + (Get-AtmText 'diag.graphCounts' $g.Coverage.Nodes $g.Coverage.Edges))
+    foreach ($grp in @(@($g.Edges) | Group-Object { $_.Relation + '|' + $_.Strength } | Sort-Object Name)) {
+        $parts = $grp.Name.Split('|')
+        Write-Host ('    ' + (Get-AtmText 'diag.graphEdgeLine' $parts[0] $parts[1] $grp.Count))
+    }
+    foreach ($kind in @('TempPartition', 'Worktree')) {
+        foreach ($dep in $script:AtmGraphDependencies) {
+            $n = @($g.Summaries | Where-Object { $_.Kind -ceq $kind -and $_.Dependency -ceq $dep }).Count
+            if ($n -gt 0) { Write-Host ('  ' + (Get-AtmText 'diag.graphDepLine' $kind $dep $n (Get-AtmText "graph.dep.$dep"))) }
+        }
+    }
+    if ($g.Coverage.Status -cne 'COMPLETE') { Write-Host ('  ' + (Get-AtmText 'diag.runtimeCoverageLine' 'dependency-graph' $g.Coverage.Status (@($g.Coverage.Reasons) -join ', '))) -ForegroundColor Yellow }
+    $codes = New-Object System.Collections.Generic.List[string]
+    foreach ($x in @(@($g.Coverage.Reasons) + @($g.Summaries | ForEach-Object { @($_.Reasons) }))) { $tx = Get-AtmCodeText 'reason' $x; if ($tx -and -not $codes.Contains("$x|$tx")) { $codes.Add("$x|$tx") } }
+    if ($codes.Count -gt 0) {
+        Write-Host ('  ' + (Get-AtmText 'diag.runtimeLegendTitle'))
+        foreach ($c in @($codes | Sort-Object)) { $i = $c.IndexOf('|'); Write-Host ('    ' + (Get-AtmText 'diag.runtimeLegendLine' $c.Substring(0, $i) $c.Substring($i + 1))) }
+    }
+    Write-Host ('  ' + (Get-AtmText 'diag.graphNotes'))
+    Write-Host ('  ' + (Get-AtmText 'diag.graphNoDelete')) -ForegroundColor Green
+}
+
 function ConvertTo-AtmDiagnoseJson {
     # Schema atm.diagnose/2 (docs/DIAGNOSE-SCHEMA.md). Codes only; no command lines, environment values, tokens,
     # exception messages or file contents. Every array is explicit, every time is ISO 8601 UTC.
@@ -641,6 +686,7 @@ function ConvertTo-AtmDiagnoseJson {
                     evidence = @(@($_.Evidence) | ForEach-Object { [ordered]@{ code = $_.Code; source = $_.Source; collector = $_.Collector; observedUtc = (Format-AtmUtcIso $_.ObservedUtc); detail = $_.Detail } }) }
             })
         agentResources   = (ConvertTo-AtmAgentResourcesJson -Totals $r.AgentResources)
+        graph            = (ConvertTo-AtmGraphJson -Graph $r.Graph)
         pseudonymization = [ordered]@{ scheme = $r.Pseudonymization.Scheme; keySource = $r.Pseudonymization.KeySource; keyId = $r.Pseudonymization.KeyId }
         inventory        = [ordered]@{
             collected        = ($null -ne $inv)
