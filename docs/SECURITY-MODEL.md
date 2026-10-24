@@ -165,6 +165,10 @@ called by `Invoke-AtmGitCommand`):
   files (a concurrent `git config` write, `checkout` or rewrite of `packed-refs` fails for the duration of one Git
   call, returned as `PinnedMs`; Git for Windows may retry or ask "Should I try again?" in a console); index and loose
   ref updates and new objects are not blocked.
+* **Shared reads (P3-D):** every repository file the engine reads itself is opened with read, write and delete
+  sharing, so reading never stops another process from rewriting or renaming over it; strict parsers refuse a torn
+  read. References are read in two passes that must agree. Publication facts come from files only (no process); a
+  remote URL is never resolved or opened. ADR-0011 (PROPOSED) describes file-based diagnostics without Git.
 * **Local work is never complete:** `status` runs with `--ignore-submodules=all`, so changes inside a gitlink (which
   can exist without `.gitmodules`) are not seen, nor entries flagged assume-unchanged or skip-worktree; its coverage is
   always `PARTIAL` (`HIDDEN_ENTRIES_NOT_OBSERVED`). A stash that cannot be attributed (detached or unreadable `HEAD`) or
