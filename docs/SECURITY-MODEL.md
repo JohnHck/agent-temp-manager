@@ -118,8 +118,15 @@ called by `Invoke-AtmGitCommand`):
   file, `commondir`, the configuration with a strict parser, every administrative `gitdir`, the alternates chain), and
   every path in them goes through one resolver before any file-system call: UNC and device forms, URLs, `~` and other
   expansions, drives that are not fixed (mapped network drives) and reparse points are refused, and so is any included
-  configuration (`include`, `includeIf`). A refused target never gets a Git process. `status` also needs the D-3
-  preconditions: no filter driver, textconv or submodule in the repository.
+  configuration (`include`, `includeIf`), reserved device names, `core.worktree` (any value) and any other path-valued
+  key that is relative or does not exist. The Git directory must be valid as Git validates it (`HEAD`, `objects`,
+  `refs`), and a target that itself holds `HEAD` is refused (Git would read it as a bare repository, with its own
+  configuration). A refused target never gets a Git process. The runner does not trust the caller's preflight: it takes
+  a fresh one immediately before each run and requires it to agree. Every path Git reports goes through the same
+  resolver before it is used. `status` also needs the D-3 preconditions: no filter driver, textconv or submodule in the
+  repository. Git runs only in repositories a discovery source led to (a repository reached only through a worktree's
+  `gitdir` is registered from its files, never given to Git). The `PATH` lookup of `git.exe` skips drives that are not
+  fixed before any file-system call.
 * **Configuration isolation (P3-B0):** no global, XDG or system configuration or attributes (`GIT_CONFIG_GLOBAL=NUL`,
   `GIT_CONFIG_NOSYSTEM=1`, `GIT_ATTR_NOSYSTEM=1`, `core.excludesFile=NUL`, `core.attributesFile=NUL`), `HOME`,
   `USERPROFILE` and `XDG_CONFIG_HOME` pointing to a directory that does not exist in the Git installation; configuration
@@ -132,6 +139,11 @@ called by `Invoke-AtmGitCommand`):
 * Still open: a child running as the same user could in principle duplicate the job handle from this process (that
   requires code running in the child, which the allow-list, the preflight and D-3 prevent); handles are inheritable
   for a short time while the child is created (the handle list requires it).
+* Still open (preflight TOCTOU): the preflight and Git read the same files at different times, and the files are not
+  locked. A process running as the same user that can write the repository (for example an agent writing in a
+  temporary partition) could change its configuration between the fresh preflight and Git reading it, and add an
+  include to a network path. The window is one process start; it is not closed. This is a reason, recorded for the
+  maintainer, to keep the worktree diagnostics gate closed for real repositories until it is decided.
 
 ## Known limits (documented, not hidden)
 
