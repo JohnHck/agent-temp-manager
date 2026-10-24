@@ -79,5 +79,37 @@ credential or token files, and can never weaken a gate or a coverage status.
 * Activity: last write time of `<config>\projects\<slug>\<sessionId>.jsonl`.
 * Config dir: `CLAUDE_CONFIG_DIR` or `<profile>\.claude`.
 
+## Claude Desktop (contract v2: `runtime` only, V0.2-P2-C)
+
+`src/providers/ClaudeDesktop.ps1`, id `claude-desktop`. Every hint is a published or publicly reported fact, with its
+source recorded in the file; nothing of the installation (files, logs, registry, configuration, package database) is
+read. Sources checked on 2026-10-24:
+
+| Fact | Source | Status |
+|---|---|---|
+| MSIX package name `Claude`, family `Claude_pzs8sxrjxfjjc`, publisher Anthropic, PBC; the values do not change between versions or architectures | Anthropic documentation (Windows fleet checklist) | documented |
+| Cowork needs the `.msix` package (the legacy `.exe` installer has no Cowork); the package registers a Windows service that Cowork uses | Anthropic documentation (fleet checklist, installation and setup) | documented (service name not given) |
+| Cowork runs in a VM the app manages; needs Virtual Machine Platform (not the Hyper-V role); the VM runs under `NT VIRTUAL MACHINE\Virtual Machines` | Anthropic documentation | documented |
+| Agent helper `claude.exe` under `%APPDATA%\Claude\claude-code\<version>\<build-id>\` | Anthropic documentation | documented |
+| Service `CoworkVMService` ("Claude (CoworkVMService)"), start type Manual with 1.1.3647 and Running/Automatic later | anthropics/claude-code#27010 (2026-02-19, Claude Desktop 1.1.3647, Windows 10 Pro 22H2), #59035 (2026-05-14, Windows 11) | publicly reported |
+| The Cowork VM is created through HCS as `cowork-vm-<8 hex>` | anthropics/claude-code#59035 | publicly reported |
+
+* **Process matcher:** `claude.exe` with the command-line marker `pzs8sxrjxfjjc`, the publisher id of the package
+  family name: an executable started from the MSIX package runs from a folder named after the package full name, so
+  its path carries that id. The marker is matched in memory and never stored. The agent helper (`claude.exe` under the
+  user profile) carries no marker and is not matched here. Claude Code's own matcher (`claude.exe`, no marker) also
+  matches the package's processes: such a process is reported as attributable to both providers
+  (`PROVIDER_ATTRIBUTION_AMBIGUOUS`), never resolved by guessing. A command line that cannot be read leaves the
+  process unchecked (`COMMAND_LINE_MARKER_UNAVAILABLE`).
+* **Service hint:** `CoworkVMService` (role `cowork-vm`), exact name. A running service with a verified process is
+  positive evidence of the local Cowork service, not of a running VM; a service not listed is `UNKNOWN` (Cowork in a
+  remote environment, the `.exe` installer, or a service the account cannot see), never "not installed".
+* **No virtualization hint:** the Cowork VM is an HCS compute system with a per-installation name, not a Hyper-V
+  Manager VM, so it is not expected in `Msvm_ComputerSystem`; a `VmName` hint would depend on an arbitrary name, and
+  no `ServiceOwner` relation (service -> worker process) is established. `vmmem`, `vmwp`, `vmcompute` and HCS
+  processes are never attributed to Claude Desktop.
+* **No temp capability:** no per-session temporary directory of Claude Desktop is confirmed for this tool.
+* **Version:** not read from the installation; the hints apply to MSIX builds since the reported 1.1.3647.
+
 Adding another agent = one new file in `src/providers/` + tests. No engine, gate, report or TUI change is
 expected; the automated test "provider ficticio" demonstrates this with a test-only provider.

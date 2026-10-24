@@ -68,3 +68,24 @@ where the Claude Desktop provider is added.
   at registration; a provider whose hint function throws gives coverage `FAILED`, not "no hints".
 * Inventory and diagnose run correctly with no provider's agent installed (fixtures without any config directory,
   process or service).
+
+## Implementation record (P2-C, 2026-10-24)
+
+Decision 6 implemented: `src/providers/ClaudeDesktop.ps1` (id `claude-desktop`, `ContractVersion = 2`,
+`Capabilities = @('runtime')`). The contract and the engine are unchanged.
+
+* **Signatures and their basis** (the file records each source; details in `docs/PROVIDERS.md`): process `claude.exe`
+  with the marker `pzs8sxrjxfjjc` (publisher id of the documented package family name `Claude_pzs8sxrjxfjjc`, which
+  the MSIX install folder carries); service `CoworkVMService` (role `cowork-vm`), a name publicly reported in
+  Anthropic's issue tracker with Claude Desktop 1.1.3647 (2026-02-19) and later (2026-05-14), not named in
+  Anthropic's documentation. Decision 6 asked for read-only observation on a machine with Claude Desktop: no such
+  machine was available to this phase (the CI runners have none), so the signatures rest on the documentation and
+  on public reports, and the real installation is NOT_TESTED.
+* **Not declared:** virtualization hints (the Cowork VM is an HCS compute system named `cowork-vm-<8 hex>`, not in
+  `Msvm_ComputerSystem`; no service -> worker relation is verifiable), temporary directories (none confirmed), and
+  any installation version (none is read).
+* **Overlap with Claude Code:** both providers match `claude.exe` (Claude Code by image, Claude Desktop by image and
+  marker), so a package process is attributable to both and reported as ambiguous. Narrowing Claude Code's matcher
+  would change a P1 provider and is left to a later decision.
+* **What the diagnose can say about Cowork:** a running `CoworkVMService` with a verified process (local service
+  evidence); never that a Cowork VM runs or does not run, and nothing about Cowork in a remote environment.

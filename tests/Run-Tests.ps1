@@ -6347,6 +6347,113 @@ try {
         Assert-True ($q.VmCoverage.Status -cne 'COMPLETE' -or ($q.Namespace -ceq 'LISTED' -and $q.Vmms -ceq 'RUNNING')) 'VMs consultadas so com namespace listado e vmms em execucao'
         $script:caseNote = "plataforma $($q.PlatformCoverage.Status) [$(@($q.PlatformCoverage.Reasons) -join ',')], namespace $($q.Namespace), vmms $($q.Vmms), hipervisor $($q.Hypervisor), VMs $($q.VmCoverage.Status) [$(@($q.VmCoverage.Reasons) -join ',')], trabalhadores $(@((& $vPlat $r).Evidence | Where-Object { $_.Code -like 'VIRTUALIZATION_WORKER*' }).Count)"
     }
+    # ------------------------------------------------------------------ P2-C (Claude Desktop provider, ADR-0008)
+    # The provider file is loaded here and removed from the registry at once (the suite runs with Claude Code only);
+    # every source is injected: no Claude Desktop installation, service, VM or process is read or touched.
+    . (Join-Path $srcDir 'providers\ClaudeDesktop.ps1')
+    $cdProvider = @(Get-AtmProviders | Where-Object { $_.Id -eq 'claude-desktop' })[0]
+    for ($k = $script:AtmProviders.Count - 1; $k -ge 0; $k--) { if ($script:AtmProviders[$k].Id -eq 'claude-desktop') { $script:AtmProviders.RemoveAt($k) } }
+    $cdHints = Get-AtmProviderRuntimeHints $cdProvider
+    $ccHints = Get-AtmProviderRuntimeHints (Get-AtmProviders)[0]
+    $cdPkg = 'C:\Program Files\WindowsApps\Claude_1.2.3.0_x64__pzs8sxrjxfjjc\app\claude.exe'
+    $cdHelper = 'C:\Users\x\AppData\Roaming\Claude\claude-code\2.1.300\abcdefabcdef\claude.exe'
+    Test-Case 'Claude Desktop' 'P2-C: contrato v2 somente runtime - processo por marcador do pacote MSIX, servico CoworkVMService (relatado), nenhum hint de virtualizacao nao comprovado; fontes e versao registradas; nenhuma leitura da instalacao' {
+        Assert-True ($null -ne $cdProvider -and $cdProvider.ContractVersion -eq 2 -and (@(Get-AtmProviderCapabilities $cdProvider) -join ',') -ceq 'runtime') 'provider v2, somente runtime (sem diretorios temporarios declarados)'
+        Assert-Eq @(Get-AtmProviders).Count 1 'suite segue com Claude Code apenas (provider de teste removido)'
+        Assert-True ($cdHints.Coverage.Status -ceq 'COMPLETE' -and (@($cdHints.ProcessMatchers | ForEach-Object { $_.ImageName + '/' + $_.CommandLineMarker }) -join ';') -ceq 'claude.exe/pzs8sxrjxfjjc') 'matcher: claude.exe com o id do editor do pacote'
+        Assert-Eq (@($cdHints.ServiceHints | ForEach-Object { $_.Name + '/' + $_.Role }) -join ';') 'CoworkVMService/cowork-vm' 'servico: somente o nome relatado, papel cowork-vm'
+        Assert-Eq @($cdHints.VirtualizationHints).Count 0 'nenhum hint de virtualizacao (nome de VM arbitrario, relacao servico-VM nao verificavel)'
+        $src = [IO.File]::ReadAllText((Join-Path $srcDir 'providers\ClaudeDesktop.ps1'))
+        foreach ($x in @('Claude_pzs8sxrjxfjjc', '1.1.3647', 'claude-code#27010', 'claude-code#59035', '2026-10-24', 'Machine Platform', 'cowork-vm-<8 hex>')) { Assert-True $src.Contains($x) "fonte/versao registrada: $x" }
+        $code = (($src -split "`r?`n") | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+        foreach ($pat in @('Get-ChildItem', 'Get-Item', 'Get-Content', 'Get-CimInstance', 'Get-WmiObject', '[IO.', 'Registry', 'HKLM', 'HKCU', 'Start-', 'Stop-', 'Set-', 'Remove-', 'New-Item', 'Invoke-', 'Get-AppxPackage')) { Assert-True (-not $code.Contains($pat)) "provider nao le nem altera nada: '$pat'" }
+        Assert-True (@($cdProvider.PSObject.Properties.Name | Where-Object { $_ -match '(?i)version' -and $_ -cne 'ContractVersion' }).Count -eq 0) 'nenhuma versao da instalacao declarada ou lida (versao desconhecida)'
+    }
+    Test-Case 'Claude Desktop' 'P2-C: processos - principal e auxiliares do pacote, identidade inconclusiva, linha de comando indisponivel, auxiliar claude.exe e Electron/Node alheios, sobreposicao com Claude Code (ambigua)' {
+        $rows = @((& $b4Row 4 0 'System' $b4T0.AddHours(-1)), (& $b4Row 100 4 'claude.exe' $b4T0), (& $b4Row 101 100 'claude.exe' $b4T0.AddSeconds(5)), (& $b4Row 200 100 'claude.exe' $b4T0.AddSeconds(9)),
+            (& $b4Row 300 4 'Code.exe' $b4T0), (& $b4Row 301 4 'node.exe' $b4T0), (& $b4Row 400 4 'claude.exe' $b4T0.AddMinutes(1)), (& $b4Row 500 4 'claude.exe' $null))
+        $c = Get-AtmProcessCollection -Source ({ $rows }.GetNewClosure())
+        $legacy = [pscustomobject]@{ Failed = $false; Processes = @(
+                [pscustomobject]@{ Pid = 100; Name = 'claude.exe'; ParentPid = 4; CommandLine = "`"$cdPkg`""; CreationUtc = $b4T0 },
+                [pscustomobject]@{ Pid = 101; Name = 'claude.exe'; ParentPid = 100; CommandLine = "`"$cdPkg`" --type=renderer"; CreationUtc = $b4T0.AddSeconds(5) },
+                [pscustomobject]@{ Pid = 200; Name = 'claude.exe'; ParentPid = 100; CommandLine = "`"$cdHelper`" --print"; CreationUtc = $b4T0.AddSeconds(9) },
+                [pscustomobject]@{ Pid = 300; Name = 'Code.exe'; ParentPid = 4; CommandLine = 'Code.exe --type=renderer'; CreationUtc = $b4T0 },
+                [pscustomobject]@{ Pid = 301; Name = 'node.exe'; ParentPid = 4; CommandLine = 'node.exe server.js'; CreationUtc = $b4T0 },
+                [pscustomobject]@{ Pid = 400; Name = 'claude.exe'; ParentPid = 4; CommandLine = $null; CreationUtc = $b4T0.AddMinutes(1) }) }
+        $r = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -ProviderHints @($cdHints) -LegacySnapshot $legacy
+        $f = { param([long]$ProcId, $Created) @($r.Findings | Where-Object { $_.Key -ceq (& $b4Key $ProcId $Created) })[0] }
+        Assert-True ((& $f 100 $b4T0).State -ceq 'AGENT_PROCESS' -and (& $f 100 $b4T0).Provider -ceq 'claude-desktop' -and @((& $f 100 $b4T0).Evidence | Where-Object { $_.Code -ceq 'PROCESS_MATCHER_MARKER' }).Count -eq 1) 'processo principal do pacote: AGENT_PROCESS do claude-desktop pelo marcador'
+        Assert-True ((& $f 101 $b4T0.AddSeconds(5)).Provider -ceq 'claude-desktop') 'processo auxiliar do pacote: claude-desktop'
+        $helper = & $f 200 $b4T0.AddSeconds(9)
+        Assert-True ($null -eq $helper -or @($helper.Evidence | Where-Object { $_.Code -ceq 'PROCESS_MATCHER_MARKER' }).Count -eq 0) 'auxiliar claude.exe do perfil: nunca casado pelo marcador do pacote'
+        Assert-True ($null -eq (& $f 300 $b4T0) -and $null -eq (& $f 301 $b4T0)) 'Electron e Node alheios: nenhum achado'
+        Assert-True (@((& $b4State $r (& $b4Key 400 $b4T0.AddMinutes(1)))) -notcontains 'AGENT_PROCESS' -and @(@($r.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0].Reasons) -contains 'COMMAND_LINE_MARKER_UNAVAILABLE') 'linha de comando indisponivel: nunca atribuido, lacuna declarada'
+        Assert-True (@($r.Findings | Where-Object { $_.Key -ceq ($script:AtmUnverifiedKeyPrefix + '500') -and $_.State -ceq 'IDENTITY_UNVERIFIED' }).Count -eq 1) 'sem horario de criacao: identidade inconclusiva'
+        $both = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -ProviderHints @($ccHints, $cdHints) -LegacySnapshot $legacy
+        $m = @($both.Findings | Where-Object { $_.Key -ceq (& $b4Key 100 $b4T0) })[0]
+        $amb = @($m.Evidence | Where-Object { $_.Code -ceq 'PROVIDER_ATTRIBUTION_AMBIGUOUS' } | ForEach-Object { $_.Detail })
+        Assert-True ($null -eq $m.Provider -and ($amb -join ';') -ceq 'claude-code,claude-desktop') 'Claude Code (imagem) e Claude Desktop (marcador): atribuicao ambigua, nunca escolhida'
+    }
+    Test-Case 'Claude Desktop' 'P2-C: servico CoworkVMService - em execucao com processo verificado (Cowork local), parado (instalado sem executar), em execucao sem processo vinculado, nao listado (UNKNOWN), negado; dois providers declarando o mesmo servico' {
+        $coll = & $svcProcs @((& $svcPRow 4 $svcT0.AddHours(-1)), (& $svcPRow 6100 $svcT0.AddMinutes(-20)))
+        $run = & $svcRun $cdHints @((& $svcRow 'CoworkVMService' 'Running' 'Auto' $false 'LocalSystem' 6100 "`"C:\Program Files\WindowsApps\Claude_1.2.3.0_x64__pzs8sxrjxfjjc\cowork-svc.exe`"")) $coll
+        $f = @($run.Findings)[0]
+        Assert-True ($f.Key -ceq 'CoworkVMService' -and $f.State -ceq 'RUNNING' -and $f.Provider -ceq 'claude-desktop' -and (& $svcEv $f 'SERVICE_HINT')[0] -ceq 'claude-desktop:cowork-vm' -and (& $svcEv $f 'SERVICE_PROCESS_VERIFIED').Count -eq 1) 'em execucao com processo verificado: evidencia positiva de servico local do Cowork'
+        Assert-True ((& $svcEv $f 'SERVICE_EXECUTABLE')[0] -ceq 'C:\Program Files\WindowsApps\Claude_1.2.3.0_x64__pzs8sxrjxfjjc\cowork-svc.exe') 'pasta do pacote sob Program Files: caminho completo (identidade publica do pacote, nada pessoal), sem argumentos'
+        $stopped = & $svcRun $cdHints @((& $svcRow 'CoworkVMService' 'Stopped' 'Manual' $false 'LocalSystem' 0)) $coll
+        Assert-True (@($stopped.Findings)[0].State -ceq 'STOPPED' -and (& $svcEv @($stopped.Findings)[0] 'SERVICE_START_MODE')[0] -ceq 'MANUAL') 'parado (instalado, nao executando)'
+        $nolink = & $svcRun $cdHints @((& $svcRow 'CoworkVMService' 'Running' 'Auto' $false 'LocalSystem' 0)) $coll
+        Assert-True (@($nolink.Findings)[0].State -ceq 'RUNNING' -and (& $svcEv @($nolink.Findings)[0] 'SERVICE_PROCESS_UNVERIFIED')[0] -ceq 'PID_NOT_REPORTED') 'em execucao sem processo vinculado'
+        $absent = & $svcRun $cdHints @() $coll
+        Assert-True (@($absent.Findings)[0].State -ceq 'UNKNOWN' -and @($absent.Findings)[0].RequestedState -ceq 'UNKNOWN' -and (& $svcCov $absent 'services').Status -ceq 'PARTIAL') 'nao listado (Cowork remoto ou instalacao .exe): UNKNOWN, nunca "nao instalado"'
+        $den = Get-AtmServiceFindings -Query (Invoke-AtmServiceQuery -ProviderHints @($cdHints) -Source { param($Names) throw (New-Object UnauthorizedAccessException('x')) })
+        Assert-True (@($den.Findings)[0].State -ceq 'UNKNOWN' -and (& $svcCov $den 'services').Status -ceq 'DENIED') 'acesso negado: UNKNOWN, DENIED'
+        $other = & $svcHints 'other-agent' @((& $svcHint 'coworkvmservice'))
+        $ov = & $svcRun @($cdHints, $other) @((& $svcRow 'CoworkVMService' 'Running')) $coll
+        Assert-True ($null -eq @($ov.Findings)[0].Provider -and (& $svcEv @($ov.Findings)[0] 'PROVIDER_ATTRIBUTION_AMBIGUOUS')[0] -ceq 'claude-desktop,other-agent') 'dois providers: ambiguo'
+    }
+    Test-Case 'Claude Desktop' 'P2-C: virtualizacao - vmmem e vmwp sem vinculo ao provider, VM utilitaria do Cowork ausente de Msvm_ComputerSystem, virtualizacao negada ou indisponivel; nenhuma atribuicao ao Claude Desktop' {
+        $prow = @((& $vPRow 4 0 'System' $vT0.AddHours(-2)), (& $vPRow 700 4 'vmwp.exe' $vT0.AddMinutes(-10)), (& $vPRow 800 4 'vmmem' $vT0.AddMinutes(-9)), (& $vPRow 6100 4 'cowork-svc.exe' $vT0.AddMinutes(-20)))
+        $coll = & $vColl $prow
+        $r = & $vRun (& $vBase @($vHostRow)) $coll @($cdHints)
+        $pf = & $vPlat $r
+        Assert-True ((& $vVms $r).Count -eq 0 -and (& $vEv $pf 'VIRTUALIZATION_WORKER').Count -eq 2 -and $null -eq $pf.Provider) 'VM utilitaria (HCS) nao listada; vmmem e vmwp observados, nunca atribuidos'
+        Assert-True (@($r.Findings | Where-Object { $_.Provider -ceq 'claude-desktop' }).Count -eq 0 -and (& $vEv $pf 'VM_HINT_NOT_OBSERVED').Count -eq 0) 'nenhum achado de virtualizacao do claude-desktop (sem hint de virtualizacao)'
+        $den = (& $vBase); $den.Vms = { throw (New-Object UnauthorizedAccessException('x')) }
+        $rd = & $vRun $den $coll @($cdHints)
+        Assert-True ((& $vCov $rd 'virtual-machines').Status -ceq 'DENIED' -and @($rd.Findings | Where-Object { $_.Provider -ceq 'claude-desktop' }).Count -eq 0) 'virtualizacao negada: nada atribuido'
+        $none = (& $vBase); $none.NamespaceRoot = @(); $none.Vmms = @()
+        $rn = & $vRun $none $coll @($cdHints)
+        Assert-True ((& $vPlat $rn).State -ceq 'UNKNOWN' -and (& $vCov $rn 'virtual-machines').Status -ceq 'NOT_OBSERVABLE') 'Hyper-V nao listado (so Virtual Machine Platform): plataforma UNKNOWN, VMs nao observaveis, nunca "sem virtualizacao"'
+    }
+    Test-Case 'Claude Desktop' 'P2-C: integracao ao diagnose - provider listado, servico e virtualizacao, prazo, privacidade do JSON e relatorio (sem argumentos nem conta)' {
+        $p = New-TestProfile 'p2c-int'
+        $null = New-TestRoot -ProfileInfo $p
+        $procRows = @([pscustomobject]@{ ProcessId = 4; ParentProcessId = 0; Name = 'System'; CreationDate = [datetime]::UtcNow.AddHours(-2) }, [pscustomobject]@{ ProcessId = 6100; ParentProcessId = 4; Name = 'cowork-svc.exe'; CreationDate = [datetime]::UtcNow.AddHours(-1) }, [pscustomobject]@{ ProcessId = 800; ParentProcessId = 4; Name = 'vmmem'; CreationDate = [datetime]::UtcNow.AddHours(-1) })
+        $svc = @(& $svcRow 'CoworkVMService' 'Running' 'Auto' $false 'CORPDOM\p2c-acct' 6100 "`"C:\Program Files\WindowsApps\Claude_1.2.3.0_x64__pzs8sxrjxfjjc\cowork-svc.exe`" --token=p2c-secret")
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0], $cdProvider) -ProcessSource ({ $procRows }.GetNewClosure()) -CpuSampleMs 0 -PseudonymKey $testPseudonymKey -ServiceSource ({ param($Names) $svc }.GetNewClosure()) -VirtualizationSource (& $vSrc (& $vBase @($vHostRow)))
+        Assert-True ((@($d.Providers | ForEach-Object { $_.Id }) -join ',') -ceq 'claude-code,claude-desktop' -and @($d.Coverage | Where-Object { $_.Collector -ceq 'provider-claude-desktop' -and $_.Status -ceq 'COMPLETE' }).Count -eq 1) 'provider claude-desktop listado, dicas lidas'
+        $sf = @($d.Findings | Where-Object { $_.Kind -ceq 'Service' })
+        Assert-True ($sf.Count -eq 1 -and $sf[0].Provider -ceq 'claude-desktop' -and $sf[0].State -ceq 'RUNNING' -and (& $svcEv $sf[0] 'SERVICE_PROCESS_VERIFIED').Count -eq 1) 'CoworkVMService no diagnose, processo verificado'
+        Assert-True (@($d.Findings | Where-Object { ($_.Kind -ceq 'VirtualMachine' -or $_.Kind -ceq 'VirtualizationPlatform') -and $_.Provider }).Count -eq 0) 'virtualizacao sem atribuicao'
+        Assert-True (@($d.Findings | Where-Object { $_.Kind -ceq 'TempPartition' -and $_.State -cne 'RUNTIME_NOT_DIAGNOSED' -and $_.State -cne 'UNKNOWN' }).Count -eq 0) 'nenhuma particao declarada descartavel'
+        $json = ConvertTo-AtmDiagnoseJson -Result $d
+        $txt = (Show-AtmDiagnose -Result $d 6>&1 | ForEach-Object { [string]$_ }) -join "`n"
+        foreach ($x in @('p2c-secret', '--token', 'p2c-acct', 'CORPDOM')) { Assert-True (-not $json.Contains($x) -and -not $txt.Contains($x)) "JSON e relatorio sem '$x'" }
+        Assert-True ($txt.Contains('CoworkVMService') -and $txt.Contains('claude-desktop')) 'relatorio mostra o servico e o provider'
+        $calls = @{ N = 0 }
+        $d0 = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0], $cdProvider) -DeadlineSeconds 0 -ServiceSource ({ param($Names) $calls.N++; @() }.GetNewClosure())
+        Assert-True ($calls.N -eq 0 -and @($d0.Coverage | Where-Object { $_.Collector -ceq 'services' -and $_.Status -ceq 'TIMEOUT' }).Count -eq 1 -and @($d0.Findings).Count -eq 0) 'prazo 0: nada consultado, nada inventado'
+    }
+    Test-Case 'Claude Desktop' 'P2-C (runner de CI, somente leitura): servico CoworkVMService e processos do pacote na maquina real; sem Claude Desktop instalado: NAO_TESTADO' {
+        if ($env:GITHUB_ACTIONS -ne 'true') { $script:caseSkipped = $true; $script:caseNote = 'somente em runner de CI (consulta real, somente leitura)'; return }
+        $q = Invoke-AtmServiceQuery -ProviderHints @($cdHints)
+        $r = Get-AtmServiceFindings -Query $q -Collection (Get-AtmProcessCollection)
+        $f = @($r.Findings)[0]
+        Assert-True ($f.State -cne 'NOT_PRESENT' -and $f.RequestedState -cne 'NOT_PRESENT') 'nunca NOT_PRESENT'
+        if (@($f.Evidence | Where-Object { $_.Code -ceq 'SERVICE_STATE' }).Count -eq 0) { $script:caseSkipped = $true; $script:caseNote = "Claude Desktop nao instalado no runner: CoworkVMService $($f.State) ($($q.Coverage.Status)); instalacao real NAO_TESTADA"; return }
+        $script:caseNote = "CoworkVMService $($f.State)"
+    }
     Test-Case 'I18n' 'P1-C: todo motivo e evidencia de arquivos abertos tem texto nos dois idiomas' {
         foreach ($l in @('en-US', 'pt-BR')) {
             foreach ($x in $script:AtmHandleReasonCodes) { Assert-True $script:AtmMessages[$l].ContainsKey("reason.$x") "reason.$x ($l)" }

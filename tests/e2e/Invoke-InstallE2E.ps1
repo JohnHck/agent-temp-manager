@@ -237,6 +237,15 @@ $ok = (@('COMPLETE', 'PARTIAL', 'DENIED', 'FAILED') -ccontains $q.PlatformCovera
     "$($summary.arch) ($InstallerShell): platform $($p[2]), namespace $($p[3]), vmms $($p[4]), hypervisor flag $($p[5]), VMs $($p[6]) ($($p[7]) observed), vmms state unchanged, no absence claimed"
 }
 
+Step 'provider-claude-desktop' {
+    # P2-C: the installed copy lists and loads the Claude Desktop provider (runtime only); on a runner without Claude
+    # Desktop its service is not listed and reads UNKNOWN, never absent.
+    Assert (Test-Path -LiteralPath (Join-Path $installDir 'providers\ClaudeDesktop.ps1') -PathType Leaf) 'provider Claude Desktop nao instalado'
+    $r = Invoke-Agent 'version -Lang en-US' 'version-providers'
+    Assert ($r.Code -eq 0 -and $r.Text -match 'providers: Claude Code, Claude Desktop') "version: $($r.Text)"
+    'installed providers: Claude Code, Claude Desktop'
+}
+
 Step 'shipped-release-gate' {
     $clean = [IO.File]::ReadAllText((Join-Path $installDir 'lib\Engine.Clean.ps1'))
     Assert ([regex]::Matches($clean, '\$script:AtmRealDeletionEnabled\s*=').Count -eq 1) 'mais de uma atribuicao da trava'

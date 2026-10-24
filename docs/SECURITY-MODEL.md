@@ -134,6 +134,10 @@ called by `Invoke-AtmGitCommand`):
   no CIM method, no Hyper-V module, no remote CIM, no disk or configuration class (static tests). VM names, GUIDs,
   the host name and raw worker process names never leave memory (keyed pseudonyms). No virtualization state
   authorizes deleting anything, stopping a service or shutting down a virtual machine.
+* **Claude Desktop provider (P2-C):** declares only published or publicly reported signatures (a process marker, the
+  `CoworkVMService` name) and reads nothing of the installation: no file, log, registry key, configuration or package
+  database. Its service and processes are observed through the read-only collectors; nothing is started, stopped,
+  reconfigured or terminated, and no command line, account name, profile path or VM name is exported.
 * **Open-file diagnostics gate (P1-C-S):** the Restart Manager collector (`handles`, D-2) is behind
   `$script:AtmHandleDiagnosticsEnabled`, `$false` in every shipped copy (single assignment; no option, environment
   variable or configuration file; checked by the test suite and the install e2e). It is checked by the diagnose and
