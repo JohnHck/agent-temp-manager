@@ -1993,7 +1993,7 @@ $script:AtmWorktreeEvidenceCodes = @('REPOSITORY_DISCOVERED', 'REPOSITORY_PREFLI
     'WORKTREE_MAIN', 'WORKTREE_REGISTERED', 'WORKTREE_LOCKED', 'WORKTREE_DIRECTORY_MISSING', 'ADMINISTRATIVE_ENTRY_NOT_FOUND', 'LOCAL_WORK_UNKNOWN', 'IN_REPOSITORY',
     'STAGED', 'UNSTAGED', 'UNTRACKED', 'IGNORED', 'CONFLICTS', 'SUBMODULES', 'OPERATION_IN_PROGRESS', 'STASHES_IN_REPOSITORY', 'STASH_MENTIONS_BRANCH',
     'LOCAL_WORK_NONE_OBSERVED', 'LOCAL_WORK_NOT_OBSERVED', 'PUBLICATION_NOT_DIAGNOSED',
-    'HEAD_STATE', 'UPSTREAM_CONFIGURED', 'NO_UPSTREAM', 'COMMITS_NOT_ON_REMOTE_TRACKING', 'PUBLICATION_UNVERIFIED', 'PUBLICATION_UNKNOWN', 'PUBLICATION_NOT_OBSERVED',
+    'HEAD_STATE', 'UPSTREAM_CONFIGURED', 'NO_UPSTREAM', 'NO_REMOTE_TRACKING_REFS', 'PUBLICATION_UNVERIFIED', 'PUBLICATION_UNKNOWN', 'PUBLICATION_NOT_OBSERVED',
     'DETACHED_TIP_REFERENCED', 'COMMITS_ONLY_IN_THIS_WORKTREE_POSSIBLE', 'LAST_FETCH_AGE_DAYS')
 # P3-C: local work (ADR-0006 rules 9 and 12). Operation markers in a worktree's Git directory, read as files.
 $script:AtmGitOperationMarkers = [ordered]@{ 'MERGE_HEAD' = 'MERGE'; 'rebase-merge' = 'REBASE'; 'rebase-apply' = 'REBASE'; 'CHERRY_PICK_HEAD' = 'CHERRY_PICK'; 'REVERT_HEAD' = 'REVERT'; 'BISECT_LOG' = 'BISECT'; 'sequencer' = 'SEQUENCER' }
@@ -2245,18 +2245,18 @@ function Get-AtmWorktreePublication {
     <#
       Publication facts of one worktree from files only (P3-D; ADR-0006 rule 13; no network, no Git, no object read).
       -GitDir: the worktree's Git directory (its HEAD); -RefStore: Get-AtmGitRefStore of its repository; -CommonDir for
-      FETCH_HEAD. Only conclusions that need no reachability walk are made, and only on a COMPLETE ref store:
-      COMMITS_NOT_ON_REMOTE_TRACKING (NO_REMOTE_TRACKING_REFS: the repository has no remote-tracking ref at all, so no
-      commit of HEAD is reachable from one) gives UNPUBLISHED_COMMITS; PUBLICATION_UNVERIFIED (HEAD_TIP_ON_REMOTE_TRACKING:
-      the tip equals a remote-tracking ref, which is never proof the server has it); a detached tip referenced by no ref
-      is COMMITS_ONLY_IN_THIS_WORKTREE_POSSIBLE. Anything else is PUBLICATION_UNKNOWN (REACHABILITY_NOT_READ). Returns
-      Evidence, Unpublished ($true only for the proven case) and Coverage (Status + Reason).
+      FETCH_HEAD. Observations only, on a COMPLETE ref store, and never a publication state: NO_REMOTE_TRACKING_REFS (the
+      repository holds no remote-tracking reference; that is NOT proof that the commits were never published: they may
+      have been pushed and the local references removed, or pushed without tracking references), PUBLICATION_UNVERIFIED
+      (HEAD_TIP_ON_REMOTE_TRACKING: the tip equals a remote-tracking ref, which is never proof the server has it), a
+      detached tip referenced by no ref is COMMITS_ONLY_IN_THIS_WORKTREE_POSSIBLE. Publication stays PUBLICATION_UNKNOWN
+      unless a stronger proof exists (none from files). Returns Evidence and Coverage (Status + Reason).
     #>
     param([string]$GitDir, $RefStore, [string]$CommonDir)
     $now = [datetime]::UtcNow
     $ev = New-Object System.Collections.Generic.List[object]
     $add = { param([string]$Code, [string]$Detail) $ev.Add((New-AtmEvidence -Code $Code -Source 'publication' -Collector 'publication-files' -ObservedUtc $now -Detail $Detail)) }
-    $res = [ordered]@{ Evidence = $null; Unpublished = $false; Coverage = $null }
+    $res = [ordered]@{ Evidence = $null; Coverage = $null }
     $h = Read-AtmGitHead -GitDir $GitDir
     if ($h.Kind -ceq 'UNREADABLE') {
         & $add 'PUBLICATION_NOT_OBSERVED' 'HEAD_UNREADABLE'
@@ -2298,7 +2298,8 @@ function Get-AtmWorktreePublication {
     } else { $tip = $h.Value; & $add 'HEAD_STATE' 'DETACHED' }
     $res.Coverage = [pscustomobject]@{ Status = 'COMPLETE'; Reason = $null }
     if ($null -ne $tip) {
-        if ($RefStore.RemoteCount -eq 0) { & $add 'COMMITS_NOT_ON_REMOTE_TRACKING' 'NO_REMOTE_TRACKING_REFS'; $res.Unpublished = $true }
+        # The absence of remote-tracking references is an observation, not proof of non-publication.
+        if ($RefStore.RemoteCount -eq 0) { & $add 'NO_REMOTE_TRACKING_REFS' $null; & $add 'PUBLICATION_UNKNOWN' 'NO_REMOTE_TRACKING_REFS' }
         elseif ($RefStore.Remote.ContainsKey($tip)) { & $add 'PUBLICATION_UNVERIFIED' 'HEAD_TIP_ON_REMOTE_TRACKING' }
         else { & $add 'PUBLICATION_UNKNOWN' 'REACHABILITY_NOT_READ' }
         if ($h.Kind -ceq 'DETACHED') {
@@ -2569,8 +2570,8 @@ function Get-AtmWorktreeDiscovery {
                 if ($lw.StatusRan) { $lwStatusOk++ }
                 if ($lw.StatusCoverage.Status -ceq 'UNAVAILABLE') { $lwUnavailable++ }
                 if ($script:AtmConclusiveCoverage -cnotcontains $lw.FilesCoverage.Status) { $lwFiles.Add('FILES_INCOMPLETE') } else { $lwFilesOk++ }
+                # P3-D gives no publication state from files: UNPUBLISHED_COMMITS needs a proof files cannot give.
                 if ($lw.LocalWork) { $state = 'LOCAL_WORK' }
-                elseif (@($ev | Where-Object { $_.Code -ceq 'COMMITS_NOT_ON_REMOTE_TRACKING' }).Count -gt 0) { $state = 'UNPUBLISHED_COMMITS' }
             } else {
                 $ev.Add((New-AtmEvidence -Code 'LOCAL_WORK_UNKNOWN' -Source 'worktree-discovery' -Collector 'worktree-discovery' -ObservedUtc $now -Detail $(if ($led) { $null } else { 'WORKTREE_OUTSIDE_SOURCES' })))
             }
