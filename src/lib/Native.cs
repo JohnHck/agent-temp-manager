@@ -629,6 +629,64 @@ namespace AgentTempManager
     // or directory a Git call reads, held for the whole call. While it is held no process can change, replace, rename
     // or delete that item, or rename a directory above it. A file that does not exist cannot be pinned (creation is not
     // prevented). The item itself must not be a reparse point (it is opened without following one).
+    // Path chain check for the diagnose engine (P3-E): the same rule and result codes as Test-AtmPathChain
+    // (Engine.Audit.ps1), in native code because the diagnose engine checks thousands of paths per run. From the volume
+    // root down to the path: a fixed drive, every component exists, is readable for attributes and is NOT a reparse
+    // point. Returns OK | NOT_FOUND | INACCESSIBLE | REPARSE_IN_PATH | UNSUPPORTED_DRIVE | INVALID; -at names the component.
+    public static class AtmPathCheck
+    {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFileAttributesW(string fileName);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        private static extern uint GetDriveTypeW(string rootPath);
+
+        public static string Chain(string path, out string at)
+        {
+            at = path;
+            if (string.IsNullOrEmpty(path) || path.Length < 3 || !char.IsLetter(path[0]) || path[0] > 'z' || path[1] != ':' || path[2] != '\\') return "INVALID";
+            string root = path.Substring(0, 3);
+            if (GetDriveTypeW(root) != 3) { at = root; return "UNSUPPORTED_DRIVE"; }
+            string cur = root;
+            foreach (string p in path.Substring(3).Split('\\'))
+            {
+                if (p.Length == 0) continue;
+                cur = cur.EndsWith("\\") ? cur + p : cur + "\\" + p;
+                uint a = GetFileAttributesW(cur);
+                if (a == 0xFFFFFFFF)
+                {
+                    int e = Marshal.GetLastWin32Error();
+                    at = cur;
+                    return (e == 2 || e == 3) ? "NOT_FOUND" : "INACCESSIBLE";
+                }
+                if ((a & 0x400) != 0) { at = cur; return "REPARSE_IN_PATH"; }
+            }
+            at = null;
+            return "OK";
+        }
+
+        // Kind, size and last-write time of each name under -dir (attributes only, no content), joined: the fingerprint of
+        // the cached common part of a preflight.
+        public static string Fingerprint(string dir, string[] names)
+        {
+            StringBuilder sb = new StringBuilder();
+            foreach (string n in names)
+            {
+                string p = n == "." ? dir : Path.Combine(dir, n);
+                sb.Append(n).Append('|');
+                try
+                {
+                    if (File.Exists(p)) { FileInfo fi = new FileInfo(p); sb.Append("f|").Append(fi.Length).Append('|').Append(fi.LastWriteTimeUtc.Ticks); }
+                    else if (Directory.Exists(p)) { sb.Append("d|").Append(Directory.GetLastWriteTimeUtc(p).Ticks); }
+                    else sb.Append('-');
+                }
+                catch (Exception) { sb.Append('?'); }
+                sb.Append(';');
+            }
+            return sb.ToString();
+        }
+    }
+
     // Shared reads (P3-D): a file opened for reading that shares read, write AND delete with everyone (never blocks
     // another process) and is opened WITHOUT following a reparse point; a reparse point or a directory is refused on the
     // handle itself, so a swap after the path check cannot redirect the read.
