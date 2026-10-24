@@ -5307,7 +5307,16 @@ try {
         $detNew = & $mk 'detached-new'; & $gitFx $detNew @('update-ref', 'refs/remotes/origin/main', 'HEAD') $detNew; & $gitFx $detNew @('checkout', '-q', '--detach') $detNew; & $next $detNew '2'
         $unborn = Join-Path $pb 'unborn'; [void][IO.Directory]::CreateDirectory($unborn); & $gitFx $unborn @('init', '-q', '-b', 'main') $null
         $reftab = & $mk 'reftable-marked'; [IO.File]::AppendAllText((Join-Path $reftab '.git\config'), "[extensions]`n`trefStorage = reftable`n")
-        $all = @($none, $equal, $ahead, $packed, $detRef, $detNew, $unborn, $reftab)
+        # A symbolic branch (HEAD -> alias -> main): no tip claimed.
+        $symb = & $mk 'symbolic'; [IO.File]::WriteAllText((Join-Path $symb '.git\refs\heads\alias'), "ref: refs/heads/main`n"); [IO.File]::WriteAllText((Join-Path $symb '.git\HEAD'), "ref: refs/heads/alias`n")
+        # A stale packed peeled id (tag recreated loose): the old commit is no longer referenced by it.
+        $stale = & $mk 'stale-peel'; $oldC = (& $gitFxOut $stale @('rev-parse', 'HEAD') $stale).Out.Trim(); & $gitFx $stale @('tag', '-a', 'v1', '-m', 'one') $stale; & $gitFx $stale @('pack-refs', '--all') $stale
+        & $next $stale '2'; & $gitFx $stale @('tag', '-f', '-a', 'v1', '-m', 'two') $stale; & $gitFx $stale @('update-ref', 'refs/remotes/origin/main', 'HEAD') $stale; & $gitFx $stale @('checkout', '-q', $oldC) $stale
+        # Upstream in config.worktree (extensions.worktreeConfig).
+        $wtc = & $mk 'worktree-config'; & $gitFx $wtc @('update-ref', 'refs/remotes/origin/main', 'HEAD') $wtc; & $gitFx $wtc @('config', 'extensions.worktreeConfig', 'true') $wtc; & $gitFx $wtc @('config', '--worktree', 'branch.main.merge', 'refs/heads/main') $wtc
+        # A name starting with a dot under refs/remotes is not a reference (Git ignores it).
+        $dot = & $mk 'dot-name'; $dotId = (& $gitFxOut $dot @('rev-parse', 'HEAD') $dot).Out.Trim(); [void][IO.Directory]::CreateDirectory((Join-Path $dot '.git\refs\remotes')); [IO.File]::WriteAllText((Join-Path $dot '.git\refs\remotes\.hidden'), "$dotId`n")
+        $all = @($none, $equal, $ahead, $packed, $detRef, $detNew, $unborn, $reftab, $symb, $stale, $wtc, $dot)
         $pz = New-AtmPseudonymizer -Key $testPseudonymKey
         try {
             Start-Sleep -Milliseconds 1100
@@ -5328,11 +5337,16 @@ try {
             Assert-True (@(& $ev $packed 'PUBLICATION_UNVERIFIED') -contains 'HEAD_TIP_ON_REMOTE_TRACKING') 'referencias compactadas lidas'
             Assert-True (@(& $ev $detRef 'HEAD_STATE') -contains 'DETACHED' -and @(& $ev $detRef 'DETACHED_TIP_REFERENCED').Count -eq 1) 'destacado na ponta de uma referencia'
             Assert-True (@(& $ev $detNew 'COMMITS_ONLY_IN_THIS_WORKTREE_POSSIBLE').Count -eq 1 -and @(& $ev $detNew 'PUBLICATION_UNKNOWN').Count -eq 1) 'destacado com commit novo: possivelmente so nesta worktree'
-            Assert-True ((& $f $unborn).State -eq 'UNKNOWN' -and @(& $ev $unborn 'HEAD_STATE') -contains 'UNBORN' -and @(& $ev $unborn 'COMMITS_NOT_ON_REMOTE_TRACKING').Count -eq 0) 'sem commits: nada afirmado'
+            Assert-True ((& $f $unborn).State -eq 'UNKNOWN' -and @(& $ev $unborn 'PUBLICATION_NOT_OBSERVED') -contains 'HEAD_BRANCH_NOT_FOUND' -and @(& $ev $unborn 'COMMITS_NOT_ON_REMOTE_TRACKING').Count -eq 0) 'branch sem ponta (sem commits, movido ou simbolico): nada afirmado'
+            Assert-True ((& $f $symb).State -eq 'UNKNOWN' -and @(& $ev $symb 'PUBLICATION_NOT_OBSERVED') -contains 'HEAD_BRANCH_NOT_FOUND') 'branch simbolico: nada afirmado'
+            Assert-True (@(& $ev $stale 'COMMITS_ONLY_IN_THIS_WORKTREE_POSSIBLE').Count -eq 1 -and @(& $ev $stale 'DETACHED_TIP_REFERENCED').Count -eq 0) 'id descascado obsoleto (tag recriada solta) nao conta como referencia'
+            Assert-True (@(& $ev $wtc 'UPSTREAM_CONFIGURED').Count -eq 1 -and @(& $ev $wtc 'NO_UPSTREAM').Count -eq 0) 'upstream em config.worktree reconhecido (nunca "sem upstream" falso)'
+            Assert-True ((& $f $dot).State -eq 'UNPUBLISHED_COMMITS') 'nome iniciado por ponto ignorado como o Git ignora'
+            Assert-True (@(& $ev $equal 'LOCAL_WORK_UNKNOWN').Count -eq 1) 'sem Git: trabalho local desconhecido sempre declarado'
             Assert-True ((& $f $reftab).State -eq 'UNKNOWN' -and @(& $ev $reftab 'PUBLICATION_NOT_OBSERVED') -contains 'REF_STORE_UNSUPPORTED') 'reftable: nao suportado, desconhecido (nunca nao publicado)'
             Assert-True (@($res.Findings | Where-Object { @($_.Evidence | Where-Object { $_.Code -match 'PUBLISHED$' -and $_.Code -notmatch 'UNPUBLISHED' }).Count -gt 0 }).Count -eq 0 -and @($res.Findings | Where-Object { $_.State -eq 'CLEAN_AND_PUBLISHED_UNKNOWN' }).Count -eq 0) 'nenhum codigo ou estado de publicado'
             $pc = @($res.Coverage | Where-Object { $_.Collector -eq 'publication-files' })[0]
-            Assert-True ($pc.Status -eq 'PARTIAL' -and @($pc.Reasons) -contains 'REF_STORE_UNSUPPORTED' -and $pc.Expected -eq 8) "cobertura de publicacao: $($pc.Status) $($pc.Observed)/$($pc.Expected)"
+            Assert-True ($pc.Status -eq 'PARTIAL' -and @($pc.Reasons) -contains 'REF_STORE_UNSUPPORTED' -and @($pc.Reasons) -contains 'HEAD_BRANCH_NOT_FOUND' -and $pc.Expected -eq 12) "cobertura de publicacao: $($pc.Status) $($pc.Observed)/$($pc.Expected)"
             $json = (@{ F = $res.Findings; C = $res.Coverage } | ConvertTo-Json -Depth 8)
             foreach ($x in @($pb, 'origin', 'refs/heads', 'refs/remotes', 'main')) { Assert-True (-not $json.Contains($x) -and -not $json.Contains($x.Replace('\', '\\'))) "nada sensivel nos achados: $(Split-Path -Leaf $x)" }
         } finally { Close-AtmPseudonymizer $pz }
@@ -5372,6 +5386,18 @@ try {
         $ns = [IO.File]::Open($target, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
         try { [IO.File]::WriteAllText((Join-Path $pb 'shared.new2'), "new2`n"); $r2 = & $try { [IO.File]::Replace((Join-Path $pb 'shared.new2'), $target, [NullString]::Value) } } finally { $ns.Dispose() }
         Assert-Eq $r2 'BLOCKED' 'contraprova: leitura sem compartilhamento bloquearia a substituicao'
+        # Raw bytes as Git reads them: a UTF-16 HEAD is not a branch; packed names differing only in case stay distinct.
+        $u16 = Join-Path $pb 'utf16-gitdir'; [void][IO.Directory]::CreateDirectory($u16); [IO.File]::WriteAllText((Join-Path $u16 'HEAD'), "ref: refs/heads/main`n", [Text.Encoding]::Unicode)
+        Assert-Eq (Read-AtmGitHead -GitDir $u16).Kind 'UNREADABLE' 'HEAD em UTF-16: ilegivel (como para o Git)'
+        $idA = ('a' * 40); $idB = ('b' * 40)
+        [IO.File]::WriteAllText($pr, $orig + "$idA refs/heads/Foo`n$idB refs/heads/foo`n")
+        $cs = Get-AtmGitRefStore -CommonDir $cd
+        Assert-True ($cs.Status -eq 'COMPLETE' -and $cs.Local['Foo'] -ceq $idA -and $cs.Local['foo'] -ceq $idB) 'branches que diferem so na caixa: distintos'
+        [IO.File]::WriteAllText($pr, $orig)
+        # A shared read never follows a reparse point: a junction is refused on the handle.
+        $jn = Join-Path $pb 'jn'; New-Junction -Link $jn -Target $pb
+        $thrown = $false; try { $x = New-AtmGitSharedReadStream -Path $jn; $x.Dispose() } catch { $thrown = $true }
+        Assert-True ($thrown -and $null -eq (Read-AtmGitSmallFile -Path $jn)) 'leitura compartilhada recusa reparse point'
         # HEAD through the resolver: a directory (junction) named HEAD is never read as a branch.
         $fakeGd = Join-Path $pb 'fake-gitdir'; [void][IO.Directory]::CreateDirectory($fakeGd)
         New-Junction -Link (Join-Path $fakeGd 'HEAD') -Target $pb
