@@ -5497,6 +5497,8 @@ try {
             Assert-True ((($m1 - $m0) / 1MB) -lt 200) ("memoria gerenciada controlada ({0:N1} MB)" -f (($m1 - $m0) / 1MB))
             Assert-True (@($capC.Coverage[0].Reasons) -contains 'CANDIDATE_LIMIT' -and @($capB.Coverage[0].Reasons) -contains 'READ_BUDGET' -and @($capD.Coverage[0].Reasons) -contains 'DEADLINE_EXCEEDED') 'limites de candidatos, bytes e prazo: PARTIAL com o motivo'
             Assert-True (@($capC.Findings | Where-Object { $_.State -eq 'CLEAN_AND_PUBLISHED_UNKNOWN' }).Count -eq 0) 'um corte nunca vira limpo'
+            $nx = @($capB.Findings | Where-Object { $_.Kind -eq 'Repository' -and @($_.Evidence | Where-Object { $_.Code -eq 'REPOSITORY_NOT_EXAMINED' -and $_.Detail -eq 'READ_BUDGET' }).Count -eq 1 })
+            Assert-True ($nx.Count -eq 1 -and @($capB.Findings | Where-Object { $_.Kind -eq 'Worktree' -and @($_.Evidence | Where-Object { $_.Code -eq 'LOCAL_WORK_UNKNOWN' -and $_.Detail -eq 'READ_BUDGET' }).Count -eq 1 }).Count -ge 1) 'orcamento de leitura: repositorio descoberto mantido e marcado como nao examinado (nunca descartado)'
             $json = (@{ F = $b.Findings; C = $b.Coverage } | ConvertTo-Json -Depth 8)
             foreach ($x in @($big.Repo, $big.Part, 'wt17', 'origin')) { Assert-True (-not $json.Contains($x) -and -not $json.Contains($x.Replace('\', '\\'))) "nada sensivel nos achados: $(Split-Path -Leaf $x)" }
             $script:caseNote = ("300 worktrees/2000 refs: {0:N1}s, {1} arquivos, {2:N0} KB lidos; 20 worktrees/300 refs: parte comum {3} -> {4}, entradas {5} -> {6}" -f $sw.Elapsed.TotalSeconds, $b.Stats.FilesRead, ($b.Stats.BytesRead / 1KB), $u.Stats.CommonPreflights, $c.Stats.CommonPreflights, $u.Stats.RefEntriesWalked, $c.Stats.RefEntriesWalked)
@@ -5524,6 +5526,18 @@ try {
         # The runner takes its own uncached preflight: a cached OK never lets Git run on a changed repository.
         $n = & $gitSpy { $script:p3eR = & $gitOpen { Invoke-AtmGitCommand -Git $testGit -Arguments @('rev-parse', '--show-toplevel') -WorkingDirectory $wt0 -Preflight $p0 } }
         Assert-True ($n -eq 0 -and $script:p3eR.Reason -eq 'GIT_PREFLIGHT_REQUIRED') "executor: pre-verificacao propria recusa o repositorio alterado ($($script:p3eR.Reason))"
+        # A change in a chained alternates file invalidates the cached part too.
+        $alt = & $scaleFixture 'scale-alt' 2 1
+        $other = & $gitNewFixture 'scale-alt-other'
+        $otherObj = Join-Path $other.Repo '.git\objects'
+        [IO.File]::WriteAllText((Join-Path $alt.Repo '.git\objects\info\alternates'), "$otherObj`n")
+        Reset-AtmScaleStats
+        $c2 = @{}
+        $null = Get-AtmGitPreflight -Target (Join-Path $alt.Part 'wt0') -Cache $c2
+        Start-Sleep -Milliseconds 50
+        [IO.File]::WriteAllText((Join-Path $otherObj 'info\alternates'), "\\$uncHost\share\objects`n")
+        $pa = Get-AtmGitPreflight -Target (Join-Path $alt.Part 'wt1') -Cache $c2
+        Assert-True ($script:AtmScaleStats.CommonCacheInvalidations -eq 1 -and $pa.Reason -eq 'GIT_PREFLIGHT_ALTERNATE_NETWORK') "alternates encadeado alterado: cache invalidado, rede recusada ($($pa.Reason))"
         $body = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Diagnose.ps1'))
         $inv = $body.Substring($body.IndexOf('function Invoke-AtmGitCommand'), 6000)
         Assert-True ($inv.Contains('$fresh = Get-AtmGitPreflight -Target $wd') -and -not $inv.Contains('-Cache')) 'executor nunca passa cache'
@@ -5535,6 +5549,8 @@ try {
         $free = @([char[]]'ZYXWVUTSRQPONMLKJIHG' | Where-Object { (New-Object IO.DriveInfo([string]$_)).DriveType -eq [IO.DriveType]::NoRootDirectory })
         $cases = @((Join-Path $pb 'd\f.txt'), (Join-Path $pb 'd\missing.txt'), (Join-Path $pb 'nope\f.txt'), (Join-Path $pb 'd\f.txt\below'), (Join-Path $pb 'j\f.txt'), $env:SystemDrive + '\', 'relative\x', '')
         if ($free.Count -gt 0) { $cases += ($free[0] + ':\x') }
+        # Too long for the plain API: refused, never "not found" (which some callers accept as absent).
+        Assert-Eq (Test-AtmGitPathChain ($env:SystemDrive + '\' + ('a' * 270))).Status 'INACCESSIBLE' 'caminho longo: recusado, nunca ausente'
         foreach ($c in $cases) {
             $a = Test-AtmPathChain $c; $b = Test-AtmGitPathChain $c
             Assert-True ($a.Status -ceq $b.Status) "paridade [$($c.Replace($pb, '<fx>'))]: $($a.Status) / $($b.Status)"
