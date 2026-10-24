@@ -1319,7 +1319,7 @@ $script:AtmGitDefaultActiveProcessLimit = 8
 # too, so a repository's protocol.<name>.allow cannot switch the network back on (the command line takes precedence).
 $script:AtmGitGlobalArguments = @('--no-pager', '--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-c', 'protocol.allow=never',
     '-c', 'protocol.file.allow=never', '-c', 'protocol.git.allow=never', '-c', 'protocol.ssh.allow=never', '-c', 'protocol.http.allow=never', '-c', 'protocol.https.allow=never', '-c', 'protocol.ext.allow=never',
-    '-c', 'color.ui=never', '-c', 'core.quotePath=false')
+    '-c', 'color.ui=never', '-c', 'core.quotePath=false', '-c', 'core.excludesFile=NUL', '-c', 'core.attributesFile=NUL')
 # Test spy: when it is a list, every argument vector that reaches the native runner is added to it.
 $script:AtmGitInvocationLog = $null
 # Same rule as the installer's Test-AtmInstallAcl: only SYSTEM, Administrators, TrustedInstaller and CREATOR OWNER
@@ -1401,23 +1401,24 @@ function Get-AtmGitEnvironment {
       The whole environment of a Git child (ADR-0006 rule 6): the caller's environment without any GIT_* variable (GIT_DIR,
       GIT_WORK_TREE, GIT_INDEX_FILE, GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT/KEY_*/VALUE_*, ...), then no optional
       locks, no prompt or askpass, no lazy fetch, discovery bounded by -Ceiling and on one file system, and messages in
-      the C locale (stderr is classified by its text). -TestEnvironment: only GIT_CONFIG_GLOBAL, GIT_CONFIG_NOSYSTEM and
-      HOME, for the suite's isolated fixtures.
+      the C locale (stderr is classified by its text). Configuration is isolated (P3-B0): no global file
+      (GIT_CONFIG_GLOBAL=NUL, which also covers the XDG file), no system configuration or attributes, and HOME,
+      USERPROFILE and XDG_CONFIG_HOME pointing to -IsolatedHome, a directory that does not exist inside the Git
+      installation.
     #>
-    param([string]$Ceiling, [hashtable]$TestEnvironment = @{})
+    param([string]$Ceiling, [string]$IsolatedHome)
     $vars = @{}
     foreach ($e in [Environment]::GetEnvironmentVariables().GetEnumerator()) {
         $k = [string]$e.Key
         if ($k.StartsWith('GIT_', [StringComparison]::OrdinalIgnoreCase) -or @('SSH_ASKPASS', 'GCM_INTERACTIVE', 'LC_ALL', 'LANG', 'LANGUAGE') -contains $k) { continue }
         $vars[$k] = [string]$e.Value
     }
-    $set = [ordered]@{ GIT_OPTIONAL_LOCKS = '0'; GIT_TERMINAL_PROMPT = '0'; GCM_INTERACTIVE = 'never'; GIT_ASKPASS = ''; SSH_ASKPASS = ''; GIT_NO_LAZY_FETCH = '1'; GIT_DISCOVERY_ACROSS_FILESYSTEM = '0'; LC_ALL = 'C'; LANG = 'C'; LANGUAGE = 'C' }
+    foreach ($k in @('HOME', 'USERPROFILE', 'XDG_CONFIG_HOME')) { $vars.Remove($k) }
+    $set = [ordered]@{ GIT_OPTIONAL_LOCKS = '0'; GIT_TERMINAL_PROMPT = '0'; GCM_INTERACTIVE = 'never'; GIT_ASKPASS = ''; SSH_ASKPASS = ''; GIT_NO_LAZY_FETCH = '1'; GIT_DISCOVERY_ACROSS_FILESYSTEM = '0'; LC_ALL = 'C'; LANG = 'C'; LANGUAGE = 'C'
+        GIT_CONFIG_GLOBAL = 'NUL'; GIT_CONFIG_NOSYSTEM = '1'; GIT_ATTR_NOSYSTEM = '1' }
     if ($Ceiling) { $set['GIT_CEILING_DIRECTORIES'] = $Ceiling }
+    if ($IsolatedHome) { $set['HOME'] = $IsolatedHome; $set['USERPROFILE'] = $IsolatedHome; $set['XDG_CONFIG_HOME'] = $IsolatedHome }
     foreach ($k in $set.Keys) { $vars[$k] = $set[$k] }
-    foreach ($k in @($TestEnvironment.Keys)) {
-        if (@('GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'HOME') -notcontains $k) { throw (Get-AtmText 'err.diagProcess' "TestEnvironment $k") }
-        $vars[$k] = [string]$TestEnvironment[$k]
-    }
     $keys = [string[]]@($vars.Keys)
     [Array]::Sort($keys, [StringComparer]::OrdinalIgnoreCase)
     return [string[]]@($keys | ForEach-Object { $_ + '=' + $vars[$_] })
@@ -1439,12 +1440,17 @@ function Invoke-AtmGitCommand {
       its parent (GIT_CEILING_DIRECTORIES), so Git does not report on a repository above it. Returns Status (COMPLETE | PARTIAL output truncated | FAILED | TIMEOUT | REFUSED | UNAVAILABLE),
       Reason (a code), ExitCode, Output (UTF-8 text, in memory only), ElapsedMs, TotalProcesses. Git's error text is
       never returned: it is classified (GIT_OWNERSHIP_REFUSED, GIT_NOT_A_REPOSITORY, GIT_COMMAND_FAILED).
+      P3-B0: every command but `--version` needs the worktree diagnostics gate open (GIT_EXECUTION_GATE_CLOSED) and a
+      -Preflight (Get-AtmGitPreflight) that is OK for this very working directory (GIT_PREFLIGHT_REQUIRED); `status`
+      also needs its D-3 preconditions (GIT_STATUS_PRECONDITION). `config` returns no names: only MatchCount.
     #>
-    param($Git, [string[]]$Arguments, [string]$WorkingDirectory, [int]$TimeoutMs = $script:AtmGitDefaultTimeoutMs, [int]$MaxOutputBytes = $script:AtmGitDefaultMaxOutputBytes,
-        [long]$JobMemoryBytes = $script:AtmGitDefaultJobMemoryBytes, [int]$ActiveProcessLimit = $script:AtmGitDefaultActiveProcessLimit, [hashtable]$TestEnvironment = @{})
-    $out = [ordered]@{ Status = 'REFUSED'; Reason = $null; ExitCode = $null; Output = $null; OutputTruncated = $false; ElapsedMs = 0; TotalProcesses = 0 }
+    param($Git, [string[]]$Arguments, [string]$WorkingDirectory, $Preflight = $null, [int]$TimeoutMs = $script:AtmGitDefaultTimeoutMs, [int]$MaxOutputBytes = $script:AtmGitDefaultMaxOutputBytes,
+        [long]$JobMemoryBytes = $script:AtmGitDefaultJobMemoryBytes, [int]$ActiveProcessLimit = $script:AtmGitDefaultActiveProcessLimit)
+    $out = [ordered]@{ Status = 'REFUSED'; Reason = $null; ExitCode = $null; Output = $null; OutputTruncated = $false; ElapsedMs = 0; TotalProcesses = 0; MatchCount = $null }
     $code = Test-AtmGitArguments -Arguments $Arguments
     if ($null -ne $code) { $out.Reason = $code; return [pscustomobject]$out }
+    $versionOnly = (@($Arguments).Count -eq 1 -and $Arguments[0] -ceq '--version')
+    if (-not $versionOnly -and -not $script:AtmWorktreeDiagnosticsEnabled) { $out.Reason = 'GIT_EXECUTION_GATE_CLOSED'; return [pscustomobject]$out }
     if ($null -eq $Git -or [string]::IsNullOrEmpty([string]$Git.Path)) { $out.Status = 'UNAVAILABLE'; $out.Reason = 'GIT_NOT_FOUND'; return [pscustomobject]$out }
     if ([string]::IsNullOrWhiteSpace($WorkingDirectory) -or $WorkingDirectory -notmatch '^[A-Za-z]:\\' -or -not [IO.Directory]::Exists($WorkingDirectory)) { $out.Reason = 'GIT_WORKDIR_INVALID'; return [pscustomobject]$out }
     $wd = Get-AtmNormalizedPath $WorkingDirectory
@@ -1452,12 +1458,16 @@ function Invoke-AtmGitCommand {
     # Git works from the resolved directory: a junction or symbolic link in the path would put the ceiling somewhere Git
     # never passes, and discovery could reach a repository above the target. Every component must be a plain directory.
     if ((Test-AtmPathChain $wd).Status -cne 'OK') { $out.Reason = 'GIT_WORKDIR_REPARSE_OR_UNREADABLE'; return [pscustomobject]$out }
+    if (-not $versionOnly) {
+        if ($null -eq $Preflight -or $Preflight.Status -cne 'OK' -or -not [string]::Equals([string]$Preflight.WorkTree, $wd, [StringComparison]::OrdinalIgnoreCase)) { $out.Reason = 'GIT_PREFLIGHT_REQUIRED'; return [pscustomobject]$out }
+        if ($Arguments[0] -ceq 'status' -and -not $Preflight.StatusAllowed) { $out.Reason = 'GIT_STATUS_PRECONDITION'; return [pscustomobject]$out }
+    }
     $parent = [IO.Path]::GetDirectoryName($wd.TrimEnd('\'))
     $ceiling = $(if ($parent) { Get-AtmNormalizedPath $parent } else { $null })
     $vector = @($script:AtmGitGlobalArguments) + @($Arguments)
     $commandLine = '"' + [string]$Git.Path + '" ' + ($vector -join ' ')
     if ($null -ne $script:AtmGitInvocationLog) { $script:AtmGitInvocationLog.Add([pscustomobject]@{ Arguments = [string[]]$vector; WorkingDirectory = $wd }) }
-    $childEnv = Get-AtmGitEnvironment -Ceiling $ceiling -TestEnvironment $TestEnvironment
+    $childEnv = Get-AtmGitEnvironment -Ceiling $ceiling -IsolatedHome ([string]$Git.IsolatedHome)
     $r = Invoke-AtmBoundedProcess -Executable ([string]$Git.Path) -CommandLine $commandLine -WorkingDirectory $wd -Environment $childEnv -TimeoutMs $TimeoutMs -MaxOutputBytes $MaxOutputBytes -JobMemoryBytes $JobMemoryBytes -ActiveProcessLimit $ActiveProcessLimit
     $out.ElapsedMs = $r.ElapsedMs; $out.TotalProcesses = $r.TotalProcesses; $out.ExitCode = $(if ($r.Started) { $r.ExitCode } else { $null })
     if (-not $r.Started) { $out.Status = 'FAILED'; $out.Reason = $(if ($r.Error -like 'JOB_*') { 'GIT_JOB_UNAVAILABLE' } else { 'GIT_START_FAILED' }); return [pscustomobject]$out }
@@ -1468,7 +1478,9 @@ function Invoke-AtmGitCommand {
         $out.Reason = $(if ($err -match 'dubious ownership') { 'GIT_OWNERSHIP_REFUSED' } elseif ($err -match 'not a git repository') { 'GIT_NOT_A_REPOSITORY' } else { 'GIT_COMMAND_FAILED' })
         return [pscustomobject]$out
     }
-    $out.Output = [Text.Encoding]::UTF8.GetString($r.Output)
+    $text = [Text.Encoding]::UTF8.GetString($r.Output)
+    # Configuration names can carry credentials (url.<url>.insteadof): they are counted, never returned.
+    if ($Arguments[0] -ceq 'config') { $out.MatchCount = @($text.Split([char[]]"`n`0") | Where-Object { $_ }).Count } else { $out.Output = $text }
     $out.OutputTruncated = [bool]$r.OutputTruncated
     if ($r.OutputTruncated) { $out.Status = 'PARTIAL'; $out.Reason = 'GIT_OUTPUT_TRUNCATED' } else { $out.Status = 'COMPLETE' }
     return [pscustomobject]$out
@@ -1477,14 +1489,17 @@ function Invoke-AtmGitCommand {
 function Resolve-AtmGitExecutable {
     <#
       git.exe from the absolute entries of -PathVariable only (never the current directory, a relative entry, or a .cmd
-      or .bat), normalized. Elevated runs (-Elevated) require the file and its directory to pass
-      Test-AtmTrustedLocationAcl (the check covers the resolved launcher only; the program it starts is not checked).
+      or .bat), normalized. Elevated runs (-Elevated): see below.
       Then `git --version` through the runner. Returns Status (COMPLETE | UNAVAILABLE), Reason (GIT_NOT_FOUND,
-      GIT_LOCATION_NOT_TRUSTED, GIT_VERSION_UNREADABLE), Path, Version ([version] or $null). No minimum version is
-      enforced here: P3-B fixes it from the features it uses.
+      GIT_LOCATION_NOT_TRUSTED, GIT_VERSION_UNREADABLE, GIT_VERSION_TOO_OLD below AtmGitMinimumVersion), Path, Version,
+      EffectivePath (the program the Git for Windows launcher starts, when that layout is recognized) and IsolatedHome.
+      Elevated (P3-B0): the launcher, the effective program, every program and library in the effective program's
+      directory, and every directory above both up to (not including) the volume root must pass
+      Test-AtmTrustedLocationAcl. The volume root is not checked (its default ACL lets users create folders); the time
+      between this check and the start is not covered.
     #>
-    param([string]$PathVariable = $env:Path, $Elevated = $null, [hashtable]$TestEnvironment = @{})
-    $out = [ordered]@{ Status = 'UNAVAILABLE'; Reason = 'GIT_NOT_FOUND'; Path = $null; Version = $null }
+    param([string]$PathVariable = $env:Path, $Elevated = $null)
+    $out = [ordered]@{ Status = 'UNAVAILABLE'; Reason = 'GIT_NOT_FOUND'; Path = $null; Version = $null; EffectivePath = $null; IsolatedHome = $null }
     if ($null -eq $Elevated) { $Elevated = [bool](Get-AtmCurrentIdentity).IsAdmin }
     $found = $null
     foreach ($entry in @(([string]$PathVariable).Split(';'))) {
@@ -1496,12 +1511,302 @@ function Resolve-AtmGitExecutable {
     if (-not $found) { return [pscustomobject]$out }
     $norm = Get-AtmNormalizedPath $found
     if (-not $norm) { return [pscustomobject]$out }
-    if ($Elevated -and (-not (Test-AtmTrustedLocationAcl -Path $norm) -or -not (Test-AtmTrustedLocationAcl -Path ([IO.Path]::GetDirectoryName($norm))))) { $out.Reason = 'GIT_LOCATION_NOT_TRUSTED'; return [pscustomobject]$out }
-    $probe = Invoke-AtmGitCommand -Git ([pscustomobject]@{ Path = $norm }) -Arguments @('--version') -WorkingDirectory ([IO.Path]::GetDirectoryName($norm)) -TestEnvironment $TestEnvironment
+    $dir = [IO.Path]::GetDirectoryName($norm)
+    $root = $dir
+    $effective = $norm
+    if (@('cmd', 'bin') -contains [IO.Path]::GetFileName($dir).ToLowerInvariant()) {
+        $root = [IO.Path]::GetDirectoryName($dir)
+        foreach ($sub in @('mingw64', 'clangarm64', 'mingw32')) {
+            $cand = Join-AtmPath (Join-AtmPath (Join-AtmPath $root $sub) 'bin') 'git.exe'
+            try { if ([IO.File]::Exists($cand)) { $effective = $cand; break } } catch { continue }
+        }
+    }
+    if ($Elevated) {
+        $items = New-Object System.Collections.Generic.List[string]
+        foreach ($f in @($norm, $effective)) {
+            $items.Add($f)
+            $cur = [IO.Path]::GetDirectoryName($f)
+            while ($cur -and $cur.Length -gt 3) { $items.Add($cur); $cur = [IO.Path]::GetDirectoryName($cur) }
+        }
+        try { foreach ($f in @([IO.Directory]::GetFiles([IO.Path]::GetDirectoryName($effective)) | Where-Object { $_ -match '\.(exe|dll)$' })) { $items.Add($f) } } catch { $out.Reason = 'GIT_LOCATION_NOT_TRUSTED'; return [pscustomobject]$out }
+        foreach ($it in @($items | Select-Object -Unique)) { if (-not (Test-AtmTrustedLocationAcl -Path $it)) { $out.Reason = 'GIT_LOCATION_NOT_TRUSTED'; return [pscustomobject]$out } }
+    }
+    $isolated = Join-AtmPath $root '.atm-isolated-home'
+    $probe = Invoke-AtmGitCommand -Git ([pscustomobject]@{ Path = $norm; IsolatedHome = $isolated }) -Arguments @('--version') -WorkingDirectory $dir
     $v = $null
     if ($probe.Status -ceq 'COMPLETE' -and $probe.Output -match '^git version (\d+)\.(\d+)\.(\d+)') { $v = New-Object Version([int]$Matches[1], [int]$Matches[2], [int]$Matches[3]) }
     if ($null -eq $v) { $out.Reason = 'GIT_VERSION_UNREADABLE'; $out.Path = $norm; return [pscustomobject]$out }
-    $out.Status = 'COMPLETE'; $out.Reason = $null; $out.Path = $norm; $out.Version = $v
+    $out.Path = $norm; $out.Version = $v; $out.EffectivePath = $effective; $out.IsolatedHome = $isolated
+    if ($v -lt $script:AtmGitMinimumVersion) { $out.Reason = 'GIT_VERSION_TOO_OLD'; return [pscustomobject]$out }
+    $out.Status = 'COMPLETE'; $out.Reason = $null
+    return [pscustomobject]$out
+}
+
+# ---------------------------------------------------------------------------------------------
+# Worktree diagnostics gate and Git preflight (P3-B0, ADR-0006, ADR-0007). Reading repositories (their .git files,
+# configuration and administrative entries) and running Git in them are both behind one gate that is $false in every
+# shipped copy; only the automated suite opens it, in its own process, for its disposable fixtures. Opening it for real
+# repositories is a maintainer decision (HUMAN_GATE). `git --version` is the only Git call allowed while it is closed.
+# Before any Git call on a target, Get-AtmGitPreflight reads the files Git would follow and refuses the target when one
+# of them could make Git open a network path (UNC, a mapped network drive, file://), a reparse point, a path outside a
+# fixed drive, or included configuration. Every such path goes through Resolve-AtmGitReferencedPath first: no file-system
+# call is ever made on a value that has not passed it, by Git or by this engine.
+# ---------------------------------------------------------------------------------------------
+
+$script:AtmWorktreeDiagnosticsEnabled = $false
+# Git features used and the release that introduced them (Git's own release notes): --no-optional-locks 2.15.0,
+# `worktree list -z` 2.36.0, `--no-lazy-fetch` / GIT_NO_LAZY_FETCH 2.45.0.
+$script:AtmGitMinimumVersion = New-Object Version(2, 45, 0)
+$script:AtmGitConfigMaxBytes = 1MB
+$script:AtmGitSmallFileMaxBytes = 64KB
+$script:AtmGitAlternatesMaxDepth = 5
+$script:AtmGitAlternatesMax = 32
+$script:AtmGitAdminEntriesMax = 4096
+# Configuration keys whose value is a path Git may open (lower case, section.key).
+$script:AtmGitPathKeys = @('core.worktree', 'core.excludesfile', 'core.attributesfile', 'core.hookspath', 'commit.template', 'core.notesref', 'gpg.program', 'gpg.ssh.program')
+
+function Resolve-AtmGitReferencedPath {
+    <#
+      A path read from a repository file (.git, commondir, an administrative gitdir, alternates, a configuration value),
+      relative to -BaseDir. Status: OK (Path: an existing local path, every component a plain directory or file),
+      MISSING (a local, safe path that does not exist: the first missing component's parent was read), or REFUSED with
+      Reason. Refused before any file-system call: empty or control characters, expansions (~, %(prefix), $, %VAR%),
+      UNC and device forms (\\, //, /\, \/, \\?\, \\.\), URLs (file:, any scheme), alternate data streams, and a result
+      that is not on a drive letter. Then Test-AtmPathChain: a drive that is not fixed (a mapped network drive) or a
+      reparse point anywhere in the path is refused.
+    #>
+    param([string]$Value, [string]$BaseDir)
+    $refuse = { param([string]$Code) [pscustomobject]@{ Status = 'REFUSED'; Reason = $Code; Path = $null } }
+    if ([string]::IsNullOrWhiteSpace($Value) -or $Value -match '[\x00-\x1f]') { return (& $refuse 'GIT_REF_PATH_INVALID') }
+    $v = $Value.Trim()
+    if ($v -match '^(\\\\|//|/\\|\\/)') { return (& $refuse 'GIT_REF_PATH_NETWORK') }
+    if ($v -match '^[A-Za-z][A-Za-z0-9+.\-]*://' -or $v -match '^file:') { return (& $refuse 'GIT_REF_PATH_NETWORK') }
+    if ($v.StartsWith('~') -or $v.Contains('%(') -or $v.Contains('$') -or $v -match '%[^%]+%') { return (& $refuse 'GIT_REF_PATH_EXPANSION') }
+    if ($v -match '^[A-Za-z]:[^\\/]' -or $v -match '^[A-Za-z]:$') { return (& $refuse 'GIT_REF_PATH_INVALID') }
+    if ($v.IndexOf(':') -ge 0 -and $v -notmatch '^[A-Za-z]:[\\/]' ) { return (& $refuse 'GIT_REF_PATH_INVALID') }
+    if ($v.LastIndexOf(':') -gt 1) { return (& $refuse 'GIT_REF_PATH_INVALID') }
+    $v = $v.Replace('/', '\')
+    if ($v -match '^\\') { return (& $refuse 'GIT_REF_PATH_INVALID') }
+    if ($v -match '^[A-Za-z]:\\') { $full = $v }
+    else {
+        if ([string]::IsNullOrWhiteSpace($BaseDir) -or $BaseDir -notmatch '^[A-Za-z]:\\') { return (& $refuse 'GIT_REF_PATH_INVALID') }
+        $full = $BaseDir.TrimEnd('\') + '\' + $v
+    }
+    # Normalize . and .. by text only (no file-system call).
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($seg in $full.Substring(3).Split('\')) {
+        if ($seg -eq '' -or $seg -eq '.') { continue }
+        if ($seg -eq '..') { if ($parts.Count -gt 0) { $parts.RemoveAt($parts.Count - 1) }; continue }
+        if ($seg -match '[<>"|?*]' -or $seg.EndsWith('.') -or $seg.EndsWith(' ')) { return (& $refuse 'GIT_REF_PATH_INVALID') }
+        $parts.Add($seg)
+    }
+    $norm = $full.Substring(0, 3) + ($parts -join '\')
+    $chain = Test-AtmPathChain $norm
+    switch ($chain.Status) {
+        'OK' { return [pscustomobject]@{ Status = 'OK'; Reason = $null; Path = $norm } }
+        'NOT_FOUND' { return [pscustomobject]@{ Status = 'MISSING'; Reason = 'GIT_REF_PATH_MISSING'; Path = $norm } }
+        'REPARSE_IN_PATH' { return (& $refuse 'GIT_REF_PATH_REPARSE') }
+        'UNSUPPORTED_DRIVE' { return (& $refuse 'GIT_REF_PATH_NETWORK') }
+        default { return (& $refuse 'GIT_REF_PATH_UNREADABLE') }
+    }
+}
+
+function Read-AtmGitSmallFile {
+    # The text of a small repository file at a path that already passed Resolve-AtmGitReferencedPath; $null when it is
+    # larger than -MaxBytes or unreadable.
+    param([string]$Path, [int]$MaxBytes = $script:AtmGitSmallFileMaxBytes)
+    try {
+        $fi = New-Object IO.FileInfo($Path)
+        if (-not $fi.Exists -or $fi.Length -gt $MaxBytes) { return $null }
+        return [IO.File]::ReadAllText($Path)
+    } catch { return $null }
+}
+
+function Read-AtmGitConfigText {
+    <#
+      Strict parser of a Git configuration file (the subset Git writes): blank lines, comments (# ;), [section],
+      [section "subsection"], key = value and a bare key. Values are decoded (quotes, \\ \" \n \t \b, inline comments
+      outside quotes). Anything else (a continuation line, an unknown escape, a malformed header) refuses the whole file:
+      Error is a code and Entries is empty. Entries: Section (lower case), Subsection (as written), Key (lower case), Value.
+    #>
+    param([string]$Text)
+    $entries = New-Object System.Collections.Generic.List[object]
+    $fail = { param([string]$Code) [pscustomobject]@{ Error = $Code; Entries = @() } }
+    $section = $null; $sub = $null
+    $lines = $Text.Replace("`r`n", "`n").Split("`n")
+    foreach ($raw in $lines) {
+        $line = $raw.Trim()
+        if ($line -eq '' -or $line.StartsWith('#') -or $line.StartsWith(';')) { continue }
+        if ($line.StartsWith('[')) {
+            if ($line -cmatch '^\[([A-Za-z0-9.\-]+)\]\s*([#;].*)?$') { $section = $Matches[1].ToLowerInvariant(); $sub = $null; continue }
+            if ($line -cmatch '^\[([A-Za-z0-9\-]+)\s+"((?:[^"\\]|\\.)*)"\]\s*([#;].*)?$') {
+                $section = $Matches[1].ToLowerInvariant()
+                $sub = [regex]::Replace($Matches[2], '\\(.)', '$1')
+                continue
+            }
+            return (& $fail 'GIT_CONFIG_UNPARSEABLE')
+        }
+        if ($null -eq $section) { return (& $fail 'GIT_CONFIG_UNPARSEABLE') }
+        if ($line -notmatch '^([A-Za-z][A-Za-z0-9\-]*)\s*(=\s*(.*))?$') { return (& $fail 'GIT_CONFIG_UNPARSEABLE') }
+        $key = $Matches[1].ToLowerInvariant()
+        $value = 'true'
+        if ($Matches[2]) {
+            $rv = $Matches[3]
+            $sb = New-Object System.Text.StringBuilder
+            $inQ = $false; $i = 0
+            while ($i -lt $rv.Length) {
+                $c = $rv[$i]
+                if ($c -eq '\') {
+                    if ($i + 1 -ge $rv.Length) { return (& $fail 'GIT_CONFIG_UNPARSEABLE') }
+                    $n = $rv[$i + 1]
+                    switch -CaseSensitive ([string]$n) { '\' { [void]$sb.Append('\') } '"' { [void]$sb.Append('"') } 'n' { [void]$sb.Append("`n") } 't' { [void]$sb.Append("`t") } 'b' { [void]$sb.Append("`b") } default { return (& $fail 'GIT_CONFIG_UNPARSEABLE') } }
+                    $i += 2; continue
+                }
+                if ($c -eq '"') { $inQ = -not $inQ; $i++; continue }
+                if (-not $inQ -and ($c -eq '#' -or $c -eq ';')) { break }
+                [void]$sb.Append($c); $i++
+            }
+            if ($inQ) { return (& $fail 'GIT_CONFIG_UNPARSEABLE') }
+            $value = $sb.ToString().Trim()
+        }
+        $entries.Add([pscustomobject]@{ Section = $section; Subsection = $sub; Key = $key; Value = $value })
+    }
+    return [pscustomobject]@{ Error = $null; Entries = $entries.ToArray() }
+}
+
+function Get-AtmGitConfigFindings {
+    # Configuration entries that make a target unsafe for any Git call (Refuse) or for `status` only (StatusBlock).
+    param($Entries, [string]$BaseDir)
+    $refuse = $null; $block = $null
+    foreach ($e in @($Entries)) {
+        $name = $e.Section + '.' + $e.Key
+        # Included configuration is read by Git from wherever it points: never followed, so never allowed.
+        if ($e.Section -eq 'include' -or $e.Section -eq 'includeif' -or $e.Section.StartsWith('include.') -or $e.Section.StartsWith('includeif.')) { $refuse = 'GIT_PREFLIGHT_INCLUDE'; break }
+        if ($script:AtmGitPathKeys -contains $name -and $e.Value) {
+            $r = Resolve-AtmGitReferencedPath -Value $e.Value -BaseDir $BaseDir
+            if ($r.Status -eq 'REFUSED') { $refuse = 'GIT_PREFLIGHT_CONFIG_PATH'; break }
+        }
+        # Any other value written as a network path (URLs of remotes are never opened: no transport is allowed).
+        if (-not ($e.Section -eq 'remote' -and ($e.Key -eq 'url' -or $e.Key -eq 'pushurl')) -and $e.Section -ne 'url' -and $e.Value -match '^\s*(\\\\|//|/\\|\\/|file:)') { $refuse = 'GIT_PREFLIGHT_CONFIG_NETWORK'; break }
+        # D-3: drivers configured in the repository can run commands during `status`.
+        if ($e.Section -eq 'filter' -and $null -eq $block) { $block = 'D3_FILTER_DRIVER' }
+        if ($e.Section -eq 'diff' -and $e.Key -eq 'textconv' -and $null -eq $block) { $block = 'D3_TEXTCONV' }
+        if ($e.Section -eq 'submodule' -and $null -eq $block) { $block = 'D3_SUBMODULES' }
+    }
+    return [pscustomobject]@{ Refuse = $refuse; StatusBlock = $block }
+}
+
+function Get-AtmGitPreflight {
+    <#
+      File-based check of a target directory before any Git call (P3-B0); no Git process. Reads, through
+      Resolve-AtmGitReferencedPath: the target's .git (directory, or a `gitdir:` file), commondir, the configuration
+      (common config and config.worktree, strict parser), every administrative entry's gitdir (stat-ed by `worktree
+      list`) and the alternates chain (bounded). Status: OK, NOT_A_REPOSITORY (no .git entry in the target), or REFUSED
+      with a reason code. StatusAllowed is $true only when no filter driver, textconv, submodule or .gitmodules is present
+      (D-3). AdminEntries: Name, Gitdir (Status OK | MISSING | REFUSED), Locked, LockReasonLength, HasHead. Nothing is
+      exported: callers turn this into codes and pseudonyms.
+    #>
+    param([string]$Target)
+    $out = [ordered]@{ Status = 'REFUSED'; Reason = $null; WorkTree = $null; GitDir = $null; CommonDir = $null; StatusAllowed = $false; StatusBlock = $null; AdminEntries = @(); Alternates = 0; Bare = $false }
+    $t = Resolve-AtmGitReferencedPath -Value $Target -BaseDir $null
+    if ($t.Status -ne 'OK') { $out.Reason = $(if ($t.Status -eq 'MISSING') { 'GIT_PREFLIGHT_TARGET_MISSING' } else { $t.Reason }); return [pscustomobject]$out }
+    $target = $t.Path
+    try { if (([IO.File]::GetAttributes($target) -band [IO.FileAttributes]::Directory) -eq 0) { $out.Reason = 'GIT_PREFLIGHT_TARGET_NOT_DIRECTORY'; return [pscustomobject]$out } } catch { $out.Reason = 'GIT_REF_PATH_UNREADABLE'; return [pscustomobject]$out }
+    $dotGit = Resolve-AtmGitReferencedPath -Value '.git' -BaseDir $target
+    if ($dotGit.Status -eq 'MISSING') { $out.Status = 'NOT_A_REPOSITORY'; $out.Reason = 'GIT_PREFLIGHT_NO_GIT_ENTRY'; return [pscustomobject]$out }
+    if ($dotGit.Status -ne 'OK') { $out.Reason = $dotGit.Reason; return [pscustomobject]$out }
+    $isDir = $false
+    try { $isDir = (([IO.File]::GetAttributes($dotGit.Path) -band [IO.FileAttributes]::Directory) -ne 0) } catch { $out.Reason = 'GIT_REF_PATH_UNREADABLE'; return [pscustomobject]$out }
+    if ($isDir) { $gitDir = $dotGit.Path }
+    else {
+        $txt = Read-AtmGitSmallFile -Path $dotGit.Path -MaxBytes 4096
+        if ($null -eq $txt -or $txt.Trim() -notmatch '^gitdir:\s*(.+)$') { $out.Reason = 'GIT_PREFLIGHT_GITFILE_INVALID'; return [pscustomobject]$out }
+        $g = Resolve-AtmGitReferencedPath -Value $Matches[1].Trim() -BaseDir $target
+        if ($g.Status -eq 'MISSING') { $out.Reason = 'GIT_PREFLIGHT_GITDIR_MISSING'; $out.GitDir = $g.Path; return [pscustomobject]$out }
+        if ($g.Status -ne 'OK') { $out.Reason = 'GIT_PREFLIGHT_GITDIR_' + $g.Reason.Substring('GIT_REF_PATH_'.Length); return [pscustomobject]$out }
+        $gitDir = $g.Path
+    }
+    $commonDir = $gitDir
+    $cd = Resolve-AtmGitReferencedPath -Value 'commondir' -BaseDir $gitDir
+    if ($cd.Status -eq 'OK') {
+        $ctext = Read-AtmGitSmallFile -Path $cd.Path -MaxBytes 4096
+        if ($null -eq $ctext -or [string]::IsNullOrWhiteSpace($ctext)) { $out.Reason = 'GIT_PREFLIGHT_COMMONDIR_INVALID'; return [pscustomobject]$out }
+        $c = Resolve-AtmGitReferencedPath -Value $ctext.Trim() -BaseDir $gitDir
+        if ($c.Status -ne 'OK') { $out.Reason = $(if ($c.Status -eq 'MISSING') { 'GIT_PREFLIGHT_COMMONDIR_MISSING' } else { 'GIT_PREFLIGHT_COMMONDIR_' + $c.Reason.Substring('GIT_REF_PATH_'.Length) }); return [pscustomobject]$out }
+        $commonDir = $c.Path
+    } elseif ($cd.Status -eq 'REFUSED') { $out.Reason = $cd.Reason; return [pscustomobject]$out }
+    # Configuration: the common config, and config.worktree when the extension is on.
+    $entries = New-Object System.Collections.Generic.List[object]
+    foreach ($pair in @(@($commonDir, 'config'), @($gitDir, 'config.worktree'))) {
+        $f = Resolve-AtmGitReferencedPath -Value $pair[1] -BaseDir $pair[0]
+        if ($f.Status -eq 'MISSING') { continue }
+        if ($f.Status -ne 'OK') { $out.Reason = $f.Reason; return [pscustomobject]$out }
+        $text = Read-AtmGitSmallFile -Path $f.Path -MaxBytes $script:AtmGitConfigMaxBytes
+        if ($null -eq $text) { $out.Reason = 'GIT_CONFIG_UNREADABLE'; return [pscustomobject]$out }
+        $parsed = Read-AtmGitConfigText -Text $text
+        if ($parsed.Error) { $out.Reason = $parsed.Error; return [pscustomobject]$out }
+        foreach ($e in $parsed.Entries) { $entries.Add($e) }
+    }
+    $cf = Get-AtmGitConfigFindings -Entries $entries.ToArray() -BaseDir $target
+    if ($cf.Refuse) { $out.Reason = $cf.Refuse; return [pscustomobject]$out }
+    $bare = @($entries | Where-Object { $_.Section -eq 'core' -and $_.Key -eq 'bare' -and $_.Value -match '^(true|yes|on|1)$' }).Count -gt 0
+    # Alternates: every object directory Git would read, recursively and bounded.
+    $queue = New-Object System.Collections.Generic.Queue[object]
+    $queue.Enqueue(@((Join-Path $commonDir 'objects'), 0))
+    $seen = @{}; $alts = 0
+    while ($queue.Count -gt 0) {
+        $item = $queue.Dequeue(); $objDir = $item[0]; $depth = $item[1]
+        $af = Resolve-AtmGitReferencedPath -Value 'info\alternates' -BaseDir $objDir
+        if ($af.Status -eq 'MISSING') { continue }
+        if ($af.Status -ne 'OK') { $out.Reason = $af.Reason; return [pscustomobject]$out }
+        $atext = Read-AtmGitSmallFile -Path $af.Path
+        if ($null -eq $atext) { $out.Reason = 'GIT_PREFLIGHT_ALTERNATES_UNREADABLE'; return [pscustomobject]$out }
+        foreach ($line in $atext.Replace("`r`n", "`n").Split("`n")) {
+            $l = $line.Trim()
+            if ($l -eq '' -or $l.StartsWith('#')) { continue }
+            if ($l.StartsWith('"')) { $out.Reason = 'GIT_PREFLIGHT_ALTERNATES_QUOTED'; return [pscustomobject]$out }
+            $a = Resolve-AtmGitReferencedPath -Value $l -BaseDir $objDir
+            if ($a.Status -ne 'OK') { $out.Reason = $(if ($a.Status -eq 'MISSING') { 'GIT_PREFLIGHT_ALTERNATE_MISSING' } else { 'GIT_PREFLIGHT_ALTERNATE_' + $a.Reason.Substring('GIT_REF_PATH_'.Length) }); return [pscustomobject]$out }
+            $alts++
+            if ($alts -gt $script:AtmGitAlternatesMax -or $depth + 1 -gt $script:AtmGitAlternatesMaxDepth) { $out.Reason = 'GIT_PREFLIGHT_ALTERNATES_LIMIT'; return [pscustomobject]$out }
+            $k = $a.Path.ToLowerInvariant()
+            if (-not $seen.ContainsKey($k)) { $seen[$k] = $true; $queue.Enqueue(@($a.Path, ($depth + 1))) }
+        }
+    }
+    # Administrative entries (`worktree list` stats each gitdir).
+    $admin = New-Object System.Collections.Generic.List[object]
+    $wtRoot = Resolve-AtmGitReferencedPath -Value 'worktrees' -BaseDir $commonDir
+    if ($wtRoot.Status -eq 'OK') {
+        $names = @()
+        try { $names = @([IO.Directory]::GetDirectories($wtRoot.Path) | ForEach-Object { [IO.Path]::GetFileName($_) } | Sort-Object) } catch { $out.Reason = 'GIT_PREFLIGHT_ADMIN_UNREADABLE'; return [pscustomobject]$out }
+        if ($names.Count -gt $script:AtmGitAdminEntriesMax) { $out.Reason = 'GIT_PREFLIGHT_ADMIN_LIMIT'; return [pscustomobject]$out }
+        foreach ($n in $names) {
+            $entryDir = Resolve-AtmGitReferencedPath -Value $n -BaseDir $wtRoot.Path
+            if ($entryDir.Status -ne 'OK') { $out.Reason = $entryDir.Reason; return [pscustomobject]$out }
+            $gf = Resolve-AtmGitReferencedPath -Value 'gitdir' -BaseDir $entryDir.Path
+            $g = [pscustomobject]@{ Status = 'MISSING'; Reason = 'GIT_ADMIN_GITDIR_FILE_MISSING'; Path = $null }
+            if ($gf.Status -eq 'OK') {
+                $gtext = Read-AtmGitSmallFile -Path $gf.Path -MaxBytes 4096
+                if ($null -eq $gtext -or [string]::IsNullOrWhiteSpace($gtext)) { $out.Reason = 'GIT_PREFLIGHT_ADMIN_GITDIR_INVALID'; return [pscustomobject]$out }
+                $g = Resolve-AtmGitReferencedPath -Value $gtext.Trim() -BaseDir $entryDir.Path
+                # A network or reparse gitdir would be stat-ed by `worktree list`: the whole repository is refused.
+                if ($g.Status -eq 'REFUSED') { $out.Reason = 'GIT_PREFLIGHT_ADMIN_' + $g.Reason.Substring('GIT_REF_PATH_'.Length); return [pscustomobject]$out }
+            } elseif ($gf.Status -eq 'REFUSED') { $out.Reason = $gf.Reason; return [pscustomobject]$out }
+            $lk = Resolve-AtmGitReferencedPath -Value 'locked' -BaseDir $entryDir.Path
+            $lockLen = $null
+            if ($lk.Status -eq 'OK') { $lt = Read-AtmGitSmallFile -Path $lk.Path -MaxBytes 4096; $lockLen = $(if ($null -eq $lt) { -1 } else { $lt.Trim().Length }) }
+            $hd = Resolve-AtmGitReferencedPath -Value 'HEAD' -BaseDir $entryDir.Path
+            $admin.Add([pscustomobject]@{ Name = $n; Gitdir = $g; Locked = ($lk.Status -eq 'OK'); LockReasonLength = $lockLen; HasHead = ($hd.Status -eq 'OK') })
+        }
+    } elseif ($wtRoot.Status -eq 'REFUSED') { $out.Reason = $wtRoot.Reason; return [pscustomobject]$out }
+    # D-3 for `status`: submodules declared in the work tree also block it.
+    $block = $cf.StatusBlock
+    if ($null -eq $block -and -not $bare) {
+        $gm = Resolve-AtmGitReferencedPath -Value '.gitmodules' -BaseDir $target
+        if ($gm.Status -eq 'OK') { $block = 'D3_SUBMODULES' } elseif ($gm.Status -eq 'REFUSED') { $block = 'D3_GITMODULES_UNREADABLE' }
+    }
+    $out.Status = 'OK'; $out.Reason = $null; $out.WorkTree = $(if ($bare) { $null } else { $target }); $out.GitDir = $gitDir; $out.CommonDir = $commonDir
+    $out.StatusAllowed = ($null -eq $block -and -not $bare); $out.StatusBlock = $(if ($bare) { 'D3_BARE_REPOSITORY' } else { $block }); $out.AdminEntries = $admin.ToArray(); $out.Alternates = $alts; $out.Bare = $bare
     return [pscustomobject]$out
 }
 
