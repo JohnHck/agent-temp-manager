@@ -202,7 +202,14 @@ called by `Invoke-AtmGitCommand`):
   briefly.
 * **Unobservable handles**: handles opened with full sharing (including `FILE_SHARE_DELETE`) and no data
   access are not detected by the probe. Process working directories and environment variables are not
-  observable without debugging privileges (not used).
+  observable (V0.1; in V0.2 the D-1 working-directory reading is deferred, ADR-0004 amendment: the diagnose reports it
+  as `NOT_OBSERVABLE`).
+* **Open-file evidence (V0.2 diagnose, D-2):** Restart Manager lists the processes holding a bounded sample of files
+  of each indexed item (start session, register, list, end session; never shut down or restart; sessions always
+  ended). It sees files only (not directories nor working directories), so a sample never proves an item free; a
+  holder is identified by PID and start time against the process snapshot, otherwise reported as unverified; no file
+  path or process name is exported. `RmGetList` cannot be cancelled: one query is bounded only by the few files
+  registered.
 * **Process coverage**: protected processes remain uninspectable even for administrators. On a real Windows
   installation there are always some (17 on the CI runners), so the coverage gate blocks every candidate: in V0.1
   `clean` stops before the release gate is even reached. Enabling real deletion (V0.3) requires a reviewed decision

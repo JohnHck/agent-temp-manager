@@ -73,3 +73,27 @@ Windows offers three ways to learn more, with very different risks:
   `RmShutdown`, `RmRestart`, `SeDebugPrivilege`; `Engine.Diagnose.ps1` never references `AtmLockProbe`.
 * Privacy test: diagnose output for a process whose working directory is outside indexed paths contains no part of
   that directory.
+
+## Amendment (P1-C, 2026-10-24)
+
+The decisions above are kept as history; this records what P1-C did with them.
+
+* **D-1: DEFERRED.** The PEB reading was not implemented. Cause, as observed: while the prototype's native code was
+  being written in the P1-C session, the generation of code that reads another process's memory was stopped by the
+  coding assistant's safety filter, twice; no D-1 code was produced, applied or tested, and nothing of it is in the
+  repository. The maintainer decided (gate of 2026-10-24) not to integrate D-1 in V0.2 for now and not to compensate
+  with more invasive methods. The diagnose reports the collector `process-cwd` as `NOT_OBSERVABLE`
+  (`WORKING_DIRECTORY_DEFERRED`): a working directory that is not observed is never an absence of dependency.
+  *Future alternative, documented only (not implemented, never full coverage):* cooperating agents could declare their
+  own working directory through an authenticated interface bound to the process identity (PID and creation time),
+  covering only the processes that take part.
+* **D-2: implemented (bounded).** `AtmRestartManager` uses only `RmStartSession`, `RmRegisterResources`, `RmGetList`
+  and `RmEndSession` (static test), ends the session in every case, and returns per holder only the PID and the start
+  time (application and service names are not returned). The collector `handles` checks a sample of at most 16 files
+  directly in each indexed node (temporary partitions; a worktree's index when discovery runs), at most 256 files and
+  64 sessions per run, one session at a time, 64 holders per query, and stops at the deadline before the next node.
+  Every path goes through the resolver (local fixed drive, no reparse point). A holder is matched with the process
+  snapshot by PID and start time (`-CimPrecision`); otherwise it is `FILE_HELD_OPEN_UNVERIFIED`. Its coverage is never
+  `COMPLETE`: a sample of files, and Restart Manager does not see directories or working directories. `RmGetList` has
+  no cancellation: the time of one query is bounded only by the small number of files registered. The evidence does
+  not change any state (dependencies are P4) and authorizes nothing.
