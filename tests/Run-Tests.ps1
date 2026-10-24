@@ -4561,16 +4561,20 @@ try {
     $testGit = Resolve-AtmGitExecutable -TestEnvironment $gitTE
     $gitSkip = { if ($testGit.Status -ne 'COMPLETE') { $script:caseSkipped = $true; $script:caseNote = "Git indisponivel: $($testGit.Reason)"; return $true }; return $false }
     $gitFx = { param([string]$Dir, [string[]]$GitArgs, [string]$Expect)
-        $saved = @{}; foreach ($k in 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_CEILING_DIRECTORIES', 'GIT_DIR', 'GIT_WORK_TREE') { $saved[$k] = [Environment]::GetEnvironmentVariable($k) }
+        # Identity, hooks and signing through the environment (independent of how each shell passes native arguments).
+        $fxEnv = [ordered]@{ GIT_CONFIG_GLOBAL = $gitCfg; GIT_CONFIG_NOSYSTEM = '1'; GIT_CEILING_DIRECTORIES = $gitRoot; GIT_DIR = $null; GIT_WORK_TREE = $null
+            GIT_AUTHOR_NAME = 'atm'; GIT_AUTHOR_EMAIL = 'atm@fixture'; GIT_COMMITTER_NAME = 'atm'; GIT_COMMITTER_EMAIL = 'atm@fixture'
+            GIT_CONFIG_COUNT = '2'; GIT_CONFIG_KEY_0 = 'core.hooksPath'; GIT_CONFIG_VALUE_0 = 'NUL'; GIT_CONFIG_KEY_1 = 'commit.gpgsign'; GIT_CONFIG_VALUE_1 = 'false' }
+        $saved = @{}; foreach ($k in $fxEnv.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k) }
         try {
-            $env:GIT_CONFIG_GLOBAL = $gitCfg; $env:GIT_CONFIG_NOSYSTEM = '1'; $env:GIT_CEILING_DIRECTORIES = $gitRoot; $env:GIT_DIR = $null; $env:GIT_WORK_TREE = $null
+            foreach ($k in $fxEnv.Keys) { [Environment]::SetEnvironmentVariable($k, $fxEnv[$k]) }
             if ($Expect) {
                 $top = (& $testGit.Path -C $Dir rev-parse --show-toplevel 2>$null | Out-String).Trim().Replace('/', '\')
                 if (-not [string]::Equals((Get-AtmNormalizedPath $top), (Get-AtmNormalizedPath $Expect), [StringComparison]::OrdinalIgnoreCase)) { throw "fixture fora do sandbox: $top" }
             }
             # Git writes warnings to stderr: only the exit code decides (sandbox fixture, so its text may be shown).
             $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-            try { $o = @(& $testGit.Path -C $Dir -c 'core.hooksPath=NUL' -c 'commit.gpgsign=false' -c 'user.name=atm' -c 'user.email=atm@fixture' @GitArgs 2>&1 | ForEach-Object { "$_" }) } finally { $ErrorActionPreference = $eap }
+            try { $o = @(& $testGit.Path -C $Dir @GitArgs 2>&1 | ForEach-Object { "$_" }) } finally { $ErrorActionPreference = $eap }
             if ($LASTEXITCODE -ne 0) { throw "git de fixture falhou: $($GitArgs[0]) ($LASTEXITCODE): $((@($o) -join ' / ').Substring(0, [Math]::Min(300, (@($o) -join ' / ').Length)))" }
         } finally { foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) } }
     }
@@ -4725,11 +4729,14 @@ try {
         $envList = Get-AtmGitEnvironment -Ceiling $gitRoot
         $script = '$g = Start-Process -FilePath powershell.exe -ArgumentList ''-NoProfile -Command Start-Sleep 60'' -PassThru -WindowStyle Hidden; [Console]::Out.WriteLine(''{0}|{1}'' -f $g.Id, $g.StartTime.ToUniversalTime().Ticks); [Console]::Out.Flush(); Start-Sleep 60'
         $j = Invoke-AtmBoundedProcess -Executable $ps -CommandLine ('"powershell.exe" -NoProfile -Command "' + $script.Replace('"', '\"') + '"') -WorkingDirectory $gitRoot -Environment $envList -TimeoutMs 20000 -MaxOutputBytes 4096 -JobMemoryBytes 1GB -ActiveProcessLimit 8
+        $runStart = [datetime]::Now.AddSeconds(-25)
         $parts = ([Text.Encoding]::ASCII.GetString($j.Output).Trim()).Split('|')
-        Assert-True ($j.Started -and $j.TimedOut -and $j.JobTerminated -and $j.TotalProcesses -ge 2 -and $parts.Count -eq 2) "job encerrado no prazo: total $($j.TotalProcesses), saida '$($parts -join '|')'"
+        Assert-True ($j.Started -and $j.TimedOut -and $j.JobTerminated -and $j.TotalProcesses -ge 3) "job encerrado no prazo com filho e neto: total $($j.TotalProcesses), saida '$($parts -join '|')', stderr '$(([Text.Encoding]::UTF8.GetString($j.ErrorOutput)).Trim())'"
         Start-Sleep -Milliseconds 800
-        $gp = Get-Process -Id ([int]$parts[0]) -ErrorAction SilentlyContinue
-        Assert-True ($null -eq $gp -or $gp.StartTime.ToUniversalTime().Ticks -ne [long]$parts[1]) 'neto (dentro do job) encerrado'
+        # No process the job's child started is still alive (the child itself is gone too).
+        $kids = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($j.ProcessId)" -ErrorAction SilentlyContinue | Where-Object { $_.CreationDate -ge $runStart -and $_.ProcessId -ne $PID })
+        Assert-True ($kids.Count -eq 0 -and $null -eq (Get-Process -Id $j.ProcessId -ErrorAction SilentlyContinue | Where-Object { $_.StartTime -ge $runStart })) "filho e neto (dentro do job) encerrados: $($kids.Count) restantes"
+        if ($parts.Count -eq 2) { $gp = Get-Process -Id ([int]$parts[0]) -ErrorAction SilentlyContinue; Assert-True ($null -eq $gp -or $gp.StartTime.ToUniversalTime().Ticks -ne [long]$parts[1]) 'neto (PID e horario impressos pelo filho) encerrado' }
         $sp = Get-Process -Id $sentinel.Id -ErrorAction SilentlyContinue
         Assert-True ($null -ne $sp -and $sp.StartTime -eq $sentStart) 'processo preexistente fora do job continua vivo'
         # Limits read back from the job and their effect (non-Git children).
