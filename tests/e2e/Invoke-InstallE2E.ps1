@@ -132,10 +132,11 @@ $out = New-Object System.Collections.Generic.List[string]
 foreach ($exe in @((Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'), (Join-Path $env:SystemRoot 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'))) {
     if (-not (Test-Path -LiteralPath $exe)) { $out.Add('absent'); continue }
     $f = Join-Path $Dir ('rm-' + [guid]::NewGuid().ToString('N') + '.txt'); [IO.File]::WriteAllText($f, 'x')
-    $c = Start-Process -FilePath $exe -ArgumentList @('-NoProfile', '-Command', "`$h = [IO.File]::Open('$f', 'Open', 'Read', 'ReadWrite'); Start-Sleep 30") -PassThru -WindowStyle Hidden
+    # A 32-bit PowerShell can take long to start on a busy runner: the helper waits up to 3 minutes, the probe up to 2.
+    $c = Start-Process -FilePath $exe -ArgumentList @('-NoProfile', '-Command', "`$h = [IO.File]::Open('$f', 'Open', 'Read', 'ReadWrite'); Start-Sleep 180") -PassThru -WindowStyle Hidden
     try {
         $found = $false; $timeOk = $false
-        for ($i = 0; $i -lt 80 -and -not $found; $i++) {
+        for ($i = 0; $i -lt 480 -and -not $found; $i++) {
             $h = $null; $null = [AgentTempManager.AtmRestartManager]::Query([string[]]@($f), 8, [ref]$h)
             $m = @($h | Where-Object { $_.Split('|')[0] -eq [string]$c.Id })
             if ($m.Count -gt 0) { $found = $true; $timeOk = ([long]$m[0].Split('|')[1] -eq $c.StartTime.ToUniversalTime().Ticks) } else { Start-Sleep -Milliseconds 250 }

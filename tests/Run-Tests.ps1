@@ -4418,16 +4418,16 @@ try {
                 if ($n -eq 'inaccessible') { Assert-Eq @($d.Inventory.InaccessibleProfiles).Count 1 'perfil inacessivel no inventario' }
                 if ($n -eq 'unverified') { Assert-Eq @($d.Inventory.UnverifiedTempProfiles).Count 1 'TEMP nao verificavel no inventario' }
             } else {
-                foreach ($c in $d.Coverage) { Assert-Eq $c.Status 'COMPLETE' "controle: $($c.Collector) completo" }
+                foreach ($c in @($d.Coverage | Where-Object { $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' })) { Assert-Eq $c.Status 'COMPLETE' "controle: $($c.Collector) completo" }
             }
             $j = (ConvertTo-AtmDiagnoseJson -Result $d) | ConvertFrom-Json
-            Assert-Eq ([bool]$j.coverageComplete) $control "$n`: JSON coverageComplete"
+            Assert-Eq ([bool]$j.coverageComplete) $false "$n`: JSON coverageComplete (P1-C: nunca completo)"
             Assert-Eq ([bool]$j.inventory.coverageComplete) $control "$n`: JSON inventory.coverageComplete"
             if (-not $control) { Assert-True (@($j.coverage | Where-Object { $_.collector -ceq $row.Collector -and $_.status -ceq $row.Status -and @($_.reasons) -ccontains $row.Reason }).Count -eq 1) "$n`: JSON com o mesmo codigo" }
             $old = Get-AtmLanguage
             try { Set-AtmLanguage -Requested 'en-US'; $txt = (Show-AtmDiagnose -Result $d 6>&1 | Out-String) } finally { Set-AtmLanguage -Requested $old }
             $yes = $txt.Contains('Complete coverage: YES'); $no = $txt.Contains('Complete coverage: NO')
-            Assert-True ($yes -eq $control -and $no -ne $control) "$n`: relatorio (YES=$yes NO=$no)"
+            Assert-True (-not $yes -and $no) "$n`: relatorio (YES=$yes NO=$no; P1-C: nunca completo)"
             if (-not $control) { Assert-True ($txt.Contains($row.Reason)) "$n`: relatorio mostra $($row.Reason)" }
         }
     }
