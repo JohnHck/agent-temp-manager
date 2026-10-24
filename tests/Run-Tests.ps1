@@ -4611,6 +4611,28 @@ try {
         [IO.File]::WriteAllText((Join-Path $repo 'u.txt'), "u`n"); [IO.File]::WriteAllText((Join-Path $wt 'w.txt'), "w`n")
         [void][IO.Directory]::CreateDirectory((Join-Path $repo 'plain\deeper'))
         return [pscustomobject]@{ Base = $base; Repo = $repo; Worktree = $wt } }
+    # P3-E: a repository (real Git fixture, one commit) with -Worktrees linked worktrees and -Refs remote-tracking refs,
+    # written as files only (administrative entries, .git files, loose refs), every worktree a child of one partition.
+    $scaleFixture = { param([string]$Name, [int]$Worktrees, [int]$Refs)
+        $base = Join-Path $gitRoot $Name
+        $repo = Join-Path $base 'repo'; $part = Join-Path $base 'part'
+        foreach ($d in @($repo, $part)) { [void][IO.Directory]::CreateDirectory($d) }
+        & $gitFx $repo @('init', '-q', '-b', 'main') $null
+        [IO.File]::WriteAllText((Join-Path $repo 'a.txt'), "a`n"); & $gitFx $repo @('add', 'a.txt') $repo; & $gitFx $repo @('commit', '-q', '-m', 'one') $repo
+        $head = (& $gitFxOut $repo @('rev-parse', 'HEAD') $repo).Out.Trim()
+        $gd = Join-Path $repo '.git'
+        $rr = Join-Path $gd 'refs\remotes\origin'; [void][IO.Directory]::CreateDirectory($rr)
+        for ($i = 0; $i -lt $Refs; $i++) { [IO.File]::WriteAllText((Join-Path $rr ('b' + $i)), "$head`n") }
+        for ($i = 0; $i -lt $Worktrees; $i++) {
+            $n = 'wt' + $i; $wt = Join-Path $part $n; $ad = Join-Path $gd ('worktrees\' + $n)
+            foreach ($d in @($wt, $ad)) { [void][IO.Directory]::CreateDirectory($d) }
+            [IO.File]::WriteAllText((Join-Path $wt '.git'), "gitdir: $ad`n")
+            [IO.File]::WriteAllText((Join-Path $ad 'gitdir'), (Join-Path $wt '.git') + "`n")
+            [IO.File]::WriteAllText((Join-Path $ad 'HEAD'), "ref: refs/heads/main`n")
+            [IO.File]::WriteAllText((Join-Path $ad 'commondir'), "../..`n")
+        }
+        return [pscustomobject]@{ Repo = $repo; Part = $part; Partitions = @([pscustomobject]@{ Path = $part; Kind = 'SessionRoot' }) }
+    }
     $gitAllowed = @(
         @('--version'), @('rev-parse', '--show-toplevel', '--git-dir', '--git-common-dir', '--is-inside-work-tree'), @('worktree', 'list', '--porcelain', '-z'),
         @('status', '--porcelain=v2', '-z', '--branch', '--untracked-files=all'), @('status', '--porcelain=v2', '-z', '--ignored=matching', '--show-stash'),
@@ -5443,6 +5465,81 @@ try {
         $rp = @($log | Where-Object { $_.Arguments -ccontains 'rev-parse' })
         Assert-True ($rp.Count -eq 1 -and $rp[0].Arguments -cnotcontains '--git-common-dir' -and $rp[0].Arguments -ccontains '--show-toplevel') 'rev-parse sem --git-common-dir'
     }
+    Test-Case 'Git' 'P3-E: escala - a parte comum da pre-verificacao e lida uma vez por repositorio (cache por impressao digital), sem repeticao O(W x R); limites, ordem deterministica, privacidade e memoria' {
+        if (& $gitSkip) { return }
+        $big = & $scaleFixture 'scale-big' 300 2000
+        $small = & $scaleFixture 'scale-small' 20 300
+        $pz = New-AtmPseudonymizer -Key $testPseudonymKey
+        try {
+            $script:AtmWorktreeDiagnosticsEnabled = $true
+            try {
+                # Before (no cache) and after (cache) on the small repository: same findings, far less work.
+                $u = Get-AtmWorktreeDiscovery -Partitions $small.Partitions -Git $null -Pseudonymizer $pz -NoPreflightCache
+                $c = Get-AtmWorktreeDiscovery -Partitions $small.Partitions -Git $null -Pseudonymizer $pz
+                # Large repository: 300 worktrees, 2,000 references.
+                [GC]::Collect(); $m0 = [GC]::GetTotalMemory($true)
+                $sw = [Diagnostics.Stopwatch]::StartNew()
+                $b = Get-AtmWorktreeDiscovery -Partitions $big.Partitions -Git $null -Pseudonymizer $pz
+                $sw.Stop(); $m1 = [GC]::GetTotalMemory($false)
+                $b2 = Get-AtmWorktreeDiscovery -Partitions $big.Partitions -Git $null -Pseudonymizer $pz
+                # Limits give PARTIAL with their reason, never a silent cut.
+                $capC = Get-AtmWorktreeDiscovery -Partitions $big.Partitions -Git $null -Pseudonymizer $pz -MaxCandidates 50
+                $capB = Get-AtmWorktreeDiscovery -Partitions $big.Partitions -Git $null -Pseudonymizer $pz -MaxBytesRead 2000
+                $capD = Get-AtmWorktreeDiscovery -Partitions $big.Partitions -Git $null -Pseudonymizer $pz -Deadline ([datetime]::UtcNow.AddSeconds(-1))
+            } finally { $script:AtmWorktreeDiagnosticsEnabled = $false }
+            $sig = { param($r) (@($r.Findings | ForEach-Object { $_.Kind + '|' + $_.Key + '|' + $_.State + '|' + (@($_.Evidence | ForEach-Object { $_.Code + '=' + $_.Detail }) -join ',') }) -join "`n") }
+            Assert-Eq (& $sig $c) (& $sig $u) 'mesmos achados com e sem cache'
+            Assert-True ($u.Stats.CommonPreflights -ge 20 -and $c.Stats.CommonPreflights -eq 1 -and $c.Stats.CommonCacheHits -ge 19) "parte comum: sem cache $($u.Stats.CommonPreflights), com cache $($c.Stats.CommonPreflights) (acertos $($c.Stats.CommonCacheHits))"
+            Assert-True ($u.Stats.RefEntriesWalked -ge 20 * 300 -and $c.Stats.RefEntriesWalked -lt 2 * 310) "entradas de referencia percorridas: sem cache $($u.Stats.RefEntriesWalked), com cache $($c.Stats.RefEntriesWalked)"
+            Assert-True ($b.Stats.CommonPreflights -eq 1 -and $b.Stats.RefStoreReads -eq 1 -and $b.Stats.RefEntriesWalked -lt 2100) "300 worktrees, 2000 referencias: parte comum 1x, referencias 1x por repositorio ($($b.Stats.RefEntriesWalked) entradas)"
+            Assert-Eq @($b.Findings | Where-Object { $_.Kind -eq 'Worktree' -and @($_.Evidence | Where-Object { $_.Code -eq 'WORKTREE_REGISTERED' }).Count -eq 1 }).Count 300 'todas as 300 worktrees registradas'
+            Assert-Eq (& $sig $b2) (& $sig $b) 'ordem e conteudo deterministicos entre execucoes'
+            Assert-True ((($m1 - $m0) / 1MB) -lt 200) ("memoria gerenciada controlada ({0:N1} MB)" -f (($m1 - $m0) / 1MB))
+            Assert-True (@($capC.Coverage[0].Reasons) -contains 'CANDIDATE_LIMIT' -and @($capB.Coverage[0].Reasons) -contains 'READ_BUDGET' -and @($capD.Coverage[0].Reasons) -contains 'DEADLINE_EXCEEDED') 'limites de candidatos, bytes e prazo: PARTIAL com o motivo'
+            Assert-True (@($capC.Findings | Where-Object { $_.State -eq 'CLEAN_AND_PUBLISHED_UNKNOWN' }).Count -eq 0) 'um corte nunca vira limpo'
+            $json = (@{ F = $b.Findings; C = $b.Coverage } | ConvertTo-Json -Depth 8)
+            foreach ($x in @($big.Repo, $big.Part, 'wt17', 'origin')) { Assert-True (-not $json.Contains($x) -and -not $json.Contains($x.Replace('\', '\\'))) "nada sensivel nos achados: $(Split-Path -Leaf $x)" }
+            $script:caseNote = ("300 worktrees/2000 refs: {0:N1}s, {1} arquivos, {2:N0} KB lidos; 20 worktrees/300 refs: parte comum {3} -> {4}, entradas {5} -> {6}" -f $sw.Elapsed.TotalSeconds, $b.Stats.FilesRead, ($b.Stats.BytesRead / 1KB), $u.Stats.CommonPreflights, $c.Stats.CommonPreflights, $u.Stats.RefEntriesWalked, $c.Stats.RefEntriesWalked)
+        } finally { Close-AtmPseudonymizer $pz }
+    }
+    Test-Case 'Git' 'P3-E: o cache nao reutiliza conclusoes apos mudancas detectaveis; a pre-verificacao do executor nunca usa cache; referencias novas sao vistas' {
+        if (& $gitSkip) { return }
+        $fx = & $scaleFixture 'scale-inval' 3 5
+        $wt0 = Join-Path $fx.Part 'wt0'; $wt1 = Join-Path $fx.Part 'wt1'; $wt2 = Join-Path $fx.Part 'wt2'
+        Reset-AtmScaleStats
+        $cache = @{}
+        $p0 = Get-AtmGitPreflight -Target $wt0 -Cache $cache
+        $p1 = Get-AtmGitPreflight -Target $wt1 -Cache $cache
+        Assert-True ($p0.Status -eq 'OK' -and $p1.Status -eq 'OK' -and $script:AtmScaleStats.CommonPreflights -eq 1 -and $script:AtmScaleStats.CommonCacheHits -eq 1) 'sem mudanca: parte comum reutilizada'
+        Start-Sleep -Milliseconds 50
+        [IO.File]::AppendAllText((Join-Path $fx.Repo '.git\config'), "[include]`n`tpath = x`n")
+        $p2 = Get-AtmGitPreflight -Target $wt2 -Cache $cache
+        Assert-True ($script:AtmScaleStats.CommonCacheInvalidations -eq 1 -and $script:AtmScaleStats.CommonPreflights -eq 2 -and $p2.Reason -eq 'GIT_PREFLIGHT_INCLUDE') 'config alterado: cache invalidado, include recusado'
+        # A reference added later is seen by the reference store (never cached).
+        $before = Get-AtmGitRefStore -CommonDir (Join-Path $fx.Repo '.git')
+        $id = (& $gitFxOut $fx.Repo @('rev-parse', 'HEAD') $fx.Repo).Out.Trim()
+        [IO.File]::WriteAllText((Join-Path $fx.Repo '.git\refs\remotes\origin\late'), "$id`n")
+        $after = Get-AtmGitRefStore -CommonDir (Join-Path $fx.Repo '.git')
+        Assert-Eq ($after.RemoteCount - $before.RemoteCount) 1 'referencia nova vista pela leitura de referencias'
+        # The runner takes its own uncached preflight: a cached OK never lets Git run on a changed repository.
+        $n = & $gitSpy { $script:p3eR = & $gitOpen { Invoke-AtmGitCommand -Git $testGit -Arguments @('rev-parse', '--show-toplevel') -WorkingDirectory $wt0 -Preflight $p0 } }
+        Assert-True ($n -eq 0 -and $script:p3eR.Reason -eq 'GIT_PREFLIGHT_REQUIRED') "executor: pre-verificacao propria recusa o repositorio alterado ($($script:p3eR.Reason))"
+        $body = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Diagnose.ps1'))
+        $inv = $body.Substring($body.IndexOf('function Invoke-AtmGitCommand'), 6000)
+        Assert-True ($inv.Contains('$fresh = Get-AtmGitPreflight -Target $wd') -and -not $inv.Contains('-Cache')) 'executor nunca passa cache'
+    }
+    Test-Case 'Git' 'P3-E: verificacao de cadeia nativa do diagnostico tem o mesmo resultado de Test-AtmPathChain (arquivo, ausente, ausente no meio, componente arquivo, juncao, unidade nao fixa, raiz, invalido)' {
+        $pb = Join-Path $gitRoot 'chain-parity'; [void][IO.Directory]::CreateDirectory((Join-Path $pb 'd'))
+        [IO.File]::WriteAllText((Join-Path $pb 'd\f.txt'), 'x')
+        New-Junction -Link (Join-Path $pb 'j') -Target (Join-Path $pb 'd')
+        $free = @([char[]]'ZYXWVUTSRQPONMLKJIHG' | Where-Object { (New-Object IO.DriveInfo([string]$_)).DriveType -eq [IO.DriveType]::NoRootDirectory })
+        $cases = @((Join-Path $pb 'd\f.txt'), (Join-Path $pb 'd\missing.txt'), (Join-Path $pb 'nope\f.txt'), (Join-Path $pb 'd\f.txt\below'), (Join-Path $pb 'j\f.txt'), $env:SystemDrive + '\', 'relative\x', '')
+        if ($free.Count -gt 0) { $cases += ($free[0] + ':\x') }
+        foreach ($c in $cases) {
+            $a = Test-AtmPathChain $c; $b = Test-AtmGitPathChain $c
+            Assert-True ($a.Status -ceq $b.Status) "paridade [$($c.Replace($pb, '<fx>'))]: $($a.Status) / $($b.Status)"
+        }
+    }
     Test-Case 'Diagnose' 'P3-C: contagem de status porcelain v2 por fonte injetada (renomeacao, conflito, submodulo, ignorado); registro irreconhecivel nunca vira zero' {
         $z = [char]0
         $t = "# branch.oid abc$z" + "1 M. N... 100644 100644 100644 h1 h2 a b.txt$z" + "1 .M N... 100644 100644 100644 h1 h2 c.txt$z" + "2 R. N... 100644 100644 100644 h1 h2 R100 new name$z" + "old name$z" +
@@ -5497,6 +5594,23 @@ try {
 
     # ------------------------------------------------------------------ scale
     if (-not $SkipHeavy) {
+        Test-Case 'Escala' 'P3-E: 2000 worktrees e 20000 referencias num repositorio (somente arquivos): parte comum uma vez, tempo e memoria medidos' {
+            if (& $gitSkip) { return }
+            $h = & $scaleFixture 'scale-heavy' 2000 20000
+            $pz = New-AtmPseudonymizer -Key $testPseudonymKey
+            try {
+                [GC]::Collect(); $m0 = [GC]::GetTotalMemory($true)
+                $sw = [Diagnostics.Stopwatch]::StartNew()
+                $script:AtmWorktreeDiagnosticsEnabled = $true
+                try { $r = Get-AtmWorktreeDiscovery -Partitions $h.Partitions -Git $null -Pseudonymizer $pz -MaxCandidates 3000 -MaxWorktreesPerRepository 3000 }
+                finally { $script:AtmWorktreeDiagnosticsEnabled = $false }
+                $sw.Stop(); $m1 = [GC]::GetTotalMemory($false)
+                Assert-True ($r.Stats.CommonPreflights -eq 1 -and $r.Stats.RefStoreReads -eq 1) 'parte comum e referencias uma vez'
+                Assert-Eq @($r.Findings | Where-Object { $_.Kind -eq 'Worktree' -and @($_.Evidence | Where-Object { $_.Code -eq 'WORKTREE_REGISTERED' }).Count -eq 1 }).Count 2000 'todas registradas'
+                Write-Host ("   2000 worktrees/20000 refs: {0:N1}s, {1} arquivos, {2:N1} MB lidos, delta memoria gerenciada ~{3:N1} MB" -f $sw.Elapsed.TotalSeconds, $r.Stats.FilesRead, ($r.Stats.BytesRead / 1MB), (($m1 - $m0) / 1MB))
+                Assert-True ((($m1 - $m0) / 1MB) -lt 500) 'memoria controlada'
+            } finally { Close-AtmPseudonymizer $pz }
+        }
         Test-Case 'Escala' "Root com $HeavyFiles arquivos: passagem unica, memoria controlada" {
             $p = New-TestProfile 'heavy'
             $r = New-TestRoot -ProfileInfo $p -Files @{}
