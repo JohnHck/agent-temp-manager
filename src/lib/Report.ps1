@@ -353,6 +353,7 @@ function Show-AtmDiagnose {
     Write-Host ('  ' + (Get-AtmText 'diag.notYet'))
 
     Show-AtmDiagnoseRuntime -Result $r
+    Show-AtmDiagnoseWorktrees -Result $r
 
     Write-AtmHeader (Get-AtmText 'diag.summaryTitle')
     Write-Host ('  ' + (Get-AtmText 'diag.coverageComplete' (Get-AtmYesNo ([bool]$r.CoverageComplete) -Upper))) -ForegroundColor $(if ($r.CoverageComplete) { 'Green' } else { 'Yellow' })
@@ -470,6 +471,28 @@ function Show-AtmDiagnoseRuntime {
     }
     Write-Host ('  ' + (Get-AtmText 'diag.runtimeScope'))
     Write-Host ('  ' + (Get-AtmText 'diag.runtimeNoDelete')) -ForegroundColor Green
+}
+
+function Show-AtmDiagnoseWorktrees {
+    # Git worktrees (P3-B): shown only when the run has worktree records (the worktree diagnostics gate is closed in
+    # shipped copies). Counts by kind and state, coverage gaps, the meaning of the codes and the limits of discovery.
+    param($Result)
+    $r = $Result
+    $cov = @($r.Coverage | Where-Object { $_.Collector -ceq 'worktree-discovery' -or $_.Collector -ceq 'git' })
+    if ($cov.Count -eq 0) { return }
+    Write-AtmHeader (Get-AtmText 'diag.wtTitle')
+    $wf = @($r.Findings | Where-Object { $_.Kind -ceq 'Repository' -or $_.Kind -ceq 'Worktree' })
+    foreach ($g in @($wf | Group-Object Kind, State | Sort-Object Name)) { Write-Host ('  ' + (Get-AtmText 'diag.wtLine' $g.Group[0].Kind $g.Group[0].State $g.Count)) }
+    foreach ($c in @($cov | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status })) { Write-Host ('  ' + (Get-AtmText 'diag.runtimeCoverageLine' $c.Collector $c.Status (@($c.Reasons) -join ', '))) -ForegroundColor Yellow }
+    $codes = New-Object System.Collections.Generic.List[string]
+    foreach ($x in @($cov | ForEach-Object { @($_.Reasons) })) { $tx = Get-AtmCodeText 'reason' $x; if ($tx -and -not $codes.Contains("$x|$tx")) { $codes.Add("$x|$tx") } }
+    foreach ($x in @($wf | ForEach-Object { @($_.Evidence | ForEach-Object { $_.Code }) })) { $tx = Get-AtmCodeText 'evidence' $x; if ($tx -and -not $codes.Contains("$x|$tx")) { $codes.Add("$x|$tx") } }
+    if ($codes.Count -gt 0) {
+        Write-Host ('  ' + (Get-AtmText 'diag.runtimeLegendTitle'))
+        foreach ($c in @($codes | Sort-Object)) { $i = $c.IndexOf('|'); Write-Host ('    ' + (Get-AtmText 'diag.runtimeLegendLine' $c.Substring(0, $i) $c.Substring($i + 1))) }
+    }
+    Write-Host ('  ' + (Get-AtmText 'diag.wtBounded'))
+    Write-Host ('  ' + (Get-AtmText 'diag.wtNoDelete')) -ForegroundColor Green
 }
 
 function ConvertTo-AtmAgentResourcesJson {
