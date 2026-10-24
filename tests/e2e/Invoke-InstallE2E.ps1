@@ -120,6 +120,68 @@ $b = [AgentTempManager.AtmJobRunner]::Run($ps, '"powershell.exe" -NoProfile -Com
     Assert ($p[4] -eq 'True' -and $p[5] -eq 'True') "deadline: $line"
     "$($summary.arch): $line"
 }
+Step 'native-restart-manager-runtime' {
+    # P1-C D-2 with the installed native library on this architecture (ARM64 included): a helper started here holds a
+    # file of this run's output folder; Restart Manager lists it with its start time; a file not held lists nothing. A
+    # 32-bit (WOW64) helper is checked too when this system has one.
+    $dll = Join-Path $installDir 'lib\AgentTempManager.Native.dll'
+    $probe = @'
+param($Dll, $Dir)
+Add-Type -Path $Dll
+$out = New-Object System.Collections.Generic.List[string]
+foreach ($exe in @((Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'), (Join-Path $env:SystemRoot 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'))) {
+    if (-not (Test-Path -LiteralPath $exe)) { $out.Add('absent'); continue }
+    $f = Join-Path $Dir ('rm-' + [guid]::NewGuid().ToString('N') + '.txt'); [IO.File]::WriteAllText($f, 'x')
+    $c = Start-Process -FilePath $exe -ArgumentList @('-NoProfile', '-Command', "`$h = [IO.File]::Open('$f', 'Open', 'Read', 'ReadWrite'); Start-Sleep 30") -PassThru -WindowStyle Hidden
+    try {
+        $found = $false; $timeOk = $false
+        for ($i = 0; $i -lt 80 -and -not $found; $i++) {
+            $h = $null; $null = [AgentTempManager.AtmRestartManager]::Query([string[]]@($f), 8, [ref]$h)
+            $m = @($h | Where-Object { $_.Split('|')[0] -eq [string]$c.Id })
+            if ($m.Count -gt 0) { $found = $true; $timeOk = ([long]$m[0].Split('|')[1] -eq $c.StartTime.ToUniversalTime().Ticks) } else { Start-Sleep -Milliseconds 250 }
+        }
+        $out.Add("$found/$timeOk")
+    } finally { if (-not $c.HasExited) { $c.Kill() } }
+}
+$g = Join-Path $Dir 'rm-free.txt'; [IO.File]::WriteAllText($g, 'x')
+$h = $null; $st = [AgentTempManager.AtmRestartManager]::Query([string[]]@($g), 8, [ref]$h)
+$out.Add("$st/$(@($h).Count)")
+$out -join '|'
+'@
+    $probeFile = Join-Path $OutDir 'restart-manager-probe.ps1'
+    [IO.File]::WriteAllText($probeFile, $probe)
+    $line = (& $ps51 -NoProfile -ExecutionPolicy Bypass -File $probeFile -Dll $dll -Dir $OutDir 2>&1 | Select-Object -Last 1) -as [string]
+    $p = $line.Split('|')
+    Assert ($p.Count -eq 3 -and $p[0] -eq 'True/True' -and $p[2] -eq 'OK/0') "restart manager: $line"
+    Assert ($p[1] -eq 'True/True' -or $p[1] -eq 'absent') "restart manager (32-bit helper): $line"
+    "$($summary.arch): native helper $($p[0]), 32-bit helper $($p[1]), free file $($p[2])"
+}
+
+Step 'prototype-handle-relative-open' {
+    # ADR-0011 study (test code only, never shipped): opening relative to the volume root with OBJ_DONT_REPARSE on this
+    # architecture; a local junction only, no network path.
+    $src = Join-Path $PSScriptRoot '..\prototypes\AtmHandleRelativeOpen.cs'
+    $probe = @'
+param($Src, $Dir)
+Add-Type -Path $Src
+$T = [AgentTempManagerPrototype.AtmHandleRelativeOpen]
+$d = Join-Path $Dir ('proto-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+foreach ($x in @('real\anc', 'evil\anc')) { [void][IO.Directory]::CreateDirectory((Join-Path $d $x)) }
+[IO.File]::WriteAllText((Join-Path $d 'real\anc\ref'), 'r'); [IO.File]::WriteAllText((Join-Path $d 'evil\anc\ref'), 'e')
+$f = Join-Path $d 'real\anc\ref'
+$a = $T::Open($f, $true)
+[IO.Directory]::Move((Join-Path $d 'real\anc'), (Join-Path $d 'real\anc-old'))
+$null = cmd /c mklink /J "`"$(Join-Path $d 'real\anc')`"" "`"$(Join-Path $d 'evil\anc')`"" 2>&1
+$b = $T::Open($f, $false); $c = $T::Open($f, $true)
+'{0:X8}|{1:X8}|{2:X8}' -f $a, $b, $c
+'@
+    $probeFile = Join-Path $OutDir 'handle-relative-open-probe.ps1'
+    [IO.File]::WriteAllText($probeFile, $probe)
+    $line = (& $ps51 -NoProfile -ExecutionPolicy Bypass -File $probeFile -Src $src -Dir $OutDir 2>&1 | Select-Object -Last 1) -as [string]
+    Assert ($line -eq '00000000|00000000|C000050B') "prototype: $line"
+    "$($summary.arch): clean $($line.Split('|')[0]), junction without flag $($line.Split('|')[1]), with OBJ_DONT_REPARSE $($line.Split('|')[2])"
+}
+
 Step 'shipped-release-gate' {
     $clean = [IO.File]::ReadAllText((Join-Path $installDir 'lib\Engine.Clean.ps1'))
     Assert ([regex]::Matches($clean, '\$script:AtmRealDeletionEnabled\s*=').Count -eq 1) 'mais de uma atribuicao da trava'

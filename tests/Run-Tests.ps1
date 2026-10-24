@@ -3822,7 +3822,8 @@ try {
         $cs = @{}; foreach ($c in $d.Coverage) { $cs[$c.Collector] = $c }
         foreach ($c in @('process-snapshot', 'sessions-claude-code', 'agent-processes', 'agent-resources')) { Assert-Eq $cs[$c].Status 'COMPLETE' "$c completo: $(@($cs[$c].Reasons) -join ',')" }
         Assert-Eq @($d.Coverage | Where-Object { $_.Collector -like 'sessions-*' }).Count 1 'um registro de sessoes por provider (dois perfis)'
-        Assert-True $d.CoverageComplete 'cobertura completa'
+        # P1-C: working directories are not observed and open files are a sample, so a diagnose is never complete.
+        Assert-True (-not $d.CoverageComplete -and (@($d.Coverage | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status } | ForEach-Object { $_.Collector } | Sort-Object) -join ',') -eq 'handles,process-cwd') 'cobertura incompleta so por diretorios de trabalho e amostra de arquivos abertos'
         $expect = @{ 200 = 'AGENT_PROCESS'; 202 = 'AGENT_PROCESS'; 201 = 'AGENT_DESCENDANT'; 203 = 'AGENT_DESCENDANT'; 3000 = 'SELF'; 3001 = 'SELF'; 1000 = '(none)'; 4 = '(none)' }
         foreach ($e in $expect.GetEnumerator()) { Assert-Eq (& $b4State $d $k[[int]$e.Key]) $e.Value "processo $($e.Key)" }
         # Sessions: one key per profile for the same session id; LIVE (exact identity) and absent from a complete collection.
@@ -4363,9 +4364,10 @@ try {
         $r1 = New-TestRoot -ProfileInfo $p
         $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -PseudonymKey $testPseudonymKey
         Assert-Eq $d.SchemaVersion 'atm.diagnose/2' 'schema'
-        Assert-Eq (@($d.Coverage | ForEach-Object { $_.Collector }) -join ',') 'identity,provider-claude-code,inventory,processes,temp-profiles,process-snapshot,sessions-claude-code,agent-processes,agent-resources' 'coletores (Claude Code v2: dicas de runtime lidas; runtime de agentes da P1-B4-c)'
-        foreach ($c in $d.Coverage) { Assert-Eq $c.Status 'COMPLETE' "$($c.Collector) completo" }
-        Assert-True $d.CoverageComplete 'cobertura completa'
+        Assert-Eq (@($d.Coverage | ForEach-Object { $_.Collector }) -join ',') 'identity,provider-claude-code,inventory,processes,temp-profiles,process-snapshot,sessions-claude-code,agent-processes,agent-resources,process-cwd,handles' 'coletores (Claude Code v2: dicas de runtime lidas; runtime de agentes da P1-B4-c; P1-C)'
+        foreach ($c in @($d.Coverage | Where-Object { $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' })) { Assert-Eq $c.Status 'COMPLETE' "$($c.Collector) completo" }
+        $hc = @($d.Coverage | Where-Object { $_.Collector -eq 'handles' })[0]; $wc = @($d.Coverage | Where-Object { $_.Collector -eq 'process-cwd' })[0]
+        Assert-True ($hc.Status -eq 'PARTIAL' -and @($hc.Reasons) -contains 'HANDLES_SAMPLED' -and $wc.Status -eq 'NOT_OBSERVABLE' -and @($wc.Reasons) -contains 'WORKING_DIRECTORY_DEFERRED' -and -not $d.CoverageComplete) 'P1-C: arquivos abertos por amostra (PARTIAL), diretorios de trabalho nao observados; cobertura nunca completa'
         Assert-True ($null -eq @($d.Coverage | Where-Object { $_.Collector -eq 'inventory' })[0].BudgetMs) 'inventario V0.1 sem orcamento declarado (nao interrompivel)'
         $f = @($d.Findings | Where-Object { $_.Key -ceq (& $b4PKey $r1) })
         Assert-Eq $f.Count 1 'achado da particao (pela chave pseudonima)'
@@ -5565,6 +5567,130 @@ try {
         Assert-Eq (ConvertFrom-AtmGitStatusV2 -Text '').Staged 0 'vazio: nada'
         foreach ($bad in @("1 M. N...$z", "Z foo$z", "2 R. N... 100644 100644 100644 h1 h2 R100 new", "1 MM. N... 100644 100644 100644 h1 h2 x$z", "u UU N... 1 2 3$z")) { Assert-Eq (ConvertFrom-AtmGitStatusV2 -Text $bad).Error 'GIT_STATUS_UNPARSEABLE' "irreconhecivel: $($bad.Replace([string]$z, '\0'))" }
     }
+    # ------------------------------------------------------------------ P1-C (D-2 Restart Manager; D-1 deferred)
+    # Helper processes are started by the tests themselves, hold sandbox files only, and are stopped through their own
+    # Process object (bound to their handle). No other process is opened, signalled or stopped.
+    $rmHolder = { param([string]$File, [int]$Seconds = 25)
+        $cmd = "`$f = [IO.File]::Open('$File', 'Open', 'Read', 'ReadWrite'); Start-Sleep -Seconds $Seconds; `$f.Dispose()"
+        $c = Start-Process -FilePath (Join-Path $PSHOME $(if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh.exe' } else { 'powershell.exe' })) -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', $cmd) -PassThru -WindowStyle Hidden
+        # Ready when Restart Manager sees the file held (bounded wait).
+        for ($i = 0; $i -lt 60; $i++) { $h = $null; $null = [AgentTempManager.AtmRestartManager]::Query([string[]]@($File), 8, [ref]$h); if (@($h | Where-Object { $_.Split('|')[0] -eq [string]$c.Id }).Count -gt 0) { break }; Start-Sleep -Milliseconds 250 }
+        return $c }
+    $rmRow = { param($Proc) [pscustomobject]@{ ProcessId = $Proc.Id; ParentProcessId = $PID; Name = 'helper.exe'; CreationDate = (New-Object DateTime(($Proc.StartTime.ToUniversalTime().Ticks - ($Proc.StartTime.ToUniversalTime().Ticks % 10)), [DateTimeKind]::Utc)); KernelModeTime = 0; UserModeTime = 0; WorkingSetSize = 0; PrivatePageCount = 0; HandleCount = 0; ReadTransferCount = 0; WriteTransferCount = 0; OtherTransferCount = 0 } }
+    Test-Case 'Processos' 'P1-C D-2: Restart Manager lista o processo auxiliar que mantem um arquivo de fixture aberto, com PID e inicio verificaveis; arquivo sem handle nao lista nada; conteudo e processo intactos' {
+        $d = Join-Path $sandbox 'rm-basic'; [void][IO.Directory]::CreateDirectory($d)
+        $held = Join-Path $d 'held.txt'; $free = Join-Path $d 'free.txt'
+        [IO.File]::WriteAllText($held, "held`n"); [IO.File]::WriteAllText($free, "free`n")
+        $before = (Get-FileHash -LiteralPath $held).Hash + (Get-FileHash -LiteralPath $free).Hash
+        $c = & $rmHolder $held
+        try {
+            $h = $null; $st = [AgentTempManager.AtmRestartManager]::Query([string[]]@($held), 8, [ref]$h)
+            $mine = @($h | Where-Object { $_.Split('|')[0] -eq [string]$c.Id })
+            Assert-True ($st -eq 'OK' -and $mine.Count -eq 1) "arquivo mantido aberto: processo auxiliar listado ($st)"
+            Assert-Eq ([long]$mine[0].Split('|')[1]) $c.StartTime.ToUniversalTime().Ticks 'inicio do processo igual ao do sistema (100 ns)'
+            $h2 = $null; Assert-True (([AgentTempManager.AtmRestartManager]::Query([string[]]@($free), 8, [ref]$h2)) -eq 'OK' -and @($h2).Count -eq 0) 'arquivo sem handle: nenhum processo'
+            Assert-True (-not $c.HasExited) 'processo auxiliar segue ativo depois das consultas'
+        } finally { if (-not $c.HasExited) { $c.Kill() }; $c.WaitForExit(10000) | Out-Null }
+        Assert-Eq ((Get-FileHash -LiteralPath $held).Hash + (Get-FileHash -LiteralPath $free).Hash) $before 'conteudo dos arquivos intacto'
+        # Sessions are always ended: more sequential queries than Restart Manager's concurrent-session limit all succeed.
+        $ok = 0; for ($i = 0; $i -lt 70; $i++) { $hx = $null; if (([AgentTempManager.AtmRestartManager]::Query([string[]]@($free), 4, [ref]$hx)) -eq 'OK') { $ok++ } }
+        Assert-Eq $ok 70 'sessoes sempre encerradas (70 consultas seguidas)'
+        $hx = $null; Assert-Eq ([AgentTempManager.AtmRestartManager]::Query([string[]]@(), 4, [ref]$hx)) 'OK' 'nenhum arquivo: nada consultado'
+    }
+    Test-Case 'Processos' 'P1-C D-2: coletor handles - identidade verificada pelo snapshot, nao verificada, proprio processo excluido, processo encerrado, limites, falha de registro, prazo; nunca COMPLETE' {
+        $d = Join-Path $sandbox 'rm-coll'; [void][IO.Directory]::CreateDirectory($d)
+        $held = Join-Path $d 'held.txt'; [IO.File]::WriteAllText($held, "x`n")
+        $c = & $rmHolder $held
+        try {
+            $coll = Get-AtmProcessCollection -Source ({ @(& $rmRow $c) }.GetNewClosure())
+            $node = [pscustomobject]@{ Key = 'claude-code/p-test'; Files = @($held); Capped = $false; Error = $null }
+            $r = Get-AtmHandleEvidence -Nodes @($node) -Collection $coll
+            $ev = @($r.Evidence['claude-code/p-test'])
+            $key = ConvertTo-AtmProcessKey -ProcessId $c.Id -CreationUtc (& $rmRow $c).CreationDate
+            Assert-True (@($ev | Where-Object { $_.Code -eq 'FILE_HELD_OPEN' -and $_.Detail -eq $key }).Count -eq 1) "processo verificado pelo snapshot: FILE_HELD_OPEN com a chave ($(@($ev | ForEach-Object { $_.Code }) -join ','))"
+            Assert-True ($r.Coverage.Status -eq 'PARTIAL' -and @($r.Coverage.Reasons) -contains 'HANDLES_SAMPLED') 'cobertura sempre PARTIAL (amostra)'
+            $r2 = Get-AtmHandleEvidence -Nodes @($node) -Collection (Get-AtmProcessCollection -Source { @([pscustomobject]@{ ProcessId = 999999; ParentProcessId = 1; Name = 'x'; CreationDate = [datetime]::UtcNow.AddDays(-1) }) })
+            Assert-True (@($r2.Evidence['claude-code/p-test'] | Where-Object { $_.Code -eq 'FILE_HELD_OPEN_UNVERIFIED' -and $_.Detail -eq ('pid:' + $c.Id) }).Count -eq 1 -and @($r2.Coverage.Reasons) -contains 'HANDLE_IDENTITY_UNVERIFIED') 'fora do snapshot: identidade nao verificada'
+            $r3 = Get-AtmHandleEvidence -Nodes @($node) -Collection $coll -SelfKeys @{ $key = $true }
+            Assert-Eq @($r3.Evidence['claude-code/p-test'] | Where-Object { $_.Code -like 'FILE_HELD_OPEN*' }).Count 0 'processo do proprio ATM nunca reportado'
+        } finally { if (-not $c.HasExited) { $c.Kill() }; $c.WaitForExit(10000) | Out-Null }
+        # Exited: the same file is no longer held.
+        $node = [pscustomobject]@{ Key = 'k'; Files = @($held); Capped = $false; Error = $null }
+        $r4 = Get-AtmHandleEvidence -Nodes @($node) -Collection $null
+        Assert-True (@($r4.Evidence['k'] | Where-Object { $_.Code -like 'FILE_HELD_OPEN*' }).Count -eq 0 -and @($r4.Coverage.Reasons) -contains 'PROCESS_SNAPSHOT_UNAVAILABLE') 'processo encerrado: nada listado; sem snapshot declarado'
+        # Injected queries: limits, failures, deadline.
+        $n2 = @([pscustomobject]@{ Key = 'a'; Files = @('C:\x\1', 'C:\x\2'); Capped = $true; Error = $null }, [pscustomobject]@{ Key = 'b'; Files = @('C:\x\3'); Capped = $false; Error = $null })
+        $okQ = { param($Files, $Max) [pscustomobject]@{ Status = 'OK'; Holders = @() } }
+        $capF = Get-AtmHandleEvidence -Nodes $n2 -Query $okQ -MaxFilesPerRun 1
+        Assert-True (@($capF.Coverage.Reasons) -contains 'HANDLE_FILES_CAPPED') 'limite de arquivos por execucao e por item'
+        $capS = Get-AtmHandleEvidence -Nodes $n2 -Query $okQ -MaxSessions 1
+        Assert-True (@($capS.Coverage.Reasons) -contains 'HANDLE_SESSION_LIMIT' -and $capS.Coverage.Observed -eq 1) 'limite de sessoes'
+        $capH = Get-AtmHandleEvidence -Nodes $n2 -Query { param($Files, $Max) [pscustomobject]@{ Status = 'PARTIAL'; Holders = @() } }
+        Assert-True (@($capH.Coverage.Reasons) -contains 'HANDLE_HOLDERS_CAPPED') 'mais processos do que o limite'
+        $fail = Get-AtmHandleEvidence -Nodes $n2 -Query { param($Files, $Max) [pscustomobject]@{ Status = 'FAILED_REGISTER_5'; Holders = @('1|1') } }
+        Assert-True (@($fail.Coverage.Reasons) -contains 'HANDLE_QUERY_FAILED' -and $fail.Evidence.Count -eq 0) 'erro no registro: nenhuma evidencia, nunca "livre"'
+        $thr = Get-AtmHandleEvidence -Nodes $n2 -Query { param($Files, $Max) throw 'boom' }
+        Assert-True (@($thr.Coverage.Reasons) -contains 'HANDLE_QUERY_FAILED') 'excecao na consulta: falha declarada'
+        $dl = Get-AtmHandleEvidence -Nodes $n2 -Query $okQ -Deadline ([datetime]::UtcNow.AddSeconds(-1))
+        Assert-True (@($dl.Coverage.Reasons) -contains 'DEADLINE_EXCEEDED' -and $dl.Coverage.Observed -eq 0) 'prazo: nada consultado depois dele'
+        Assert-Eq (Get-AtmHandleEvidence -Nodes @()).Coverage.Status 'NOT_OBSERVABLE' 'sem itens: nao observavel'
+    }
+    Test-Case 'Processos' 'P1-C D-2: amostra de arquivos por item (nunca recursiva, sem reparse point, limitada) e integracao ao diagnose sem caminhos; estado da particao inalterado; diretorios de trabalho nao observados' {
+        $d = Join-Path $sandbox 'rm-sample'; [void][IO.Directory]::CreateDirectory((Join-Path $d 'sub'))
+        foreach ($n in @('a.txt', 'b.txt', 'c.txt')) { [IO.File]::WriteAllText((Join-Path $d $n), 'x') }
+        [IO.File]::WriteAllText((Join-Path $d 'sub\deep.txt'), 'x')
+        $smp = Get-AtmHandleSampleFiles -Dir $d -Max 2
+        Assert-True (@($smp.Files).Count -eq 2 -and $smp.Capped -and @($smp.Files | Where-Object { $_ -like '*deep*' }).Count -eq 0) 'amostra limitada e nao recursiva'
+        Assert-Eq (Get-AtmHandleSampleFiles -Dir '\\atm-unc-probe.invalid\share').Error 'HANDLE_NODE_UNREADABLE' 'item de rede recusado antes de listar'
+        $p = New-TestProfile 'p1c-int'
+        $root = New-TestRoot -ProfileInfo $p
+        $marker = 'p1c-secret-name'
+        [IO.File]::WriteAllText((Join-Path $root "$marker.txt"), 'x')
+        $hq = { param($Files, $Max) [pscustomobject]@{ Status = 'OK'; Holders = @('424242|' + [datetime]::UtcNow.AddMinutes(-5).Ticks) } }
+        $res = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -ProcessSource { @([pscustomobject]@{ ProcessId = 1; ParentProcessId = 0; Name = 'x'; CreationDate = [datetime]::UtcNow.AddDays(-1) }) } -CpuSampleMs 0 -PseudonymKey $testPseudonymKey -HandleQuery $hq
+        $tp = @($res.Findings | Where-Object { $_.Kind -eq 'TempPartition' })
+        Assert-True ($tp.Count -ge 1 -and @($tp | Where-Object { @($_.Evidence | Where-Object { $_.Code -eq 'FILE_HELD_OPEN_UNVERIFIED' -and $_.Detail -eq 'pid:424242' }).Count -eq 1 }).Count -ge 1) 'evidencia de arquivo aberto na particao (identidade nao verificada)'
+        Assert-True (@($tp | Where-Object { $_.State -ne 'RUNTIME_NOT_DIAGNOSED' -and $_.State -ne 'UNKNOWN' }).Count -eq 0) 'estado da particao inalterado (dependencias sao da P4)'
+        $json = ConvertTo-AtmDiagnoseJson -Result $res
+        foreach ($x in @($marker, $root, $root.Replace('\', '\\'))) { Assert-True (-not $json.Contains($x)) "JSON sem caminho nem nome de arquivo: $(Split-Path -Leaf $x)" }
+        $txt = (Show-AtmDiagnose -Result $res 6>&1 | Out-String)
+        Assert-True ($txt.Contains((Get-AtmText 'diag.hTitle')) -and $txt.Contains((Get-AtmText 'diag.hCwd')) -and -not $txt.Contains($marker) -and -not $txt.Contains($root)) 'relatorio: secao de arquivos abertos, sem caminhos'
+        Assert-True (@($res.Coverage | Where-Object { $_.Collector -eq 'process-cwd' -and $_.Status -eq 'NOT_OBSERVABLE' }).Count -eq 1) 'diretorios de trabalho: NOT_OBSERVABLE (D-1 adiado)'
+    }
+    Test-Case 'Prototipo' 'ADR-0011 (estudo isolado, so codigo de teste): abertura relativa a raiz do volume com OBJ_DONT_REPARSE recusa reparse point em qualquer componente na propria abertura; caixa, 8.3, caminho longo, inexistente' {
+        if (-not ('AgentTempManagerPrototype.AtmHandleRelativeOpen' -as [type])) { Add-Type -Path (Join-Path $testsDir 'prototypes\AtmHandleRelativeOpen.cs') }
+        $T = [AgentTempManagerPrototype.AtmHandleRelativeOpen]
+        $hex = { param([int]$v) '0x{0:X8}' -f $v }
+        $d = Join-Path $sandbox 'proto-dr'
+        foreach ($x in @('real\anc', 'evil\anc')) { [void][IO.Directory]::CreateDirectory((Join-Path $d $x)) }
+        [IO.File]::WriteAllText((Join-Path $d 'real\anc\ref'), 'real'); [IO.File]::WriteAllText((Join-Path $d 'evil\anc\ref'), 'evil')
+        $f = Join-Path $d 'real\anc\ref'
+        Assert-Eq (& $hex $T::Open($f, $true)) '0x00000000' 'caminho limpo abre'
+        Assert-Eq (& $hex $T::Open($f.ToUpperInvariant(), $true)) '0x00000000' 'diferenca de caixa: abre (OBJ_CASE_INSENSITIVE)'
+        Assert-Eq (& $hex $T::Open((Join-Path $d 'real\anc\none'), $true)) '0xC0000034' 'inexistente: STATUS_OBJECT_NAME_NOT_FOUND'
+        $short = [AgentTempManager.AtmNative]::GetShortPath($f)
+        if ($short -and $short -ne $f) { Assert-Eq (& $hex $T::Open($short, $true)) '0x00000000' 'nome 8.3: abre' } else { $script:caseNote = 'nome 8.3 nao disponivel neste volume' }
+        # Long path (> 260): created through the \\?\ prefix, opened by the prototype without it.
+        $long = $d; while ($long.Length -lt 300) { $long = Join-Path $long ('l' * 40) }
+        [void][IO.Directory]::CreateDirectory('\\?\' + $long); [IO.File]::WriteAllText('\\?\' + (Join-Path $long 'f'), 'x')
+        Assert-Eq (& $hex $T::Open((Join-Path $long 'f'), $true)) '0x00000000' 'caminho longo: abre'
+        # Ancestor replaced by a junction after the "check": refused at open; without the flag it is followed.
+        [IO.Directory]::Move((Join-Path $d 'real\anc'), (Join-Path $d 'real\anc-old'))
+        New-Junction -Link (Join-Path $d 'real\anc') -Target (Join-Path $d 'evil\anc')
+        Assert-Eq (& $hex $T::Open($f, $false)) '0x00000000' 'contraprova: sem a flag a juncao ancestral e seguida'
+        Assert-Eq (& $hex $T::Open($f, $true)) '0xC000050B' 'juncao em ancestral: STATUS_REPARSE_POINT_ENCOUNTERED'
+        # Final component a junction (a directory link where a file was): refused too.
+        New-Junction -Link (Join-Path $d 'real\last') -Target (Join-Path $d 'evil\anc')
+        Assert-Eq (& $hex $T::Open((Join-Path $d 'real\last'), $true)) '0xC000050B' 'componente final reparse point: recusado'
+        Assert-Eq $T::Open('\\atm-unc-probe.invalid\share\x', $true) -1 'caminho de rede: recusado antes de qualquer abertura'
+        Assert-Eq $T::Open('relative\x', $true) -1 'caminho relativo: recusado'
+    }
+    Test-Case 'I18n' 'P1-C: todo motivo e evidencia de arquivos abertos tem texto nos dois idiomas' {
+        foreach ($l in @('en-US', 'pt-BR')) {
+            foreach ($x in $script:AtmHandleReasonCodes) { Assert-True $script:AtmMessages[$l].ContainsKey("reason.$x") "reason.$x ($l)" }
+            foreach ($x in $script:AtmHandleEvidenceCodes) { Assert-True $script:AtmMessages[$l].ContainsKey("evidence.$x") "evidence.$x ($l)" }
+        }
+    }
     Test-Case 'I18n' 'Worktrees (P3-B): todo motivo e evidencia da descoberta tem texto nos dois idiomas' {
         foreach ($l in @('en-US', 'pt-BR')) {
             foreach ($x in $script:AtmWorktreeReasonCodes) { Assert-True $script:AtmMessages[$l].ContainsKey("reason.$x") "reason.$x ($l)" }
@@ -5588,6 +5714,9 @@ try {
         $native = [IO.File]::ReadAllText((Join-Path $lib 'Native.cs'))
         foreach ($pat in @('SeDebugPrivilege', 'AdjustTokenPrivileges', 'RmShutdown', 'RmRestart', 'TerminateProcess', 'WriteProcessMemory', 'CreateRemoteThread', 'DebugActiveProcess', 'NtTerminate', 'CreateProcessAsUser', 'CreateProcessWithLogon', 'CreateProcessWithToken', 'ShellExecute', 'WinExec', 'DuplicateHandle')) { Assert-True (-not $native.Contains($pat)) "Native.cs contem '$pat'" }
         Assert-True (-not ($native -match '\bOpenProcess\s*\(')) 'Native.cs nao abre outros processos (OpenProcess)'
+        Assert-True (-not $native.Contains('ReadProcessMemory') -and -not $native.Contains('NtQueryInformationProcess')) 'P1-C: nenhuma leitura de memoria de outros processos (D-1 adiado)'
+        $rm = @([regex]::Matches($native, 'extern\s+int\s+(Rm\w+)\s*\(') | ForEach-Object { $_.Groups[1].Value } | Sort-Object)
+        Assert-Eq ($rm -join ',') 'RmEndSession,RmGetList,RmRegisterResources,RmStartSession' 'P1-C D-2: so as quatro funcoes permitidas do Restart Manager'
         $cp = [regex]::Matches($native, '\bCreateProcess\w*\s*\(')
         Assert-True ($cp.Count -ge 1 -and @($cp | Where-Object { $_.Index -lt $native.IndexOf('public static class AtmJobRunner') }).Count -eq 0) 'toda criacao de processo esta dentro do executor'
         # D-4: the only termination is of the runner's own job, and only the runner creates processes.
