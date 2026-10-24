@@ -1299,6 +1299,204 @@ function Get-AtmAgentResourceTotals {
 }
 
 # ---------------------------------------------------------------------------------------------
+# Git runner (ADR-0006 rules 1-7 and 10-11, D-4, P3-A): the only way the engine runs Git. Not yet part of
+# Invoke-AtmDiagnose (discovery and the git coverage record are P3-B). Every call: the allow-list below, refused before
+# any process is started; global options and an environment that keep Git from writing, prompting, reaching the
+# network or leaving the target directory; and a job object of its own (AtmJobRunner) with a timeout, an output cap,
+# a memory limit and a process limit. The only process ever terminated is that job. `status` is listed in ADR-0006
+# rule 4, but repositories whose configuration can run commands during reads (D-3) are handled in P3-C: until then it is
+# run only on the suite's own fixtures.
+# ---------------------------------------------------------------------------------------------
+
+$script:AtmGitDefaultTimeoutMs = 10000
+$script:AtmGitDefaultMaxOutputBytes = 4MB
+$script:AtmGitDefaultJobMemoryBytes = 1GB
+# The Git for Windows launcher (cmd\git.exe) starts mingw64\bin\git.exe; console programs also get a conhost.
+$script:AtmGitDefaultActiveProcessLimit = 8
+$script:AtmGitGlobalArguments = @('--no-pager', '--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-c', 'protocol.allow=never', '-c', 'color.ui=never', '-c', 'core.quotePath=false')
+# Test spy: when it is a list, every argument vector that reaches the native runner is added to it.
+$script:AtmGitInvocationLog = $null
+# Same rule as the installer's Test-AtmInstallAcl: only SYSTEM, Administrators, TrustedInstaller and CREATOR OWNER
+# may own the item or hold write-type rights.
+$script:AtmTrustedWriterSids = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464', 'S-1-3-0')
+$script:AtmGitRevisionPattern = '^\^?(HEAD|[0-9a-fA-F]{4,64}|refs/[A-Za-z0-9._/\-]+)$'
+
+function Test-AtmTrustedLocationAcl {
+    # $true when the item's owner and every account with a write-type right are trusted (AtmTrustedWriterSids):
+    # an elevated run must not start a binary a standard user could replace (ADR-0006 rule 2).
+    param([string]$Path)
+    try {
+        $acl = Get-Acl -LiteralPath $Path
+        if ($script:AtmTrustedWriterSids -cnotcontains $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value) { return $false }
+        $writeMask = [Security.AccessControl.FileSystemRights]'WriteData, AppendData, WriteExtendedAttributes, WriteAttributes, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'
+        foreach ($ace in @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))) {
+            if ($ace.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
+            if ($script:AtmTrustedWriterSids -ccontains $ace.IdentityReference.Value) { continue }
+            if (($ace.FileSystemRights -band $writeMask) -ne 0) { return $false }
+        }
+        return $true
+    } catch { return $false }
+}
+
+function Test-AtmGitArguments {
+    <#
+      The allow-list of ADR-0006 rule 4, checked before a process exists. Returns $null when allowed, otherwise a code:
+      GIT_VERB_NOT_ALLOWED (any other verb, including fetch, pull, push, prune, gc, maintenance, repack, checkout,
+      switch, restore, reset, clean, stash, worktree add/remove/..., update-index, reflog, commit-graph) or
+      GIT_ARGUMENT_REFUSED (an option or value outside the verb's list). No argument may hold whitespace, a quote or a
+      control character, so the command line needs no quoting.
+    #>
+    param([string[]]$Arguments)
+    $a = @($Arguments)
+    if ($a.Count -eq 0) { return 'GIT_VERB_NOT_ALLOWED' }
+    foreach ($x in $a) { if ([string]::IsNullOrEmpty($x) -or $x -match '[\s"\x00-\x1f]') { return 'GIT_ARGUMENT_REFUSED' } }
+    $verb = $a[0]; $rest = @($a | Select-Object -Skip 1)
+    $revision = { param([string]$v) $v -cmatch $script:AtmGitRevisionPattern }
+    switch -CaseSensitive ($verb) {
+        '--version' { if ($rest.Count -eq 0) { return $null }; return 'GIT_ARGUMENT_REFUSED' }
+        'rev-parse' {
+            $opts = @('--show-toplevel', '--git-dir', '--git-common-dir', '--absolute-git-dir', '--is-inside-work-tree', '--is-bare-repository', '--is-shallow-repository', '--show-prefix', '--symbolic-full-name', '--abbrev-ref', '--verify', '--quiet')
+            foreach ($x in $rest) { if ($opts -cnotcontains $x -and -not (& $revision $x)) { return 'GIT_ARGUMENT_REFUSED' } }
+            if ($rest.Count -eq 0) { return 'GIT_ARGUMENT_REFUSED' }
+            return $null
+        }
+        'worktree' { if (($rest -join ' ') -ceq 'list --porcelain -z') { return $null }; return 'GIT_VERB_NOT_ALLOWED' }
+        'status' {
+            if ($rest -cnotcontains '--porcelain=v2' -or $rest -cnotcontains '-z') { return 'GIT_ARGUMENT_REFUSED' }
+            $opts = @('--porcelain=v2', '-z', '--branch', '--show-stash', '--ahead-behind', '--no-ahead-behind', '--no-renames', '--untracked-files=no', '--untracked-files=normal', '--untracked-files=all', '--ignored=no', '--ignored=traditional', '--ignored=matching')
+            foreach ($x in $rest) { if ($opts -cnotcontains $x) { return 'GIT_ARGUMENT_REFUSED' } }
+            return $null
+        }
+        'for-each-ref' {
+            foreach ($x in $rest) {
+                if ($x -cmatch '^--format=[%A-Za-z0-9()_:./\-]+$' -or $x -cmatch '^--count=\d{1,6}$' -or $x -cmatch '^refs/[A-Za-z0-9._/*\-]*$') { continue }
+                return 'GIT_ARGUMENT_REFUSED'
+            }
+            return $null
+        }
+        'rev-list' {
+            $opts = @('--count', '--all', '--branches', '--tags', '--remotes', '--not', '--first-parent')
+            foreach ($x in $rest) { if ($opts -cnotcontains $x -and $x -cnotmatch '^--max-count=\d{1,9}$' -and -not (& $revision $x)) { return 'GIT_ARGUMENT_REFUSED' } }
+            if ($rest.Count -eq 0) { return 'GIT_ARGUMENT_REFUSED' }
+            return $null
+        }
+        'config' {
+            # Names only, never values.
+            if ($rest.Count -eq 3 -and $rest[0] -ceq '--name-only' -and $rest[1] -ceq '--get-regexp' -and $rest[2] -notmatch '^-') { return $null }
+            return 'GIT_ARGUMENT_REFUSED'
+        }
+        'cat-file' { if ($rest.Count -eq 2 -and $rest[0] -ceq '-e' -and (& $revision $rest[1]) -and $rest[1] -notmatch '^\^') { return $null }; return 'GIT_ARGUMENT_REFUSED' }
+        default { return 'GIT_VERB_NOT_ALLOWED' }
+    }
+}
+
+function Get-AtmGitEnvironment {
+    <#
+      The whole environment of a Git child (ADR-0006 rule 6): the caller's environment without any GIT_* variable (GIT_DIR,
+      GIT_WORK_TREE, GIT_INDEX_FILE, GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT/KEY_*/VALUE_*, ...), then no optional
+      locks, no prompt or askpass, no lazy fetch, discovery bounded by -Ceiling and on one file system, and messages in
+      the C locale (stderr is classified by its text). -TestEnvironment: only GIT_CONFIG_GLOBAL, GIT_CONFIG_NOSYSTEM and
+      HOME, for the suite's isolated fixtures.
+    #>
+    param([string]$Ceiling, [hashtable]$TestEnvironment = @{})
+    $vars = @{}
+    foreach ($e in [Environment]::GetEnvironmentVariables().GetEnumerator()) {
+        $k = [string]$e.Key
+        if ($k.StartsWith('GIT_', [StringComparison]::OrdinalIgnoreCase) -or @('SSH_ASKPASS', 'GCM_INTERACTIVE', 'LC_ALL', 'LANG', 'LANGUAGE') -contains $k) { continue }
+        $vars[$k] = [string]$e.Value
+    }
+    $set = [ordered]@{ GIT_OPTIONAL_LOCKS = '0'; GIT_TERMINAL_PROMPT = '0'; GCM_INTERACTIVE = 'never'; GIT_ASKPASS = ''; SSH_ASKPASS = ''; GIT_NO_LAZY_FETCH = '1'; GIT_DISCOVERY_ACROSS_FILESYSTEM = '0'; LC_ALL = 'C'; LANG = 'C'; LANGUAGE = 'C' }
+    if ($Ceiling) { $set['GIT_CEILING_DIRECTORIES'] = $Ceiling }
+    foreach ($k in $set.Keys) { $vars[$k] = $set[$k] }
+    foreach ($k in @($TestEnvironment.Keys)) {
+        if (@('GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'HOME') -notcontains $k) { throw (Get-AtmText 'err.diagProcess' "TestEnvironment $k") }
+        $vars[$k] = [string]$TestEnvironment[$k]
+    }
+    $keys = [string[]]@($vars.Keys)
+    [Array]::Sort($keys, [StringComparer]::OrdinalIgnoreCase)
+    return [string[]]@($keys | ForEach-Object { $_ + '=' + $vars[$_] })
+}
+
+function Invoke-AtmBoundedProcess {
+    # One program in a job object of its own (AtmJobRunner). Used by Invoke-AtmGitCommand; the suite uses it directly to
+    # prove the job limits and that only the job is ever terminated (D-4).
+    param([string]$Executable, [string]$CommandLine, [string]$WorkingDirectory, [string[]]$Environment, [int]$TimeoutMs, [int]$MaxOutputBytes, [long]$JobMemoryBytes, [int]$ActiveProcessLimit)
+    if ($TimeoutMs -lt 0 -or $MaxOutputBytes -lt 1 -or $JobMemoryBytes -lt 1MB -or $ActiveProcessLimit -lt 1) { throw (Get-AtmText 'err.diagProcess' 'limits') }
+    Initialize-AtmNative
+    return [AgentTempManager.AtmJobRunner]::Run($Executable, $CommandLine, $WorkingDirectory, $Environment, $TimeoutMs, $MaxOutputBytes, $JobMemoryBytes, $ActiveProcessLimit)
+}
+
+function Invoke-AtmGitCommand {
+    <#
+      One allow-listed Git command. -Git: Resolve-AtmGitExecutable. -WorkingDirectory: mandatory, an existing directory on
+      a drive (8.3 names normalized); discovery is bounded by its parent (GIT_CEILING_DIRECTORIES), so Git never reports
+      on a repository above it. Returns Status (COMPLETE | PARTIAL output truncated | FAILED | TIMEOUT | REFUSED | UNAVAILABLE),
+      Reason (a code), ExitCode, Output (UTF-8 text, in memory only), ElapsedMs, TotalProcesses. Git's error text is
+      never returned: it is classified (GIT_OWNERSHIP_REFUSED, GIT_NOT_A_REPOSITORY, GIT_COMMAND_FAILED).
+    #>
+    param($Git, [string[]]$Arguments, [string]$WorkingDirectory, [int]$TimeoutMs = $script:AtmGitDefaultTimeoutMs, [int]$MaxOutputBytes = $script:AtmGitDefaultMaxOutputBytes,
+        [long]$JobMemoryBytes = $script:AtmGitDefaultJobMemoryBytes, [int]$ActiveProcessLimit = $script:AtmGitDefaultActiveProcessLimit, [hashtable]$TestEnvironment = @{})
+    $out = [ordered]@{ Status = 'REFUSED'; Reason = $null; ExitCode = $null; Output = $null; OutputTruncated = $false; ElapsedMs = 0; TotalProcesses = 0 }
+    $code = Test-AtmGitArguments -Arguments $Arguments
+    if ($null -ne $code) { $out.Reason = $code; return [pscustomobject]$out }
+    if ($null -eq $Git -or [string]::IsNullOrEmpty([string]$Git.Path)) { $out.Status = 'UNAVAILABLE'; $out.Reason = 'GIT_NOT_FOUND'; return [pscustomobject]$out }
+    if ([string]::IsNullOrWhiteSpace($WorkingDirectory) -or $WorkingDirectory -notmatch '^[A-Za-z]:\\' -or -not [IO.Directory]::Exists($WorkingDirectory)) { $out.Reason = 'GIT_WORKDIR_INVALID'; return [pscustomobject]$out }
+    $wd = Get-AtmNormalizedPath $WorkingDirectory
+    if (-not $wd) { $out.Reason = 'GIT_WORKDIR_INVALID'; return [pscustomobject]$out }
+    $parent = [IO.Path]::GetDirectoryName($wd.TrimEnd('\'))
+    $ceiling = $(if ($parent) { Get-AtmNormalizedPath $parent } else { $null })
+    $vector = @($script:AtmGitGlobalArguments) + @($Arguments)
+    $commandLine = '"' + [string]$Git.Path + '" ' + ($vector -join ' ')
+    if ($null -ne $script:AtmGitInvocationLog) { $script:AtmGitInvocationLog.Add([pscustomobject]@{ Arguments = [string[]]$vector; WorkingDirectory = $wd }) }
+    $childEnv = Get-AtmGitEnvironment -Ceiling $ceiling -TestEnvironment $TestEnvironment
+    $r = Invoke-AtmBoundedProcess -Executable ([string]$Git.Path) -CommandLine $commandLine -WorkingDirectory $wd -Environment $childEnv -TimeoutMs $TimeoutMs -MaxOutputBytes $MaxOutputBytes -JobMemoryBytes $JobMemoryBytes -ActiveProcessLimit $ActiveProcessLimit
+    $out.ElapsedMs = $r.ElapsedMs; $out.TotalProcesses = $r.TotalProcesses; $out.ExitCode = $(if ($r.Started) { $r.ExitCode } else { $null })
+    if (-not $r.Started) { $out.Status = 'FAILED'; $out.Reason = $(if ($r.Error -like 'JOB_*') { 'GIT_JOB_UNAVAILABLE' } else { 'GIT_START_FAILED' }); return [pscustomobject]$out }
+    if ($r.TimedOut) { $out.Status = 'TIMEOUT'; $out.Reason = 'GIT_TIMEOUT'; return [pscustomobject]$out }
+    $err = [Text.Encoding]::UTF8.GetString($r.ErrorOutput)
+    if ($r.ExitCode -ne 0) {
+        $out.Status = 'FAILED'
+        $out.Reason = $(if ($err -match 'dubious ownership') { 'GIT_OWNERSHIP_REFUSED' } elseif ($err -match 'not a git repository') { 'GIT_NOT_A_REPOSITORY' } else { 'GIT_COMMAND_FAILED' })
+        return [pscustomobject]$out
+    }
+    $out.Output = [Text.Encoding]::UTF8.GetString($r.Output)
+    $out.OutputTruncated = [bool]$r.OutputTruncated
+    if ($r.OutputTruncated) { $out.Status = 'PARTIAL'; $out.Reason = 'GIT_OUTPUT_TRUNCATED' } else { $out.Status = 'COMPLETE' }
+    return [pscustomobject]$out
+}
+
+function Resolve-AtmGitExecutable {
+    <#
+      git.exe from the absolute entries of -PathVariable only (never the current directory, a relative entry, or a .cmd
+      or .bat), normalized. Elevated runs (-Elevated) require the file and its directory to pass
+      Test-AtmTrustedLocationAcl (the check covers the resolved launcher only; the program it starts is not checked).
+      Then `git --version` through the runner. Returns Status (COMPLETE | UNAVAILABLE), Reason (GIT_NOT_FOUND,
+      GIT_LOCATION_NOT_TRUSTED, GIT_VERSION_UNREADABLE), Path, Version ([version] or $null). No minimum version is
+      enforced here: P3-B fixes it from the features it uses.
+    #>
+    param([string]$PathVariable = $env:Path, $Elevated = $null, [hashtable]$TestEnvironment = @{})
+    $out = [ordered]@{ Status = 'UNAVAILABLE'; Reason = 'GIT_NOT_FOUND'; Path = $null; Version = $null }
+    if ($null -eq $Elevated) { $Elevated = [bool](Get-AtmCurrentIdentity).IsAdmin }
+    $found = $null
+    foreach ($entry in @(([string]$PathVariable).Split(';'))) {
+        $dir = $entry.Trim().Trim('"')
+        if ($dir -notmatch '^[A-Za-z]:\\') { continue }
+        $cand = Join-AtmPath $dir 'git.exe'
+        try { if ([IO.File]::Exists($cand)) { $found = $cand; break } } catch { continue }
+    }
+    if (-not $found) { return [pscustomobject]$out }
+    $norm = Get-AtmNormalizedPath $found
+    if (-not $norm) { return [pscustomobject]$out }
+    if ($Elevated -and (-not (Test-AtmTrustedLocationAcl -Path $norm) -or -not (Test-AtmTrustedLocationAcl -Path ([IO.Path]::GetDirectoryName($norm))))) { $out.Reason = 'GIT_LOCATION_NOT_TRUSTED'; return [pscustomobject]$out }
+    $probe = Invoke-AtmGitCommand -Git ([pscustomobject]@{ Path = $norm }) -Arguments @('--version') -WorkingDirectory ([IO.Path]::GetDirectoryName($norm)) -TestEnvironment $TestEnvironment
+    $v = $null
+    if ($probe.Status -ceq 'COMPLETE' -and $probe.Output -match '^git version (\d+)\.(\d+)\.(\d+)') { $v = New-Object Version([int]$Matches[1], [int]$Matches[2], [int]$Matches[3]) }
+    if ($null -eq $v) { $out.Reason = 'GIT_VERSION_UNREADABLE'; $out.Path = $norm; return [pscustomobject]$out }
+    $out.Status = 'COMPLETE'; $out.Reason = $null; $out.Path = $norm; $out.Version = $v
+    return [pscustomobject]$out
+}
+
+# ---------------------------------------------------------------------------------------------
 # Pseudonyms of exported identifiers (ADR-0010, P1-B4-d): keyed HMAC-SHA256, first 128 bits. Without the key nobody
 # can compute or check a pseudonym from the inputs, the export included. The key is EPHEMERAL (random, one run) unless
 # the operator supplies a key file (read only, never written by the tool) to correlate runs. The key never enters a

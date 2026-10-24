@@ -6,6 +6,8 @@
 //  * Reparse points (junctions, symlinks, mount points, cloud placeholders) are
 //    NEVER traversed. They are counted and reported.
 //  * The scanner and the lock probe never write to the filesystem.
+//  * The job runner (Git, docs/adr/ADR-0006) creates its child inside a job object of its own and only ever
+//    terminates that job; it never opens, signals or terminates any other process.
 //  * The deleter never forces: no attribute changes, no ACL changes, no
 //    ownership changes, no privileges. It pins ancestors and the tree by handle
 //    (no FILE_SHARE_DELETE) so names cannot be redirected, deletes by handle, aborts
@@ -597,6 +599,340 @@ namespace AgentTempManager
             {
                 foreach (Pinned d in dirs) { if (d.Handle != null) d.Handle.Dispose(); }
                 foreach (SafeFileHandle h in ancestors) h.Dispose();
+            }
+        }
+    }
+
+    public sealed class AtmJobResult
+    {
+        public bool Started;
+        public string Error;            // code: JOB_CREATE_FAILED, JOB_LIMITS_FAILED, JOB_LIMITS_MISMATCH, PIPE_FAILED, ATTRIBUTES_FAILED, CREATE_PROCESS_FAILED
+        public int Win32Error;
+        public int ProcessId;
+        public int ExitCode = -1;
+        public bool TimedOut;           // the deadline came first: the job was terminated
+        public bool JobTerminated;      // TerminateJobObject was called on this run's job (timeout, or members left after the exit)
+        public long ElapsedMs;
+        public byte[] Output = new byte[0];
+        public bool OutputTruncated;
+        public byte[] ErrorOutput = new byte[0];
+        public bool ErrorTruncated;
+        public int TotalProcesses;      // processes that ran in the job
+        public long PeakJobMemory;
+        public long JobMemoryLimit;     // read back from the job
+        public int ActiveProcessLimit;  // read back from the job
+    }
+
+    // Bounded execution of one program inside a job object created for that run (docs/adr/ADR-0006 rules 10-11, D-4).
+    // The child is created INSIDE the job (PROC_THREAD_ATTRIBUTE_JOB_LIST): when that is not possible nothing runs. It
+    // inherits only stdin (NUL), stdout and stderr (PROC_THREAD_ATTRIBUTE_HANDLE_LIST). The job kills its processes when
+    // its handle is closed, limits memory and the number of active processes, allows no breakaway, and is the only thing
+    // ever terminated (TerminateJobObject on this run's own job handle). No other process is opened, signalled or
+    // terminated.
+    public static class AtmJobRunner
+    {
+        const uint JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008;
+        const uint JOB_OBJECT_LIMIT_JOB_MEMORY = 0x00000200;
+        const uint JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION = 0x00000400;
+        const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+        const int JobObjectBasicAccountingInformation = 1;
+        const int JobObjectExtendedLimitInformation = 9;
+        const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
+        const uint CREATE_NO_WINDOW = 0x08000000;
+        const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+        const int STARTF_USESTDHANDLES = 0x00000100;
+        const uint HANDLE_FLAG_INHERIT = 0x00000001;
+        const uint GENERIC_READ = 0x80000000;
+        const uint FILE_SHARE_READ = 0x1;
+        const uint FILE_SHARE_WRITE = 0x2;
+        const uint OPEN_EXISTING = 3;
+        const uint WAIT_OBJECT_0 = 0;
+        static readonly IntPtr PROC_THREAD_ATTRIBUTE_HANDLE_LIST = new IntPtr(0x00020002);
+        static readonly IntPtr PROC_THREAD_ATTRIBUTE_JOB_LIST = new IntPtr(0x0002000D);
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+        {
+            public long PerProcessUserTimeLimit;
+            public long PerJobUserTimeLimit;
+            public uint LimitFlags;
+            public UIntPtr MinimumWorkingSetSize;
+            public UIntPtr MaximumWorkingSetSize;
+            public uint ActiveProcessLimit;
+            public UIntPtr Affinity;
+            public uint PriorityClass;
+            public uint SchedulingClass;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct IO_COUNTERS
+        {
+            public ulong ReadOperationCount;
+            public ulong WriteOperationCount;
+            public ulong OtherOperationCount;
+            public ulong ReadTransferCount;
+            public ulong WriteTransferCount;
+            public ulong OtherTransferCount;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+        {
+            public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+            public IO_COUNTERS IoInfo;
+            public UIntPtr ProcessMemoryLimit;
+            public UIntPtr JobMemoryLimit;
+            public UIntPtr PeakProcessMemoryUsed;
+            public UIntPtr PeakJobMemoryUsed;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct JOBOBJECT_BASIC_ACCOUNTING_INFORMATION
+        {
+            public long TotalUserTime;
+            public long TotalKernelTime;
+            public long ThisPeriodTotalUserTime;
+            public long ThisPeriodTotalKernelTime;
+            public uint TotalPageFaultCount;
+            public uint TotalProcesses;
+            public uint ActiveProcesses;
+            public uint TotalTerminatedProcesses;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct SECURITY_ATTRIBUTES
+        {
+            public int nLength;
+            public IntPtr lpSecurityDescriptor;
+            public int bInheritHandle;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct STARTUPINFO
+        {
+            public int cb;
+            public IntPtr lpReserved;
+            public IntPtr lpDesktop;
+            public IntPtr lpTitle;
+            public int dwX;
+            public int dwY;
+            public int dwXSize;
+            public int dwYSize;
+            public int dwXCountChars;
+            public int dwYCountChars;
+            public int dwFillAttribute;
+            public int dwFlags;
+            public short wShowWindow;
+            public short cbReserved2;
+            public IntPtr lpReserved2;
+            public IntPtr hStdInput;
+            public IntPtr hStdOutput;
+            public IntPtr hStdError;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct STARTUPINFOEX
+        {
+            public STARTUPINFO StartupInfo;
+            public IntPtr lpAttributeList;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct PROCESS_INFORMATION
+        {
+            public IntPtr hProcess;
+            public IntPtr hThread;
+            public int dwProcessId;
+            public int dwThreadId;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern IntPtr CreateJobObjectW(IntPtr attributes, string name);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref JOBOBJECT_EXTENDED_LIMIT_INFORMATION info, uint length);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool QueryInformationJobObject(IntPtr job, int infoClass, out JOBOBJECT_EXTENDED_LIMIT_INFORMATION info, uint length, IntPtr returnLength);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool QueryInformationJobObject(IntPtr job, int infoClass, out JOBOBJECT_BASIC_ACCOUNTING_INFORMATION info, uint length, IntPtr returnLength);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool CreatePipe(out IntPtr readPipe, out IntPtr writePipe, ref SECURITY_ATTRIBUTES attributes, uint size);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern IntPtr CreateFileW(string fileName, uint desiredAccess, uint shareMode, ref SECURITY_ATTRIBUTES attributes, uint creationDisposition, uint flags, IntPtr template);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, int flags, ref IntPtr size);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool UpdateProcThreadAttribute(IntPtr list, uint flags, IntPtr attribute, IntPtr value, IntPtr size, IntPtr previousValue, IntPtr returnSize);
+        [DllImport("kernel32.dll")]
+        static extern void DeleteProcThreadAttributeList(IntPtr list);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern bool CreateProcessW(string application, StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment, string currentDirectory, ref STARTUPINFOEX startupInfo, out PROCESS_INFORMATION processInformation);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool GetExitCodeProcess(IntPtr process, out int exitCode);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool CloseHandle(IntPtr handle);
+
+        sealed class Reader
+        {
+            readonly FileStream stream;
+            readonly int cap;
+            readonly MemoryStream kept = new MemoryStream();
+            public bool Truncated;
+            public System.Threading.Thread Thread;
+            public Reader(IntPtr handle, int cap)
+            {
+                stream = new FileStream(new SafeFileHandle(handle, true), FileAccess.Read, 4096, false);
+                this.cap = cap;
+                Thread = new System.Threading.Thread(Run);
+                Thread.IsBackground = true;
+                Thread.Start();
+            }
+            void Run()
+            {
+                // Everything is read so the child never blocks on a full pipe; only the first cap bytes are kept.
+                byte[] buf = new byte[8192];
+                try
+                {
+                    int n;
+                    while ((n = stream.Read(buf, 0, buf.Length)) > 0)
+                    {
+                        int room = cap - (int)kept.Length;
+                        if (room > 0) kept.Write(buf, 0, Math.Min(room, n));
+                        if (n > room) Truncated = true;
+                    }
+                }
+                catch (IOException) { }
+                catch (ObjectDisposedException) { }
+                finally { stream.Dispose(); }
+            }
+            public byte[] Bytes { get { return kept.ToArray(); } }
+        }
+
+        // application: absolute path of the program. commandLine: the full command line (program name first), already
+        // validated by the caller. environment: KEY=VALUE pairs (the whole environment of the child). Limits: timeout
+        // (ms), bytes kept per output stream, job memory (bytes) and active processes.
+        public static AtmJobResult Run(string application, string commandLine, string workingDirectory, string[] environment, int timeoutMs, int maxOutputBytes, long jobMemoryBytes, int activeProcessLimit)
+        {
+            AtmJobResult r = new AtmJobResult();
+            System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+            IntPtr job = IntPtr.Zero, outRead = IntPtr.Zero, outWrite = IntPtr.Zero, errRead = IntPtr.Zero, errWrite = IntPtr.Zero, nul = IntPtr.Zero;
+            IntPtr attrList = IntPtr.Zero, handleArray = IntPtr.Zero, jobArray = IntPtr.Zero, envBlock = IntPtr.Zero;
+            bool attrInit = false;
+            PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
+            Reader outReader = null, errReader = null;
+            try
+            {
+                job = CreateJobObjectW(IntPtr.Zero, null);
+                if (job == IntPtr.Zero) { r.Error = "JOB_CREATE_FAILED"; r.Win32Error = Marshal.GetLastWin32Error(); return r; }
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+                limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_JOB_MEMORY | JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+                limits.BasicLimitInformation.ActiveProcessLimit = (uint)activeProcessLimit;
+                limits.JobMemoryLimit = new UIntPtr((ulong)jobMemoryBytes);
+                uint size = (uint)Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+                if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, ref limits, size)) { r.Error = "JOB_LIMITS_FAILED"; r.Win32Error = Marshal.GetLastWin32Error(); return r; }
+                // Read back: the limits in force, and a check of the structure layout on this architecture.
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION back;
+                if (!QueryInformationJobObject(job, JobObjectExtendedLimitInformation, out back, size, IntPtr.Zero)) { r.Error = "JOB_LIMITS_FAILED"; r.Win32Error = Marshal.GetLastWin32Error(); return r; }
+                r.JobMemoryLimit = (long)back.JobMemoryLimit.ToUInt64();
+                r.ActiveProcessLimit = (int)back.BasicLimitInformation.ActiveProcessLimit;
+                uint wanted = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_JOB_MEMORY | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+                if ((back.BasicLimitInformation.LimitFlags & wanted) != wanted || r.JobMemoryLimit != jobMemoryBytes || r.ActiveProcessLimit != activeProcessLimit) { r.Error = "JOB_LIMITS_MISMATCH"; return r; }
+
+                SECURITY_ATTRIBUTES sa = new SECURITY_ATTRIBUTES();
+                sa.nLength = Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES));
+                sa.bInheritHandle = 1;
+                if (!CreatePipe(out outRead, out outWrite, ref sa, 0) || !CreatePipe(out errRead, out errWrite, ref sa, 0)) { r.Error = "PIPE_FAILED"; r.Win32Error = Marshal.GetLastWin32Error(); return r; }
+                SetHandleInformation(outRead, HANDLE_FLAG_INHERIT, 0);
+                SetHandleInformation(errRead, HANDLE_FLAG_INHERIT, 0);
+                nul = CreateFileW("NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, ref sa, OPEN_EXISTING, 0, IntPtr.Zero);
+                if (nul == IntPtr.Zero || nul == new IntPtr(-1)) { nul = IntPtr.Zero; r.Error = "PIPE_FAILED"; r.Win32Error = Marshal.GetLastWin32Error(); return r; }
+
+                // Two attributes: the handles the child inherits, and the job it is created in.
+                IntPtr listSize = IntPtr.Zero;
+                InitializeProcThreadAttributeList(IntPtr.Zero, 2, 0, ref listSize);
+                attrList = Marshal.AllocHGlobal(listSize);
+                if (!InitializeProcThreadAttributeList(attrList, 2, 0, ref listSize)) { r.Error = "ATTRIBUTES_FAILED"; r.Win32Error = Marshal.GetLastWin32Error(); return r; }
+                attrInit = true;
+                handleArray = Marshal.AllocHGlobal(IntPtr.Size * 3);
+                Marshal.WriteIntPtr(handleArray, 0, nul);
+                Marshal.WriteIntPtr(handleArray, IntPtr.Size, outWrite);
+                Marshal.WriteIntPtr(handleArray, IntPtr.Size * 2, errWrite);
+                if (!UpdateProcThreadAttribute(attrList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handleArray, new IntPtr(IntPtr.Size * 3), IntPtr.Zero, IntPtr.Zero)) { r.Error = "ATTRIBUTES_FAILED"; r.Win32Error = Marshal.GetLastWin32Error(); return r; }
+                jobArray = Marshal.AllocHGlobal(IntPtr.Size);
+                Marshal.WriteIntPtr(jobArray, job);
+                if (!UpdateProcThreadAttribute(attrList, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, jobArray, new IntPtr(IntPtr.Size), IntPtr.Zero, IntPtr.Zero)) { r.Error = "ATTRIBUTES_FAILED"; r.Win32Error = Marshal.GetLastWin32Error(); return r; }
+
+                StringBuilder env = new StringBuilder();
+                foreach (string kv in environment) { env.Append(kv); env.Append('\0'); }
+                env.Append('\0');
+                envBlock = Marshal.StringToHGlobalUni(env.ToString());
+
+                STARTUPINFOEX si = new STARTUPINFOEX();
+                si.StartupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFOEX));
+                si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+                si.StartupInfo.hStdInput = nul;
+                si.StartupInfo.hStdOutput = outWrite;
+                si.StartupInfo.hStdError = errWrite;
+                si.lpAttributeList = attrList;
+                StringBuilder cmd = new StringBuilder(commandLine);
+                if (!CreateProcessW(application, cmd, IntPtr.Zero, IntPtr.Zero, true, EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, envBlock, workingDirectory, ref si, out pi))
+                {
+                    r.Error = "CREATE_PROCESS_FAILED"; r.Win32Error = Marshal.GetLastWin32Error(); return r;
+                }
+                r.Started = true;
+                r.ProcessId = pi.dwProcessId;
+                // The parent keeps no write end: the readers see the end of the output when the job's processes close it.
+                CloseHandle(outWrite); outWrite = IntPtr.Zero;
+                CloseHandle(errWrite); errWrite = IntPtr.Zero;
+                outReader = new Reader(outRead, maxOutputBytes); outRead = IntPtr.Zero;
+                errReader = new Reader(errRead, maxOutputBytes); errRead = IntPtr.Zero;
+
+                uint wait = WaitForSingleObject(pi.hProcess, (uint)Math.Max(0, timeoutMs));
+                if (wait != WAIT_OBJECT_0)
+                {
+                    r.TimedOut = true;
+                    r.JobTerminated = TerminateJobObject(job, 1);
+                    WaitForSingleObject(pi.hProcess, 10000);
+                }
+                // Members still holding the output (a grandchild) end with the job.
+                if (!outReader.Thread.Join(2000) || !errReader.Thread.Join(500))
+                {
+                    if (TerminateJobObject(job, 1)) r.JobTerminated = true;
+                    outReader.Thread.Join(5000); errReader.Thread.Join(5000);
+                }
+                int code;
+                if (GetExitCodeProcess(pi.hProcess, out code)) r.ExitCode = code;
+                JOBOBJECT_BASIC_ACCOUNTING_INFORMATION acc;
+                if (QueryInformationJobObject(job, JobObjectBasicAccountingInformation, out acc, (uint)Marshal.SizeOf(typeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION)), IntPtr.Zero)) r.TotalProcesses = (int)acc.TotalProcesses;
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION after;
+                if (QueryInformationJobObject(job, JobObjectExtendedLimitInformation, out after, size, IntPtr.Zero)) r.PeakJobMemory = (long)after.PeakJobMemoryUsed.ToUInt64();
+                r.Output = outReader.Bytes; r.OutputTruncated = outReader.Truncated;
+                r.ErrorOutput = errReader.Bytes; r.ErrorTruncated = errReader.Truncated;
+                return r;
+            }
+            finally
+            {
+                if (pi.hThread != IntPtr.Zero) CloseHandle(pi.hThread);
+                if (pi.hProcess != IntPtr.Zero) CloseHandle(pi.hProcess);
+                if (outWrite != IntPtr.Zero) CloseHandle(outWrite);
+                if (errWrite != IntPtr.Zero) CloseHandle(errWrite);
+                if (outRead != IntPtr.Zero) CloseHandle(outRead);
+                if (errRead != IntPtr.Zero) CloseHandle(errRead);
+                if (nul != IntPtr.Zero) CloseHandle(nul);
+                if (attrInit) DeleteProcThreadAttributeList(attrList);
+                if (attrList != IntPtr.Zero) Marshal.FreeHGlobal(attrList);
+                if (handleArray != IntPtr.Zero) Marshal.FreeHGlobal(handleArray);
+                if (jobArray != IntPtr.Zero) Marshal.FreeHGlobal(jobArray);
+                if (envBlock != IntPtr.Zero) Marshal.FreeHGlobal(envBlock);
+                // Closing the job kills whatever is still in it (KILL_ON_JOB_CLOSE): nothing started here outlives the run.
+                if (job != IntPtr.Zero) CloseHandle(job);
+                sw.Stop();
+                r.ElapsedMs = sw.ElapsedMilliseconds;
             }
         }
     }
