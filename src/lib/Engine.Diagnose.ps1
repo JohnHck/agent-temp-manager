@@ -24,8 +24,9 @@ $script:AtmAbsenceStates = @('SESSION_PROCESS_NOT_FOUND', 'NOT_PRESENT')
 # Closed list of states per finding kind (ADR-0001 rule 2). Only states with an accepted basis are listed:
 # TempPartition: RUNTIME_NOT_DIAGNOSED (P1-A) and the graph states of ADR-0002; Worktree: the summary states of
 # ADR-0006 rule 14; Process and AgentSession: the runtime states of P1-B4-b (Get-AtmAgentRuntimeFindings); Service:
-# the state reported by the service control manager for a provider-declared name (P2-A, ADR-0005), NOT_PRESENT only
-# when the query completed and the name was not listed. The other kinds have no state yet: each later phase adds its
+# the state reported by the service control manager for a provider-declared name (P2-A, ADR-0005); NOT_PRESENT stays
+# in the list for a future source that tells a missing service from one the account may not see, and the current
+# collector never produces it (P2-A-S). The other kinds have no state yet: each later phase adds its
 # own, with tests. UNKNOWN is in every list because New-AtmFinding may replace a requested state with it. No Process,
 # AgentSession or Service state says anything about a temporary directory.
 $script:AtmFindingStates = @{
@@ -66,6 +67,8 @@ function New-AtmCoverage {
     $rs = @($Reasons | Where-Object { $_ })
     foreach ($r in $rs) { if ($r -cnotmatch $script:AtmCodePattern) { throw (Get-AtmText 'err.diagCoverage' "reason '$r'") } }
     if ($Status -ne 'COMPLETE' -and $Status -ne 'NOT_PRESENT' -and $rs.Count -eq 0) { throw (Get-AtmText 'err.diagCoverage' "status '$Status' without reason") }
+    # A conclusive status never carries a reason: a reason means something was not observed (ADR-0001).
+    if (($Status -ceq 'COMPLETE' -or $Status -ceq 'NOT_PRESENT') -and $rs.Count -gt 0) { throw (Get-AtmText 'err.diagCoverage' "status '$Status' with reasons") }
     [pscustomobject]@{
         Collector          = $Collector
         Status             = $Status
@@ -2976,8 +2979,9 @@ function Get-AtmInventoryCoverage {
 # by the service control manager is linked to a process only when the snapshot (taken after the query) holds that PID
 # with a verified identity created before the query started, so the process owned the PID during the whole query.
 # PathName is reduced in memory to the executable (full path only in a well-known program location, otherwise the file
-# name) and dropped; its arguments are never kept. A NOT_PRESENT service is one the service control manager did not
-# list for this account; no service state authorizes anything.
+# name, read as text only: nothing is looked up on disk) and dropped; its arguments are never kept. A declared name
+# the service control manager does not list is UNKNOWN (P2-A-S: not listed for this account is not proof of absence);
+# the collector never produces NOT_PRESENT. Account names are never exported (ADR-0012). No state authorizes anything.
 # ---------------------------------------------------------------------------------------------
 
 $script:AtmServiceCimProperties = @('Name', 'State', 'StartMode', 'DelayedAutoStart', 'StartName', 'ProcessId', 'PathName')
@@ -3008,79 +3012,75 @@ function Get-AtmServiceProgramRoots {
 
 function ConvertFrom-AtmServicePathName {
     <#
-      The executable of a service command line, in memory only (ADR-0005 rule 4). Returns Path (the full path, only
-      under a well-known program location), Name (the file name) and Reason (EXECUTABLE_UNREADABLE when there is no
-      value, EXECUTABLE_UNPARSEABLE otherwise); the command line and its arguments are never returned, and a failure
-      keeps only that code. Candidate: the quoted part, or (unquoted) the text up to the first ".exe" followed by a
-      space or the end (how Windows resolves it). \??\, \SystemRoot\, %SystemRoot%, %windir% and the program files
-      variables are read as their folders. Arguments are separated by white space, so a candidate without white space
-      cannot hold one; a candidate with white space (a folder such as "Program Files", or a misquoted command line) is
-      kept only when it is the normalized form of an existing file on a local fixed drive (a metadata check only;
-      nothing is opened or run). No '=', '/', second ':' or variable is accepted; the file name has no white space.
-      The full path is returned only when it is normalized (no '..' or trailing dots or spaces in a folder) and under
-      a well-known program location; otherwise the file name only.
+      The executable of a service command line, read as untrusted text only (ADR-0005 rule 4, P2-A-S): nothing is
+      opened, run, resolved or looked up on any disk. Returns Path (the full path, only under a well-known program
+      location), Name (the file name) and Reason (EXECUTABLE_UNREADABLE when there is no value, EXECUTABLE_UNPARSEABLE
+      otherwise); the command line and its arguments are never returned, and a failure keeps only that code.
+      Candidate: the text between the first pair of quotes, or (unquoted) the text up to the first ".exe" followed by
+      a space or the end. Unambiguous only when:
+        * unquoted, it holds no white space (arguments are separated by white space);
+        * quoted, ".exe" appears once, at its end (a whole command line inside the quotes is refused);
+        * it holds no '=', '/', '*', '?', '<', '>', '|', control character, second ':' or variable other than
+          \SystemRoot\, %SystemRoot%, %windir% and the program files variables (read as their folders);
+        * it is not a network or device form (\\server\..., \\.\..., \\?\...); \??\ before a drive letter is dropped;
+        * the file name has no white space.
+      The full path is returned only when every folder is plain (no empty, '.', '..', dots-only, or leading or
+      trailing space or dot) and it is textually under a well-known program location; otherwise the file name only.
     #>
-    param($PathName, [string[]]$Roots = (Get-AtmServiceProgramRoots), [scriptblock]$FileExists = $null)
+    param($PathName, [string[]]$Roots = (Get-AtmServiceProgramRoots))
     $out = [ordered]@{ Path = $null; Name = $null; Reason = $null }
     if (-not ($PathName -is [string]) -or [string]::IsNullOrWhiteSpace($PathName)) { $out.Reason = 'EXECUTABLE_UNREADABLE'; return [pscustomobject]$out }
+    $bad = [pscustomobject]@{ Path = $null; Name = $null; Reason = 'EXECUTABLE_UNPARSEABLE' }
     try {
         $s = $PathName.TrimStart()
-        $exe = $null
+        $exe = $null; $quoted = $false
         if ($s.StartsWith('"')) {
             $end = $s.IndexOf('"', 1)
-            if ($end -gt 1) { $exe = $s.Substring(1, $end - 1) }
+            if ($end -gt 1) { $exe = $s.Substring(1, $end - 1); $quoted = $true }
         } else {
             $m = [regex]::Match($s, '^(.+?\.exe)(?=\s|$)', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
             if ($m.Success) { $exe = $m.Groups[1].Value }
         }
-        if ($null -ne $exe -and $exe.StartsWith('\??\')) { $exe = $exe.Substring(4) }
-        $bad = { $out.Path = $null; $out.Name = $null; $out.Reason = 'EXECUTABLE_UNPARSEABLE'; [pscustomobject]$out }
-        if ($null -eq $exe -or $exe -match '[\x00-\x1f"*?<>|=/]') { return (& $bad) }
+        if ($null -eq $exe) { return $bad }
+        if ($exe.StartsWith('\??\') -and $exe -match '^\\\?\?\\[A-Za-z]:\\') { $exe = $exe.Substring(4) }
+        if ($exe.StartsWith('\\') -or $exe -match '[\x00-\x1f"*?<>|=/]') { return $bad }
+        if ($quoted) {
+            # ".exe" once, at the end: a misquoted command line ("...svc.exe --x run.exe") is never taken apart.
+            if ([regex]::Matches($exe, '\.exe', [Text.RegularExpressions.RegexOptions]::IgnoreCase).Count -ne 1 -or $exe -notmatch '(?i)\.exe$') { return $bad }
+        } elseif ($exe -match '\s') { return $bad }
         $map = [ordered]@{ '\SystemRoot\' = $env:SystemRoot; '%SystemRoot%\' = $env:SystemRoot; '%windir%\' = $env:SystemRoot; '%ProgramFiles%\' = $env:ProgramFiles; '%ProgramFiles(x86)%\' = ${env:ProgramFiles(x86)}; '%ProgramW6432%\' = $env:ProgramW6432 }
         foreach ($k in $map.Keys) {
             if ($exe.StartsWith($k, [StringComparison]::OrdinalIgnoreCase)) { if ($map[$k]) { $exe = $map[$k].TrimEnd('\') + '\' + $exe.Substring($k.Length) }; break }
         }
-        if ($exe.Contains('%') -or $exe.IndexOf(':', 2) -ge 0 -or ($exe.IndexOf(':') -ge 0 -and $exe -notmatch '^[A-Za-z]:\\')) { return (& $bad) }
+        if ($exe.Contains('%') -or $exe.IndexOf(':', 2) -ge 0 -or ($exe.IndexOf(':') -ge 0 -and $exe -notmatch '^[A-Za-z]:\\')) { return $bad }
         $i = $exe.LastIndexOf('\')
         $leaf = $(if ($i -ge 0) { $exe.Substring($i + 1) } else { $exe })
-        if ($leaf -notmatch '^[^\\\s]+\.exe$' -or $leaf -match '^\.+exe$') { return (& $bad) }
-        $abs = ($exe -match '^[A-Za-z]:\\')
-        # Normalized: what Windows would open is exactly this text (no '..', '.', trailing dots or spaces, '~' names).
-        # Segments decide first (the runtimes differ on '...'), then the full-path check.
-        $norm = $abs -and -not $exe.Contains('~') -and @($exe.Substring(3).Split('\') | Where-Object { $_ -eq '' -or $_ -match '^\.+$|[\s.]$|^\s' }).Count -eq 0
-        if ($norm) { try { $norm = ([IO.Path]::GetFullPath($exe) -ceq $exe) } catch { $norm = $false } }
-        $existing = $false
-        if ($exe -match '\s') {
-            if (-not $norm) { return (& $bad) }
-            $fixed = $false
-            try { $fixed = ((New-Object IO.DriveInfo($exe.Substring(0, 1))).DriveType -eq [IO.DriveType]::Fixed) } catch { $fixed = $false }
-            if (-not $fixed) { return (& $bad) }
-            $existing = $(if ($null -ne $FileExists) { [bool](& $FileExists $exe) } else { [IO.File]::Exists($exe) })
-            if (-not $existing) { return (& $bad) }
-        }
+        if ($leaf -notmatch '^[^\\\s]+\.exe$' -or $leaf -match '^\.+exe$') { return $bad }
         $out.Name = $leaf
-        if ($norm) { foreach ($r in @($Roots)) { if ($exe.StartsWith($r, [StringComparison]::OrdinalIgnoreCase)) { $out.Path = $exe; break } } }
-    } catch { $out.Path = $null; $out.Name = $null; $out.Reason = 'EXECUTABLE_UNPARSEABLE' }
+        if ($exe -match '^[A-Za-z]:\\' -and -not $exe.Contains('~')) {
+            $plain = (@($exe.Substring(3).Split('\') | Where-Object { $_ -eq '' -or $_ -match '^\.+$|[\s.]$|^\s' }).Count -eq 0)
+            if ($plain) { foreach ($r in @($Roots)) { if ($exe.StartsWith($r, [StringComparison]::OrdinalIgnoreCase)) { $out.Path = $exe; break } } }
+        }
+    } catch { return $bad }
     return [pscustomobject]$out
 }
 
 function ConvertTo-AtmServiceAccount {
-    # Account kind and name (ADR-0005 rule 6): LocalSystem, NT AUTHORITY\..., virtual service accounts (NT SERVICE\...)
-    # and managed service accounts (ending with $) are shown as such; any other account is USER, shown by its name.
-    # $null when unreadable.
+    # Kind of the account a service runs as, and a standard identifier only for the three built-in service accounts
+    # (ADR-0012, replacing ADR-0005 rule 6): LocalSystem, NT AUTHORITY\LocalService, NT AUTHORITY\NetworkService.
+    # VIRTUAL (NT SERVICE\...), MANAGED (ending with $), BUILTIN (other NT AUTHORITY\...) and USER give the kind only;
+    # the raw StartName is read here and never returned. $null when unreadable.
     param($StartName)
     if (-not (Test-AtmHintText -Value $StartName -Max 256)) { return $null }
-    $n = $StartName.Trim()
-    if (-not $n) { return $null }
-    $u = $n.ToUpperInvariant()
-    $kind = 'USER'
-    if ($u -ceq 'LOCALSYSTEM' -or $u -ceq 'NT AUTHORITY\SYSTEM' -or $u -ceq '.\LOCALSYSTEM') { $kind = 'LOCAL_SYSTEM' }
-    elseif ($u -ceq 'NT AUTHORITY\LOCALSERVICE' -or $u -ceq 'NT AUTHORITY\LOCAL SERVICE') { $kind = 'LOCAL_SERVICE' }
-    elseif ($u -ceq 'NT AUTHORITY\NETWORKSERVICE' -or $u -ceq 'NT AUTHORITY\NETWORK SERVICE') { $kind = 'NETWORK_SERVICE' }
-    elseif ($u.StartsWith('NT SERVICE\', [StringComparison]::Ordinal)) { $kind = 'VIRTUAL' }
-    elseif ($u.StartsWith('NT AUTHORITY\', [StringComparison]::Ordinal)) { $kind = 'BUILTIN' }
-    elseif ($u.EndsWith('$')) { $kind = 'MANAGED' }
-    return [pscustomobject]@{ Kind = $kind; Account = $n }
+    $u = $StartName.Trim().ToUpperInvariant()
+    if (-not $u) { return $null }
+    if ($u -ceq 'LOCALSYSTEM' -or $u -ceq 'NT AUTHORITY\SYSTEM' -or $u -ceq '.\LOCALSYSTEM') { return [pscustomobject]@{ Kind = 'LOCAL_SYSTEM'; Account = 'LocalSystem' } }
+    if ($u -ceq 'NT AUTHORITY\LOCALSERVICE' -or $u -ceq 'NT AUTHORITY\LOCAL SERVICE') { return [pscustomobject]@{ Kind = 'LOCAL_SERVICE'; Account = 'NT AUTHORITY\LocalService' } }
+    if ($u -ceq 'NT AUTHORITY\NETWORKSERVICE' -or $u -ceq 'NT AUTHORITY\NETWORK SERVICE') { return [pscustomobject]@{ Kind = 'NETWORK_SERVICE'; Account = 'NT AUTHORITY\NetworkService' } }
+    if ($u.StartsWith('NT SERVICE\', [StringComparison]::Ordinal)) { return [pscustomobject]@{ Kind = 'VIRTUAL'; Account = $null } }
+    if ($u.StartsWith('NT AUTHORITY\', [StringComparison]::Ordinal)) { return [pscustomobject]@{ Kind = 'BUILTIN'; Account = $null } }
+    if ($u.EndsWith('$')) { return [pscustomobject]@{ Kind = 'MANAGED'; Account = $null } }
+    return [pscustomobject]@{ Kind = 'USER'; Account = $null }
 }
 
 function Get-AtmServiceRaw {
@@ -3179,12 +3179,11 @@ function Invoke-AtmServiceQuery {
     }
     foreach ($d in @($dup.Keys)) { $rows[$d].Duplicate = $true }
     $out.Rows = $rows
+    # The service control manager leaves out services the caller may not query (EnumServicesStatusEx): a declared
+    # name that is not listed is not proof of absence, so the query is PARTIAL and the service UNKNOWN (P2-A-S).
+    if (@($names | Where-Object { -not $rows.ContainsKey($_) }).Count -gt 0) { $reasons.Add('SERVICE_NOT_LISTED_FOR_ACCOUNT') }
     $st = $(if ($reasons.Count -gt 0) { 'PARTIAL' } else { 'COMPLETE' })
-    # The service control manager leaves out services the caller may not query: a name not listed is reported with
-    # SERVICE_NOT_LISTED_FOR_ACCOUNT, and another account (elevation included) might see it.
-    $notListed = @($names | Where-Object { -not $rows.ContainsKey($_) }).Count -gt 0
-    if ($notListed) { $reasons.Add('SERVICE_NOT_LISTED_FOR_ACCOUNT') }
-    $out.Coverage = New-AtmCoverage -Collector 'services' -Status $st -Reasons @(Get-AtmSortedCodes $reasons) -ElevationWouldHelp $(if ($st -ceq 'COMPLETE' -and -not $notListed) { 'NO' } else { 'UNKNOWN' }) -Observed @($rows.Keys).Count -Expected $declared.Count -StartedUtc $started -ElapsedMs $sw.ElapsedMilliseconds -BudgetMs $budgetMs
+    $out.Coverage = New-AtmCoverage -Collector 'services' -Status $st -Reasons @(Get-AtmSortedCodes $reasons) -ElevationWouldHelp $(if ($st -ceq 'COMPLETE') { 'NO' } else { 'UNKNOWN' }) -Observed @($rows.Keys).Count -Expected $declared.Count -StartedUtc $started -ElapsedMs $sw.ElapsedMilliseconds -BudgetMs $budgetMs
     return [pscustomobject]$out
 }
 
@@ -3233,8 +3232,9 @@ function Get-AtmServiceFindings {
         if (-not $queried -or @($Query.Capped) -ccontains $d.Name) {
             $list.Add((& $ev 'SERVICE_NOT_QUERIED' $(if (@($Query.Capped) -ccontains $d.Name) { 'SERVICE_HINTS_CAPPED' } else { [string]$svcCov.Status })))
         } elseif (-not $Query.Rows.ContainsKey($d.Name)) {
-            # Not listed by the service control manager for this account; NOT_PRESENT only with a complete query.
-            $list.Add((& $ev 'SERVICE_NOT_LISTED' $null)); $state = 'NOT_PRESENT'
+            # Not listed for this account: an observation, never proof that the service does not exist (UNKNOWN; no
+            # source distinguishes a missing service from one the account may not see).
+            $list.Add((& $ev 'SERVICE_NOT_LISTED' 'NOT_LISTED_FOR_ACCOUNT'))
         } else {
             $present++
             $row = $Query.Rows[$d.Name]; $ok = $true
@@ -3247,7 +3247,7 @@ function Get-AtmServiceFindings {
             if ($sm.Count -eq 1) { $list.Add((& $ev 'SERVICE_START_MODE' $sm[0].ToUpperInvariant())) } else { $list.Add((& $ev 'SERVICE_START_MODE_UNREADABLE' $null)); $ok = $false }
             if ($row.DelayedAutoStart -is [bool]) { $list.Add((& $ev 'SERVICE_DELAYED_AUTO_START' $(if ($row.DelayedAutoStart) { 'TRUE' } else { 'FALSE' }))) } else { $list.Add((& $ev 'SERVICE_DELAYED_AUTO_START_UNREADABLE' $null)); $ok = $false }
             $acc = ConvertTo-AtmServiceAccount $row.StartName
-            if ($null -ne $acc) { $list.Add((& $ev 'SERVICE_ACCOUNT_KIND' $acc.Kind)); $list.Add((& $ev 'SERVICE_ACCOUNT' $acc.Account)) } else { $list.Add((& $ev 'SERVICE_ACCOUNT_UNREADABLE' $null)); $ok = $false }
+            if ($null -ne $acc) { $list.Add((& $ev 'SERVICE_ACCOUNT_KIND' $acc.Kind)); if ($acc.Account) { $list.Add((& $ev 'SERVICE_ACCOUNT' $acc.Account)) } } else { $list.Add((& $ev 'SERVICE_ACCOUNT_UNREADABLE' $null)); $ok = $false }
             $x = $row.Executable
             if ($x.Path) { $list.Add((& $ev 'SERVICE_EXECUTABLE' $x.Path)) } elseif ($x.Name) { $list.Add((& $ev 'SERVICE_EXECUTABLE_NAME' $x.Name)) } else { $list.Add((& $ev 'SERVICE_EXECUTABLE_UNREADABLE' $x.Reason)); $ok = $false }
             if (-not $ok) { $propReasons.Add('SERVICE_PROPERTY_UNREADABLE') }

@@ -118,10 +118,13 @@ called by `Invoke-AtmGitCommand`):
   declare, the allowed properties only, with a CIM operation timeout (enforced by CIM; not a guaranteed cancellation).
   No service is started, stopped, paused or reconfigured; no CIM method is invoked; no other machine and no CIM
   session is used; nothing is run from a service command line (static tests). `PathName` is reduced in memory to the
-  executable (full path only under the Windows or program files folders, otherwise the file name) and dropped; a
-  candidate with white space is kept only when it is an existing file on a local fixed drive (metadata only), so
-  argument text is not taken for a path; its arguments never reach evidence, coverage, the report, the JSON or an
-  error (adversarial tests, including misquoted command lines and later `.exe` arguments). A service PID is linked to a process only
+  executable (full path only under the Windows or program files folders, otherwise the file name) and dropped. It
+  is read as untrusted text only: no existence, attribute or metadata check, nothing opened or resolved (a fixed drive
+  letter does not prove that a folder on the way is not redirected); an unquoted candidate with white space, a
+  network or device form or an unknown variable gives a code. Its arguments never reach evidence, coverage, the
+  report, the JSON or an error (adversarial tests, including misquoted command lines and later `.exe` arguments).
+  Account names are never exported: only the kind, and a standard identifier for the three built-in service accounts
+  (ADR-0012). A service PID is linked to a process only
   when the snapshot taken after the query holds it with a verified identity created before the query; no process is
   opened for it.
 * **Open-file diagnostics gate (P1-C-S):** the Restart Manager collector (`handles`, D-2) is behind
@@ -231,11 +234,14 @@ called by `Invoke-AtmGitCommand`):
   holder is identified by PID and start time against the process snapshot, otherwise reported as unverified; no file
   path or process name is exported. `RmGetList` cannot be cancelled: one query is bounded only by the few files
   registered.
-* **Services not listed for the account (P2-A)**: `NOT_PRESENT` means that the service control manager did not list
-  the name for the account that ran the diagnose. A service whose security descriptor denies that account the right
-  to query it may be left out of the list (a known way to hide a service); this cannot be tested without changing a
-  real service, and no other source (for example the registry) is read. Not resolved. A `NOT_PRESENT` service
-  authorizes nothing.
+* **Services not listed for the account (P2-A-S)**: the service control manager may leave out a service whose
+  security descriptor denies the account the right to query it (a known way to hide a service). A declared name that
+  is not listed is therefore `UNKNOWN`, never `NOT_PRESENT`, and the query is `PARTIAL`; no other source (for example
+  the registry) is read. A real hidden service was not tested (it needs a modified security descriptor); an injected
+  source simulates it. No service state, `UNKNOWN` included, authorizes deleting anything, stopping a service or
+  shutting down a virtual machine.
+* **Service and process link (P2-A)**: a linked PID is a temporal observation (the process owned the PID during the
+  query), not continuous monitoring.
 * **Process coverage**: protected processes remain uninspectable even for administrators. On a real Windows
   installation there are always some (17 on the CI runners), so the coverage gate blocks every candidate: in V0.1
   `clean` stops before the release gate is even reached. Enabling real deletion (V0.3) requires a reviewed decision

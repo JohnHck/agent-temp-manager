@@ -206,8 +206,8 @@ $link = @($wm.Evidence | Where-Object { $_.Code -eq 'SERVICE_PROCESS_VERIFIED' }
     $probeFile = Join-Path $OutDir 'services-probe.ps1'
     [IO.File]::WriteAllText($probeFile, $probe)
     $line = (& $installerExe -NoProfile -ExecutionPolicy Bypass -File $probeFile -Lib (Join-Path $installDir 'lib') 2>&1 | Select-Object -Last 1) -as [string]
-    Assert ($line -ceq 'COMPLETE|AtmNoSuchServiceP2A=NOT_PRESENT,EventLog=RUNNING,Winmgmt=RUNNING|1|1') "services: $line"
-    "$($summary.arch) ($InstallerShell): query COMPLETE, EventLog/Winmgmt RUNNING, unknown name NOT_PRESENT, Winmgmt process verified, state and start mode unchanged"
+    Assert ($line -ceq 'PARTIAL|AtmNoSuchServiceP2A=UNKNOWN,EventLog=RUNNING,Winmgmt=RUNNING|1|1') "services: $line"
+    "$($summary.arch) ($InstallerShell): query PARTIAL (a declared name not listed), EventLog/Winmgmt RUNNING, unknown name UNKNOWN (never NOT_PRESENT), Winmgmt process verified, state and start mode unchanged"
 }
 
 Step 'shipped-release-gate' {

@@ -82,3 +82,14 @@ source and its coverage; unknown is never reported as "not running"*.
   state must become `UNKNOWN`.
 * Catalog parity test (existing) covers the new keys; a test asserts that exported codes are identical in both
   languages.
+
+## Amendment (P2-A-S, 2026-10-24)
+
+The decisions above are kept; the maintainer's review of PR #42 added:
+
+* **A conclusive status carries no reason.** `COMPLETE` and `NOT_PRESENT` have an empty `Reasons` list: a reason
+  means that something was not observed. `New-AtmCoverage` refuses a conclusive status with a reason (test).
+* **The services example of rule 1 is not enough.** "The service control manager answered and has no such service"
+  is not a positive answer: the enumeration may silently leave out services the caller may not query. The services
+  collector therefore never gives `NOT_PRESENT` (ADR-0005 implementation record, P2-A-S); a source whose semantics
+  tell a missing item from an inaccessible one is required for `NOT_PRESENT`.

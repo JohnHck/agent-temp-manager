@@ -491,7 +491,8 @@ function Show-AtmDiagnoseServices {
     foreach ($s in @($sf | Select-Object -First $script:AtmRuntimeListMax)) {
         Write-Host ('  ' + (Get-AtmText 'diag.svcLine' $s.Key $s.State) + '  ' + (Get-AtmText "state.Service.$($s.State)"))
         if (@($s.Evidence | Where-Object { $_.Code -ceq 'SERVICE_STATE' }).Count -eq 0) { continue }
-        $acct = $(if (@($s.Evidence | Where-Object { $_.Code -ceq 'SERVICE_ACCOUNT' }).Count -gt 0) { (& $val $s 'SERVICE_ACCOUNT_KIND') + ' ' + (& $val $s 'SERVICE_ACCOUNT') } else { Get-AtmText 'diag.svcUnknownValue' })
+        # The kind always; a name only for the standard built-in accounts (ADR-0012).
+        $acct = $(if (@($s.Evidence | Where-Object { $_.Code -ceq 'SERVICE_ACCOUNT' }).Count -gt 0) { (& $val $s 'SERVICE_ACCOUNT_KIND') + ' ' + (& $val $s 'SERVICE_ACCOUNT') } elseif (@($s.Evidence | Where-Object { $_.Code -ceq 'SERVICE_ACCOUNT_KIND' }).Count -gt 0) { & $val $s 'SERVICE_ACCOUNT_KIND' } else { Get-AtmText 'diag.svcUnknownValue' })
         $exe = $(if (@($s.Evidence | Where-Object { $_.Code -ceq 'SERVICE_EXECUTABLE' }).Count -gt 0) { & $val $s 'SERVICE_EXECUTABLE' } else { & $val $s 'SERVICE_EXECUTABLE_NAME' })
         $proc = $(if (@($s.Evidence | Where-Object { $_.Code -ceq 'SERVICE_PROCESS_VERIFIED' }).Count -gt 0) { & $val $s 'SERVICE_PROCESS_VERIFIED' } elseif (@($s.Evidence | Where-Object { $_.Code -ceq 'SERVICE_PROCESS_UNVERIFIED' }).Count -gt 0) { 'UNVERIFIED (' + (& $val $s 'SERVICE_PROCESS_UNVERIFIED') + ')' } else { '-' })
         $who = $(if ($s.Provider) { $s.Provider } else { & $val $s 'PROVIDER_ATTRIBUTION_AMBIGUOUS' })
