@@ -1649,8 +1649,13 @@ function New-AtmGitSharedReadStream {
     # P3-D: a read stream that shares read, write AND delete with everyone, so reading a repository file never stops
     # another process (an agent's Git) from rewriting or renaming over it. Git replaces files by lockfile and rename, so
     # what is read is one whole version; a torn read by another kind of writer must fail the strict parsers.
+    # The final component is opened without following a reparse point (AtmSharedRead): a file swapped for a link after
+    # the path checks is refused, never followed. Throws when the file cannot be opened that way.
     param([string]$Path)
-    return New-Object IO.FileStream($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    $err = $null
+    $h = [AgentTempManager.AtmSharedRead]::Open($Path, [ref]$err)
+    if ($null -eq $h) { throw (New-Object IO.IOException("ATM_SHARED_READ_$err")) }
+    return New-Object IO.FileStream($h, [IO.FileAccess]::Read)
 }
 
 function Read-AtmGitSmallFile {
@@ -1661,7 +1666,9 @@ function Read-AtmGitSmallFile {
     try {
         $fs = New-AtmGitSharedReadStream -Path $Path
         if ($fs.Length -gt $MaxBytes) { return $null }
-        $sr = New-Object IO.StreamReader($fs, (New-Object Text.UTF8Encoding($false)), $true)
+        # Raw UTF-8, no byte-order-mark detection: Git reads bytes, so a UTF-16 or BOM-prefixed file must fail the strict
+        # parsers here as it does in Git.
+        $sr = New-Object IO.StreamReader($fs, (New-Object Text.UTF8Encoding($false)), $false)
         return $sr.ReadToEnd()
     } catch { return $null }
     finally { if ($null -ne $fs) { $fs.Dispose() } }
@@ -2089,7 +2096,7 @@ function Get-AtmGitStashSummary {
 
 $script:AtmGitPackedRefsTraits = @('peeled', 'fully-peeled', 'sorted')
 $script:AtmGitPackedRefsMaxBytes = 16777216
-$script:AtmPublicationReasonCodes = @('REF_STORE_UNSUPPORTED', 'REF_STORE_UNSTABLE', 'REF_STORE_FAILED', 'REF_STORE_LIMIT', 'HEAD_UNREADABLE', 'REACHABILITY_NOT_READ', 'NO_REMOTE_TRACKING_REFS', 'HEAD_TIP_ON_REMOTE_TRACKING')
+$script:AtmPublicationReasonCodes = @('REF_STORE_UNSUPPORTED', 'REF_STORE_UNSTABLE', 'REF_STORE_FAILED', 'REF_STORE_LIMIT', 'HEAD_UNREADABLE', 'REACHABILITY_NOT_READ', 'NO_REMOTE_TRACKING_REFS', 'HEAD_TIP_ON_REMOTE_TRACKING', 'HEAD_BRANCH_NOT_FOUND', 'NO_WORKTREE_OBSERVED')
 
 function Read-AtmGitHead {
     # A worktree's HEAD, read through the resolver from its Git directory: Kind BRANCH (Value: the branch name, in memory
@@ -2134,7 +2141,7 @@ function Get-AtmGitRefStore {
       names with branch.<name>.merge set), names in memory only. -ReadFile (tests) replaces the file reader.
     #>
     param([string]$CommonDir, [scriptblock]$ReadFile = $null)
-    $out = [ordered]@{ Status = 'FAILED'; Reason = 'REF_STORE_FAILED'; Local = @{}; Tags = @{}; Remote = @{}; Upstreams = @(); RemoteCount = 0 }
+    $out = [ordered]@{ Status = 'FAILED'; Reason = 'REF_STORE_FAILED'; Local = (New-Object Collections.Hashtable([StringComparer]::Ordinal)); Tags = @{}; Remote = @{}; Upstreams = @(); RemoteCount = 0; SymbolicBranches = @(); WorktreeConfig = $false }
     $read = $(if ($null -ne $ReadFile) { $ReadFile } else { { param([string]$P, [int]$Max) Read-AtmGitSmallFile -Path $P -MaxBytes $Max } })
     # Configuration: the reference storage and the upstreams.
     $cfgPath = Resolve-AtmGitReferencedPath -Value 'config' -BaseDir $CommonDir
@@ -2150,10 +2157,12 @@ function Get-AtmGitRefStore {
     $rt = Resolve-AtmGitReferencedPath -Value 'reftable' -BaseDir $CommonDir
     if (@($rs | Where-Object { $_.Value -ine 'files' }).Count -gt 0 -or $rt.Status -ne 'MISSING') { $out.Status = 'UNSUPPORTED'; $out.Reason = 'REF_STORE_UNSUPPORTED'; return [pscustomobject]$out }
     $out.Upstreams = @($entries | Where-Object { $_.Section -eq 'branch' -and $_.Key -eq 'merge' -and $_.Value } | ForEach-Object { $_.Subsection } | Select-Object -Unique)
+    $out.WorktreeConfig = (@($entries | Where-Object { $_.Section -eq 'extensions' -and $_.Key -eq 'worktreeconfig' -and $_.Value -match '^(true|yes|on|1)$' }).Count -gt 0)
     $idPattern = '^([0-9a-f]{40}|[0-9a-f]{64})$'
     $pass = {
         $refs = New-Object 'System.Collections.Generic.SortedDictionary[string,string]' ([StringComparer]::Ordinal)
         $peeled = New-Object System.Collections.Generic.List[string]
+        $sym = New-Object System.Collections.Generic.List[string]
         $count = 0
         foreach ($top in @('refs\heads', 'refs\tags', 'refs\remotes')) {
             $root = Resolve-AtmGitReferencedPath -Value $top -BaseDir $CommonDir
@@ -2167,16 +2176,21 @@ function Get-AtmGitRefStore {
                 foreach ($fi in $items) {
                     $count++
                     if ($count -gt $script:AtmGitRefEntriesMax) { return 'REF_STORE_LIMIT' }
-                    if (($fi.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return 'REF_STORE_FAILED' }
-                    if (($fi.Attributes -band [IO.FileAttributes]::Directory) -ne 0) { $stack.Push($fi.FullName); continue }
-                    if ($fi.Name.EndsWith('.lock')) { continue }
-                    $t = & $read $fi.FullName 4096
+                    # Git ignores names starting with a dot and lock files.
+                    if ($fi.Name.StartsWith('.') -or $fi.Name.EndsWith('.lock')) { continue }
+                    # Every entry goes through the resolver (text checks, no reparse point in its chain) before it is used.
+                    $er = Resolve-AtmGitReferencedPath -Value $fi.Name -BaseDir $d
+                    if ($er.Status -eq 'MISSING') { return 'REF_STORE_UNSTABLE' }
+                    if ($er.Status -ne 'OK') { return 'REF_STORE_FAILED' }
+                    if (($fi.Attributes -band [IO.FileAttributes]::Directory) -ne 0) { $stack.Push($er.Path); continue }
+                    $t = & $read $er.Path 4096
                     # A loose ref that disappears between the listing and the read moved meanwhile: not stable.
-                    if ($null -eq $t) { if (-not [IO.File]::Exists($fi.FullName)) { return 'REF_STORE_UNSTABLE' }; return 'REF_STORE_FAILED' }
+                    if ($null -eq $t) { if (-not [IO.File]::Exists($er.Path)) { return 'REF_STORE_UNSTABLE' }; return 'REF_STORE_FAILED' }
                     $v = $t.TrimEnd([char[]]"`n")
-                    if ($v.StartsWith('ref: ')) { continue }
+                    $name = ($er.Path.Substring($CommonDir.TrimEnd('\').Length + 1)).Replace('\', '/')
+                    # A symbolic ref is not followed; a branch that is one is recorded (its HEAD then gives no tip).
+                    if ($v.StartsWith('ref: ')) { if ($name -clike 'refs/heads/*') { $sym.Add($name.Substring(11)) }; continue }
                     if ($v -cnotmatch $idPattern -or -not $t.EndsWith("`n")) { return 'REF_STORE_FAILED' }
-                    $name = ($fi.FullName.Substring($CommonDir.TrimEnd('\').Length + 1)).Replace('\', '/')
                     $refs[$name] = $v
                 }
             }
@@ -2186,7 +2200,7 @@ function Get-AtmGitRefStore {
             $pt = & $read $pr.Path $script:AtmGitPackedRefsMaxBytes
             if ($null -eq $pt) { return 'REF_STORE_FAILED' }
             if ($pt.Length -gt 0 -and -not $pt.EndsWith("`n")) { return 'REF_STORE_FAILED' }
-            $last = $null
+            $last = $null; $lastUsed = $false
             foreach ($line in $pt.TrimEnd([char[]]"`n").Split("`n")) {
                 if ($line -eq '' -and $pt.Length -eq 0) { continue }
                 if ($line.StartsWith('# pack-refs with:')) {
@@ -2195,7 +2209,8 @@ function Get-AtmGitRefStore {
                 }
                 if ($line.StartsWith('^')) {
                     if ($null -eq $last -or $line.Substring(1) -cnotmatch $idPattern) { return 'REF_STORE_FAILED' }
-                    if ($last -clike 'refs/tags/*' -or $last -clike 'refs/remotes/*') { $peeled.Add($last + '|' + $line.Substring(1)) }
+                    # Only for a packed entry actually used: a loose ref overriding it makes its peeled id stale.
+                    if ($lastUsed -and ($last -clike 'refs/tags/*' -or $last -clike 'refs/remotes/*')) { $peeled.Add($last + '|' + $line.Substring(1)) }
                     continue
                 }
                 $sp = $line.IndexOf(' ')
@@ -2203,16 +2218,17 @@ function Get-AtmGitRefStore {
                 $n = $line.Substring($sp + 1)
                 if ($n -cnotmatch '^refs/\S+$') { return 'REF_STORE_FAILED' }
                 $last = $n
-                if (($n -clike 'refs/heads/*' -or $n -clike 'refs/tags/*' -or $n -clike 'refs/remotes/*') -and -not $refs.ContainsKey($n)) { $refs[$n] = $line.Substring(0, $sp) }
+                $lastUsed = $false
+                if (($n -clike 'refs/heads/*' -or $n -clike 'refs/tags/*' -or $n -clike 'refs/remotes/*') -and -not $refs.ContainsKey($n)) { $refs[$n] = $line.Substring(0, $sp); $lastUsed = $true }
             }
         } elseif ($pr.Status -ne 'MISSING') { return 'REF_STORE_FAILED' }
-        return [pscustomobject]@{ Refs = $refs; Peeled = $peeled.ToArray() }
+        return [pscustomobject]@{ Refs = $refs; Peeled = $peeled.ToArray(); Symbolic = $sym.ToArray() }
     }
     $a = & $pass
     if ($a -is [string]) { $out.Reason = $a; $out.Status = $(if ($a -ceq 'REF_STORE_UNSUPPORTED') { 'UNSUPPORTED' } elseif ($a -ceq 'REF_STORE_UNSTABLE') { 'UNSTABLE' } elseif ($a -ceq 'REF_STORE_LIMIT') { 'PARTIAL' } else { 'FAILED' }); return [pscustomobject]$out }
     $b = & $pass
     if ($b -is [string]) { $out.Reason = $b; $out.Status = $(if ($b -ceq 'REF_STORE_UNSUPPORTED') { 'UNSUPPORTED' } elseif ($b -ceq 'REF_STORE_LIMIT') { 'PARTIAL' } else { 'UNSTABLE' }); if ($out.Status -ceq 'UNSTABLE') { $out.Reason = 'REF_STORE_UNSTABLE' }; return [pscustomobject]$out }
-    $sig = { param($x) (@($x.Refs.GetEnumerator() | ForEach-Object { $_.Key + '=' + $_.Value }) + @($x.Peeled)) -join "`n" }
+    $sig = { param($x) (@($x.Refs.GetEnumerator() | ForEach-Object { $_.Key + '=' + $_.Value }) + @($x.Peeled) + @($x.Symbolic | ForEach-Object { 'sym:' + $_ })) -join "`n" }
     if ((& $sig $a) -cne (& $sig $b)) { $out.Status = 'UNSTABLE'; $out.Reason = 'REF_STORE_UNSTABLE'; return [pscustomobject]$out }
     foreach ($kv in $a.Refs.GetEnumerator()) {
         if ($kv.Key -clike 'refs/heads/*') { $out.Local[$kv.Key.Substring(11)] = $kv.Value }
@@ -2220,6 +2236,7 @@ function Get-AtmGitRefStore {
         elseif ($kv.Key -clike 'refs/remotes/*') { $out.Remote[$kv.Value] = $true; $out.RemoteCount++ }
     }
     foreach ($pe in $a.Peeled) { $i = $pe.IndexOf('|'); $id = $pe.Substring($i + 1); if ($pe -clike 'refs/tags/*') { $out.Tags[$id] = $true } else { $out.Remote[$id] = $true } }
+    $out.SymbolicBranches = @($a.Symbolic)
     $out.Status = 'COMPLETE'; $out.Reason = $null
     return [pscustomobject]$out
 }
@@ -2255,9 +2272,29 @@ function Get-AtmWorktreePublication {
     }
     $tip = $null
     if ($h.Kind -ceq 'BRANCH') {
-        if ($RefStore.Local.ContainsKey($h.Value)) { $tip = $RefStore.Local[$h.Value]; & $add 'HEAD_STATE' 'BRANCH' }
-        else { & $add 'HEAD_STATE' 'UNBORN' }
-        & $add $(if (@($RefStore.Upstreams) -ccontains $h.Value) { 'UPSTREAM_CONFIGURED' } else { 'NO_UPSTREAM' }) $null
+        & $add 'HEAD_STATE' 'BRANCH'
+        if (-not $RefStore.Local.ContainsKey($h.Value)) {
+            # No tip for HEAD's branch: unborn, moved after the reference read (HEAD is read later, per worktree), or a
+            # symbolic branch. They cannot be told apart, so nothing is claimed (never "no commits").
+            & $add 'PUBLICATION_NOT_OBSERVED' 'HEAD_BRANCH_NOT_FOUND'
+            $res.Coverage = [pscustomobject]@{ Status = 'PARTIAL'; Reason = 'HEAD_BRANCH_NOT_FOUND' }
+            $res.Evidence = $ev.ToArray(); return [pscustomobject]$res
+        }
+        $tip = $RefStore.Local[$h.Value]
+        $up = (@($RefStore.Upstreams) -ccontains $h.Value)
+        $upKnown = $true
+        if (-not $up -and $RefStore.WorktreeConfig) {
+            # extensions.worktreeConfig: the upstream may be set in this worktree's config.worktree.
+            $upKnown = $false
+            $wc = Resolve-AtmGitReferencedPath -Value 'config.worktree' -BaseDir $GitDir
+            if ($wc.Status -eq 'MISSING') { $upKnown = $true }
+            elseif ($wc.Status -eq 'OK') {
+                $wt = Read-AtmGitSmallFile -Path $wc.Path -MaxBytes $script:AtmGitConfigMaxBytes
+                $wp = $(if ($null -ne $wt) { Read-AtmGitConfigText -Text $wt } else { $null })
+                if ($null -ne $wp -and -not $wp.Error) { $upKnown = $true; $up = (@($wp.Entries | Where-Object { $_.Section -eq 'branch' -and $_.Key -eq 'merge' -and $_.Value -and [string]::Equals($_.Subsection, $h.Value, [StringComparison]::Ordinal) }).Count -gt 0) }
+            }
+        }
+        if ($up) { & $add 'UPSTREAM_CONFIGURED' $null } elseif ($upKnown) { & $add 'NO_UPSTREAM' $null }
     } else { $tip = $h.Value; & $add 'HEAD_STATE' 'DETACHED' }
     $res.Coverage = [pscustomobject]@{ Status = 'COMPLETE'; Reason = $null }
     if ($null -ne $tip) {
@@ -2521,7 +2558,8 @@ function Get-AtmWorktreeDiscovery {
                 $lw = Get-AtmWorktreeLocalWork -WorkTree $w.Dir -Git $(if ($gitUsable) { $Git } else { $null }) -Stash $stash -Deadline $Deadline -Preflight $wpf
                 foreach ($e in $lw.Evidence) { $ev.Add($e) }
                 if ($wpf.Status -ceq 'OK') {
-                    $pub = Get-AtmWorktreePublication -GitDir $wpf.GitDir -RefStore $refStore -CommonDir $wpf.CommonDir
+                    $sameStore = [string]::Equals((Get-AtmNormalizedPath $wpf.CommonDir), (Get-AtmNormalizedPath $pf.CommonDir), [StringComparison]::OrdinalIgnoreCase)
+                    $pub = Get-AtmWorktreePublication -GitDir $wpf.GitDir -RefStore $(if ($sameStore) { $refStore } else { $null }) -CommonDir $wpf.CommonDir
                     foreach ($e in $pub.Evidence) { $ev.Add($e) }
                     $pubCount++
                     if ($script:AtmConclusiveCoverage -ccontains $pub.Coverage.Status) { $pubOk++ } else { $pubReasons.Add([string]$pub.Coverage.Reason) }
@@ -2551,7 +2589,7 @@ function Get-AtmWorktreeDiscovery {
     $stCov = $(if ($lwCount -eq 0) { New-AtmCoverage -Collector 'local-work-status' -Status 'NOT_OBSERVABLE' -Reasons @('STATUS_NOT_RUN') -ElevationWouldHelp 'NO' }
         elseif ($lwUnavailable -eq $lwCount) { New-AtmCoverage -Collector 'local-work-status' -Status 'UNAVAILABLE' -Reasons @(Get-AtmSortedCodes $lwStatus) -ElevationWouldHelp 'NO' -Observed 0 -Expected $lwCount }
         else { New-AtmCoverage -Collector 'local-work-status' -Status 'PARTIAL' -Reasons @(Get-AtmSortedCodes $lwStatus) -ElevationWouldHelp 'UNKNOWN' -Observed $lwStatusOk -Expected $lwCount })
-    $pbCov = $(if ($pubCount -eq 0) { New-AtmCoverage -Collector 'publication-files' -Status 'NOT_OBSERVABLE' -Reasons @('REF_STORE_FAILED') -ElevationWouldHelp 'NO' }
+    $pbCov = $(if ($pubCount -eq 0) { New-AtmCoverage -Collector 'publication-files' -Status 'NOT_OBSERVABLE' -Reasons @('NO_WORKTREE_OBSERVED') -ElevationWouldHelp 'NO' }
         elseif ($pubReasons.Count -eq 0) { New-AtmCoverage -Collector 'publication-files' -Status 'COMPLETE' -ElevationWouldHelp 'NO' -Observed $pubOk -Expected $pubCount }
         else { New-AtmCoverage -Collector 'publication-files' -Status 'PARTIAL' -Reasons @(Get-AtmSortedCodes $pubReasons) -ElevationWouldHelp 'UNKNOWN' -Observed $pubOk -Expected $pubCount })
     $fiCov = $(if ($lwCount -eq 0 -and $lwFiles.Count -eq 0) { New-AtmCoverage -Collector 'local-work-files' -Status 'NOT_OBSERVABLE' -Reasons @('FILES_INCOMPLETE') -ElevationWouldHelp 'NO' }

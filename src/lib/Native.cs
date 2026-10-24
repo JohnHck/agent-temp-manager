@@ -629,6 +629,24 @@ namespace AgentTempManager
     // or directory a Git call reads, held for the whole call. While it is held no process can change, replace, rename
     // or delete that item, or rename a directory above it. A file that does not exist cannot be pinned (creation is not
     // prevented). The item itself must not be a reparse point (it is opened without following one).
+    // Shared reads (P3-D): a file opened for reading that shares read, write AND delete with everyone (never blocks
+    // another process) and is opened WITHOUT following a reparse point; a reparse point or a directory is refused on the
+    // handle itself, so a swap after the path check cannot redirect the read.
+    public static class AtmSharedRead
+    {
+        public static SafeFileHandle Open(string path, out string error)
+        {
+            error = null;
+            SafeFileHandle h = AtmNative.CreateFileW(path, 0x80000000, 0x00000007, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero);
+            if (h.IsInvalid) { int e = Marshal.GetLastWin32Error(); error = (e == 2 || e == 3) ? "NOT_FOUND" : ("WIN32_" + e); h.Dispose(); return null; }
+            uint attrs = AtmReadPin.Attributes(h);
+            if (attrs == 0xFFFFFFFF) { error = "WIN32_" + Marshal.GetLastWin32Error(); h.Dispose(); return null; }
+            if ((attrs & 0x400) != 0) { error = "REPARSE"; h.Dispose(); return null; }
+            if ((attrs & 0x10) != 0) { error = "DIRECTORY"; h.Dispose(); return null; }
+            return h;
+        }
+    }
+
     public static class AtmReadPin
     {
         [StructLayout(LayoutKind.Sequential)]
@@ -663,10 +681,18 @@ namespace AgentTempManager
                 h.Dispose();
                 return null;
             }
-            ByHandleFileInformation info;
-            if (!GetFileInformationByHandle(h, out info)) { error = "WIN32_" + Marshal.GetLastWin32Error(); h.Dispose(); return null; }
-            if ((info.FileAttributes & 0x400) != 0) { error = "REPARSE"; h.Dispose(); return null; }
+            uint attrs = Attributes(h);
+            if (attrs == 0xFFFFFFFF) { error = "WIN32_" + Marshal.GetLastWin32Error(); h.Dispose(); return null; }
+            if ((attrs & 0x400) != 0) { error = "REPARSE"; h.Dispose(); return null; }
             return h;
+        }
+
+        // File attributes read from an open handle (0xFFFFFFFF on failure).
+        internal static uint Attributes(SafeFileHandle h)
+        {
+            ByHandleFileInformation info;
+            if (!GetFileInformationByHandle(h, out info)) return 0xFFFFFFFF;
+            return info.FileAttributes;
         }
     }
 
