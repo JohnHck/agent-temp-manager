@@ -354,6 +354,7 @@ function Show-AtmDiagnose {
 
     Show-AtmDiagnoseRuntime -Result $r
     Show-AtmDiagnoseWorktrees -Result $r
+    Show-AtmDiagnoseHandles -Result $r
 
     Write-AtmHeader (Get-AtmText 'diag.summaryTitle')
     Write-Host ('  ' + (Get-AtmText 'diag.coverageComplete' (Get-AtmYesNo ([bool]$r.CoverageComplete) -Upper))) -ForegroundColor $(if ($r.CoverageComplete) { 'Green' } else { 'Yellow' })
@@ -471,6 +472,22 @@ function Show-AtmDiagnoseRuntime {
     }
     Write-Host ('  ' + (Get-AtmText 'diag.runtimeScope'))
     Write-Host ('  ' + (Get-AtmText 'diag.runtimeNoDelete')) -ForegroundColor Green
+}
+
+function Show-AtmDiagnoseHandles {
+    # Open files (D-2) and working directories (D-1, deferred): counts and codes only, never a path or process name.
+    param($Result)
+    $r = $Result
+    $cov = @($r.Coverage | Where-Object { $_.Collector -ceq 'handles' -or $_.Collector -ceq 'process-cwd' })
+    if ($cov.Count -eq 0) { return }
+    Write-AtmHeader (Get-AtmText 'diag.hTitle')
+    $items = @($r.Findings | Where-Object { $_.Kind -ceq 'TempPartition' -or $_.Kind -ceq 'Worktree' })
+    $held = @($items | Where-Object { @($_.Evidence | Where-Object { $_.Code -ceq 'FILE_HELD_OPEN' -or $_.Code -ceq 'FILE_HELD_OPEN_UNVERIFIED' }).Count -gt 0 })
+    Write-Host ('  ' + (Get-AtmText 'diag.hLine' $held.Count $items.Count))
+    foreach ($c in @($cov | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status })) { Write-Host ('  ' + (Get-AtmText 'diag.runtimeCoverageLine' $c.Collector $c.Status (@($c.Reasons) -join ', '))) -ForegroundColor Yellow }
+    Write-Host ('  ' + (Get-AtmText 'diag.hSample'))
+    Write-Host ('  ' + (Get-AtmText 'diag.hCwd'))
+    Write-Host ('  ' + (Get-AtmText 'diag.hState')) -ForegroundColor Green
 }
 
 function Show-AtmDiagnoseWorktrees {

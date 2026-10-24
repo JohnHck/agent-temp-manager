@@ -10,6 +10,8 @@
 //    terminates that job; it never opens, signals or terminates any other process.
 //  * Read pins (P3-C0) open files and directories for reading only, without write or delete sharing, and never
 //    write; they refuse reparse points.
+//  * Restart Manager (D-2, P1-C) is used only to list the processes that hold given files open: a session is started,
+//    the files are registered, the list is read and the session is always ended. Nothing is shut down or restarted.
 //  * The deleter never forces: no attribute changes, no ACL changes, no
 //    ownership changes, no privileges. It pins ancestors and the tree by handle
 //    (no FILE_SHARE_DELETE) so names cannot be redirected, deletes by handle, aborts
@@ -753,6 +755,73 @@ namespace AgentTempManager
             ByHandleFileInformation info;
             if (!GetFileInformationByHandle(h, out info)) return 0xFFFFFFFF;
             return info.FileAttributes;
+        }
+    }
+
+    // D-2 (docs/adr/ADR-0004, P1-C): which processes hold given files open, through Restart Manager. Only
+    // RmStartSession, RmRegisterResources, RmGetList and RmEndSession are used; the session is ended in every case.
+    // Returns a status (OK, PARTIAL when more processes hold the files than -maxProcesses, or FAILED_<code>) and, per
+    // holder, "pid|startTicksUtc" (the process start time Restart Manager reports, 100 ns). Application and service
+    // names are not returned. RmGetList has no cancellation: callers keep the number of files small.
+    public static class AtmRestartManager
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        // FILETIME is two DWORDs (4-byte aligned): a long here would add padding and shift every field.
+        private struct RmUniqueProcess { public int ProcessId; public uint StartLow; public uint StartHigh; }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct RmProcessInfo
+        {
+            public RmUniqueProcess Process;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string AppName;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)] public string ServiceShortName;
+            public int ApplicationType;
+            public uint AppStatus;
+            public uint TSSessionId;
+            [MarshalAs(UnmanagedType.Bool)] public bool Restartable;
+        }
+
+        [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+        private static extern int RmStartSession(out uint sessionHandle, int flags, StringBuilder sessionKey);
+        [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+        private static extern int RmRegisterResources(uint sessionHandle, uint nFiles, string[] files, uint nApplications, IntPtr applications, uint nServices, IntPtr services);
+        [DllImport("rstrtmgr.dll")]
+        private static extern int RmGetList(uint sessionHandle, out uint needed, ref uint count, [In, Out] RmProcessInfo[] info, out uint rebootReasons);
+        [DllImport("rstrtmgr.dll")]
+        private static extern int RmEndSession(uint sessionHandle);
+
+        public static string Query(string[] files, int maxProcesses, out string[] holders)
+        {
+            holders = new string[0];
+            if (files == null || files.Length == 0) return "OK";
+            if (maxProcesses < 1) maxProcesses = 1;
+            uint session;
+            int rc = RmStartSession(out session, 0, new StringBuilder(64));
+            if (rc != 0) return "FAILED_START_" + rc;
+            try
+            {
+                rc = RmRegisterResources(session, (uint)files.Length, files, 0, IntPtr.Zero, 0, IntPtr.Zero);
+                if (rc != 0) return "FAILED_REGISTER_" + rc;
+                uint needed, reasons;
+                uint count = (uint)maxProcesses;
+                RmProcessInfo[] info = new RmProcessInfo[maxProcesses];
+                rc = RmGetList(session, out needed, ref count, info, out reasons);
+                bool partial = false;
+                if (rc == 234) { partial = true; count = 0; } // ERROR_MORE_DATA: more holders than the cap
+                else if (rc != 0) return "FAILED_LIST_" + rc;
+                List<string> list = new List<string>();
+                for (int i = 0; i < count && i < info.Length; i++)
+                {
+                    long ticks = 0;
+                    long ft = ((long)info[i].Process.StartHigh << 32) | info[i].Process.StartLow;
+                    try { ticks = DateTime.FromFileTimeUtc(ft).Ticks; } catch (ArgumentOutOfRangeException) { ticks = 0; }
+                    list.Add(info[i].Process.ProcessId + "|" + ticks);
+                    info[i].AppName = null; info[i].ServiceShortName = null;
+                }
+                holders = list.ToArray();
+                return partial ? "PARTIAL" : "OK";
+            }
+            finally { RmEndSession(session); }
         }
     }
 
