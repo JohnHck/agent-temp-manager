@@ -4549,6 +4549,198 @@ try {
         foreach ($w in @('Cobertura', 'somente leitura', 'Coletor', 'ACHADOS', 'RESUMO')) { Assert-True (-not $txt.Contains($w)) "en-US sem '$w'" }
         Assert-True ($txt.Contains('COVERAGE BY COLLECTOR') -and $txt.Contains('RUNTIME_NOT_DIAGNOSED')) 'en-US e codigos'
     }
+    # ------------------------------------------------------------------ Git runner (P3-A, ADR-0006, D-4)
+    # Fixtures are built with raw Git in the sandbox only: isolated configuration (no global or system file), hooks and
+    # signing off, discovery bounded at the fixture root, and the top level checked before any change. The runner
+    # under test never gets anything but read-only, allow-listed commands.
+    $gitRoot = Join-Path $sandbox 'git'
+    [void][IO.Directory]::CreateDirectory($gitRoot)
+    $gitCfg = Join-Path $gitRoot 'gitconfig'
+    [IO.File]::WriteAllText($gitCfg, '')
+    $gitTE = @{ GIT_CONFIG_GLOBAL = $gitCfg; GIT_CONFIG_NOSYSTEM = '1' }
+    $testGit = Resolve-AtmGitExecutable -TestEnvironment $gitTE
+    $gitSkip = { if ($testGit.Status -ne 'COMPLETE') { $script:caseSkipped = $true; $script:caseNote = "Git indisponivel: $($testGit.Reason)"; return $true }; return $false }
+    $gitFx = { param([string]$Dir, [string[]]$GitArgs, [string]$Expect)
+        $saved = @{}; foreach ($k in 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_CEILING_DIRECTORIES', 'GIT_DIR', 'GIT_WORK_TREE') { $saved[$k] = [Environment]::GetEnvironmentVariable($k) }
+        try {
+            $env:GIT_CONFIG_GLOBAL = $gitCfg; $env:GIT_CONFIG_NOSYSTEM = '1'; $env:GIT_CEILING_DIRECTORIES = $gitRoot; $env:GIT_DIR = $null; $env:GIT_WORK_TREE = $null
+            if ($Expect) {
+                $top = (& $testGit.Path -C $Dir rev-parse --show-toplevel 2>$null | Out-String).Trim().Replace('/', '\')
+                if (-not [string]::Equals((Get-AtmNormalizedPath $top), (Get-AtmNormalizedPath $Expect), [StringComparison]::OrdinalIgnoreCase)) { throw "fixture fora do sandbox: $top" }
+            }
+            $null = & $testGit.Path -C $Dir -c core.hooksPath=NUL -c commit.gpgsign=false -c user.name=atm -c user.email=atm@fixture @GitArgs 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "git de fixture falhou: $($GitArgs[0])" }
+        } finally { foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) } }
+    }
+    # Listing of a tree: name, size, last-write time read from the item itself (an enumeration can return stale directory
+    # times) and SHA-256 of every file, .git and its index included.
+    $gitSnap = { param([string]$Root)
+        @(Get-ChildItem -LiteralPath $Root -Recurse -Force | Sort-Object FullName | ForEach-Object {
+                $f = $_.FullName
+                if ($_.PSIsContainer) { '{0}|d|{1}' -f $f.Substring($Root.Length), [IO.Directory]::GetLastWriteTimeUtc($f).Ticks }
+                else { '{0}|{1}|{2}|{3}' -f $f.Substring($Root.Length), (New-Object IO.FileInfo($f)).Length, [IO.File]::GetLastWriteTimeUtc($f).Ticks, (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash } }) -join "`n" }
+    $gitNewFixture = { param([string]$Name)
+        $base = Join-Path $gitRoot $Name
+        $repo = Join-Path $base 'repo'; $wt = Join-Path $base 'wt'
+        [void][IO.Directory]::CreateDirectory($repo)
+        & $gitFx $repo @('init', '-q', '-b', 'main') $null
+        & $gitFx $repo @('rev-parse', '--git-dir') $repo
+        [IO.File]::WriteAllText((Join-Path $repo 'a.txt'), "a`n"); [void][IO.Directory]::CreateDirectory((Join-Path $repo 'sub')); [IO.File]::WriteAllText((Join-Path $repo 'sub\b.txt'), "b`n")
+        & $gitFx $repo @('add', 'a.txt', 'sub/b.txt') $repo
+        & $gitFx $repo @('commit', '-q', '-m', 'one') $repo
+        & $gitFx $repo @('worktree', 'add', '-q', $wt, '-b', 'wt') $repo
+        [IO.File]::WriteAllText((Join-Path $repo 'a.txt'), "a2`n")
+        [IO.File]::WriteAllText((Join-Path $repo 'c.txt'), "c`n"); & $gitFx $repo @('add', 'c.txt') $repo
+        [IO.File]::WriteAllText((Join-Path $repo 'u.txt'), "u`n"); [IO.File]::WriteAllText((Join-Path $wt 'w.txt'), "w`n")
+        [void][IO.Directory]::CreateDirectory((Join-Path $repo 'plain\deeper'))
+        return [pscustomobject]@{ Base = $base; Repo = $repo; Worktree = $wt } }
+    $gitAllowed = @(
+        @('--version'), @('rev-parse', '--show-toplevel', '--git-dir', '--git-common-dir', '--is-inside-work-tree'), @('worktree', 'list', '--porcelain', '-z'),
+        @('status', '--porcelain=v2', '-z', '--branch', '--untracked-files=all'), @('status', '--porcelain=v2', '-z', '--ignored=matching', '--show-stash'),
+        @('for-each-ref', '--format=%(refname)%00%(objectname)', 'refs/heads', 'refs/remotes'), @('rev-list', '--count', 'HEAD', '--not', '--remotes'),
+        @('config', '--name-only', '--get-regexp', '^core\.'), @('cat-file', '-e', 'HEAD'))
+    Test-Case 'Git' 'Executor Git (P3-A): git.exe so de entradas absolutas do PATH; relativo, .cmd e ausente nunca executados; local gravavel por usuarios recusado quando elevado' {
+        if (& $gitSkip) { return }
+        Assert-True ([IO.Path]::IsPathRooted($testGit.Path) -and $testGit.Path -match '\\git\.exe$' -and $null -ne $testGit.Version) "git resolvido: $($testGit.Version)"
+        if ($env:GITHUB_ACTIONS -eq 'true') { Assert-Eq (Resolve-AtmGitExecutable -TestEnvironment $gitTE).Status 'COMPLETE' 'CI (elevado): local do Git confiavel pela regra do instalador' }
+        $script:AtmGitInvocationLog = New-Object System.Collections.Generic.List[object]
+        try {
+            $rel = Join-Path $gitRoot 'rel'; [void][IO.Directory]::CreateDirectory($rel); [IO.File]::WriteAllText((Join-Path $rel 'git.exe'), 'not a program')
+            $cmdDir = Join-Path $gitRoot 'cmdonly'; [void][IO.Directory]::CreateDirectory($cmdDir); [IO.File]::WriteAllText((Join-Path $cmdDir 'git.cmd'), '@echo planted')
+            $r = Resolve-AtmGitExecutable -PathVariable ('rel;.\rel;' + [IO.Path]::GetFileName($rel) + ';"' + $cmdDir + '";' + (Join-Path $gitRoot 'missing'))
+            Assert-True ($r.Status -eq 'UNAVAILABLE' -and $r.Reason -eq 'GIT_NOT_FOUND' -and $null -eq $r.Path) "relativo, .cmd e ausente: $($r.Reason)"
+            Assert-Eq $script:AtmGitInvocationLog.Count 0 'nada executado'
+            $u = Invoke-AtmGitCommand -Git $null -Arguments @('--version') -WorkingDirectory $gitRoot
+            Assert-True ($u.Status -eq 'UNAVAILABLE' -and $u.Reason -eq 'GIT_NOT_FOUND' -and $script:AtmGitInvocationLog.Count -eq 0) 'sem Git: UNAVAILABLE, nada executado'
+            $open = Join-Path $gitRoot 'open'; [void][IO.Directory]::CreateDirectory($open); [IO.File]::WriteAllText((Join-Path $open 'git.exe'), 'not a program')
+            $null = & icacls.exe $open /grant '*S-1-5-32-545:(OI)(CI)(M)' 2>&1
+            $r = Resolve-AtmGitExecutable -PathVariable $open -Elevated $true
+            Assert-True ($r.Status -eq 'UNAVAILABLE' -and $r.Reason -eq 'GIT_LOCATION_NOT_TRUSTED' -and $script:AtmGitInvocationLog.Count -eq 0) "elevado e local gravavel por Users: $($r.Reason), nada executado"
+            $r = Resolve-AtmGitExecutable -PathVariable $open -Elevated $false
+            Assert-True ($r.Status -eq 'UNAVAILABLE' -and $r.Reason -eq 'GIT_VERSION_UNREADABLE') "nao elevado, arquivo que nao e programa: $($r.Reason)"
+            Assert-True ($script:AtmGitInvocationLog.Count -eq 1 -and ($script:AtmGitInvocationLog[0].Arguments -join ' ') -match ' --version$') 'so o --version foi tentado'
+        } finally { $script:AtmGitInvocationLog = $null }
+    }
+    Test-Case 'Git' 'Executor Git (P3-A): allow-list e diretorio de trabalho recusados antes de qualquer processo; formas permitidas aceitas' {
+        foreach ($a in $gitAllowed) { Assert-True ($null -eq (Test-AtmGitArguments -Arguments $a)) "permitido: $($a -join ' ')" }
+        $refused = @(
+            @('fetch'), @('pull'), @('push'), @('prune'), @('gc'), @('maintenance', 'run'), @('repack'), @('checkout', 'main'), @('switch', 'main'), @('restore', 'a.txt'), @('reset', '--hard'),
+            @('clean', '-fdx'), @('stash'), @('worktree', 'add', 'x'), @('worktree', 'remove', 'x'), @('worktree', 'prune'), @('worktree', 'move', 'a', 'b'), @('worktree', 'repair'), @('worktree', 'lock', 'x'),
+            @('update-index', '--refresh'), @('reflog', 'expire'), @('commit-graph', 'write'), @('-c', 'core.fsmonitor=x', 'status', '--porcelain=v2', '-z'), @('--exec-path=x', '--version'), @('-C', 'x', 'status'),
+            @('status'), @('status', '--porcelain=v2'), @('status', '--porcelain=v2', '-z', '--untracked-cache'), @('config', '--get', 'user.name'), @('config', '--name-only', '--get-regexp'),
+            @('config', '--list'), @('rev-parse', '--git-path', 'x'), @('rev-parse'), @('rev-list', '--objects', 'HEAD'), @('cat-file', '-p', 'HEAD'), @('cat-file', '-e', '^HEAD'),
+            @('for-each-ref', '--format=%(refname) x'), @('rev-parse', 'HEAD extra'), @('rev-parse', 'HEAD"'), @('--version', 'x'), @())
+        $script:AtmGitInvocationLog = New-Object System.Collections.Generic.List[object]
+        try {
+            foreach ($a in $refused) {
+                $code = Test-AtmGitArguments -Arguments $a
+                Assert-True ($code -eq 'GIT_VERB_NOT_ALLOWED' -or $code -eq 'GIT_ARGUMENT_REFUSED') "recusado: [$($a -join ' ')] -> $code"
+                $r = Invoke-AtmGitCommand -Git ([pscustomobject]@{ Path = 'C:\nao\existe\git.exe' }) -Arguments $a -WorkingDirectory $gitRoot
+                Assert-True ($r.Status -eq 'REFUSED' -and $r.Reason -eq $code) "runner recusa: [$($a -join ' ')]"
+            }
+            foreach ($wd in @('relativo', 'C:', (Join-Path $gitRoot 'nao-existe'), $gitCfg, '')) {
+                $r = Invoke-AtmGitCommand -Git ([pscustomobject]@{ Path = 'C:\nao\existe\git.exe' }) -Arguments @('--version') -WorkingDirectory $wd
+                Assert-True ($r.Status -eq 'REFUSED' -and $r.Reason -eq 'GIT_WORKDIR_INVALID') "diretorio de trabalho invalido recusado: '$wd'"
+            }
+            Assert-Eq $script:AtmGitInvocationLog.Count 0 'nenhum processo iniciado por um pedido recusado'
+        } finally { $script:AtmGitInvocationLog = $null }
+    }
+    Test-Case 'Git' 'Executor Git (P3-A): somente leitura em repositorio e worktree descartaveis (nomes, tamanhos, horarios, SHA-256, .git\index, diretorios); opcoes globais; ambiente sanitizado; teto de descoberta com caminho curto' {
+        if (& $gitSkip) { return }
+        $fx = & $gitNewFixture 'ro'
+        # A repository-configured fsmonitor hook that would leave a marker if Git ran it.
+        $marker = Join-Path $fx.Base 'fsmonitor-ran.txt'
+        $hook = Join-Path $fx.Base 'fsmon.sh'
+        [IO.File]::WriteAllText($hook, "#!/bin/sh`necho ran > '" + $marker.Replace('\', '/') + "'`n")
+        & $gitFx $fx.Repo @('config', 'core.fsmonitor', $hook.Replace('\', '/')) $fx.Repo
+        Start-Sleep -Milliseconds 1100
+        $before = & $gitSnap $fx.Base
+        $script:AtmGitInvocationLog = New-Object System.Collections.Generic.List[object]
+        try {
+            foreach ($a in $gitAllowed) {
+                foreach ($wd in @($fx.Repo, $fx.Worktree)) {
+                    $r = Invoke-AtmGitCommand -Git $testGit -Arguments $a -WorkingDirectory $wd -TestEnvironment $gitTE
+                    Assert-True ($r.Status -eq 'COMPLETE' -and $r.ExitCode -eq 0) "[$($a -join ' ')] em $(Split-Path -Leaf $wd): $($r.Status) $($r.Reason)"
+                }
+            }
+            $st = Invoke-AtmGitCommand -Git $testGit -Arguments @('status', '--porcelain=v2', '-z', '--untracked-files=all') -WorkingDirectory $fx.Repo -TestEnvironment $gitTE
+            $recs = @($st.Output.Split([char]0) | Where-Object { $_ })
+            Assert-True (@($recs | Where-Object { $_ -like '1 .M *a.txt' }).Count -eq 1 -and @($recs | Where-Object { $_ -like '1 A. *c.txt' }).Count -eq 1 -and @($recs | Where-Object { $_ -ceq '? u.txt' }).Count -eq 1) "status v2 le a fixture: $(@($recs) -join ' | ')"
+            $wl = Invoke-AtmGitCommand -Git $testGit -Arguments @('worktree', 'list', '--porcelain', '-z') -WorkingDirectory $fx.Repo -TestEnvironment $gitTE
+            Assert-Eq @($wl.Output.Split([char]0) | Where-Object { $_ -like 'worktree *' }).Count 2 'worktree list: repositorio e worktree'
+            Start-Sleep -Milliseconds 300
+            $after = & $gitSnap $fx.Base
+            $diff = @(Compare-Object ($before -split "`n") ($after -split "`n") | ForEach-Object { $_.SideIndicator + ($_.InputObject -replace '\|[0-9A-F]{64}$', '') })
+            Assert-Eq $diff.Count 0 ('nada alterado no repositorio nem na worktree: ' + ($diff -join ' ; '))
+            Assert-True (-not (Test-Path -LiteralPath $marker)) 'hook fsmonitor do repositorio nao executado (core.fsmonitor=false)'
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $fx.Repo '.git\index.lock'))) 'nenhum index.lock'
+            foreach ($v in $script:AtmGitInvocationLog) {
+                $args0 = [string[]]$v.Arguments
+                Assert-Eq (($args0 | Select-Object -First $script:AtmGitGlobalArguments.Count) -join ' ') ($script:AtmGitGlobalArguments -join ' ') 'opcoes globais em toda chamada'
+                Assert-True ($null -eq (Test-AtmGitArguments -Arguments @($args0 | Select-Object -Skip $script:AtmGitGlobalArguments.Count))) "vetor registrado permitido: $($args0 -join ' ')"
+            }
+            Assert-True (($script:AtmGitGlobalArguments -join ' ') -match '--no-optional-locks' -and ($script:AtmGitGlobalArguments -join ' ') -match 'protocol\.allow=never' -and ($script:AtmGitGlobalArguments -join ' ') -match 'core\.fsmonitor=false') 'sem locks opcionais, sem rede, sem fsmonitor'
+        } finally { $script:AtmGitInvocationLog = $null }
+        # Environment: inherited GIT_* never reach the child; locale C; ceiling.
+        $saved = @{}; foreach ($k in 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0') { $saved[$k] = [Environment]::GetEnvironmentVariable($k) }
+        try {
+            $env:GIT_DIR = (Join-Path $gitRoot 'bogus'); $env:GIT_WORK_TREE = $gitRoot; $env:GIT_INDEX_FILE = (Join-Path $gitRoot 'bogus-index'); $env:GIT_CONFIG_PARAMETERS = "'core.bare=true'"
+            $env:GIT_CONFIG_COUNT = '1'; $env:GIT_CONFIG_KEY_0 = 'core.worktree'; $env:GIT_CONFIG_VALUE_0 = $gitRoot
+            $envList = Get-AtmGitEnvironment -Ceiling 'C:\x'
+            Assert-True (@($envList | Where-Object { $_ -match '^GIT_(DIR|WORK_TREE|INDEX_FILE|CONFIG_PARAMETERS|CONFIG_COUNT|CONFIG_KEY_0|CONFIG_VALUE_0)=' }).Count -eq 0) 'GIT_* herdados removidos'
+            foreach ($kv in @('GIT_OPTIONAL_LOCKS=0', 'GIT_TERMINAL_PROMPT=0', 'GCM_INTERACTIVE=never', 'GIT_ASKPASS=', 'SSH_ASKPASS=', 'GIT_NO_LAZY_FETCH=1', 'GIT_DISCOVERY_ACROSS_FILESYSTEM=0', 'GIT_CEILING_DIRECTORIES=C:\x', 'LC_ALL=C', 'LANG=C')) { Assert-True ($envList -contains $kv) "ambiente: $kv" }
+            $r = Invoke-AtmGitCommand -Git $testGit -Arguments @('rev-parse', '--show-toplevel') -WorkingDirectory $fx.Repo -TestEnvironment $gitTE
+            Assert-True ($r.Status -eq 'COMPLETE' -and [string]::Equals((Get-AtmNormalizedPath $r.Output.Trim().Replace('/', '\')), (Get-AtmNormalizedPath $fx.Repo), [StringComparison]::OrdinalIgnoreCase)) "variaveis GIT_* do chamador ignoradas: $($r.Status)"
+        } finally { foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) } }
+        $threw = $false; try { $null = Get-AtmGitEnvironment -Ceiling 'C:\x' -TestEnvironment @{ GIT_DIR = 'x' } } catch { $threw = $true }
+        Assert-True $threw 'ambiente de teste restrito a GIT_CONFIG_GLOBAL, GIT_CONFIG_NOSYSTEM e HOME'
+        # Ceiling: a plain directory inside the repository is not attributed to it, also through its 8.3 name.
+        $plain = Join-Path $fx.Repo 'plain\deeper'
+        foreach ($wd in @($plain, [AgentTempManager.AtmNative]::GetShortPath($plain))) {
+            $r = Invoke-AtmGitCommand -Git $testGit -Arguments @('rev-parse', '--show-toplevel') -WorkingDirectory $wd -TestEnvironment $gitTE
+            Assert-True ($r.Status -eq 'FAILED' -and $r.Reason -eq 'GIT_NOT_A_REPOSITORY' -and $null -eq $r.Output) "diretorio comum dentro do repositorio nao atribuido a ele ($wd): $($r.Reason)"
+        }
+        # Control for the fsmonitor marker (raw Git, after the read-only checks): whether this Git runs the hook at all.
+        & $gitFx $fx.Repo @('status', '--porcelain') $fx.Repo
+        $script:caseNote = $(if (Test-Path -LiteralPath $marker) { 'controle: o Git sem as opcoes do executor roda o hook fsmonitor' } else { 'controle: este Git nao rodou o hook fsmonitor (teste do marcador sem contraprova)' })
+    }
+    Test-Case 'Git' 'Executor Git (P3-A, D-4): prazo encerra so o job proprio (filho e neto), sem index.lock e sem afetar processo preexistente; limites de memoria, processos e saida' {
+        if (& $gitSkip) { return }
+        $fx = & $gitNewFixture 'to'
+        Start-Sleep -Milliseconds 1100
+        $before = & $gitSnap $fx.Base
+        $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        # A process outside the job, started before the runs; it ends by itself.
+        $sentinel = [Diagnostics.Process]::Start((New-Object Diagnostics.ProcessStartInfo($ps, '-NoProfile -Command Start-Sleep 40') -Property @{ UseShellExecute = $false; CreateNoWindow = $true }))
+        $sentStart = $sentinel.StartTime
+        $r = Invoke-AtmGitCommand -Git $testGit -Arguments @('status', '--porcelain=v2', '-z', '--untracked-files=all') -WorkingDirectory $fx.Repo -TimeoutMs 0 -TestEnvironment $gitTE
+        Assert-True ($r.Status -eq 'TIMEOUT' -and $r.Reason -eq 'GIT_TIMEOUT' -and $null -eq $r.Output) "prazo 0: $($r.Status)"
+        Start-Sleep -Milliseconds 500
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $fx.Repo '.git\index.lock'))) 'nenhum index.lock depois do prazo'
+        $diff = @(Compare-Object ($before -split "`n") ((& $gitSnap $fx.Base) -split "`n"))
+        Assert-Eq $diff.Count 0 'repositorio intacto depois do encerramento por prazo'
+        # Child and grandchild in the job; the deadline terminates the job, both end; the sentinel lives.
+        $envList = Get-AtmGitEnvironment -Ceiling $gitRoot
+        $script = '$g = Start-Process -FilePath powershell.exe -ArgumentList ''-NoProfile -Command Start-Sleep 60'' -PassThru -WindowStyle Hidden; [Console]::Out.WriteLine(''{0}|{1}'' -f $g.Id, $g.StartTime.ToUniversalTime().Ticks); [Console]::Out.Flush(); Start-Sleep 60'
+        $j = Invoke-AtmBoundedProcess -Executable $ps -CommandLine ('"powershell.exe" -NoProfile -Command "' + $script.Replace('"', '\"') + '"') -WorkingDirectory $gitRoot -Environment $envList -TimeoutMs 6000 -MaxOutputBytes 4096 -JobMemoryBytes 1GB -ActiveProcessLimit 8
+        $parts = ([Text.Encoding]::ASCII.GetString($j.Output).Trim()).Split('|')
+        Assert-True ($j.Started -and $j.TimedOut -and $j.JobTerminated -and $j.TotalProcesses -ge 2 -and $parts.Count -eq 2) "job encerrado no prazo: total $($j.TotalProcesses), saida '$($parts -join '|')'"
+        Start-Sleep -Milliseconds 800
+        $gp = Get-Process -Id ([int]$parts[0]) -ErrorAction SilentlyContinue
+        Assert-True ($null -eq $gp -or $gp.StartTime.ToUniversalTime().Ticks -ne [long]$parts[1]) 'neto (dentro do job) encerrado'
+        $sp = Get-Process -Id $sentinel.Id -ErrorAction SilentlyContinue
+        Assert-True ($null -ne $sp -and $sp.StartTime -eq $sentStart) 'processo preexistente fora do job continua vivo'
+        # Limits read back from the job and their effect (non-Git children).
+        $j = Invoke-AtmBoundedProcess -Executable $ps -CommandLine '"powershell.exe" -NoProfile -Command "try { $p = Start-Process cmd.exe -ArgumentList ''/c exit 0'' -PassThru -Wait -WindowStyle Hidden; exit 0 } catch { exit 7 }"' -WorkingDirectory $gitRoot -Environment $envList -TimeoutMs 30000 -MaxOutputBytes 4096 -JobMemoryBytes 1GB -ActiveProcessLimit 1
+        Assert-True ($j.ActiveProcessLimit -eq 1 -and $j.ExitCode -eq 7) "limite de 1 processo: o filho nao cria outro (saida $($j.ExitCode))"
+        $j = Invoke-AtmBoundedProcess -Executable $ps -CommandLine '"powershell.exe" -NoProfile -Command "[Console]::Out.Write((''x'' * 300000))"' -WorkingDirectory $gitRoot -Environment $envList -TimeoutMs 30000 -MaxOutputBytes 65536 -JobMemoryBytes 1GB -ActiveProcessLimit 8
+        Assert-True ($j.ExitCode -eq 0 -and $j.Output.Length -eq 65536 -and $j.OutputTruncated) "saida limitada: $($j.Output.Length) bytes, truncada $($j.OutputTruncated)"
+        $j = Invoke-AtmBoundedProcess -Executable $ps -CommandLine '"powershell.exe" -NoProfile -Command "$b = New-Object byte[] 2000000000; exit 0"' -WorkingDirectory $gitRoot -Environment $envList -TimeoutMs 60000 -MaxOutputBytes 4096 -JobMemoryBytes 400MB -ActiveProcessLimit 8
+        Assert-True ($j.JobMemoryLimit -eq 400MB -and $j.ExitCode -ne 0) "limite de memoria do job (lido de volta $($j.JobMemoryLimit)): alocacao de 2 GB falha (saida $($j.ExitCode))"
+        $threw = $false; try { $null = Invoke-AtmBoundedProcess -Executable $ps -CommandLine 'x' -WorkingDirectory $gitRoot -Environment $envList -TimeoutMs 1000 -MaxOutputBytes 0 -JobMemoryBytes 1GB -ActiveProcessLimit 1 } catch { $threw = $true }
+        Assert-True $threw 'limites invalidos recusados'
+        $script:caseNote = "sentinela PID $($sentinel.Id) termina sozinho"
+    }
     Test-Case 'Camadas' 'Motor de diagnostico somente leitura, sem saida no terminal nem controle de processos/servicos/VMs; codigo nativo sem privilegios' {
         $lib = Join-Path $srcDir 'lib'
         $files = @(Get-ChildItem -LiteralPath $lib -File | Where-Object { $_.Name -eq 'Engine.Diagnose.ps1' -or $_.Name -like 'Diagnose.*.ps1' })
@@ -4562,10 +4754,20 @@ try {
             Assert-True (-not ($txt -match '(?i)\b(Start|Stop|Save|Suspend|Resume|Restart|Checkpoint|Remove|Set|New)-VM\b')) "$($f.Name) usa cmdlet de VM"
         }
         $native = [IO.File]::ReadAllText((Join-Path $lib 'Native.cs'))
-        foreach ($pat in @('SeDebugPrivilege', 'AdjustTokenPrivileges', 'RmShutdown', 'RmRestart', 'TerminateProcess', 'WriteProcessMemory')) { Assert-True (-not $native.Contains($pat)) "Native.cs contem '$pat'" }
+        foreach ($pat in @('SeDebugPrivilege', 'AdjustTokenPrivileges', 'RmShutdown', 'RmRestart', 'TerminateProcess', 'WriteProcessMemory', 'OpenProcess(', 'CreateRemoteThread', 'DebugActiveProcess', 'NtTerminate')) { Assert-True (-not $native.Contains($pat)) "Native.cs contem '$pat'" }
+        # D-4: the only termination is of the runner's own job, and only the runner creates processes.
+        $runner = $native.Substring($native.IndexOf('public static class AtmJobRunner'))
+        Assert-True ($native.IndexOf('TerminateJobObject') -gt $native.IndexOf('public static class AtmJobRunner') -and [regex]::Matches($native, 'CreateProcessW\(').Count -eq 2 -and $runner.Contains('PROC_THREAD_ATTRIBUTE_JOB_LIST') -and -not $runner.Contains('AssignProcessToJobObject')) 'Native.cs: processos so pelo executor, criados dentro do job; so o job proprio e encerrado'
+        $srcAll = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File -Filter '*.ps1' | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Text = [IO.File]::ReadAllText($_.FullName) } })
+        Assert-Eq (@($srcAll | Where-Object { $_.Text.Contains('[AgentTempManager.AtmJobRunner]') } | ForEach-Object { $_.Name }) -join ',') 'Engine.Diagnose.ps1' 'so o motor de diagnostico chama o executor nativo'
+        $diag = [IO.File]::ReadAllText((Join-Path $lib 'Engine.Diagnose.ps1'))
+        Assert-Eq ([regex]::Matches($diag, '\[AgentTempManager\.AtmJobRunner\]::Run').Count) 1 'um unico ponto de execucao (Invoke-AtmBoundedProcess)'
+        Assert-True (-not ($diag -match '(?m)^\s*&\s*(\$git|git(\.exe)?\b)')) 'o motor nunca chama git diretamente'
+        $inv = $diag.Substring($diag.IndexOf('function Invoke-AtmDiagnoseRun'))
+        Assert-True (-not $inv.Contains('Invoke-AtmGitCommand') -and -not $inv.Contains('Resolve-AtmGitExecutable')) 'P3-A: o executor ainda nao faz parte do diagnose (P3-B)'
         foreach ($f in @('Tui.ps1', 'Report.ps1')) {
             $txt = [IO.File]::ReadAllText((Join-Path $lib $f))
-            foreach ($pat in @('Get-AtmIdentityRaw', 'Get-AtmIdentityState', 'Get-AtmProviderRuntimeHints', 'Get-AtmInventoryCoverage', 'AtmToken]', 'Get-AtmProcessRaw', 'Get-AtmProcessCollection', 'Resolve-AtmProcessReference', 'Get-AtmProcessParentLink', 'Get-AtmProcessTree', 'Compare-AtmProcessCollections', 'Get-AtmSelfProcessKeys', 'Measure-AtmProcessCpu', 'Invoke-AtmProcessCpuSampling', 'Get-AtmProcessTreeResources')) { Assert-True (-not $txt.Contains($pat)) "$f chama coletor diretamente: $pat" }
+            foreach ($pat in @('Get-AtmIdentityRaw', 'Get-AtmIdentityState', 'Get-AtmProviderRuntimeHints', 'Get-AtmInventoryCoverage', 'AtmToken]', 'Get-AtmProcessRaw', 'Get-AtmProcessCollection', 'Resolve-AtmProcessReference', 'Get-AtmProcessParentLink', 'Get-AtmProcessTree', 'Compare-AtmProcessCollections', 'Get-AtmSelfProcessKeys', 'Measure-AtmProcessCpu', 'Invoke-AtmProcessCpuSampling', 'Get-AtmProcessTreeResources', 'Invoke-AtmGitCommand', 'Resolve-AtmGitExecutable', 'Invoke-AtmBoundedProcess', 'AtmJobRunner')) { Assert-True (-not $txt.Contains($pat)) "$f chama coletor diretamente: $pat" }
         }
     }
 

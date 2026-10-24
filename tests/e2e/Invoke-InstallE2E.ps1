@@ -98,6 +98,28 @@ Step 'install' {
     Assert (([Environment]::GetEnvironmentVariable('Path', 'Machine')) -match [regex]::Escape((Join-Path $installDir 'bin'))) 'PATH da maquina sem bin'
     'ok'
 }
+Step 'native-job-runner-runtime' {
+    # The installed native library on this architecture (ARM64 included), in a separate process: the job runner starts
+    # a child inside its job (exit code and output), and a deadline terminates the job.
+    $dll = Join-Path $installDir 'lib\AgentTempManager.Native.dll'
+    $probe = @'
+param($Dll)
+Add-Type -Path $Dll
+$e = @([Environment]::GetEnvironmentVariables().GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" })
+$cmd = Join-Path $env:SystemRoot 'System32\cmd.exe'
+$a = [AgentTempManager.AtmJobRunner]::Run($cmd, '"cmd.exe" /c echo atm-runner-ok', $env:SystemRoot, $e, 20000, 4096, 256MB, 4)
+$ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$b = [AgentTempManager.AtmJobRunner]::Run($ps, '"powershell.exe" -NoProfile -Command Start-Sleep 60', $env:SystemRoot, $e, 2000, 4096, 512MB, 4)
+'{0}|{1}|{2}|{3}|{4}|{5}|{6}' -f $a.Started, $a.ExitCode, [Text.Encoding]::ASCII.GetString($a.Output).Trim(), $a.ActiveProcessLimit, $b.TimedOut, $b.JobTerminated, $b.Error
+'@
+    $probeFile = Join-Path $OutDir 'job-runner-probe.ps1'
+    [IO.File]::WriteAllText($probeFile, $probe)
+    $line = (& $ps51 -NoProfile -ExecutionPolicy Bypass -File $probeFile -Dll $dll 2>&1 | Select-Object -Last 1) -as [string]
+    $p = $line.Split('|')
+    Assert ($p.Count -eq 7 -and $p[0] -eq 'True' -and $p[1] -eq '0' -and $p[2] -eq 'atm-runner-ok' -and $p[3] -eq '4') "runner: $line"
+    Assert ($p[4] -eq 'True' -and $p[5] -eq 'True') "deadline: $line"
+    "$($summary.arch): $line"
+}
 Step 'shipped-release-gate' {
     $clean = [IO.File]::ReadAllText((Join-Path $installDir 'lib\Engine.Clean.ps1'))
     Assert ([regex]::Matches($clean, '\$script:AtmRealDeletionEnabled\s*=').Count -eq 1) 'mais de uma atribuicao da trava'
