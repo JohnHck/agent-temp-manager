@@ -111,14 +111,27 @@ called by `Invoke-AtmGitCommand`):
   cannot override) and `GIT_NO_LAZY_FETCH=1` (effective from the Git version that supports it; the minimum version is
   fixed when object reads are added in P3-C). The working directory must have no reparse point in its path, so the
   discovery ceiling cannot be bypassed through a junction.
-* Known before P3-B uses the runner on real repositories: configuration a repository controls (include paths,
-  alternates, a `gitdir:` file) can make Git read UNC paths (SMB, with the user's credentials), and configuration names
-  can carry credentials; the runner's output stays in memory. A child running as the same user could in principle
-  duplicate the job handle from this process; that requires code running in the child, which the allow-list and D-3
-  are there to prevent.
-* An elevated run starts `git.exe` only if the file and its directory pass the installer's ACL rule (only SYSTEM,
-  Administrators, TrustedInstaller and CREATOR OWNER may own or write them). The check covers the resolved launcher
-  (`cmd\git.exe` in Git for Windows); the program it starts is not checked.
+* **Worktree diagnostics gate (P3-B0):** reading repositories and running Git in them are both behind
+  `$script:AtmWorktreeDiagnosticsEnabled`, `$false` in every shipped copy (checked by the test suite and the install
+  e2e). Only `git --version` runs while it is closed. Opening it for real repositories is a maintainer decision.
+* **Preflight (P3-B0), before any Git call on a target:** the files Git would follow are read directly (the `.git`
+  file, `commondir`, the configuration with a strict parser, every administrative `gitdir`, the alternates chain), and
+  every path in them goes through one resolver before any file-system call: UNC and device forms, URLs, `~` and other
+  expansions, drives that are not fixed (mapped network drives) and reparse points are refused, and so is any included
+  configuration (`include`, `includeIf`). A refused target never gets a Git process. `status` also needs the D-3
+  preconditions: no filter driver, textconv or submodule in the repository.
+* **Configuration isolation (P3-B0):** no global, XDG or system configuration or attributes (`GIT_CONFIG_GLOBAL=NUL`,
+  `GIT_CONFIG_NOSYSTEM=1`, `GIT_ATTR_NOSYSTEM=1`, `core.excludesFile=NUL`, `core.attributesFile=NUL`), `HOME`,
+  `USERPROFILE` and `XDG_CONFIG_HOME` pointing to a directory that does not exist in the Git installation; configuration
+  names are counted, never returned (they can carry credentials); Git's error text is never returned. Minimum Git
+  2.45.0 (`GIT_NO_LAZY_FETCH`), on top of every transport refused by name.
+* **Elevated runs (P3-B0):** the launcher, the program it starts (`mingw64`/`clangarm64`), every program and library in
+  that program's directory, and every directory above both up to the volume root must pass the installer's ACL rule.
+  The volume root is not checked (its default ACL lets users create folders) and the time between the check and the
+  start is not covered.
+* Still open: a child running as the same user could in principle duplicate the job handle from this process (that
+  requires code running in the child, which the allow-list, the preflight and D-3 prevent); handles are inheritable
+  for a short time while the child is created (the handle list requires it).
 
 ## Known limits (documented, not hidden)
 
