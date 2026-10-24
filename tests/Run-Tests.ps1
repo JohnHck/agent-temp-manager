@@ -5648,7 +5648,7 @@ try {
         $slowQ = { param($Files, $Max) Start-Sleep -Milliseconds 30; [pscustomobject]@{ Status = 'OK'; Holders = @('424242|' + [datetime]::UtcNow.AddMinutes(-5).Ticks) } }
         $tb = Get-AtmHandleEvidence -Nodes $n2 -Query $slowQ
         $tt = @(@($tb.Evidence['a']) + @($tb.Evidence['b']) | ForEach-Object { $_.ObservedUtc.Ticks } | Select-Object -Unique)
-        Assert-True ($tt.Count -eq 1 -and $tt[0] -eq $tb.Coverage.StartedUtc.Ticks -and $tb.Coverage.ElapsedMs -ge 50) "horario do lote: um so, igual ao inicio da cobertura handles ($($tt.Count) valores)"
+        Assert-True ($tt.Count -eq 1 -and $tt[0] -eq $tb.Coverage.StartedUtc.Ticks -and $tb.Coverage.ElapsedMs -ge 40) "horario do lote: um so, igual ao inicio da cobertura handles ($($tt.Count) valores)"
         Assert-True (@((Get-Command Get-AtmHandleEvidence).Parameters.Keys) -notcontains 'ObservedUtc') 'horario de outra coleta nao pode ser imposto ao lote'
         } finally { $script:AtmHandleDiagnosticsEnabled = $false }
     }
@@ -5693,7 +5693,10 @@ try {
         Assert-Eq $script:AtmHandleDiagnosticsEnabled $false 'trava fechada fora dos testes'
         $diag = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Diagnose.ps1'))
         Assert-Eq ([regex]::Matches($diag, '\$script:AtmHandleDiagnosticsEnabled\s*=').Count) 1 'uma unica atribuicao da trava no motor'
-        Assert-True ($diag -match '\$script:AtmHandleDiagnosticsEnabled = \$false') 'a trava distribuida e $false'
+        Assert-True ($diag -match '(?m)^\$script:AtmHandleDiagnosticsEnabled = \$false\r?$') 'a trava distribuida e $false (linha inteira)'
+        # Every other mention of the gate in the engine only reads it (no Set-Variable/New-Variable, no environment).
+        $gateUses = @([regex]::Matches($diag, '(?m)^.*AtmHandleDiagnosticsEnabled.*$') | ForEach-Object { $_.Value.Trim() } | Where-Object { $_ -notmatch '^#' -and $_ -cne '$script:AtmHandleDiagnosticsEnabled = $false' })
+        Assert-True ($gateUses.Count -ge 4 -and @($gateUses | Where-Object { $_ -notmatch '^(if|elseif) \((-not )?\$script:AtmHandleDiagnosticsEnabled\) \{' -and $_ -notmatch '^\} ?elseif' }).Count -eq 0 -and -not ($diag -match '(?i)(Set|New)-Variable[^\r\n]*AtmHandleDiagnosticsEnabled')) "a trava so e lida no motor ($($gateUses.Count) leituras)"
         $srcAll = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1', '.psd1', '.cs', '.json', '.cmd', '.bat') } | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Text = [IO.File]::ReadAllText($_.FullName) } })
         Assert-Eq (@($srcAll | Where-Object { $_.Name -ne 'Engine.Diagnose.ps1' -and $_.Text.Contains('AtmHandleDiagnosticsEnabled') }).Count) 0 'nenhum outro arquivo (CLI, TUI, configuracao) menciona a trava: nenhuma opcao publica a abre'
         Assert-True (-not ($diag -match '\$env:[A-Za-z_]*Handle')) 'nenhuma variavel de ambiente abre a trava'
@@ -5726,7 +5729,7 @@ try {
             try {
                 $closedNative = Invoke-AtmDiagnose @diagArgs
                 $closedInjected = Invoke-AtmDiagnose @diagArgs -HandleQuery $countQ
-                $log = @($script:AtmHandleInvocationLog)
+                $log = $script:AtmHandleInvocationLog.ToArray()
             } finally { $script:AtmHandleInvocationLog = $null }
             Assert-True ($log.Count -eq 0 -and $calls.N -eq 0) "trava fechada: nenhuma listagem de arquivos e nenhuma consulta Restart Manager pelo diagnose ($($log.Count) registros)"
             Assert-True (-not $c.HasExited) 'processo auxiliar do proprio harness segue ativo'
@@ -5743,7 +5746,7 @@ try {
         $script:AtmHandleInvocationLog = New-Object System.Collections.Generic.List[object]
         try {
             $open = Invoke-AtmDiagnose @diagArgs -HandleQuery ({ param($Files, $Max) [pscustomobject]@{ Status = 'OK'; Holders = @() } })
-            $openLog = @($script:AtmHandleInvocationLog)
+            $openLog = $script:AtmHandleInvocationLog.ToArray()
         } finally { $script:AtmHandleInvocationLog = $null; $script:AtmHandleDiagnosticsEnabled = $false }
         Assert-True (@($openLog | Where-Object { $_.Op -eq 'LIST' }).Count -ge 1 -and @($openLog | Where-Object { $_.Op -eq 'QUERY' }).Count -ge 1) 'contraprova: com a trava aberta o espiao registra listagem e consulta'
         # I: no state changes because of missing evidence: the same states and evidence codes, closed or open with no holder.

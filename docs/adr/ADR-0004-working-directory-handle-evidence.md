@@ -122,8 +122,8 @@ The amendment above is kept as written; the maintainer's review of PR #41 added 
   `HANDLE_SECURITY_GATE_CLOSED`, which is never an absence of dependency, and the report says that open files are not
   observed (no count of items). The tests open it only for disposable fixtures of the harness and close it again in
   `finally`. Opening it for real directories needs a demonstrated solution and a maintainer decision.
-* **Observation time.** Every open-file evidence entry carries one instant: the start of the handle batch, before its
-  first query, which is also the `startedUtc` of the `handles` coverage record. It no longer reuses the time of the
+* **Observation time.** Every open-file evidence entry carries one instant: the start of the handle batch (its query phase:
+  after the files were sampled, before the first query), which is also the `startedUtc` of the `handles` coverage record. It no longer reuses the time of the
   partition observation. The order of evidence and of partition findings (D-8) is unchanged, and one time per
   collector for every item gives no enumeration order back.
 * **OBJ_DONT_REPARSE** stays an isolated prototype (test code only); ADR-0011 stays `PROPOSED`.
