@@ -118,15 +118,19 @@ called by `Invoke-AtmGitCommand`):
   file, `commondir`, the configuration with a strict parser, every administrative `gitdir`, the alternates chain), and
   every path in them goes through one resolver before any file-system call: UNC and device forms, URLs, `~` and other
   expansions, drives that are not fixed (mapped network drives) and reparse points are refused, and so is any included
-  configuration (`include`, `includeIf`), reserved device names, `core.worktree` (any value) and any other path-valued
-  key that is relative or does not exist. The Git directory must be valid as Git validates it (`HEAD`, `objects`,
-  `refs`), and a target that itself holds `HEAD` is refused (Git would read it as a bare repository, with its own
-  configuration). A refused target never gets a Git process. The runner does not trust the caller's preflight: it takes
+  configuration (`include`, `includeIf`), reserved device names, `core.worktree` (any value), a path-valued key whose
+  value is refused, and any value written as a path on a drive that is not fixed. Paths stored in Git files (`.git`
+  file, `commondir`, administrative `gitdir`) are taken exactly as Git reads them (only a trailing line break dropped).
+  The Git directory must be valid as Git validates it (`HEAD`, `objects`, `refs`); a target that itself holds `HEAD`,
+  `objects` and `refs` is refused (Git would read it as a bare repository, with its own configuration). No reparse
+  point may sit in `refs`, `packed-refs`, `reftable` or an administrative entry's lock or `HEAD` (`worktree list`
+  reads them). A refused target never gets a Git process. The runner does not trust the caller's preflight: it takes
   a fresh one immediately before each run and requires it to agree. Every path Git reports goes through the same
   resolver before it is used. `status` also needs the D-3 preconditions: no filter driver, textconv or submodule in the
   repository. Git runs only in repositories a discovery source led to (a repository reached only through a worktree's
-  `gitdir` is registered from its files, never given to Git). The `PATH` lookup of `git.exe` skips drives that are not
-  fixed before any file-system call.
+  `gitdir` is registered from its files, never given to Git). The `PATH` lookup of `git.exe` goes through the same
+  resolver: drives that are not fixed and paths with a reparse point are skipped (so a Git reached through a junction,
+  as some package managers install it, is not found: fail closed).
 * **Configuration isolation (P3-B0):** no global, XDG or system configuration or attributes (`GIT_CONFIG_GLOBAL=NUL`,
   `GIT_CONFIG_NOSYSTEM=1`, `GIT_ATTR_NOSYSTEM=1`, `core.excludesFile=NUL`, `core.attributesFile=NUL`), `HOME`,
   `USERPROFILE` and `XDG_CONFIG_HOME` pointing to a directory that does not exist in the Git installation; configuration
