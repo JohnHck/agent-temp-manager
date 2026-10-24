@@ -73,3 +73,16 @@ a stable hash, and paths only on the console of the user who owns them.
 * Scale: 2,000 synthetic administrative entries in one repository (CI, light) and 1,000+ real worktrees with status
   (heavy, `-SkipHeavy` skips it; run locally and in a manual CI job): bounded time and memory, caps honoured, partial
   coverage when a cap is reached.
+
+## Amendment (P3-E, 2026-10-24)
+
+Implementation notes; the decisions above are unchanged.
+
+* The common-directory part of the preflight is computed once per repository per run and reused while its
+  fingerprint is unchanged (never by the Git runner); the reference facts are read once per repository. The cost per
+  worktree no longer grows with the number of references or of worktrees of the same repository.
+* Limits: candidates, repositories, worktrees per repository, administrative entries, reference entries, bytes read
+  per run (`READ_BUDGET`) and the deadline give `PARTIAL` with their reason.
+* Scale tests: 300 worktrees and 2,000 references per repository in CI (both shells); 2,000 worktrees and 20,000
+  references in the heavy set (`-SkipHeavy` skips it). Worktrees in these tests are files written by the suite, not
+  repositories of the user.

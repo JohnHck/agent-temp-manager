@@ -178,6 +178,11 @@ called by `Invoke-AtmGitCommand`):
   guarantee that every read stays on the local volume under adversarial concurrency. No SMB authentication was
   attempted. The worktree diagnostics gate stays closed. Publication facts come from files only (no process); a
   remote URL is never resolved or opened. ADR-0011 (PROPOSED) describes file-based diagnostics without Git.
+* **Preflight reuse (P3-E):** within one discovery run, the common-directory part of the preflight is reused while a
+  fingerprint (kind, size, last-write time of the files and directories it depends on) is unchanged. The fingerprint
+  is not a guarantee (a change keeping size and time, or one deeper in `refs\` or inside an administrative entry, is
+  not seen), so the cache is never used by the runner: before any Git process the runner takes its own uncached
+  preflight. Reuse never crosses runs.
 * **Local work is never complete:** `status` runs with `--ignore-submodules=all`, so changes inside a gitlink (which
   can exist without `.gitmodules`) are not seen, nor entries flagged assume-unchanged or skip-worktree; its coverage is
   always `PARTIAL` (`HIDDEN_ENTRIES_NOT_OBSERVED`). A stash that cannot be attributed (detached or unreadable `HEAD`) or

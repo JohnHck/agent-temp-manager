@@ -74,6 +74,16 @@ the direction: prioritize safe, file-based diagnosis without running Git on real
    *R* references in one repository the publication facts cost O(R + W). The preflight still walks the reference store
    for each candidate (O(W x R)); reusing one walk per common directory belongs to P3-E (scale).
 
+6. **Proposed mitigation of the ancestor TOCTOU (examined in P3-E, not implemented).** Open each repository file with
+   `NtCreateFile` relative to a handle of the volume root and with `OBJ_DONT_REPARSE`: the kernel then refuses a reparse
+   point in any component while parsing the name, in the same call that opens the file (no window between a check and
+   the open). Examined on fixtures with a local junction: a clean path opens; with an ancestor replaced by a junction
+   the open fails with `STATUS_REPARSE_POINT_ENCOUNTERED`; with the flag on a `\??\C:` name even the drive letter is
+   refused (it is an object-manager link), hence the volume-root handle. Open questions before adopting it: the
+   minimum Windows build that honours the flag (and refusing to run where it is not), 8.3 and case behaviour, error
+   mapping, and that the volume-root handle itself is opened on a fixed drive. It changes how every repository file is
+   opened, so it needs the maintainer's decision; until then the ancestor TOCTOU stays NOT RESOLVED.
+
 ## Rejected alternatives
 
 * *Read pins as a guarantee (P3-C0):* creation cannot be prevented, and pinning interferes with other agents.
