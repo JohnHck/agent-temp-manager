@@ -4557,15 +4557,21 @@ try {
     [void][IO.Directory]::CreateDirectory($gitRoot)
     $gitCfg = Join-Path $gitRoot 'gitconfig'
     [IO.File]::WriteAllText($gitCfg, '')
-    $gitTE = @{ GIT_CONFIG_GLOBAL = $gitCfg; GIT_CONFIG_NOSYSTEM = '1' }
-    $testGit = Resolve-AtmGitExecutable -TestEnvironment $gitTE
+    $testGit = Resolve-AtmGitExecutable
+    # P3-B0: repository commands need the worktree diagnostics gate (opened only here, in the suite's process, and always
+    # closed again) and a preflight of the working directory.
+    $gitOpen = { param([scriptblock]$Body) $script:AtmWorktreeDiagnosticsEnabled = $true; try { & $Body } finally { $script:AtmWorktreeDiagnosticsEnabled = $false } }
+    $gitRun = { param([string[]]$GitArgs, [string]$Dir, [int]$TimeoutMs = 10000) Invoke-AtmGitCommand -Git $testGit -Arguments $GitArgs -WorkingDirectory $Dir -Preflight (Get-AtmGitPreflight -Target $Dir) -TimeoutMs $TimeoutMs }
     $gitSkip = { if ($testGit.Status -ne 'COMPLETE') { $script:caseSkipped = $true; $script:caseNote = "Git indisponivel: $($testGit.Reason)"; return $true }; return $false }
     $setEnvVar = { param([string]$Name, $Value) if ($null -eq $Value) { [Environment]::SetEnvironmentVariable($Name, [NullString]::Value) } else { [Environment]::SetEnvironmentVariable($Name, [string]$Value) } }
-    $gitFx = { param([string]$Dir, [string[]]$GitArgs, [string]$Expect)
+    # Raw Git for fixtures and counter-proofs (never the runner): returns Code and Out. -ExtraEnv adds variables for one
+    # call (a counter-proof with HOME, for example).
+    $gitFxOut = { param([string]$Dir, [string[]]$GitArgs, [string]$Expect, [hashtable]$ExtraEnv = @{})
         # Identity, hooks and signing through the environment (independent of how each shell passes native arguments).
         $fxEnv = [ordered]@{ GIT_CONFIG_GLOBAL = $gitCfg; GIT_CONFIG_NOSYSTEM = '1'; GIT_CEILING_DIRECTORIES = $gitRoot; GIT_DIR = $null; GIT_WORK_TREE = $null
             GIT_AUTHOR_NAME = 'atm'; GIT_AUTHOR_EMAIL = 'atm@fixture'; GIT_COMMITTER_NAME = 'atm'; GIT_COMMITTER_EMAIL = 'atm@fixture'
             GIT_CONFIG_COUNT = '2'; GIT_CONFIG_KEY_0 = 'core.hooksPath'; GIT_CONFIG_VALUE_0 = 'NUL'; GIT_CONFIG_KEY_1 = 'commit.gpgsign'; GIT_CONFIG_VALUE_1 = 'false' }
+        foreach ($k in $ExtraEnv.Keys) { $fxEnv[$k] = $ExtraEnv[$k] }
         $saved = @{}; foreach ($k in $fxEnv.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k) }
         try {
             foreach ($k in $fxEnv.Keys) { & $setEnvVar $k $fxEnv[$k] }
@@ -4576,8 +4582,12 @@ try {
             # Git writes warnings to stderr: only the exit code decides (sandbox fixture, so its text may be shown).
             $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
             try { $o = @(& $testGit.Path -C $Dir @GitArgs 2>&1 | ForEach-Object { "$_" }) } finally { $ErrorActionPreference = $eap }
-            if ($LASTEXITCODE -ne 0) { throw "git de fixture falhou: $($GitArgs[0]) ($LASTEXITCODE): $((@($o) -join ' / ').Substring(0, [Math]::Min(300, (@($o) -join ' / ').Length)))" }
+            return [pscustomobject]@{ Code = $LASTEXITCODE; Out = (@($o) -join "`n") }
         } finally { foreach ($k in $saved.Keys) { & $setEnvVar $k $saved[$k] } }
+    }
+    $gitFx = { param([string]$Dir, [string[]]$GitArgs, [string]$Expect)
+        $res = & $gitFxOut $Dir $GitArgs $Expect
+        if ($res.Code -ne 0) { throw "git de fixture falhou: $($GitArgs[0]) ($($res.Code)): $($res.Out.Substring(0, [Math]::Min(300, $res.Out.Length)))" }
     }
     # Listing of a tree: name, size, last-write time read from the item itself (an enumeration can return stale directory
     # times) and SHA-256 of every file, .git and its index included.
@@ -4609,7 +4619,7 @@ try {
     Test-Case 'Git' 'Executor Git (P3-A): git.exe so de entradas absolutas do PATH; relativo, .cmd e ausente nunca executados; local gravavel por usuarios recusado quando elevado' {
         if (& $gitSkip) { return }
         Assert-True ([IO.Path]::IsPathRooted($testGit.Path) -and $testGit.Path -match '\\git\.exe$' -and $null -ne $testGit.Version) "git resolvido: $($testGit.Version)"
-        if ($env:GITHUB_ACTIONS -eq 'true') { Assert-Eq (Resolve-AtmGitExecutable -TestEnvironment $gitTE).Status 'COMPLETE' 'CI (elevado): local do Git confiavel pela regra do instalador' }
+        if ($env:GITHUB_ACTIONS -eq 'true') { Assert-Eq (Resolve-AtmGitExecutable).Status 'COMPLETE' 'CI (elevado): local do Git confiavel pela regra do instalador' }
         $script:AtmGitInvocationLog = New-Object System.Collections.Generic.List[object]
         try {
             $rel = Join-Path $gitRoot 'rel'; [void][IO.Directory]::CreateDirectory($rel); [IO.File]::WriteAllText((Join-Path $rel 'git.exe'), 'not a program')
@@ -4663,17 +4673,18 @@ try {
         Start-Sleep -Milliseconds 1100
         $before = & $gitSnap $fx.Base
         $script:AtmGitInvocationLog = New-Object System.Collections.Generic.List[object]
+        $script:AtmWorktreeDiagnosticsEnabled = $true
         try {
             foreach ($a in $gitAllowed) {
                 foreach ($wd in @($fx.Repo, $fx.Worktree)) {
-                    $r = Invoke-AtmGitCommand -Git $testGit -Arguments $a -WorkingDirectory $wd -TestEnvironment $gitTE
+                    $r = & $gitRun $a $wd
                     Assert-True ($r.Status -eq 'COMPLETE' -and $r.ExitCode -eq 0) "[$($a -join ' ')] em $(Split-Path -Leaf $wd): $($r.Status) $($r.Reason)"
                 }
             }
-            $st = Invoke-AtmGitCommand -Git $testGit -Arguments @('status', '--porcelain=v2', '-z', '--untracked-files=all') -WorkingDirectory $fx.Repo -TestEnvironment $gitTE
+            $st = & $gitRun @('status', '--porcelain=v2', '-z', '--untracked-files=all') $fx.Repo
             $recs = @($st.Output.Split([char]0) | Where-Object { $_ })
             Assert-True (@($recs | Where-Object { $_ -like '1 .M *a.txt' }).Count -eq 1 -and @($recs | Where-Object { $_ -like '1 A. *c.txt' }).Count -eq 1 -and @($recs | Where-Object { $_ -ceq '? u.txt' }).Count -eq 1) "status v2 le a fixture: $(@($recs) -join ' | ')"
-            $wl = Invoke-AtmGitCommand -Git $testGit -Arguments @('worktree', 'list', '--porcelain', '-z') -WorkingDirectory $fx.Repo -TestEnvironment $gitTE
+            $wl = & $gitRun @('worktree', 'list', '--porcelain', '-z') $fx.Repo
             Assert-Eq @($wl.Output.Split([char]0) | Where-Object { $_ -like 'worktree *' }).Count 2 'worktree list: repositorio e worktree'
             Start-Sleep -Milliseconds 300
             $after = & $gitSnap $fx.Base
@@ -4689,7 +4700,8 @@ try {
             $ga = $script:AtmGitGlobalArguments -join ' '
             Assert-True ($ga -match '--no-optional-locks' -and $ga -match 'core\.fsmonitor=false' -and $ga -match 'protocol\.allow=never') 'sem locks opcionais, sem fsmonitor, protocolos recusados por padrao'
             foreach ($proto in @('file', 'git', 'ssh', 'http', 'https', 'ext')) { Assert-True ($ga -match "protocol\.$proto\.allow=never") "protocolo $proto recusado por nome (a configuracao do repositorio nao o reativa)" }
-        } finally { $script:AtmGitInvocationLog = $null }
+            Assert-True ($ga -match 'core\.excludesFile=NUL' -and $ga -match 'core\.attributesFile=NUL') 'arquivos globais de exclusao e atributos nunca lidos'
+        } finally { $script:AtmGitInvocationLog = $null; $script:AtmWorktreeDiagnosticsEnabled = $false }
         # Environment: inherited GIT_* never reach the child; locale C; ceiling.
         $saved = @{}; foreach ($k in 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0') { $saved[$k] = [Environment]::GetEnvironmentVariable($k) }
         try {
@@ -4698,23 +4710,30 @@ try {
             $envList = Get-AtmGitEnvironment -Ceiling 'C:\x'
             Assert-True (@($envList | Where-Object { $_ -match '^GIT_(DIR|WORK_TREE|INDEX_FILE|CONFIG_PARAMETERS|CONFIG_COUNT|CONFIG_KEY_0|CONFIG_VALUE_0)=' }).Count -eq 0) 'GIT_* herdados removidos'
             foreach ($kv in @('GIT_OPTIONAL_LOCKS=0', 'GIT_TERMINAL_PROMPT=0', 'GCM_INTERACTIVE=never', 'GIT_ASKPASS=', 'SSH_ASKPASS=', 'GIT_NO_LAZY_FETCH=1', 'GIT_DISCOVERY_ACROSS_FILESYSTEM=0', 'GIT_CEILING_DIRECTORIES=C:\x', 'LC_ALL=C', 'LANG=C')) { Assert-True ($envList -contains $kv) "ambiente: $kv" }
-            $r = Invoke-AtmGitCommand -Git $testGit -Arguments @('rev-parse', '--show-toplevel') -WorkingDirectory $fx.Repo -TestEnvironment $gitTE
+            $r = & $gitOpen { & $gitRun @('rev-parse', '--show-toplevel') $fx.Repo }
             Assert-True ($r.Status -eq 'COMPLETE' -and [string]::Equals((Get-AtmNormalizedPath $r.Output.Trim().Replace('/', '\')), (Get-AtmNormalizedPath $fx.Repo), [StringComparison]::OrdinalIgnoreCase)) "variaveis GIT_* do chamador ignoradas: $($r.Status)"
         } finally { foreach ($k in $saved.Keys) { & $setEnvVar $k $saved[$k] } }
-        $threw = $false; try { $null = Get-AtmGitEnvironment -Ceiling 'C:\x' -TestEnvironment @{ GIT_DIR = 'x' } } catch { $threw = $true }
-        Assert-True $threw 'ambiente de teste restrito a GIT_CONFIG_GLOBAL, GIT_CONFIG_NOSYSTEM e HOME'
+        $iso = Get-AtmGitEnvironment -Ceiling 'C:\x' -IsolatedHome 'C:\iso\none'
+        foreach ($kv in @('GIT_CONFIG_GLOBAL=NUL', 'GIT_CONFIG_NOSYSTEM=1', 'GIT_ATTR_NOSYSTEM=1', 'HOME=C:\iso\none', 'USERPROFILE=C:\iso\none', 'XDG_CONFIG_HOME=C:\iso\none')) { Assert-True ($iso -contains $kv) "configuracao isolada: $kv" }
         # A junction in the working directory path is refused (Git would work from the resolved directory, above the ceiling).
         $jn = Join-Path $fx.Base 'junction-to-plain'
         $null = & cmd.exe /c mklink /J "$jn" "$(Join-Path $fx.Repo 'plain\deeper')" 2>&1
         if (Test-Path -LiteralPath $jn) {
-            $r = Invoke-AtmGitCommand -Git $testGit -Arguments @('rev-parse', '--show-toplevel') -WorkingDirectory $jn -TestEnvironment $gitTE
+            $r = & $gitOpen { Invoke-AtmGitCommand -Git $testGit -Arguments @('rev-parse', '--show-toplevel') -WorkingDirectory $jn -Preflight (Get-AtmGitPreflight -Target $jn) }
             Assert-True ($r.Status -eq 'REFUSED' -and $r.Reason -eq 'GIT_WORKDIR_REPARSE_OR_UNREADABLE') "juncao no caminho recusada: $($r.Reason)"
+            Assert-Eq (Get-AtmGitPreflight -Target $jn).Reason 'GIT_REF_PATH_REPARSE' 'preflight recusa a juncao'
         } else { Assert-True $false 'juncao de teste nao criada' }
         # Ceiling: a plain directory inside the repository is not attributed to it, also through its 8.3 name.
         $plain = Join-Path $fx.Repo 'plain\deeper'
         foreach ($wd in @($plain, [AgentTempManager.AtmNative]::GetShortPath($plain))) {
-            $r = Invoke-AtmGitCommand -Git $testGit -Arguments @('rev-parse', '--show-toplevel') -WorkingDirectory $wd -TestEnvironment $gitTE
-            Assert-True ($r.Status -eq 'FAILED' -and $r.Reason -eq 'GIT_NOT_A_REPOSITORY' -and $null -eq $r.Output) "diretorio comum dentro do repositorio nao atribuido a ele ($wd): $($r.Reason)"
+            $pf = Get-AtmGitPreflight -Target $wd
+            Assert-True ($pf.Status -eq 'NOT_A_REPOSITORY') "preflight: diretorio comum dentro do repositorio nao e repositorio ($wd)"
+            $r = & $gitOpen { Invoke-AtmGitCommand -Git $testGit -Arguments @('rev-parse', '--show-toplevel') -WorkingDirectory $wd -Preflight $pf }
+            Assert-True ($r.Status -eq 'REFUSED' -and $r.Reason -eq 'GIT_PREFLIGHT_REQUIRED') "sem repositorio, o Git nao roda: $($r.Reason)"
+            # The ceiling itself, observed with Git through the same job, options and environment.
+            $wdn = Get-AtmNormalizedPath $wd
+            $j = Invoke-AtmBoundedProcess -Executable $testGit.Path -CommandLine ('"' + $testGit.Path + '" ' + (@($script:AtmGitGlobalArguments) + @('rev-parse', '--show-toplevel') -join ' ')) -WorkingDirectory $wdn -Environment (Get-AtmGitEnvironment -Ceiling (Get-AtmNormalizedPath ([IO.Path]::GetDirectoryName($wdn))) -IsolatedHome $testGit.IsolatedHome) -TimeoutMs 10000 -MaxOutputBytes 65536 -JobMemoryBytes 1GB -ActiveProcessLimit 8
+            Assert-True ($j.ExitCode -ne 0 -and ([Text.Encoding]::UTF8.GetString($j.ErrorOutput)) -match 'not a git repository') "teto de descoberta observado no Git ($wd)"
         }
         # Control for the fsmonitor marker (raw Git, after the read-only checks): whether this Git runs the hook at all.
         & $gitFx $fx.Repo @('status', '--porcelain') $fx.Repo
@@ -4729,7 +4748,7 @@ try {
         # A process outside the job, started before the runs; it ends by itself.
         $sentinel = [Diagnostics.Process]::Start((New-Object Diagnostics.ProcessStartInfo($ps, '-NoProfile -Command Start-Sleep 40') -Property @{ UseShellExecute = $false; CreateNoWindow = $true }))
         $sentStart = $sentinel.StartTime
-        $r = Invoke-AtmGitCommand -Git $testGit -Arguments @('status', '--porcelain=v2', '-z', '--untracked-files=all') -WorkingDirectory $fx.Repo -TimeoutMs 0 -TestEnvironment $gitTE
+        $r = & $gitOpen { & $gitRun @('status', '--porcelain=v2', '-z', '--untracked-files=all') $fx.Repo 0 }
         Assert-True ($r.Status -eq 'TIMEOUT' -and $r.Reason -eq 'GIT_TIMEOUT' -and $null -eq $r.Output) "prazo 0: $($r.Status)"
         Start-Sleep -Milliseconds 500
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $fx.Repo '.git\index.lock'))) 'nenhum index.lock depois do prazo'
@@ -4766,6 +4785,223 @@ try {
             Assert-True $threw "executor nativo recusa limites invalidos ($($bad -join ','))"
         }
         $script:caseNote = "sentinela PID $($sentinel.Id) termina sozinho"
+    }
+    # ------------------------------------------------------------------ P3-B0: security preconnect gate
+    $uncHost = 'atm-unc-probe.invalid'
+    $gitSpy = { param([scriptblock]$Body) $script:AtmGitInvocationLog = New-Object System.Collections.Generic.List[object]; try { & $Body; return $script:AtmGitInvocationLog.Count } finally { $script:AtmGitInvocationLog = $null } }
+    Test-Case 'Git' 'P3-B0: resolvedor de caminhos referenciados recusa rede, expansoes e formas de dispositivo antes de qualquer acesso; parser de configuracao estrito' {
+        $base = Join-Path $gitRoot 'resolver'; [void][IO.Directory]::CreateDirectory((Join-Path $base 'sub'))
+        $refused = [ordered]@{
+            ('\\' + $uncHost + '\s\x') = 'GIT_REF_PATH_NETWORK'; ('//' + $uncHost + '/s/x') = 'GIT_REF_PATH_NETWORK'; ('\\?\UNC\' + $uncHost + '\s') = 'GIT_REF_PATH_NETWORK'; '\\.\pipe\x' = 'GIT_REF_PATH_NETWORK'
+            ('/\' + $uncHost + '\s') = 'GIT_REF_PATH_NETWORK'; ('\/' + $uncHost + '/s') = 'GIT_REF_PATH_NETWORK'; ('file://' + $uncHost + '/s') = 'GIT_REF_PATH_NETWORK'; 'file:x' = 'GIT_REF_PATH_NETWORK'; ('https://' + $uncHost + '/x') = 'GIT_REF_PATH_NETWORK'
+            '~/x' = 'GIT_REF_PATH_EXPANSION'; '%(prefix)/x' = 'GIT_REF_PATH_EXPANSION'; '$HOME/x' = 'GIT_REF_PATH_EXPANSION'; '%USERPROFILE%\x' = 'GIT_REF_PATH_EXPANSION'
+            'C:x' = 'GIT_REF_PATH_INVALID'; 'C:' = 'GIT_REF_PATH_INVALID'; ($base + '\a:ads') = 'GIT_REF_PATH_INVALID'; '\rooted\no-drive' = 'GIT_REF_PATH_INVALID'; 'sub\na*me' = 'GIT_REF_PATH_INVALID'; '' = 'GIT_REF_PATH_INVALID'
+        }
+        foreach ($c in $refused.GetEnumerator()) { $r = Resolve-AtmGitReferencedPath -Value $c.Key -BaseDir $base; Assert-True ($r.Status -eq 'REFUSED' -and $r.Reason -eq $c.Value -and $null -eq $r.Path) "recusado [$($c.Key)]: $($r.Reason)" }
+        $r = Resolve-AtmGitReferencedPath -Value 'sub\..\sub' -BaseDir $base
+        Assert-True ($r.Status -eq 'OK' -and $r.Path -ceq (Join-Path $base 'sub')) 'relativo resolvido sem acesso fora da base'
+        Assert-Eq (Resolve-AtmGitReferencedPath -Value 'nope' -BaseDir $base).Status 'MISSING' 'local inexistente: MISSING'
+        $unused = $null
+        foreach ($l in [char[]]'BDEFGHIJKLMNOPQRSTUVWXYZ') { if (-not (Test-Path -LiteralPath "$($l):\")) { $unused = $l; break } }
+        if ($unused) { Assert-Eq (Resolve-AtmGitReferencedPath -Value "$($unused):\x" -BaseDir $base).Reason 'GIT_REF_PATH_NETWORK' 'unidade inexistente ou de rede (nao fixa) recusada' }
+        $jn = Join-Path $base 'jn'; $null = & cmd.exe /c mklink /J "$jn" "$(Join-Path $base 'sub')" 2>&1
+        Assert-Eq (Resolve-AtmGitReferencedPath -Value 'jn\x' -BaseDir $base).Reason 'GIT_REF_PATH_REPARSE' 'reparse point no caminho recusado'
+        # Strict configuration parser.
+        $ok = Read-AtmGitConfigText -Text "# c`n[core]`n`trepositoryformatversion = 0`n`tbare`n[remote `"origin`"]`n`turl = `"https://example.invalid/x`" ; c`n[a.b]`n`tk = `"x\\y\`"z`"`n"
+        Assert-True ($null -eq $ok.Error -and @($ok.Entries).Count -eq 4 -and @($ok.Entries | Where-Object { $_.Section -eq 'core' -and $_.Key -eq 'bare' -and $_.Value -eq 'true' }).Count -eq 1 -and @($ok.Entries | Where-Object { $_.Key -eq 'k' -and $_.Value -ceq 'x\y"z' }).Count -eq 1) 'configuracao valida lida e decodificada'
+        foreach ($bad in @("[core]`n`tworktree = a \`n`tb", "[core]`n`tk = `"open", "[core]`n`tk = a\q", "k = v", "[core`n", "[core] junk`n", "[sec `"sub`" x]", "[core]`n`t= v")) {
+            Assert-Eq (Read-AtmGitConfigText -Text $bad).Error 'GIT_CONFIG_UNPARSEABLE' "linha nao entendida recusa o arquivo: $($bad.Replace("`n", '|'))"
+        }
+        $inc = Read-AtmGitConfigText -Text "[INCLUDE]`n`tpath = x"
+        Assert-Eq (Get-AtmGitConfigFindings -Entries $inc.Entries -BaseDir $base).Refuse 'GIT_PREFLIGHT_INCLUDE' '[INCLUDE] em maiusculas tambem e include'
+        $inc = Read-AtmGitConfigText -Text "[includeIf `"onbranch:x`"]`n`tpath = x"
+        Assert-Eq (Get-AtmGitConfigFindings -Entries $inc.Entries -BaseDir $base).Refuse 'GIT_PREFLIGHT_INCLUDE' 'includeIf em qualquer forma'
+        $esc = Read-AtmGitConfigText -Text ("[core]`n`texcludesFile = \\\\" + $uncHost + "\\s\\x")
+        Assert-Eq (Get-AtmGitConfigFindings -Entries $esc.Entries -BaseDir $base).Refuse 'GIT_PREFLIGHT_CONFIG_PATH' 'caminho UNC escrito com escapes decodificado e recusado'
+    }
+    Test-Case 'Git' 'P3-B0: cada vetor que leva o Git para fora do repositorio e provado com caminho local (contraprova) e recusado com caminho de rede antes de qualquer processo (espiao: zero)' {
+        if (& $gitSkip) { return }
+        $out = Join-Path $gitRoot 'outside'; [void][IO.Directory]::CreateDirectory($out)
+        $incFile = Join-Path $out 'inc.cfg'; [IO.File]::WriteAllText($incFile, "[atm]`n`tprobe = from-include`n")
+        $refusedRun = { param([string]$Dir) & $gitSpy { $null = & $gitOpen { Invoke-AtmGitCommand -Git $testGit -Arguments @('rev-parse', '--show-toplevel') -WorkingDirectory $Dir -Preflight (Get-AtmGitPreflight -Target $Dir) } } }
+        # include and includeIf: Git reads configuration from outside the repository.
+        $fx = & $gitNewFixture 'v-inc'
+        & $gitFx $fx.Repo @('config', '--add', 'include.path', $incFile.Replace('\', '/')) $fx.Repo
+        Assert-Eq (& $gitFxOut $fx.Repo @('config', '--get', 'atm.probe') $fx.Repo).Out.Trim() 'from-include' 'contraprova: o Git le o include local'
+        $pf = Get-AtmGitPreflight -Target $fx.Repo
+        Assert-True ($pf.Status -eq 'REFUSED' -and $pf.Reason -eq 'GIT_PREFLIGHT_INCLUDE') "include recusado: $($pf.Reason)"
+        Assert-Eq (& $refusedRun $fx.Repo) 0 'include: nenhum processo Git'
+        $fx = & $gitNewFixture 'v-incif'
+        & $gitFx $fx.Repo @('config', '--add', ('includeIf.gitdir/i:' + (Get-AtmNormalizedPath $fx.Repo).Replace('\', '/') + '/.path'), $incFile.Replace('\', '/')) $fx.Repo
+        Assert-Eq (& $gitFxOut $fx.Repo @('config', '--get', 'atm.probe') $fx.Repo).Out.Trim() 'from-include' 'contraprova: o Git le o includeIf local'
+        Assert-Eq (Get-AtmGitPreflight -Target $fx.Repo).Reason 'GIT_PREFLIGHT_INCLUDE' 'includeIf recusado'
+        # Alternates: Git reads objects from another directory.
+        $fxA = & $gitNewFixture 'v-alt-src'
+        $oid = (& $gitFxOut $fxA.Repo @('rev-parse', 'HEAD') $fxA.Repo).Out.Trim()
+        $fx = & $gitNewFixture 'v-alt'
+        $altFile = Join-Path $fx.Repo '.git\objects\info\alternates'
+        [IO.File]::WriteAllText($altFile, (Join-Path $fxA.Repo '.git\objects') + "`n")
+        Assert-Eq (& $gitFxOut $fx.Repo @('cat-file', '-e', $oid) $fx.Repo).Code 0 'contraprova: o Git le objetos do alternate local'
+        $pf = Get-AtmGitPreflight -Target $fx.Repo
+        Assert-True ($pf.Status -eq 'OK' -and $pf.Alternates -eq 1) 'alternate local permitido e contado'
+        [IO.File]::WriteAllText($altFile, "\\$uncHost\share\objects`n")
+        Assert-Eq (Get-AtmGitPreflight -Target $fx.Repo).Reason 'GIT_PREFLIGHT_ALTERNATE_NETWORK' 'alternate de rede recusado'
+        Assert-Eq (& $refusedRun $fx.Repo) 0 'alternate de rede: nenhum processo Git'
+        [IO.File]::WriteAllText($altFile, (Join-Path $fxA.Repo '.git\objects') + "`n")
+        [IO.File]::WriteAllText((Join-Path $fxA.Repo '.git\objects\info\alternates'), "//$uncHost/share/objects`n")
+        Assert-Eq (Get-AtmGitPreflight -Target $fx.Repo).Reason 'GIT_PREFLIGHT_ALTERNATE_NETWORK' 'alternate de rede num alternate (encadeado) recusado'
+        # gitdir: a .git file sends Git to another directory.
+        $fxG = & $gitNewFixture 'v-gitdir'
+        $redir = Join-Path $out 'redir'; [void][IO.Directory]::CreateDirectory($redir)
+        [IO.File]::WriteAllText((Join-Path $redir '.git'), 'gitdir: ' + (Join-Path $fxG.Repo '.git') + "`n")
+        $gd = (& $gitFxOut $redir @('rev-parse', '--absolute-git-dir') $null).Out.Trim().Replace('/', '\')
+        Assert-True ([string]::Equals((Get-AtmNormalizedPath $gd), (Get-AtmNormalizedPath (Join-Path $fxG.Repo '.git')), [StringComparison]::OrdinalIgnoreCase)) "contraprova: o arquivo .git leva o Git a outro diretorio ($gd)"
+        Assert-Eq (Get-AtmGitPreflight -Target $redir).Status 'OK' 'gitdir local permitido'
+        $redirU = Join-Path $out 'redir-unc'; [void][IO.Directory]::CreateDirectory($redirU)
+        [IO.File]::WriteAllText((Join-Path $redirU '.git'), "gitdir: \\$uncHost\share\repo.git`n")
+        Assert-Eq (Get-AtmGitPreflight -Target $redirU).Reason 'GIT_PREFLIGHT_GITDIR_NETWORK' 'gitdir de rede recusado'
+        Assert-Eq (& $refusedRun $redirU) 0 'gitdir de rede: nenhum processo Git'
+        # commondir of a worktree's administrative directory.
+        $admin = Join-Path $fxG.Repo '.git\worktrees\fake'; [void][IO.Directory]::CreateDirectory($admin)
+        [IO.File]::WriteAllText((Join-Path $admin 'commondir'), "//$uncHost/share/common`n")
+        $wtFake = Join-Path $out 'wt-fake'; [void][IO.Directory]::CreateDirectory($wtFake)
+        [IO.File]::WriteAllText((Join-Path $wtFake '.git'), "gitdir: $admin`n")
+        Assert-Eq (Get-AtmGitPreflight -Target $wtFake).Reason 'GIT_PREFLIGHT_COMMONDIR_NETWORK' 'commondir de rede recusado'
+        # Administrative gitdir: `worktree list` stats it.
+        $fx = & $gitNewFixture 'v-admin'
+        $ad = Join-Path $fx.Repo '.git\worktrees\gone'; [void][IO.Directory]::CreateDirectory($ad)
+        [IO.File]::WriteAllText((Join-Path $ad 'gitdir'), (Join-Path $out 'missing-wt\.git') + "`n"); [IO.File]::WriteAllText((Join-Path $ad 'HEAD'), "ref: refs/heads/main`n")
+        Assert-True ((& $gitFxOut $fx.Repo @('worktree', 'list', '--porcelain') $fx.Repo).Out -match 'prunable') 'contraprova: worktree list consulta o gitdir administrativo (prunable)'
+        $pf = Get-AtmGitPreflight -Target $fx.Repo
+        Assert-True ($pf.Status -eq 'OK' -and @($pf.AdminEntries | Where-Object { $_.Name -eq 'gone' -and $_.Gitdir.Status -eq 'MISSING' }).Count -eq 1) 'gitdir administrativo local ausente: MISSING (evidencia, nao recusa)'
+        [IO.File]::WriteAllText((Join-Path $ad 'gitdir'), "\\$uncHost\share\wt\.git`n")
+        Assert-Eq (Get-AtmGitPreflight -Target $fx.Repo).Reason 'GIT_PREFLIGHT_ADMIN_NETWORK' 'gitdir administrativo de rede recusado (o repositorio inteiro)'
+        Assert-Eq (& $refusedRun $fx.Repo) 0 'gitdir administrativo de rede: nenhum processo Git'
+        # Path-valued configuration and an unparseable file.
+        $fx = & $gitNewFixture 'v-cfg'
+        $alt = Join-Path $out 'other-tree'; [void][IO.Directory]::CreateDirectory($alt)
+        & $gitFx $fx.Repo @('config', 'core.worktree', $alt.Replace('\', '/')) $fx.Repo
+        $tl = (& $gitFxOut $fx.Repo @('rev-parse', '--show-toplevel') $null).Out.Trim().Replace('/', '\')
+        Assert-True ([string]::Equals((Get-AtmNormalizedPath $tl), (Get-AtmNormalizedPath $alt), [StringComparison]::OrdinalIgnoreCase)) 'contraprova: core.worktree leva o Git a outro diretorio'
+        $cfgFile = Join-Path $fx.Repo '.git\config'
+        foreach ($c in @(@("[core]`n`tworktree = \\\\$uncHost\\share", 'GIT_PREFLIGHT_CONFIG_PATH'), @("[core]`n`texcludesFile = //$uncHost/s/ignore", 'GIT_PREFLIGHT_CONFIG_PATH'), @("[core]`n`tattributesFile = ~/attr", 'GIT_PREFLIGHT_CONFIG_PATH'),
+                @("[atm]`n`tsomething = \\\\$uncHost\\x", 'GIT_PREFLIGHT_CONFIG_NETWORK'), @("[core]`n`tbroken = a \`n`tb", 'GIT_CONFIG_UNPARSEABLE'))) {
+            $orig = [IO.File]::ReadAllText($cfgFile)
+            [IO.File]::WriteAllText($cfgFile, $orig + "`n" + $c[0] + "`n")
+            Assert-Eq (Get-AtmGitPreflight -Target $fx.Repo).Reason $c[1] "configuracao recusada: $($c[1])"
+            [IO.File]::WriteAllText($cfgFile, $orig)
+        }
+        $script:caseNote = 'host UNC de teste em .invalid; nenhum valor de rede chega a uma chamada de sistema de arquivos'
+    }
+    Test-Case 'Git' 'P3-B0: configuracao isolada (so opcoes de linha de comando) e D-3 (filtro do repositorio bloqueia status; atributo sem driver e filtro global nao executam), com contraprovas' {
+        if (& $gitSkip) { return }
+        # One observation: with the runner environment, Git sees only command-line configuration.
+        $plain = Join-Path $gitRoot 'iso-plain'; [void][IO.Directory]::CreateDirectory($plain)
+        $fakeHome = Join-Path $gitRoot 'fake-home'; [void][IO.Directory]::CreateDirectory($fakeHome)
+        $marker = Join-Path $gitRoot 'filter-ran.txt'
+        $evil = "echo ran > '" + $marker.Replace('\', '/') + "' && cat"
+        [IO.File]::WriteAllText((Join-Path $fakeHome '.gitconfig'), "[atm]`n`tprobe = from-home`n[filter `"evil`"]`n`tclean = $evil`n")
+        $line = '"' + $testGit.Path + '" ' + ((@($script:AtmGitGlobalArguments) + @('config', '--list', '--show-origin')) -join ' ')
+        $saved = @{ HOME = $env:HOME; USERPROFILE = $env:USERPROFILE }
+        try {
+            & $setEnvVar 'HOME' $fakeHome; & $setEnvVar 'USERPROFILE' $fakeHome
+            $iso = Invoke-AtmBoundedProcess -Executable $testGit.Path -CommandLine $line -WorkingDirectory $plain -Environment (Get-AtmGitEnvironment -Ceiling $gitRoot -IsolatedHome $testGit.IsolatedHome) -TimeoutMs 10000 -MaxOutputBytes 65536 -JobMemoryBytes 1GB -ActiveProcessLimit 8
+            $origins = @(([Text.Encoding]::UTF8.GetString($iso.Output)).Split("`n") | Where-Object { $_ } | ForEach-Object { ($_ -split "`t")[0] } | Select-Object -Unique)
+            Assert-True ($iso.ExitCode -eq 0 -and $origins.Count -ge 1 -and @($origins | Where-Object { $_ -ne 'command line:' }).Count -eq 0) "isolada: so 'command line:' ($($origins -join ', '))"
+            $raw = Invoke-AtmBoundedProcess -Executable $testGit.Path -CommandLine ('"' + $testGit.Path + '" config --list --show-origin') -WorkingDirectory $plain -Environment @([Environment]::GetEnvironmentVariables().GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -TimeoutMs 10000 -MaxOutputBytes 65536 -JobMemoryBytes 1GB -ActiveProcessLimit 8
+            $rawText = [Text.Encoding]::UTF8.GetString($raw.Output)
+            Assert-True ($rawText -match 'file:' -and $rawText -match 'from-home') 'contraprova: sem isolamento o Git le arquivos de configuracao (inclusive o HOME)'
+        } finally { foreach ($k in $saved.Keys) { & $setEnvVar $k $saved[$k] } }
+        # D-3 (a): a filter driver configured in the repository blocks status; raw Git runs it.
+        $fx = & $gitNewFixture 'd3-repo'
+        [IO.File]::WriteAllText((Join-Path $fx.Repo '.gitattributes'), "a.txt filter=evil`n")
+        & $gitFx $fx.Repo @('config', 'filter.evil.clean', $evil) $fx.Repo
+        $pf = Get-AtmGitPreflight -Target $fx.Repo
+        Assert-True ($pf.Status -eq 'OK' -and -not $pf.StatusAllowed -and $pf.StatusBlock -eq 'D3_FILTER_DRIVER') "filtro no repositorio bloqueia status: $($pf.StatusBlock)"
+        $n = & $gitSpy { $r = & $gitOpen { Invoke-AtmGitCommand -Git $testGit -Arguments @('status', '--porcelain=v2', '-z') -WorkingDirectory $fx.Repo -Preflight $pf }; Assert-Eq $r.Reason 'GIT_STATUS_PRECONDITION' 'status recusado sem as precondicoes D-3' }
+        Assert-Eq $n 0 'status bloqueado: nenhum processo Git'
+        $r = & $gitOpen { & $gitRun @('rev-parse', '--show-toplevel') $fx.Repo }
+        Assert-Eq $r.Status 'COMPLETE' 'outros comandos seguem permitidos'
+        Assert-True (-not (Test-Path -LiteralPath $marker)) 'filtro nao executado pelo executor'
+        Start-Sleep -Milliseconds 1100; [IO.File]::WriteAllText((Join-Path $fx.Repo 'a.txt'), "a`n")
+        $null = & $gitFxOut $fx.Repo @('status', '--porcelain') $fx.Repo
+        Assert-True (Test-Path -LiteralPath $marker) 'contraprova: o Git sem as protecoes executa o filtro do repositorio'
+        # D-3 (b): an attribute without a configured driver, and (c) a driver in a global file under HOME: status runs, nothing executes.
+        $marker2 = Join-Path $gitRoot 'filter-ran-2.txt'
+        $evil2 = "echo ran > '" + $marker2.Replace('\', '/') + "' && cat"
+        [IO.File]::WriteAllText((Join-Path $fakeHome '.gitconfig'), "[filter `"evil`"]`n`tclean = $evil2`n")
+        $fx = & $gitNewFixture 'd3-attr'
+        [IO.File]::WriteAllText((Join-Path $fx.Repo '.gitattributes'), "a.txt filter=evil`n")
+        Start-Sleep -Milliseconds 1100; [IO.File]::WriteAllText((Join-Path $fx.Repo 'a.txt'), "a`n")
+        $saved = @{ HOME = $env:HOME; USERPROFILE = $env:USERPROFILE }
+        try {
+            & $setEnvVar 'HOME' $fakeHome; & $setEnvVar 'USERPROFILE' $fakeHome
+            $pf = Get-AtmGitPreflight -Target $fx.Repo
+            Assert-True ($pf.Status -eq 'OK' -and $pf.StatusAllowed) 'sem driver no repositorio: status permitido'
+            $r = & $gitOpen { Invoke-AtmGitCommand -Git $testGit -Arguments @('status', '--porcelain=v2', '-z') -WorkingDirectory $fx.Repo -Preflight $pf }
+            Assert-True ($r.Status -eq 'COMPLETE' -and -not (Test-Path -LiteralPath $marker2)) "status executado; atributo sem driver e driver global ignorados: $($r.Status)"
+            $null = & $gitFxOut $fx.Repo @('status', '--porcelain') $fx.Repo @{ GIT_CONFIG_GLOBAL = $null; HOME = $fakeHome }
+            Assert-True (Test-Path -LiteralPath $marker2) 'contraprova: o Git com o HOME do usuario executa o filtro global'
+        } finally { foreach ($k in $saved.Keys) { & $setEnvVar $k $saved[$k] } }
+        # Submodules block status too.
+        $fx = & $gitNewFixture 'd3-sub'
+        [IO.File]::WriteAllText((Join-Path $fx.Repo '.gitmodules'), "[submodule `"x`"]`n`tpath = x`n`turl = ./x`n")
+        Assert-Eq (Get-AtmGitPreflight -Target $fx.Repo).StatusBlock 'D3_SUBMODULES' '.gitmodules bloqueia status'
+    }
+    Test-Case 'Git' 'P3-B0: sem rede e sem lazy fetch em clone parcial (contraprova: o Git sem as protecoes tenta buscar o objeto); versao minima 2.45.0' {
+        if (& $gitSkip) { return }
+        Assert-True ($testGit.Version -ge $script:AtmGitMinimumVersion -and $script:AtmGitMinimumVersion -eq [version]'2.45.0') "Git $($testGit.Version) atende a versao minima $($script:AtmGitMinimumVersion)"
+        Assert-True ([version]'2.44.9' -lt $script:AtmGitMinimumVersion) 'versao anterior seria GIT_VERSION_TOO_OLD'
+        $fxS = & $gitNewFixture 'lazy-server'
+        [IO.File]::WriteAllText((Join-Path $fxS.Repo 'big.txt'), ('x' * 5000)); & $gitFx $fxS.Repo @('add', 'big.txt') $fxS.Repo; & $gitFx $fxS.Repo @('commit', '-q', '-m', 'big') $fxS.Repo
+        $client = Join-Path $gitRoot 'lazy-client'
+        $srcUrl = 'file:///' + $fxS.Repo.Replace('\', '/')
+        $res = & $gitFxOut $gitRoot @('-c', 'protocol.file.allow=always', '-c', 'uploadpack.allowFilter=true', 'clone', '-q', '--no-checkout', '--filter=blob:none', $srcUrl, $client) $null
+        Assert-Eq $res.Code 0 "clone parcial da fixture: $($res.Out)"
+        $missing = @((& $gitFxOut $client @('rev-list', '--objects', '--missing=print', 'HEAD') $client).Out.Split("`n") | Where-Object { $_ -match '^\?[0-9a-f]{40}' } | ForEach-Object { $_.Substring(1, 40) })
+        Assert-True ($missing.Count -ge 1) "blob ausente no clone parcial ($($missing.Count))"
+        # The promisor now points to a local path that does not exist.
+        & $gitFx $client @('config', 'remote.origin.url', ('file:///' + (Join-Path $gitRoot 'no-such-server').Replace('\', '/'))) $client
+        Start-Sleep -Milliseconds 1100
+        $before = & $gitSnap $client
+        $pf = Get-AtmGitPreflight -Target $client
+        Assert-Eq $pf.Status 'OK' 'clone parcial passa no preflight (o promissor nunca e contatado)'
+        $r = & $gitOpen { Invoke-AtmGitCommand -Git $testGit -Arguments @('cat-file', '-e', $missing[0]) -WorkingDirectory $client -Preflight $pf }
+        Assert-True ($r.Status -eq 'FAILED') "objeto ausente nao buscado: $($r.Status)"
+        $wdn = Get-AtmNormalizedPath $client
+        $j = Invoke-AtmBoundedProcess -Executable $testGit.Path -CommandLine ('"' + $testGit.Path + '" ' + ((@($script:AtmGitGlobalArguments) + @('cat-file', '-e', $missing[0])) -join ' ')) -WorkingDirectory $wdn -Environment (Get-AtmGitEnvironment -Ceiling (Get-AtmNormalizedPath $gitRoot) -IsolatedHome $testGit.IsolatedHome) -TimeoutMs 10000 -MaxOutputBytes 65536 -JobMemoryBytes 1GB -ActiveProcessLimit 8
+        $err = [Text.Encoding]::UTF8.GetString($j.ErrorOutput)
+        Assert-True ($err -match 'lazy fetching disabled' -and $err -notmatch 'no-such-server') "lazy fetch desativado e promissor nunca contatado: $($err.Trim())"
+        $envNoLazy = @(Get-AtmGitEnvironment -Ceiling (Get-AtmNormalizedPath $gitRoot) -IsolatedHome $testGit.IsolatedHome | Where-Object { $_ -notmatch '^GIT_NO_LAZY_FETCH=' })
+        $j = Invoke-AtmBoundedProcess -Executable $testGit.Path -CommandLine ('"' + $testGit.Path + '" ' + ((@($script:AtmGitGlobalArguments) + @('cat-file', '-e', $missing[0])) -join ' ')) -WorkingDirectory $wdn -Environment $envNoLazy -TimeoutMs 10000 -MaxOutputBytes 65536 -JobMemoryBytes 1GB -ActiveProcessLimit 8
+        $err2 = [Text.Encoding]::UTF8.GetString($j.ErrorOutput)
+        Assert-True ($j.ExitCode -ne 0 -and $err2 -match "transport 'file' not allowed") "segunda camada: mesmo sem GIT_NO_LAZY_FETCH o transporte e recusado ($($err2.Trim()))"
+        Assert-Eq (@(Compare-Object ($before -split "`n") ((& $gitSnap $client) -split "`n")).Count) 0 'nenhum objeto novo no clone'
+        $raw = & $gitFxOut $client @('-c', 'protocol.file.allow=always', 'cat-file', '-e', $missing[0]) $null
+        Assert-True ($raw.Code -ne 0 -and $raw.Out -match 'no-such-server|does not appear|not a git repository|could not read') "contraprova: o Git sem as protecoes tenta buscar no promissor ($($raw.Out.Trim().Split("`n")[0]))"
+    }
+    Test-Case 'Git' 'P3-B0: trava de diagnostico de worktrees fechada por padrao; cadeia elevada (launcher, programa efetivo e diretorios) verificada' {
+        if (& $gitSkip) { return }
+        Assert-Eq $script:AtmWorktreeDiagnosticsEnabled $false 'trava fechada fora dos testes'
+        $diag = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Diagnose.ps1'))
+        Assert-Eq ([regex]::Matches($diag, '\$script:AtmWorktreeDiagnosticsEnabled\s*=').Count) 1 'uma unica atribuicao da trava no motor'
+        Assert-True ($diag -match '\$script:AtmWorktreeDiagnosticsEnabled = \$false') 'a trava distribuida e $false'
+        $others = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File -Filter '*.ps1' | Where-Object { $_.Name -ne 'Engine.Diagnose.ps1' -and ([IO.File]::ReadAllText($_.FullName)) -match 'AtmWorktreeDiagnosticsEnabled\s*=' })
+        Assert-Eq $others.Count 0 'nenhum outro arquivo altera a trava'
+        $fx = & $gitNewFixture 'gate'
+        $n = & $gitSpy { $r = Invoke-AtmGitCommand -Git $testGit -Arguments @('rev-parse', '--show-toplevel') -WorkingDirectory $fx.Repo -Preflight (Get-AtmGitPreflight -Target $fx.Repo); Assert-Eq $r.Reason 'GIT_EXECUTION_GATE_CLOSED' 'trava fechada: comando no repositorio recusado' }
+        Assert-Eq $n 0 'trava fechada: nenhum processo'
+        Assert-Eq (Invoke-AtmGitCommand -Git $testGit -Arguments @('--version') -WorkingDirectory ([IO.Path]::GetDirectoryName($testGit.Path))).Status 'COMPLETE' 'so --version roda com a trava fechada'
+        Assert-True ($null -ne $testGit.EffectivePath -and [IO.File]::Exists($testGit.EffectivePath) -and $null -ne $testGit.IsolatedHome -and -not [IO.Directory]::Exists($testGit.IsolatedHome)) "programa efetivo identificado ($([IO.Path]::GetFileName([IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName($testGit.EffectivePath))))); HOME isolado inexistente"
+        # Git for Windows layout in the sandbox: launcher and effective program are found; elevated, the chain is refused.
+        $fg = Join-Path $gitRoot 'fakegit'
+        foreach ($d in @('cmd', 'mingw64\bin')) { [void][IO.Directory]::CreateDirectory((Join-Path $fg $d)) }
+        [IO.File]::WriteAllText((Join-Path $fg 'cmd\git.exe'), 'not a program'); [IO.File]::WriteAllText((Join-Path $fg 'mingw64\bin\git.exe'), 'not a program')
+        $n = & $gitSpy { $r = Resolve-AtmGitExecutable -PathVariable (Join-Path $fg 'cmd') -Elevated $true; Assert-Eq $r.Reason 'GIT_LOCATION_NOT_TRUSTED' 'elevado: cadeia nao confiavel recusada' }
+        Assert-Eq $n 0 'elevado e nao confiavel: nada executado'
+        $r = Resolve-AtmGitExecutable -PathVariable (Join-Path $fg 'cmd') -Elevated $false
+        Assert-True ($r.Reason -eq 'GIT_VERSION_UNREADABLE' -and $r.Path -eq (Get-AtmNormalizedPath (Join-Path $fg 'cmd\git.exe'))) 'layout reconhecido (versao ilegivel: arquivo que nao e programa)'
+        if ($env:GITHUB_ACTIONS -eq 'true') { Assert-Eq (Resolve-AtmGitExecutable -Elevated $true).Status 'COMPLETE' 'CI elevado: launcher, programa efetivo, bibliotecas e diretorios confiaveis' }
     }
     Test-Case 'Camadas' 'Motor de diagnostico somente leitura, sem saida no terminal nem controle de processos/servicos/VMs; codigo nativo sem privilegios' {
         $lib = Join-Path $srcDir 'lib'

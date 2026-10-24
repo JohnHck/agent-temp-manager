@@ -126,6 +126,13 @@ Step 'shipped-release-gate' {
     Assert ($clean -match '\$script:AtmRealDeletionEnabled = \$false') 'trava instalada nao e $false'
     'installed gate = $false (single assignment)'
 }
+Step 'shipped-worktree-diagnostics-gate' {
+    # P3-B0: reading repositories and running Git in them stay closed in every shipped copy.
+    $diag = [IO.File]::ReadAllText((Join-Path $installDir 'lib\Engine.Diagnose.ps1'))
+    Assert ([regex]::Matches($diag, '\$script:AtmWorktreeDiagnosticsEnabled\s*=').Count -eq 1) 'mais de uma atribuicao da trava de worktrees'
+    Assert ($diag -match '\$script:AtmWorktreeDiagnosticsEnabled = \$false') 'trava de worktrees instalada nao e $false'
+    'installed worktree diagnostics gate = $false (single assignment)'
+}
 foreach ($c in @(@('verify', 'verify', 0), @('version -Lang en-US', 'version', 0), @('audit -NoProgress -Lang en-US', 'audit', 0),
                  @('preview -NoProgress -Lang en-US', 'preview', 0), @('help', 'help', 0), @('', 'tui-noninteractive', 6))) {
     $argLine = $c[0]; $tag = $c[1]; $expect = $c[2]
