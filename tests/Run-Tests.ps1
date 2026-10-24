@@ -4975,7 +4975,8 @@ try {
         $wdn = Get-AtmNormalizedPath $client
         $j = Invoke-AtmBoundedProcess -Executable $testGit.Path -CommandLine ('"' + $testGit.Path + '" ' + ((@($script:AtmGitGlobalArguments) + @('cat-file', '-e', $missing[0])) -join ' ')) -WorkingDirectory $wdn -Environment (Get-AtmGitEnvironment -Ceiling (Get-AtmNormalizedPath $gitRoot) -IsolatedHome $testGit.IsolatedHome) -TimeoutMs 10000 -MaxOutputBytes 65536 -JobMemoryBytes 1GB -ActiveProcessLimit 8
         $err = [Text.Encoding]::UTF8.GetString($j.ErrorOutput)
-        Assert-True ($err -match 'lazy fetching disabled' -and $err -notmatch 'no-such-server') "lazy fetch desativado e promissor nunca contatado: $($err.Trim())"
+        # cat-file -e is silent: with lazy fetching disabled it only fails, and never names the promisor.
+        Assert-True ($j.ExitCode -ne 0 -and $err -notmatch 'no-such-server|does not appear') "lazy fetch desativado e promissor nunca contatado (saida $($j.ExitCode)): $($err.Trim())"
         $envNoLazy = @(Get-AtmGitEnvironment -Ceiling (Get-AtmNormalizedPath $gitRoot) -IsolatedHome $testGit.IsolatedHome | Where-Object { $_ -notmatch '^GIT_NO_LAZY_FETCH=' })
         $j = Invoke-AtmBoundedProcess -Executable $testGit.Path -CommandLine ('"' + $testGit.Path + '" ' + ((@($script:AtmGitGlobalArguments) + @('cat-file', '-e', $missing[0])) -join ' ')) -WorkingDirectory $wdn -Environment $envNoLazy -TimeoutMs 10000 -MaxOutputBytes 65536 -JobMemoryBytes 1GB -ActiveProcessLimit 8
         $err2 = [Text.Encoding]::UTF8.GetString($j.ErrorOutput)
@@ -5007,6 +5008,100 @@ try {
         Assert-True ($r.Reason -eq 'GIT_VERSION_UNREADABLE' -and $r.Path -eq (Get-AtmNormalizedPath (Join-Path $fg 'cmd\git.exe'))) 'layout reconhecido (versao ilegivel: arquivo que nao e programa)'
         if ($env:GITHUB_ACTIONS -eq 'true') { Assert-Eq (Resolve-AtmGitExecutable -Elevated $true).Status 'COMPLETE' 'CI elevado: launcher, programa efetivo, bibliotecas e diretorios confiaveis' }
     }
+    Test-Case 'Git' 'P3-B: descoberta limitada as fontes (particoes e caminhos explicitos), deduplicada, registro pelas entradas administrativas e confirmado pelo Git, orfao so com nao encontrado positivo, pseudonimos e somente leitura' {
+        if (& $gitSkip) { return }
+        $base = Join-Path $gitRoot 'disc'
+        $partA = Join-Path $base 'partA'; $partB = Join-Path $base 'partB'
+        foreach ($d in @($partA, $partB)) { [void][IO.Directory]::CreateDirectory($d) }
+        # Repository R (main + locked worktree + worktree whose directory was removed) under partition A, reached again
+        # through an explicit path deep inside it; repository Q is the partition B root itself; S sits next to the
+        # partitions and is never named.
+        $R = Join-Path $partA 'proj'; [void][IO.Directory]::CreateDirectory($R)
+        & $gitFx $R @('init', '-q', '-b', 'main') $null
+        [IO.File]::WriteAllText((Join-Path $R 'a.txt'), "a`n"); & $gitFx $R @('add', 'a.txt') $R; & $gitFx $R @('commit', '-q', '-m', 'one') $R
+        $wtL = Join-Path $base 'wt-locked'; & $gitFx $R @('worktree', 'add', '-q', $wtL, '-b', 'locked') $R; & $gitFx $R @('worktree', 'lock', '--reason', 'keep', $wtL) $R
+        $ad = Join-Path $R '.git\worktrees\ghost'; [void][IO.Directory]::CreateDirectory($ad)
+        [IO.File]::WriteAllText((Join-Path $ad 'gitdir'), (Join-Path $base 'ghost-wt\.git') + "`n"); [IO.File]::WriteAllText((Join-Path $ad 'HEAD'), "ref: refs/heads/main`n")
+        [void][IO.Directory]::CreateDirectory((Join-Path $R 'deep\deeper'))
+        & $gitFx $partB @('init', '-q', '-b', 'main') $null
+        $S = Join-Path $base 'stranger'; [void][IO.Directory]::CreateDirectory($S); & $gitFx $S @('init', '-q', '-b', 'main') $null
+        # A worktree directory whose administrative entry does not exist (positive not found) under partition A, and one
+        # whose .git points to a network path (refused, never an orphan).
+        $orph = Join-Path $partA 'orphan'; [void][IO.Directory]::CreateDirectory($orph)
+        [IO.File]::WriteAllText((Join-Path $orph '.git'), 'gitdir: ' + (Join-Path $R '.git\worktrees\deleted-entry') + "`n")
+        $netw = Join-Path $partA 'net-wt'; [void][IO.Directory]::CreateDirectory($netw)
+        [IO.File]::WriteAllText((Join-Path $netw '.git'), "gitdir: \\$uncHost\share\x`n")
+        $parts = @([pscustomobject]@{ Path = $partA; Kind = 'SessionRoot' }, [pscustomobject]@{ Path = $partB; Kind = 'SessionRoot' }, [pscustomobject]@{ Path = $S; Kind = 'NotScanned' })
+        $pz = New-AtmPseudonymizer -Key $testPseudonymKey
+        try {
+            $closed = Get-AtmWorktreeDiscovery -Partitions $parts -Pseudonymizer $pz
+            Assert-True (@($closed.Findings).Count -eq 0 -and $closed.Coverage[0].Status -eq 'NOT_OBSERVABLE' -and @($closed.Coverage[0].Reasons) -contains 'WORKTREE_DIAGNOSTICS_GATE_CLOSED') 'trava fechada: nada lido, nao observavel'
+            Start-Sleep -Milliseconds 1100
+            $before = & $gitSnap $base
+            $script:AtmGitInvocationLog = New-Object System.Collections.Generic.List[object]
+            $script:AtmWorktreeDiagnosticsEnabled = $true
+            try { $res = Get-AtmWorktreeDiscovery -Partitions $parts -RepositoryPaths @((Join-Path $R 'deep\deeper'), 'relative\x') -Git $testGit -Pseudonymizer $pz; $log = $script:AtmGitInvocationLog.ToArray() }
+            finally { $script:AtmWorktreeDiagnosticsEnabled = $false; $script:AtmGitInvocationLog = $null }
+            Start-Sleep -Milliseconds 300
+            Assert-Eq (@(Compare-Object ($before -split "`n") ((& $gitSnap $base) -split "`n")).Count) 0 'descoberta e confirmacao pelo Git nao alteram nada'
+            $repos = @($res.Findings | Where-Object { $_.Kind -eq 'Repository' }); $wts = @($res.Findings | Where-Object { $_.Kind -eq 'Worktree' })
+            $kR = 'git/r-' + (Get-AtmPseudonym -Pseudonymizer $pz -Domain 'atm-repository/1' -Fields @((Get-AtmNormalizedPath (Join-Path $R '.git')).ToLowerInvariant()))
+            $fR = @($repos | Where-Object { $_.Key -ceq $kR })
+            Assert-True ($fR.Count -eq 1 -and $fR[0].State -eq 'UNKNOWN') 'repositorio R: um achado (particao e caminho explicito deduplicados)'
+            Assert-Eq (@($fR[0].Evidence | Where-Object { $_.Code -eq 'REPOSITORY_DISCOVERED' } | ForEach-Object { $_.Detail } | Sort-Object) -join ',') 'EXPLICIT,PARTITION' 'fontes registradas'
+            Assert-True (@($fR[0].Evidence | Where-Object { $_.Code -eq 'REPOSITORY_CONFIRMED_BY_GIT' }).Count -eq 1) 'confirmado pelo Git (rev-parse)'
+            $wk = { param($d) 'git/w-' + (Get-AtmPseudonym -Pseudonymizer $pz -Domain 'atm-worktree/1' -Fields @((Get-AtmNormalizedPath $d).ToLowerInvariant())) }
+            $codes = { param($k) @(@($wts | Where-Object { $_.Key -ceq $k })[0].Evidence | ForEach-Object { $_.Code }) }
+            Assert-True ((& $codes (& $wk $R)) -contains 'WORKTREE_MAIN' -and (& $codes (& $wk $R)) -contains 'WORKTREE_LISTED_BY_GIT') 'worktree principal registrada e listada pelo Git'
+            Assert-True ((& $codes (& $wk $wtL)) -contains 'WORKTREE_LOCKED' -and (& $codes (& $wk $wtL)) -contains 'WORKTREE_REGISTERED') 'worktree trancada'
+            Assert-True ((& $codes (& $wk (Join-Path $base 'ghost-wt'))) -contains 'WORKTREE_DIRECTORY_MISSING' -and (& $codes (& $wk (Join-Path $base 'ghost-wt'))) -contains 'WORKTREE_PRUNABLE') 'entrada administrativa sem diretorio: ausente e prunable (nao orfa)'
+            $fo = @($wts | Where-Object { $_.Key -ceq (& $wk $orph) })
+            Assert-True ($fo.Count -eq 1 -and $fo[0].State -eq 'APPARENT_ORPHAN' -and @($fo[0].Evidence | ForEach-Object { $_.Code }) -contains 'LOCAL_WORK_UNKNOWN') 'orfa aparente so com entrada administrativa positivamente ausente, trabalho local desconhecido'
+            Assert-Eq @($wts | Where-Object { $_.State -eq 'APPARENT_ORPHAN' }).Count 1 'nenhum outro orfao (a de rede e recusada, nao orfa)'
+            Assert-True (@($repos | Where-Object { @($_.Evidence | Where-Object { $_.Code -eq 'REPOSITORY_PREFLIGHT_REFUSED' -and $_.Detail -eq 'GIT_PREFLIGHT_GITDIR_NETWORK' }).Count -eq 1 }).Count -eq 1) 'gitdir de rede: recusado antes do Git'
+            Assert-Eq @($repos | Where-Object { @($_.Evidence | Where-Object { $_.Code -eq 'REPOSITORY_DISCOVERED' }).Count -gt 0 }).Count 2 'repositorios R e Q (raiz da particao B)'
+            Assert-True (@($wts | ForEach-Object { @($_.Evidence | Where-Object { $_.Code -eq 'LOCAL_WORK_UNKNOWN' }).Count } | Where-Object { $_ -ne 1 }).Count -eq 0 -and @($res.Findings | Where-Object { $_.State -eq 'CLEAN_AND_PUBLISHED_UNKNOWN' }).Count -eq 0) 'toda worktree declara trabalho local desconhecido; nada limpo/publicado'
+            $sN = Get-AtmNormalizedPath $S
+            Assert-Eq @($log | Where-Object { [string]::Equals($_.WorkingDirectory, $sN, [StringComparison]::OrdinalIgnoreCase) }).Count 0 'repositorio nunca citado nunca recebe o Git (espiao)'
+            Assert-Eq @($log | Where-Object { $_.WorkingDirectory -like "*net-wt*" -or $_.WorkingDirectory -like "*orphan*" }).Count 0 'alvos recusados ou orfaos nunca recebem o Git'
+            $dc = @($res.Coverage | Where-Object { $_.Collector -eq 'worktree-discovery' })[0]
+            Assert-True ($dc.Status -eq 'PARTIAL' -and @($dc.Reasons) -contains 'DISCOVERY_BOUNDED' -and @($dc.Reasons) -contains 'EXPLICIT_PATH_INVALID' -and @($dc.Reasons) -contains 'PREFLIGHT_REFUSED_TARGETS') "cobertura limitada: $(@($dc.Reasons) -join ',')"
+            Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'git' })[0].Status 'COMPLETE' 'chamadas ao Git completas'
+            Assert-True (@($res.Findings | Where-Object { $_.Key -cnotmatch '^git/[rwt]-[0-9a-f]{32}$' }).Count -eq 0) 'chaves pseudonimas'
+            $json = (@{ F = $res.Findings; C = $res.Coverage } | ConvertTo-Json -Depth 8)
+            foreach ($x in @($base, $R, $wtL, (Split-Path -Leaf $R), 'locked', 'keep', $uncHost)) { Assert-True (-not $json.Contains($x) -and -not $json.Contains($x.Replace('\', '\\'))) "nada sensivel nos achados: $(Split-Path -Leaf $x)" }
+            # Caps and the upward walk limit.
+            $script:AtmWorktreeDiagnosticsEnabled = $true
+            try {
+                $one = Get-AtmWorktreeDiscovery -Partitions $parts -Git $testGit -Pseudonymizer $pz -MaxRepositories 1
+                $walk = Get-AtmWorktreeDiscovery -RepositoryPaths @((Join-Path $R 'deep\deeper')) -Git $null -Pseudonymizer $pz -MaxWalkLevels 1
+            } finally { $script:AtmWorktreeDiagnosticsEnabled = $false }
+            Assert-True (@($one.Coverage[0].Reasons) -contains 'REPOSITORY_LIMIT' -and @($one.Findings | Where-Object { $_.Kind -eq 'Repository' -and @($_.Evidence | Where-Object { $_.Code -eq 'REPOSITORY_DISCOVERED' }).Count -gt 0 }).Count -eq 1) 'limite de repositorios: PARTIAL'
+            Assert-True (@($walk.Coverage[0].Reasons) -contains 'WALK_LIMIT' -and @($walk.Findings).Count -eq 0) 'limite de subida: PARTIAL, nada inventado'
+            Assert-True (@($walk.Coverage | Where-Object { $_.Collector -eq 'git' })[0].Status -eq 'UNAVAILABLE') 'sem Git: cobertura git indisponivel'
+            # Integrated: closed gate leaves diagnose unchanged; open gate adds the two collectors.
+            $p = New-TestProfile 'disc-int'
+            $null = New-TestRoot -ProfileInfo $p
+            $rows = $b4cRows
+            $d0 = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $b4cLegacy) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0]) -ProcessSource ({ $rows }.GetNewClosure()) -CpuSampleMs 0 -PseudonymKey $testPseudonymKey
+            Assert-Eq @($d0.Coverage | Where-Object { $_.Collector -eq 'worktree-discovery' -or $_.Collector -eq 'git' }).Count 0 'trava fechada: diagnose sem coletores de worktree (saida inalterada)'
+            $d1 = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $b4cLegacy) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0]) -ProcessSource ({ $rows }.GetNewClosure()) -CpuSampleMs 0 -PseudonymKey $testPseudonymKey -RepositoryPaths @($R)
+            Assert-True (@($d1.Coverage | Where-Object { $_.Collector -eq 'worktree-discovery' -and $_.Status -eq 'NOT_OBSERVABLE' }).Count -eq 1) 'trava fechada com lista explicita: nao observavel'
+            $script:AtmWorktreeDiagnosticsEnabled = $true
+            try { $d2 = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $b4cLegacy) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0]) -ProcessSource ({ $rows }.GetNewClosure()) -CpuSampleMs 0 -PseudonymKey $testPseudonymKey -RepositoryPaths @($R) }
+            finally { $script:AtmWorktreeDiagnosticsEnabled = $false }
+            Assert-True (@($d2.Findings | Where-Object { $_.Key -ceq $kR }).Count -eq 1 -and @($d2.Coverage | Where-Object { $_.Collector -eq 'git' }).Count -eq 1 -and -not $d2.CoverageComplete) 'trava aberta: repositorio no diagnose; descoberta limitada deixa a cobertura incompleta'
+            $txt = (Show-AtmDiagnose -Result $d2 6>&1 | Out-String) -replace '\s+', ' '
+            Assert-True ($txt.Contains((Get-AtmText 'diag.wtTitle')) -and $txt.Contains((Get-AtmText 'diag.wtNoDelete'))) 'relatorio: secao de worktrees, sem nada descartavel'
+            Assert-True (-not $txt.Contains($R) -and -not (ConvertTo-AtmDiagnoseJson -Result $d2).Contains($R.Replace('\', '\\'))) 'relatorio e JSON sem caminhos de repositorio'
+        } finally { Close-AtmPseudonymizer $pz }
+    }
+    Test-Case 'I18n' 'Worktrees (P3-B): todo motivo e evidencia da descoberta tem texto nos dois idiomas' {
+        foreach ($l in @('en-US', 'pt-BR')) {
+            foreach ($x in $script:AtmWorktreeReasonCodes) { Assert-True $script:AtmMessages[$l].ContainsKey("reason.$x") "reason.$x ($l)" }
+            foreach ($x in $script:AtmWorktreeEvidenceCodes) { Assert-True $script:AtmMessages[$l].ContainsKey("evidence.$x") "evidence.$x ($l)" }
+        }
+    }
     Test-Case 'Camadas' 'Motor de diagnostico somente leitura, sem saida no terminal nem controle de processos/servicos/VMs; codigo nativo sem privilegios' {
         $lib = Join-Path $srcDir 'lib'
         $files = @(Get-ChildItem -LiteralPath $lib -File | Where-Object { $_.Name -eq 'Engine.Diagnose.ps1' -or $_.Name -like 'Diagnose.*.ps1' })
@@ -5033,7 +5128,9 @@ try {
         Assert-Eq ([regex]::Matches($diag, '\[AgentTempManager\.AtmJobRunner\]::Run').Count) 1 'um unico ponto de execucao (Invoke-AtmBoundedProcess)'
         Assert-True (-not ($diag -match '(?m)^\s*&\s*(\$git|git(\.exe)?\b)')) 'o motor nunca chama git diretamente'
         $inv = $diag.Substring($diag.IndexOf('function Invoke-AtmDiagnoseRun'))
-        Assert-True (-not $inv.Contains('Invoke-AtmGitCommand') -and -not $inv.Contains('Resolve-AtmGitExecutable')) 'P3-A: o executor ainda nao faz parte do diagnose (P3-B)'
+        # P3-B: the diagnose reaches Git only through the discovery, and only inside the worktree diagnostics gate.
+        $gateAt = $inv.IndexOf('if ($script:AtmWorktreeDiagnosticsEnabled) {')
+        Assert-True (-not $inv.Contains('Invoke-AtmGitCommand') -and [regex]::Matches($inv, 'Resolve-AtmGitExecutable').Count -eq 1 -and $gateAt -gt 0 -and $inv.IndexOf('Resolve-AtmGitExecutable') -gt $gateAt -and $inv.IndexOf('Resolve-AtmGitExecutable') -lt $inv.IndexOf('} elseif (@($RepositoryPaths).Count -gt 0)')) 'P3-B: Git no diagnose so pela descoberta, atras da trava'
         foreach ($f in @('Tui.ps1', 'Report.ps1')) {
             $txt = [IO.File]::ReadAllText((Join-Path $lib $f))
             foreach ($pat in @('Get-AtmIdentityRaw', 'Get-AtmIdentityState', 'Get-AtmProviderRuntimeHints', 'Get-AtmInventoryCoverage', 'AtmToken]', 'Get-AtmProcessRaw', 'Get-AtmProcessCollection', 'Resolve-AtmProcessReference', 'Get-AtmProcessParentLink', 'Get-AtmProcessTree', 'Compare-AtmProcessCollections', 'Get-AtmSelfProcessKeys', 'Measure-AtmProcessCpu', 'Invoke-AtmProcessCpuSampling', 'Get-AtmProcessTreeResources', 'Invoke-AtmGitCommand', 'Resolve-AtmGitExecutable', 'Invoke-AtmBoundedProcess', 'AtmJobRunner')) { Assert-True (-not $txt.Contains($pat)) "$f chama coletor diretamente: $pat" }
