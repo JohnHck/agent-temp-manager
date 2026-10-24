@@ -5630,7 +5630,9 @@ try {
         $capS = Get-AtmHandleEvidence -Nodes $n2 -Query $okQ -MaxSessions 1
         Assert-True (@($capS.Coverage.Reasons) -contains 'HANDLE_SESSION_LIMIT' -and $capS.Coverage.Observed -eq 1) 'limite de sessoes'
         $capH = Get-AtmHandleEvidence -Nodes $n2 -Query { param($Files, $Max) [pscustomobject]@{ Status = 'PARTIAL'; Holders = @() } }
-        Assert-True (@($capH.Coverage.Reasons) -contains 'HANDLE_HOLDERS_CAPPED') 'mais processos do que o limite'
+        Assert-True (@($capH.Coverage.Reasons) -contains 'HANDLE_HOLDERS_CAPPED' -and @($capH.Evidence['a'] | Where-Object { $_.Code -eq 'FILE_HELD_OPEN_UNVERIFIED' -and $_.Detail -eq 'HOLDERS_CAPPED' }).Count -eq 1) 'mais processos do que o limite: item marcado como mantido aberto, nunca livre'
+        $dup = Get-AtmHandleEvidence -Nodes @([pscustomobject]@{ Key = 'z'; Files = @('C:\x\1'); Capped = $false; Error = $null }, [pscustomobject]@{ Key = 'z'; Files = @('C:\x\2'); Capped = $false; Error = $null }) -Query $okQ
+        Assert-Eq $dup.Coverage.Expected 1 'chave repetida: um so item'
         $fail = Get-AtmHandleEvidence -Nodes $n2 -Query { param($Files, $Max) [pscustomobject]@{ Status = 'FAILED_REGISTER_5'; Holders = @('1|1') } }
         Assert-True (@($fail.Coverage.Reasons) -contains 'HANDLE_QUERY_FAILED' -and $fail.Evidence.Count -eq 0) 'erro no registro: nenhuma evidencia, nunca "livre"'
         $thr = Get-AtmHandleEvidence -Nodes $n2 -Query { param($Files, $Max) throw 'boom' }
@@ -5642,6 +5644,8 @@ try {
     Test-Case 'Processos' 'P1-C D-2: amostra de arquivos por item (nunca recursiva, sem reparse point, limitada) e integracao ao diagnose sem caminhos; estado da particao inalterado; diretorios de trabalho nao observados' {
         $d = Join-Path $sandbox 'rm-sample'; [void][IO.Directory]::CreateDirectory((Join-Path $d 'sub'))
         foreach ($n in @('a.txt', 'b.txt', 'c.txt')) { [IO.File]::WriteAllText((Join-Path $d $n), 'x') }
+        $od = Join-Path $sandbox 'rm-office'; [void][IO.Directory]::CreateDirectory($od); [IO.File]::WriteAllText((Join-Path $od '~$doc.docx'), 'x')
+        Assert-Eq @((Get-AtmHandleSampleFiles -Dir $od).Files | Where-Object { $_ -like '*~$doc.docx' }).Count 1 'arquivo de dono do Office (~$) entra na amostra'
         [IO.File]::WriteAllText((Join-Path $d 'sub\deep.txt'), 'x')
         $smp = Get-AtmHandleSampleFiles -Dir $d -Max 2
         Assert-True (@($smp.Files).Count -eq 2 -and $smp.Capped -and @($smp.Files | Where-Object { $_ -like '*deep*' }).Count -eq 0) 'amostra limitada e nao recursiva'

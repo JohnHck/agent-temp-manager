@@ -97,3 +97,8 @@ The decisions above are kept as history; this records what P1-C did with them.
   `COMPLETE`: a sample of files, and Restart Manager does not see directories or working directories. `RmGetList` has
   no cancellation: the time of one query is bounded only by the small number of files registered. The evidence does
   not change any state (dependencies are P4) and authorizes nothing.
+  When more processes hold the files than can be listed (at most 4,096 after one retry with the size Restart
+  Manager reports), the item is still marked held (`FILE_HELD_OPEN_UNVERIFIED`, `HOLDERS_CAPPED`). A sampled file
+  name is taken as listed (names such as `~$doc.docx` are kept), its chain checked natively; at most four times the
+  sample size of entries is looked at. `RmStartSession` writes a transient session key under
+  `HKCU\Software\Microsoft\RestartManager`, removed by `RmEndSession`; no file is written.
