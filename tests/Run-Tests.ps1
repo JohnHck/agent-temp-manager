@@ -5757,7 +5757,8 @@ try {
         $json = ConvertTo-AtmDiagnoseJson -Result $closedNative
         foreach ($x in @($marker, $root, $root.Replace('\', '\\'))) { Assert-True (-not $json.Contains($x)) "JSON sem caminho nem nome de arquivo: $(Split-Path -Leaf $x)" }
         Assert-True ($json.Contains('HANDLE_SECURITY_GATE_CLOSED')) 'JSON com o motivo da trava'
-        $txt = (Show-AtmDiagnose -Result $closedNative 6>&1 | Out-String)
+        # Messages joined as written (Out-String wraps long lines at the console width on PowerShell 5.1).
+        $txt = (Show-AtmDiagnose -Result $closedNative 6>&1 | ForEach-Object { [string]$_ }) -join "`n"
         $lineHead = (Get-AtmText 'diag.hLine' 0 0).Split(':')[0]
         Assert-True ($txt.Contains((Get-AtmText 'diag.hGate')) -and -not $txt.Contains($lineHead) -and -not $txt.Contains((Get-AtmText 'diag.hSample')) -and -not $txt.Contains($marker) -and -not $txt.Contains($root)) 'relatorio: arquivos abertos nao observados (trava), sem contagem de itens livres, sem caminhos'
     }
