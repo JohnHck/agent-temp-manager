@@ -1305,7 +1305,9 @@ function Get-AtmAgentResourceTotals {
 # network or leaving the target directory; and a job object of its own (AtmJobRunner) with a timeout, an output cap,
 # a memory limit and a process limit. The only process ever terminated is that job. `status` is listed in ADR-0006
 # rule 4, but repositories whose configuration can run commands during reads (D-3) are handled in P3-C: until then it is
-# run only on the suite's own fixtures.
+# run only on the suite's own fixtures. Known before P3-B wires it to real repositories: configuration a repository
+# controls (include paths, alternates, a `gitdir:` file) can make Git open UNC paths, and configuration names can carry
+# credentials (`url.<url>.insteadof`): output stays in memory and must never be exported verbatim.
 # ---------------------------------------------------------------------------------------------
 
 $script:AtmGitDefaultTimeoutMs = 10000
@@ -1313,7 +1315,11 @@ $script:AtmGitDefaultMaxOutputBytes = 4MB
 $script:AtmGitDefaultJobMemoryBytes = 1GB
 # The Git for Windows launcher (cmd\git.exe) starts mingw64\bin\git.exe; console programs also get a conhost.
 $script:AtmGitDefaultActiveProcessLimit = 8
-$script:AtmGitGlobalArguments = @('--no-pager', '--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-c', 'protocol.allow=never', '-c', 'color.ui=never', '-c', 'core.quotePath=false')
+# protocol.allow is only the default for protocols without a setting of their own: each transport is refused by name
+# too, so a repository's protocol.<name>.allow cannot switch the network back on (the command line takes precedence).
+$script:AtmGitGlobalArguments = @('--no-pager', '--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-c', 'protocol.allow=never',
+    '-c', 'protocol.file.allow=never', '-c', 'protocol.git.allow=never', '-c', 'protocol.ssh.allow=never', '-c', 'protocol.http.allow=never', '-c', 'protocol.https.allow=never', '-c', 'protocol.ext.allow=never',
+    '-c', 'color.ui=never', '-c', 'core.quotePath=false')
 # Test spy: when it is a list, every argument vector that reaches the native runner is added to it.
 $script:AtmGitInvocationLog = $null
 # Same rule as the installer's Test-AtmInstallAcl: only SYSTEM, Administrators, TrustedInstaller and CREATOR OWNER
@@ -1429,8 +1435,8 @@ function Invoke-AtmBoundedProcess {
 function Invoke-AtmGitCommand {
     <#
       One allow-listed Git command. -Git: Resolve-AtmGitExecutable. -WorkingDirectory: mandatory, an existing directory on
-      a drive (8.3 names normalized); discovery is bounded by its parent (GIT_CEILING_DIRECTORIES), so Git never reports
-      on a repository above it. Returns Status (COMPLETE | PARTIAL output truncated | FAILED | TIMEOUT | REFUSED | UNAVAILABLE),
+      a fixed drive (8.3 names normalized) with no reparse point in its path (Test-AtmPathChain); discovery is bounded by
+      its parent (GIT_CEILING_DIRECTORIES), so Git does not report on a repository above it. Returns Status (COMPLETE | PARTIAL output truncated | FAILED | TIMEOUT | REFUSED | UNAVAILABLE),
       Reason (a code), ExitCode, Output (UTF-8 text, in memory only), ElapsedMs, TotalProcesses. Git's error text is
       never returned: it is classified (GIT_OWNERSHIP_REFUSED, GIT_NOT_A_REPOSITORY, GIT_COMMAND_FAILED).
     #>
@@ -1443,6 +1449,9 @@ function Invoke-AtmGitCommand {
     if ([string]::IsNullOrWhiteSpace($WorkingDirectory) -or $WorkingDirectory -notmatch '^[A-Za-z]:\\' -or -not [IO.Directory]::Exists($WorkingDirectory)) { $out.Reason = 'GIT_WORKDIR_INVALID'; return [pscustomobject]$out }
     $wd = Get-AtmNormalizedPath $WorkingDirectory
     if (-not $wd) { $out.Reason = 'GIT_WORKDIR_INVALID'; return [pscustomobject]$out }
+    # Git works from the resolved directory: a junction or symbolic link in the path would put the ceiling somewhere Git
+    # never passes, and discovery could reach a repository above the target. Every component must be a plain directory.
+    if ((Test-AtmPathChain $wd).Status -cne 'OK') { $out.Reason = 'GIT_WORKDIR_REPARSE_OR_UNREADABLE'; return [pscustomobject]$out }
     $parent = [IO.Path]::GetDirectoryName($wd.TrimEnd('\'))
     $ceiling = $(if ($parent) { Get-AtmNormalizedPath $parent } else { $null })
     $vector = @($script:AtmGitGlobalArguments) + @($Arguments)

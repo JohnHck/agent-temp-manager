@@ -105,9 +105,17 @@ called by `Invoke-AtmGitCommand`):
   processes end when the handle is closed at the end of every run. This is the only termination in the product: no
   other process is opened, signalled or terminated (`TerminateProcess`, `OpenProcess`, `CreateRemoteThread` are
   absent from `Native.cs`, checked by the layering test). Pre-existing processes are never affected.
-* Only allow-listed, read-only Git commands are started, with `--no-optional-locks` and no network
-  (`protocol.allow=never`, `GIT_NO_LAZY_FETCH=1`), so terminating one leaves no lock file behind (tested on suite
-  fixtures).
+* Only allow-listed, read-only Git commands are started, with `--no-optional-locks` (the read commands take no lock,
+  so there is none to leave behind when one is terminated), every transport refused by name on the command line
+  (`protocol.allow=never` plus `protocol.<file|git|ssh|http|https|ext>.allow=never`, which a repository's own setting
+  cannot override) and `GIT_NO_LAZY_FETCH=1` (effective from the Git version that supports it; the minimum version is
+  fixed when object reads are added in P3-C). The working directory must have no reparse point in its path, so the
+  discovery ceiling cannot be bypassed through a junction.
+* Known before P3-B uses the runner on real repositories: configuration a repository controls (include paths,
+  alternates, a `gitdir:` file) can make Git read UNC paths (SMB, with the user's credentials), and configuration names
+  can carry credentials; the runner's output stays in memory. A child running as the same user could in principle
+  duplicate the job handle from this process; that requires code running in the child, which the allow-list and D-3
+  are there to prevent.
 * An elevated run starts `git.exe` only if the file and its directory pass the installer's ACL rule (only SYSTEM,
   Administrators, TrustedInstaller and CREATOR OWNER may own or write them). The check covers the resolved launcher
   (`cmd\git.exe` in Git for Windows); the program it starts is not checked.

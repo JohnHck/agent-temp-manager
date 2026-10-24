@@ -818,6 +818,8 @@ namespace AgentTempManager
         // (ms), bytes kept per output stream, job memory (bytes) and active processes.
         public static AtmJobResult Run(string application, string commandLine, string workingDirectory, string[] environment, int timeoutMs, int maxOutputBytes, long jobMemoryBytes, int activeProcessLimit)
         {
+            if (timeoutMs < 0 || maxOutputBytes < 1 || jobMemoryBytes < 1048576 || activeProcessLimit < 1 || application == null || commandLine == null || environment == null)
+                throw new ArgumentOutOfRangeException("limits");
             AtmJobResult r = new AtmJobResult();
             System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
             IntPtr job = IntPtr.Zero, outRead = IntPtr.Zero, outWrite = IntPtr.Zero, errRead = IntPtr.Zero, errWrite = IntPtr.Zero, nul = IntPtr.Zero;

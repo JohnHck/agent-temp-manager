@@ -4560,6 +4560,7 @@ try {
     $gitTE = @{ GIT_CONFIG_GLOBAL = $gitCfg; GIT_CONFIG_NOSYSTEM = '1' }
     $testGit = Resolve-AtmGitExecutable -TestEnvironment $gitTE
     $gitSkip = { if ($testGit.Status -ne 'COMPLETE') { $script:caseSkipped = $true; $script:caseNote = "Git indisponivel: $($testGit.Reason)"; return $true }; return $false }
+    $setEnvVar = { param([string]$Name, $Value) if ($null -eq $Value) { [Environment]::SetEnvironmentVariable($Name, [NullString]::Value) } else { [Environment]::SetEnvironmentVariable($Name, [string]$Value) } }
     $gitFx = { param([string]$Dir, [string[]]$GitArgs, [string]$Expect)
         # Identity, hooks and signing through the environment (independent of how each shell passes native arguments).
         $fxEnv = [ordered]@{ GIT_CONFIG_GLOBAL = $gitCfg; GIT_CONFIG_NOSYSTEM = '1'; GIT_CEILING_DIRECTORIES = $gitRoot; GIT_DIR = $null; GIT_WORK_TREE = $null
@@ -4567,7 +4568,7 @@ try {
             GIT_CONFIG_COUNT = '2'; GIT_CONFIG_KEY_0 = 'core.hooksPath'; GIT_CONFIG_VALUE_0 = 'NUL'; GIT_CONFIG_KEY_1 = 'commit.gpgsign'; GIT_CONFIG_VALUE_1 = 'false' }
         $saved = @{}; foreach ($k in $fxEnv.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k) }
         try {
-            foreach ($k in $fxEnv.Keys) { [Environment]::SetEnvironmentVariable($k, $fxEnv[$k]) }
+            foreach ($k in $fxEnv.Keys) { & $setEnvVar $k $fxEnv[$k] }
             if ($Expect) {
                 $top = (& $testGit.Path -C $Dir rev-parse --show-toplevel 2>$null | Out-String).Trim().Replace('/', '\')
                 if (-not [string]::Equals((Get-AtmNormalizedPath $top), (Get-AtmNormalizedPath $Expect), [StringComparison]::OrdinalIgnoreCase)) { throw "fixture fora do sandbox: $top" }
@@ -4576,7 +4577,7 @@ try {
             $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
             try { $o = @(& $testGit.Path -C $Dir @GitArgs 2>&1 | ForEach-Object { "$_" }) } finally { $ErrorActionPreference = $eap }
             if ($LASTEXITCODE -ne 0) { throw "git de fixture falhou: $($GitArgs[0]) ($LASTEXITCODE): $((@($o) -join ' / ').Substring(0, [Math]::Min(300, (@($o) -join ' / ').Length)))" }
-        } finally { foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) } }
+        } finally { foreach ($k in $saved.Keys) { & $setEnvVar $k $saved[$k] } }
     }
     # Listing of a tree: name, size, last-write time read from the item itself (an enumeration can return stale directory
     # times) and SHA-256 of every file, .git and its index included.
@@ -4685,7 +4686,9 @@ try {
                 Assert-Eq (($args0 | Select-Object -First $script:AtmGitGlobalArguments.Count) -join ' ') ($script:AtmGitGlobalArguments -join ' ') 'opcoes globais em toda chamada'
                 Assert-True ($null -eq (Test-AtmGitArguments -Arguments @($args0 | Select-Object -Skip $script:AtmGitGlobalArguments.Count))) "vetor registrado permitido: $($args0 -join ' ')"
             }
-            Assert-True (($script:AtmGitGlobalArguments -join ' ') -match '--no-optional-locks' -and ($script:AtmGitGlobalArguments -join ' ') -match 'protocol\.allow=never' -and ($script:AtmGitGlobalArguments -join ' ') -match 'core\.fsmonitor=false') 'sem locks opcionais, sem rede, sem fsmonitor'
+            $ga = $script:AtmGitGlobalArguments -join ' '
+            Assert-True ($ga -match '--no-optional-locks' -and $ga -match 'core\.fsmonitor=false' -and $ga -match 'protocol\.allow=never') 'sem locks opcionais, sem fsmonitor, protocolos recusados por padrao'
+            foreach ($proto in @('file', 'git', 'ssh', 'http', 'https', 'ext')) { Assert-True ($ga -match "protocol\.$proto\.allow=never") "protocolo $proto recusado por nome (a configuracao do repositorio nao o reativa)" }
         } finally { $script:AtmGitInvocationLog = $null }
         # Environment: inherited GIT_* never reach the child; locale C; ceiling.
         $saved = @{}; foreach ($k in 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0') { $saved[$k] = [Environment]::GetEnvironmentVariable($k) }
@@ -4697,9 +4700,16 @@ try {
             foreach ($kv in @('GIT_OPTIONAL_LOCKS=0', 'GIT_TERMINAL_PROMPT=0', 'GCM_INTERACTIVE=never', 'GIT_ASKPASS=', 'SSH_ASKPASS=', 'GIT_NO_LAZY_FETCH=1', 'GIT_DISCOVERY_ACROSS_FILESYSTEM=0', 'GIT_CEILING_DIRECTORIES=C:\x', 'LC_ALL=C', 'LANG=C')) { Assert-True ($envList -contains $kv) "ambiente: $kv" }
             $r = Invoke-AtmGitCommand -Git $testGit -Arguments @('rev-parse', '--show-toplevel') -WorkingDirectory $fx.Repo -TestEnvironment $gitTE
             Assert-True ($r.Status -eq 'COMPLETE' -and [string]::Equals((Get-AtmNormalizedPath $r.Output.Trim().Replace('/', '\')), (Get-AtmNormalizedPath $fx.Repo), [StringComparison]::OrdinalIgnoreCase)) "variaveis GIT_* do chamador ignoradas: $($r.Status)"
-        } finally { foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) } }
+        } finally { foreach ($k in $saved.Keys) { & $setEnvVar $k $saved[$k] } }
         $threw = $false; try { $null = Get-AtmGitEnvironment -Ceiling 'C:\x' -TestEnvironment @{ GIT_DIR = 'x' } } catch { $threw = $true }
         Assert-True $threw 'ambiente de teste restrito a GIT_CONFIG_GLOBAL, GIT_CONFIG_NOSYSTEM e HOME'
+        # A junction in the working directory path is refused (Git would work from the resolved directory, above the ceiling).
+        $jn = Join-Path $fx.Base 'junction-to-plain'
+        $null = & cmd.exe /c mklink /J "$jn" "$(Join-Path $fx.Repo 'plain\deeper')" 2>&1
+        if (Test-Path -LiteralPath $jn) {
+            $r = Invoke-AtmGitCommand -Git $testGit -Arguments @('rev-parse', '--show-toplevel') -WorkingDirectory $jn -TestEnvironment $gitTE
+            Assert-True ($r.Status -eq 'REFUSED' -and $r.Reason -eq 'GIT_WORKDIR_REPARSE_OR_UNREADABLE') "juncao no caminho recusada: $($r.Reason)"
+        } else { Assert-True $false 'juncao de teste nao criada' }
         # Ceiling: a plain directory inside the repository is not attributed to it, also through its 8.3 name.
         $plain = Join-Path $fx.Repo 'plain\deeper'
         foreach ($wd in @($plain, [AgentTempManager.AtmNative]::GetShortPath($plain))) {
@@ -4744,10 +4754,17 @@ try {
         Assert-True ($j.ActiveProcessLimit -eq 1 -and $j.ExitCode -eq 7) "limite de 1 processo: o filho nao cria outro (saida $($j.ExitCode))"
         $j = Invoke-AtmBoundedProcess -Executable $ps -CommandLine '"powershell.exe" -NoProfile -Command "[Console]::Out.Write((''x'' * 300000))"' -WorkingDirectory $gitRoot -Environment $envList -TimeoutMs 30000 -MaxOutputBytes 65536 -JobMemoryBytes 1GB -ActiveProcessLimit 8
         Assert-True ($j.ExitCode -eq 0 -and $j.Output.Length -eq 65536 -and $j.OutputTruncated) "saida limitada: $($j.Output.Length) bytes, truncada $($j.OutputTruncated)"
-        $j = Invoke-AtmBoundedProcess -Executable $ps -CommandLine '"powershell.exe" -NoProfile -Command "$b = New-Object byte[] 2000000000; exit 0"' -WorkingDirectory $gitRoot -Environment $envList -TimeoutMs 60000 -MaxOutputBytes 4096 -JobMemoryBytes 400MB -ActiveProcessLimit 8
-        Assert-True ($j.JobMemoryLimit -eq 400MB -and $j.ExitCode -ne 0) "limite de memoria do job (lido de volta $($j.JobMemoryLimit)): alocacao de 2 GB falha (saida $($j.ExitCode))"
+        $alloc = '"powershell.exe" -NoProfile -Command "try { $b = New-Object byte[] 1500000000 -ErrorAction Stop; $b[0] = 1; exit 0 } catch { exit 9 }"'
+        $j = Invoke-AtmBoundedProcess -Executable $ps -CommandLine $alloc -WorkingDirectory $gitRoot -Environment $envList -TimeoutMs 60000 -MaxOutputBytes 4096 -JobMemoryBytes 400MB -ActiveProcessLimit 8
+        Assert-True ($j.JobMemoryLimit -eq 400MB -and $j.ExitCode -eq 9) "limite de memoria do job (lido de volta $($j.JobMemoryLimit)): alocacao de 1,5 GB recusada (saida $($j.ExitCode), esperado 9)"
+        $j = Invoke-AtmBoundedProcess -Executable $ps -CommandLine $alloc -WorkingDirectory $gitRoot -Environment $envList -TimeoutMs 60000 -MaxOutputBytes 4096 -JobMemoryBytes 3GB -ActiveProcessLimit 8
+        Assert-True ($j.JobMemoryLimit -eq 3GB -and $j.ExitCode -eq 0) "contraprova: com limite de 3 GB a mesma alocacao funciona (saida $($j.ExitCode))"
         $threw = $false; try { $null = Invoke-AtmBoundedProcess -Executable $ps -CommandLine 'x' -WorkingDirectory $gitRoot -Environment $envList -TimeoutMs 1000 -MaxOutputBytes 0 -JobMemoryBytes 1GB -ActiveProcessLimit 1 } catch { $threw = $true }
         Assert-True $threw 'limites invalidos recusados'
+        foreach ($bad in @(@(-1, 4096, 1GB, 1), @(1000, 0, 1GB, 1), @(1000, 4096, -1, 1), @(1000, 4096, 1GB, 0))) {
+            $threw = $false; try { $null = [AgentTempManager.AtmJobRunner]::Run($ps, '"powershell.exe" -NoProfile -Command exit', $gitRoot, $envList, $bad[0], $bad[1], [long]$bad[2], $bad[3]) } catch { $threw = $true }
+            Assert-True $threw "executor nativo recusa limites invalidos ($($bad -join ','))"
+        }
         $script:caseNote = "sentinela PID $($sentinel.Id) termina sozinho"
     }
     Test-Case 'Camadas' 'Motor de diagnostico somente leitura, sem saida no terminal nem controle de processos/servicos/VMs; codigo nativo sem privilegios' {
@@ -4763,7 +4780,10 @@ try {
             Assert-True (-not ($txt -match '(?i)\b(Start|Stop|Save|Suspend|Resume|Restart|Checkpoint|Remove|Set|New)-VM\b')) "$($f.Name) usa cmdlet de VM"
         }
         $native = [IO.File]::ReadAllText((Join-Path $lib 'Native.cs'))
-        foreach ($pat in @('SeDebugPrivilege', 'AdjustTokenPrivileges', 'RmShutdown', 'RmRestart', 'TerminateProcess', 'WriteProcessMemory', 'OpenProcess(', 'CreateRemoteThread', 'DebugActiveProcess', 'NtTerminate')) { Assert-True (-not $native.Contains($pat)) "Native.cs contem '$pat'" }
+        foreach ($pat in @('SeDebugPrivilege', 'AdjustTokenPrivileges', 'RmShutdown', 'RmRestart', 'TerminateProcess', 'WriteProcessMemory', 'CreateRemoteThread', 'DebugActiveProcess', 'NtTerminate', 'CreateProcessAsUser', 'CreateProcessWithLogon', 'CreateProcessWithToken', 'ShellExecute', 'WinExec', 'DuplicateHandle')) { Assert-True (-not $native.Contains($pat)) "Native.cs contem '$pat'" }
+        Assert-True (-not ($native -match '\bOpenProcess\s*\(')) 'Native.cs nao abre outros processos (OpenProcess)'
+        $cp = [regex]::Matches($native, '\bCreateProcess\w*\s*\(')
+        Assert-True ($cp.Count -ge 1 -and @($cp | Where-Object { $_.Index -lt $native.IndexOf('public static class AtmJobRunner') }).Count -eq 0) 'toda criacao de processo esta dentro do executor'
         # D-4: the only termination is of the runner's own job, and only the runner creates processes.
         $runner = $native.Substring($native.IndexOf('public static class AtmJobRunner'))
         Assert-True ($native.IndexOf('TerminateJobObject') -gt $native.IndexOf('public sealed class AtmJobResult') -and $native.IndexOf('public sealed class AtmJobResult') -gt 0 -and [regex]::Matches($native, 'CreateProcessW\(').Count -eq 2 -and $runner.Contains('PROC_THREAD_ATTRIBUTE_JOB_LIST') -and -not $runner.Contains('AssignProcessToJobObject')) 'Native.cs: processos so pelo executor, criados dentro do job; so o job proprio e encerrado'
