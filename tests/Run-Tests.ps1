@@ -4896,7 +4896,7 @@ try {
         Assert-Eq (& $refusedRun $fx.Repo) 0 'core.worktree: nenhum processo Git'
         & $gitFx $fx.Repo @('config', '--unset', 'core.worktree') $null
         $cfgFile = Join-Path $fx.Repo '.git\config'
-        foreach ($c in @(@("[core]`n`tworktree = \\\\$uncHost\\share", 'GIT_PREFLIGHT_CORE_WORKTREE'), @("[core]`n`tworktree = ../lnk", 'GIT_PREFLIGHT_CORE_WORKTREE'), @("[core]`n`thooksPath = hooks-rel", 'GIT_PREFLIGHT_CONFIG_PATH'), @("[core]`n`texcludesFile = //$uncHost/s/ignore", 'GIT_PREFLIGHT_CONFIG_PATH'), @("[core]`n`tattributesFile = ~/attr", 'GIT_PREFLIGHT_CONFIG_PATH'),
+        foreach ($c in @(@("[core]`n`tworktree = \\\\$uncHost\\share", 'GIT_PREFLIGHT_CORE_WORKTREE'), @("[core]`n`tworktree = ../lnk", 'GIT_PREFLIGHT_CORE_WORKTREE'), @("[core]`n`thooksPath = \\\\$uncHost\\hooks", 'GIT_PREFLIGHT_CONFIG_PATH'), @("[core]`n`texcludesFile = //$uncHost/s/ignore", 'GIT_PREFLIGHT_CONFIG_PATH'), @("[core]`n`tattributesFile = ~/attr", 'GIT_PREFLIGHT_CONFIG_PATH'),
                 @("[atm]`n`tsomething = \\\\$uncHost\\x", 'GIT_PREFLIGHT_CONFIG_NETWORK'), @("[core]`n`tbroken = a \`n`tb", 'GIT_CONFIG_UNPARSEABLE'))) {
             $orig = [IO.File]::ReadAllText($cfgFile)
             [IO.File]::WriteAllText($cfgFile, $orig + "`n" + $c[0] + "`n")
@@ -4918,6 +4918,33 @@ try {
         $noObj = Join-Path $out 'no-objects'; [void][IO.Directory]::CreateDirectory((Join-Path $noObj '.git\refs'))
         [IO.File]::WriteAllText((Join-Path $noObj '.git\HEAD'), "ref: refs/heads/main`n")
         Assert-Eq (Get-AtmGitPreflight -Target $noObj).Reason 'GIT_PREFLIGHT_GITDIR_INVALID' 'diretorio .git sem objects recusado'
+        # A relative hooks path (Husky) is not read by the allowed commands: allowed.
+        $orig = [IO.File]::ReadAllText($cfgFile)
+        [IO.File]::WriteAllText($cfgFile, $orig + "`n[core]`n`thooksPath = .husky/_`n")
+        Assert-Eq (Get-AtmGitPreflight -Target $fx.Repo).Status 'OK' 'core.hooksPath relativo permitido'
+        [IO.File]::WriteAllText($cfgFile, $orig + "`n[url `"https://example.invalid/`"]`n`tinsteadOf = g:`n")
+        Assert-Eq (Get-AtmGitPreflight -Target $fx.Repo).Status 'OK' 'valor com letra e dois pontos que nao e caminho permitido'
+        [IO.File]::WriteAllText($cfgFile, $orig)
+        # Paths stored in Git files are taken exactly as Git reads them: blanks Git would keep are refused.
+        $ws = Join-Path $out 'gitfile-ws'; [void][IO.Directory]::CreateDirectory($ws)
+        [IO.File]::WriteAllText((Join-Path $ws '.git'), 'gitdir:  ' + (Join-Path $fxG.Repo '.git') + "`n")
+        Assert-Eq (Get-AtmGitPreflight -Target $ws).Reason 'GIT_PREFLIGHT_GITFILE_INVALID' 'gitfile com espaco extra recusado'
+        [IO.File]::WriteAllText((Join-Path $ws '.git'), 'gitdir: ' + (Join-Path $fxG.Repo '.git') + "`r`n")
+        Assert-Eq (Get-AtmGitPreflight -Target $ws).Status 'OK' 'gitfile com CRLF final aceito (como o Git)'
+        [IO.File]::WriteAllText((Join-Path $admin 'commondir'), " ..\..`n")
+        Assert-Eq (Get-AtmGitPreflight -Target $wtFake).Reason 'GIT_PREFLIGHT_COMMONDIR_INVALID' 'commondir com espaco inicial recusado'
+        # Links where `worktree list` reads: a lock of an administrative entry, a loose ref.
+        $lockTarget = Join-Path $out 'lock-target'; [void][IO.Directory]::CreateDirectory($lockTarget)
+        $fxL = & $gitNewFixture 'v-link-lock'
+        & $gitFx $fxL.Repo @('worktree', 'add', '-q', (Join-Path $out 'wt-link-lock'), '-b', 'links') $fxL.Repo
+        Assert-Eq (Get-AtmGitPreflight -Target $fxL.Repo).Status 'OK' 'antes do link: permitido'
+        New-Junction -Link (Join-Path $fxL.Repo '.git\worktrees\wt-link-lock\locked') -Target $lockTarget
+        Assert-Eq (Get-AtmGitPreflight -Target $fxL.Repo).Reason 'GIT_PREFLIGHT_ADMIN_REPARSE' 'trava administrativa como link recusada'
+        Assert-Eq (& $refusedRun $fxL.Repo) 0 'trava como link: nenhum processo Git'
+        $fxR = & $gitNewFixture 'v-link-ref'
+        New-Junction -Link (Join-Path $fxR.Repo '.git\refs\heads\linked') -Target $lockTarget
+        Assert-Eq (Get-AtmGitPreflight -Target $fxR.Repo).Reason 'GIT_PREFLIGHT_REFS_REPARSE' 'ref como link recusada'
+        Assert-Eq (& $refusedRun $fxR.Repo) 0 'ref como link: nenhum processo Git'
         # Reserved device names never reach the file system.
         foreach ($v in @('C:\x\COM1', 'C:\x\nul.txt', 'AUX', 'C:\x\LPT9\y', 'C:\x\conout')) { Assert-Eq (Resolve-AtmGitReferencedPath -Value $v -BaseDir $out).Reason 'GIT_REF_PATH_INVALID' "nome de dispositivo recusado: $v" }
         # A forged preflight is not enough: the runner takes its own.
