@@ -125,3 +125,17 @@ not control is not automatically read-only or safe:
 * Timeout test with a fixture that makes Git slow (for example a large untracked tree and a tiny timeout): `TIMEOUT`,
   job terminated, no `index.lock` left, no other process affected (D-4).
 * Git not installed: runner pointed at a missing executable: `UNAVAILABLE`, worktrees `UNKNOWN`, run succeeds.
+
+## Amendment (P3-C0, 2026-10-24)
+
+Implementation notes recorded after the security closure of P3-C0; the decisions above are unchanged.
+
+* `worktree list` stays in the allow-list but is not run: it follows administrative entries created after the
+  preflight. Registration (rule 12: `REGISTERED`, `LOCKED`, a missing worktree directory) comes from the files (rule
+  9); `PRUNABLE` as Git reports it is therefore not produced.
+* Every Git call holds read pins (no write or delete sharing) on the files the preflight validated, with a fresh
+  preflight under the pins, and runs with `GIT_COMMON_DIR` set to the validated common directory (in addition to the
+  sanitized environment of rule 6). `status` always runs with `--ignore-submodules=all` (rule 12: submodules are not
+  recursed).
+* Files that did not exist at the preflight cannot be pinned; the vectors left open are listed in
+  `SECURITY-MODEL.md`. The worktree diagnostics gate stays closed until the maintainer decides.

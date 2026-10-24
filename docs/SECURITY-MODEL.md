@@ -123,8 +123,7 @@ called by `Invoke-AtmGitCommand`):
   file, `commondir`, administrative `gitdir`) are taken exactly as Git reads them (only a trailing line break dropped).
   The Git directory must be valid as Git validates it (`HEAD`, `objects`, `refs`); a target that itself holds `HEAD`,
   `objects` and `refs` is refused (Git would read it as a bare repository, with its own configuration). No reparse
-  point may sit in `refs`, `packed-refs`, `reftable` or an administrative entry's lock or `HEAD` (`worktree list`
-  reads them). A refused target never gets a Git process. The runner does not trust the caller's preflight: it takes
+  point may sit in `refs`, `packed-refs`, `reftable` or an administrative entry's lock or `HEAD`. A refused target never gets a Git process. The runner does not trust the caller's preflight: it takes
   a fresh one immediately before each run and requires it to agree. Every path Git reports goes through the same
   resolver before it is used. `status` also needs the D-3 preconditions: no filter driver, textconv or submodule in the
   repository. Git runs only in repositories a discovery source led to (a repository reached only through a worktree's
@@ -143,11 +142,27 @@ called by `Invoke-AtmGitCommand`):
 * Still open: a child running as the same user could in principle duplicate the job handle from this process (that
   requires code running in the child, which the allow-list, the preflight and D-3 prevent); handles are inheritable
   for a short time while the child is created (the handle list requires it).
-* Still open (preflight TOCTOU): the preflight and Git read the same files at different times, and the files are not
-  locked. A process running as the same user that can write the repository (for example an agent writing in a
-  temporary partition) could change its configuration between the fresh preflight and Git reading it, and add an
-  include to a network path. The window is one process start; it is not closed. This is a reason, recorded for the
-  maintainer, to keep the worktree diagnostics gate closed for real repositories until it is decided.
+* **Read pins (P3-C0):** for each Git call the runner opens, for reading and without write or delete sharing, every
+  file the preflight validated (`.git` file, `HEAD`, `commondir`, configuration files, alternates files) and every
+  alternate object directory, then runs a fresh preflight under those pins and requires it to agree; the pins are held
+  until Git exits. `GIT_COMMON_DIR` is set to the validated common directory. `worktree list` is not run. `status`
+  always runs with `--ignore-submodules=all`.
+* **TOCTOU: NOT RESOLVED (partially mitigated).** Vector matrix, each row proved on fixtures with a local target:
+
+  | Vector (created or changed after the preflight) | Result |
+  |---|---|
+  | include or includeIf added to the configuration; configuration, `HEAD`, `.git` file replaced; `.git` or the repository renamed | prevented while pinned |
+  | `commondir` created in the Git directory | not read (`GIT_COMMON_DIR`) |
+  | `config.worktree` created (extension off) | ignored by Git |
+  | new administrative entry (`worktrees\<name>\gitdir`) | not reached (`worktree list` not run) |
+  | `objects\info\alternates` created (any command that reads objects, such as `status`) | **open**: followed by Git |
+  | `.git` file dropped in the work tree (untracked scan of `status`) | **open**: its target is resolved |
+  | file symbolic link to a network path created where a file was absent | **open**: needs the symbolic-link privilege or Developer Mode; junctions cannot point to network paths |
+
+  A file that does not exist cannot be pinned, so creation cannot be prevented within the accepted architecture. The
+  worktree diagnostics gate stays closed. **Interference:** while pinned, another process cannot rewrite the pinned
+  files (a concurrent `git config` write or `checkout` fails for the duration of one Git call, returned as
+  `PinnedMs`); index and ref updates are not blocked.
 
 ## Known limits (documented, not hidden)
 
