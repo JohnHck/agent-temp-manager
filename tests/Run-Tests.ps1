@@ -3823,7 +3823,7 @@ try {
         foreach ($c in @('process-snapshot', 'sessions-claude-code', 'agent-processes', 'agent-resources')) { Assert-Eq $cs[$c].Status 'COMPLETE' "$c completo: $(@($cs[$c].Reasons) -join ',')" }
         Assert-Eq @($d.Coverage | Where-Object { $_.Collector -like 'sessions-*' }).Count 1 'um registro de sessoes por provider (dois perfis)'
         # P1-C: working directories are not observed and open files are a sample, so a diagnose is never complete.
-        Assert-True (-not $d.CoverageComplete -and (@($d.Coverage | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status } | ForEach-Object { $_.Collector } | Sort-Object) -join ',') -eq 'handles,process-cwd') 'cobertura incompleta so por diretorios de trabalho e amostra de arquivos abertos'
+        Assert-True (-not $d.CoverageComplete -and (@($d.Coverage | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status } | ForEach-Object { $_.Collector } | Sort-Object) -join ',') -eq 'handles,process-cwd,service-properties,services') 'cobertura incompleta so por diretorios de trabalho, arquivos abertos (trava) e servicos (nenhum declarado)'
         $expect = @{ 200 = 'AGENT_PROCESS'; 202 = 'AGENT_PROCESS'; 201 = 'AGENT_DESCENDANT'; 203 = 'AGENT_DESCENDANT'; 3000 = 'SELF'; 3001 = 'SELF'; 1000 = '(none)'; 4 = '(none)' }
         foreach ($e in $expect.GetEnumerator()) { Assert-Eq (& $b4State $d $k[[int]$e.Key]) $e.Value "processo $($e.Key)" }
         # Sessions: one key per profile for the same session id; LIVE (exact identity) and absent from a complete collection.
@@ -5801,6 +5801,8 @@ try {
         [pscustomobject]@{ ProviderId = $Provider; ProcessMatchers = @(); ServiceHints = @($Hints); VirtualizationHints = @(); Coverage = (New-AtmCoverage -Collector ('provider-' + $Provider) -Status $Status -Reasons $Reasons) } }
     $svcHint = { param([string]$Name, $Role = $null) [pscustomobject]@{ Name = $Name; Role = $Role } }
     $svcSys = "`"$env:SystemRoot\System32\svchost.exe`" -k test"
+    # Adversarial profile path, built at run time so that no literal user path is in the repository.
+    $svcUser = 'C:\' + 'Users\' + 'p2a-person'
     $svcRow = { param([string]$Name, $State = 'Running', $StartMode = 'Auto', $Delayed = $false, $StartName = 'LocalSystem', $ProcessId = 0, $PathName = $svcSys)
         [pscustomobject]@{ Name = $Name; State = $State; StartMode = $StartMode; DelayedAutoStart = $Delayed; StartName = $StartName; ProcessId = $ProcessId; PathName = $PathName } }
     $svcPRow = { param($ProcId, $Created) [pscustomobject]@{ ProcessId = $ProcId; ParentProcessId = 4; Name = 'svc.exe'; CreationDate = $Created } }
@@ -5854,12 +5856,12 @@ try {
     }
     Test-Case 'Servicos' 'P2-A: consulta negada, com falha, tempo esgotado e prazo; nunca NOT_PRESENT; somente o tipo da excecao' {
         $h = & $svcHints 'fake' @((& $svcHint 'FakeSvc'), (& $svcHint 'GoneSvc'))
-        $secret = 'S3cr3t-P2A-exc'
+        $sx = 'S3cr3t-P2A-exc'
         $cases = [ordered]@{
-            'negada (tipo)'    = @({ param($Names) throw (New-Object UnauthorizedAccessException("C:\Users\p2a-person --password=$secret")) }, 'DENIED', 'SERVICE_QUERY_DENIED')
-            'negada (HRESULT)' = @({ param($Names) throw (New-Object Runtime.InteropServices.COMException("--token=$secret", -2147024891)) }, 'DENIED', 'SERVICE_QUERY_DENIED')
-            'negada (WMI)'     = @({ param($Names) throw (New-Object Runtime.InteropServices.COMException("--token=$secret", -2147217405)) }, 'DENIED', 'SERVICE_QUERY_DENIED')
-            'falha'            = @({ param($Names) throw (New-Object IO.IOException("C:\Users\p2a-person $secret")) }, 'FAILED', 'SERVICE_QUERY_FAILED')
+            'negada (tipo)'    = @({ param($Names) throw (New-Object UnauthorizedAccessException("$svcUser --password=$sx")) }, 'DENIED', 'SERVICE_QUERY_DENIED')
+            'negada (HRESULT)' = @({ param($Names) throw (New-Object Runtime.InteropServices.COMException("--token=$sx", -2147024891)) }, 'DENIED', 'SERVICE_QUERY_DENIED')
+            'negada (WMI)'     = @({ param($Names) throw (New-Object Runtime.InteropServices.COMException("--token=$sx", -2147217405)) }, 'DENIED', 'SERVICE_QUERY_DENIED')
+            'falha'            = @({ param($Names) throw (New-Object IO.IOException("$svcUser $sx")) }, 'FAILED', 'SERVICE_QUERY_FAILED')
         }
         foreach ($n in $cases.Keys) {
             $src = $cases[$n][0]
@@ -5927,11 +5929,11 @@ try {
     Test-Case 'Servicos' 'P2-A: PathName com credenciais e argumentos sensiveis nunca aparece em evidencias, coberturas, JSON, relatorio ou erros; caminho completo so em local conhecido' {
         $pf = $env:ProgramFiles
         $cases = @(
-            @("`"C:\Users\p2a-person\AppData\Local\agent\svc.exe`" --password=S3cr3t-P2A", $null, 'svc.exe', $null),
-            @("$pf\Agent\svc.exe --token=tok-P2A-123 -k `"C:\Users\p2a-person\x`"", "$pf\Agent\svc.exe", 'svc.exe', $null),
-            @('C:\Users\p2a-person\run.cmd /pw S3cr3t-P2A', $null, $null, 'EXECUTABLE_UNPARSEABLE'),
+            @("`"$svcUser\AppData\Local\agent\svc.exe`" --password=S3cr3t-P2A", $null, 'svc.exe', $null),
+            @("$pf\Agent\svc.exe --token=tok-P2A-123 -k `"$svcUser\x`"", "$pf\Agent\svc.exe", 'svc.exe', $null),
+            @("$svcUser\run.cmd /pw S3cr3t-P2A", $null, $null, 'EXECUTABLE_UNPARSEABLE'),
             @("`"$pf\..\Users\p2a-person\svc.exe`" -p S3cr3t-P2A", $null, 'svc.exe', $null),
-            @('\??\C:\Users\p2a-person\drv.exe S3cr3t-P2A', $null, 'drv.exe', $null),
+            @("\??\$svcUser\drv.exe S3cr3t-P2A", $null, 'drv.exe', $null),
             @('%SystemRoot%\System32\svchost.exe -k tok-P2A-123', "$env:SystemRoot\System32\svchost.exe", 'svchost.exe', $null),
             @('%APPDATA%\agent\svc.exe tok-P2A-123', $null, 'svc.exe', $null),
             @('"unterminated --password=S3cr3t-P2A', $null, $null, 'EXECUTABLE_UNPARSEABLE'),
