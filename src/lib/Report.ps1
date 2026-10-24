@@ -485,7 +485,8 @@ function Show-AtmDiagnoseServices {
     if ($cov.Count -eq 0) { return }
     Write-AtmHeader (Get-AtmText 'diag.svcTitle')
     $sf = @($r.Findings | Where-Object { $_.Kind -ceq 'Service' })
-    if (@($cov | Where-Object { $_.Collector -ceq 'services' -and @($_.Reasons) -ccontains 'SERVICE_HINTS_NONE' }).Count -gt 0) { Write-Host ('  ' + (Get-AtmText 'diag.svcNone')) }
+    # "No provider declares a service" only when every provider's names were read.
+    if (@($cov | Where-Object { $_.Collector -ceq 'services' -and @($_.Reasons) -ccontains 'SERVICE_HINTS_NONE' -and @($_.Reasons) -cnotcontains 'SERVICE_HINTS_INCOMPLETE' }).Count -gt 0) { Write-Host ('  ' + (Get-AtmText 'diag.svcNone')) }
     $val = { param($F, [string]$Code) $e = @($F.Evidence | Where-Object { $_.Code -ceq $Code }); if ($e.Count -gt 0 -and $e[0].Detail) { [string]$e[0].Detail } else { Get-AtmText 'diag.svcUnknownValue' } }
     foreach ($s in @($sf | Select-Object -First $script:AtmRuntimeListMax)) {
         Write-Host ('  ' + (Get-AtmText 'diag.svcLine' $s.Key $s.State) + '  ' + (Get-AtmText "state.Service.$($s.State)"))

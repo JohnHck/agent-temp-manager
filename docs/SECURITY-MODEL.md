@@ -118,8 +118,10 @@ called by `Invoke-AtmGitCommand`):
   declare, the allowed properties only, with a CIM operation timeout (enforced by CIM; not a guaranteed cancellation).
   No service is started, stopped, paused or reconfigured; no CIM method is invoked; no other machine and no CIM
   session is used; nothing is run from a service command line (static tests). `PathName` is reduced in memory to the
-  executable (full path only under the Windows or program files folders, otherwise the file name) and dropped; its
-  arguments never reach evidence, coverage, the report, the JSON or an error. A service PID is linked to a process only
+  executable (full path only under the Windows or program files folders, otherwise the file name) and dropped; a
+  candidate with white space is kept only when it is an existing file on a local fixed drive (metadata only), so
+  argument text is not taken for a path; its arguments never reach evidence, coverage, the report, the JSON or an
+  error (adversarial tests, including misquoted command lines and later `.exe` arguments). A service PID is linked to a process only
   when the snapshot taken after the query holds it with a verified identity created before the query; no process is
   opened for it.
 * **Open-file diagnostics gate (P1-C-S):** the Restart Manager collector (`handles`, D-2) is behind

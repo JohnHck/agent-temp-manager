@@ -84,24 +84,29 @@ P2-B; the Claude Desktop hints are P2-C).
   64 per run; names are checked again against the contract's character set before the filter is built) and
   `-OperationTimeoutSec 30`. The answer is matched again in memory, case-insensitively, with the declared names; a name
   that was not asked for (for example a similar name) or a repeated name makes the query `PARTIAL`.
-* **Coverage.** `services` (one per run): `NOT_OBSERVABLE` / `SERVICE_HINTS_NONE` when no provider declares a service
+* **Coverage.** `services` (one per run): `TIMEOUT` when the deadline came first; `NOT_OBSERVABLE` / `SERVICE_HINTS_NONE` when no provider declares a service
   (nothing is queried; this is the case of every run until a provider declares one), `TIMEOUT` (deadline before the
   query, or a failure after the budget), `DENIED` (access denied by exception type, CIM code or HRESULT), `FAILED`,
-  `PARTIAL` (declared names incomplete because a provider's member failed, names capped, unexpected or repeated rows) or
-  `COMPLETE`. Only the exception type is kept. `service-properties` (one per run) carries unreadable values and
+  `PARTIAL` (declared names incomplete because a provider's member failed or a provider was not read, names capped,
+  unexpected or repeated rows) or `COMPLETE`; a complete query with a name not listed carries
+  `SERVICE_NOT_LISTED_FOR_ACCOUNT` and `ElevationWouldHelp = UNKNOWN`. Only the exception type is kept. `service-properties` (one per run) carries unreadable values and
   unverified process links, so an unreadable value of one service never turns another service's absence into
   `UNKNOWN`.
 * **States.** `Service`: `RUNNING`, `STOPPED`, `PAUSED`, `PENDING`, `NOT_PRESENT`, `UNKNOWN`. `NOT_PRESENT` is an
   absence state: `New-AtmFinding` keeps it only when the `services` record is conclusive. Denied, failed, timed-out,
   capped or incomplete queries give `UNKNOWN`.
 * **Process link (rule 5).** `Win32_Service.ProcessId` has no creation time, so the services query runs before the
-  process snapshot of the run. A PID is linked (`SERVICE_PROCESS_VERIFIED`, with the process key) only when the service
+  process snapshot of the run, which must start after the query ended. A PID is linked (`SERVICE_PROCESS_VERIFIED`, with the process key) only when the service
   is running and the snapshot, taken after the query, holds that PID with a verified identity created at least 1 us
   before the query started: such a process was alive during the whole query, and a live PID belongs to one process.
   Otherwise `SERVICE_PROCESS_UNVERIFIED` with the reason. No process is opened.
 * **Privacy (rules 4 and 6).** `ConvertFrom-AtmServicePathName` keeps only the executable: the full path when it is
   under the Windows folder or a program files folder (textually, no relative segment or variable), otherwise the file
-  name; quoted and unquoted forms, `\??\`, `\SystemRoot\` and the matching variables are read; anything else is a code.
+  name; quoted and unquoted forms, `\??\`, `\SystemRoot\` and the matching variables are read. Arguments are separated by
+  white space, so a candidate with white space (a folder such as `Program Files`, or a misquoted command line) is kept
+  only when it is the normalized form of an existing file on a local fixed drive (a metadata check; nothing is opened
+  or run); `=`, `/`, a second `:`, other variables, a file name with white space and non-normalized folders (`..`,
+  trailing dots or spaces) give a code only.
   The command line is dropped when the row is read. Accounts: `LocalSystem`, `NT AUTHORITY\...`, `NT SERVICE\...` and
   managed service accounts are shown as such; any other account is shown by its name (rule 6), which can be a person's
   account: a privacy point for the maintainer.

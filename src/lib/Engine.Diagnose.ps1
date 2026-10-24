@@ -3011,11 +3011,16 @@ function ConvertFrom-AtmServicePathName {
       The executable of a service command line, in memory only (ADR-0005 rule 4). Returns Path (the full path, only
       under a well-known program location), Name (the file name) and Reason (EXECUTABLE_UNREADABLE when there is no
       value, EXECUTABLE_UNPARSEABLE otherwise); the command line and its arguments are never returned, and a failure
-      keeps only that code. Quoted: up to the closing quote. Unquoted: up to the first ".exe" followed by a space or
-      the end (how Windows resolves it). \??\, \SystemRoot\, %SystemRoot%, %windir% and the program files variables
-      are read as their folders; any other variable or a relative path gives the file name only.
+      keeps only that code. Candidate: the quoted part, or (unquoted) the text up to the first ".exe" followed by a
+      space or the end (how Windows resolves it). \??\, \SystemRoot\, %SystemRoot%, %windir% and the program files
+      variables are read as their folders. Arguments are separated by white space, so a candidate without white space
+      cannot hold one; a candidate with white space (a folder such as "Program Files", or a misquoted command line) is
+      kept only when it is the normalized form of an existing file on a local fixed drive (a metadata check only;
+      nothing is opened or run). No '=', '/', second ':' or variable is accepted; the file name has no white space.
+      The full path is returned only when it is normalized (no '..' or trailing dots or spaces in a folder) and under
+      a well-known program location; otherwise the file name only.
     #>
-    param($PathName, [string[]]$Roots = (Get-AtmServiceProgramRoots))
+    param($PathName, [string[]]$Roots = (Get-AtmServiceProgramRoots), [scriptblock]$FileExists = $null)
     $out = [ordered]@{ Path = $null; Name = $null; Reason = $null }
     if (-not ($PathName -is [string]) -or [string]::IsNullOrWhiteSpace($PathName)) { $out.Reason = 'EXECUTABLE_UNREADABLE'; return [pscustomobject]$out }
     try {
@@ -3029,20 +3034,32 @@ function ConvertFrom-AtmServicePathName {
             if ($m.Success) { $exe = $m.Groups[1].Value }
         }
         if ($null -ne $exe -and $exe.StartsWith('\??\')) { $exe = $exe.Substring(4) }
-        if ($null -eq $exe -or $exe -match '[\x00-\x1f"*?<>|]') { $out.Reason = 'EXECUTABLE_UNPARSEABLE'; return [pscustomobject]$out }
-        $map =[ordered]@{ '\SystemRoot\' = $env:SystemRoot; '%SystemRoot%\' = $env:SystemRoot; '%windir%\' = $env:SystemRoot; '%ProgramFiles%\' = $env:ProgramFiles; '%ProgramFiles(x86)%\' = ${env:ProgramFiles(x86)}; '%ProgramW6432%\' = $env:ProgramW6432 }
+        $bad = { $out.Path = $null; $out.Name = $null; $out.Reason = 'EXECUTABLE_UNPARSEABLE'; [pscustomobject]$out }
+        if ($null -eq $exe -or $exe -match '[\x00-\x1f"*?<>|=/]') { return (& $bad) }
+        $map = [ordered]@{ '\SystemRoot\' = $env:SystemRoot; '%SystemRoot%\' = $env:SystemRoot; '%windir%\' = $env:SystemRoot; '%ProgramFiles%\' = $env:ProgramFiles; '%ProgramFiles(x86)%\' = ${env:ProgramFiles(x86)}; '%ProgramW6432%\' = $env:ProgramW6432 }
         foreach ($k in $map.Keys) {
             if ($exe.StartsWith($k, [StringComparison]::OrdinalIgnoreCase)) { if ($map[$k]) { $exe = $map[$k].TrimEnd('\') + '\' + $exe.Substring($k.Length) }; break }
         }
-        $i = [Math]::Max($exe.LastIndexOf('\'), $exe.LastIndexOf('/'))
+        if ($exe.Contains('%') -or $exe.IndexOf(':', 2) -ge 0 -or ($exe.IndexOf(':') -ge 0 -and $exe -notmatch '^[A-Za-z]:\\')) { return (& $bad) }
+        $i = $exe.LastIndexOf('\')
         $leaf = $(if ($i -ge 0) { $exe.Substring($i + 1) } else { $exe })
-        if ($leaf -notmatch '^[^\\/:*?"<>|]+\.exe$') { $out.Reason = 'EXECUTABLE_UNPARSEABLE'; return [pscustomobject]$out }
-        $out.Name = $leaf
-        # Full path only when it is drive-absolute, without relative segments, variables or forward slashes, and
-        # textually under a well-known program location.
-        if ($exe -match '^[A-Za-z]:\\' -and $exe -notmatch '\\\.\.?\\|[/%~]' -and $exe.IndexOf(':', 2) -lt 0) {
-            foreach ($r in @($Roots)) { if ($exe.StartsWith($r, [StringComparison]::OrdinalIgnoreCase)) { $out.Path = $exe; break } }
+        if ($leaf -notmatch '^[^\\\s]+\.exe$' -or $leaf -match '^\.+exe$') { return (& $bad) }
+        $abs = ($exe -match '^[A-Za-z]:\\')
+        # Normalized: what Windows would open is exactly this text (no '..', '.', trailing dots or spaces, '~' names).
+        # Segments decide first (the runtimes differ on '...'), then the full-path check.
+        $norm = $abs -and -not $exe.Contains('~') -and @($exe.Substring(3).Split('\') | Where-Object { $_ -eq '' -or $_ -match '^\.+$|[\s.]$|^\s' }).Count -eq 0
+        if ($norm) { try { $norm = ([IO.Path]::GetFullPath($exe) -ceq $exe) } catch { $norm = $false } }
+        $existing = $false
+        if ($exe -match '\s') {
+            if (-not $norm) { return (& $bad) }
+            $fixed = $false
+            try { $fixed = ((New-Object IO.DriveInfo($exe.Substring(0, 1))).DriveType -eq [IO.DriveType]::Fixed) } catch { $fixed = $false }
+            if (-not $fixed) { return (& $bad) }
+            $existing = $(if ($null -ne $FileExists) { [bool](& $FileExists $exe) } else { [IO.File]::Exists($exe) })
+            if (-not $existing) { return (& $bad) }
         }
+        $out.Name = $leaf
+        if ($norm) { foreach ($r in @($Roots)) { if ($exe.StartsWith($r, [StringComparison]::OrdinalIgnoreCase)) { $out.Path = $exe; break } } }
     } catch { $out.Path = $null; $out.Name = $null; $out.Reason = 'EXECUTABLE_UNPARSEABLE' }
     return [pscustomobject]$out
 }
@@ -3102,8 +3119,10 @@ function Invoke-AtmServiceQuery {
       Coverage ('services'): NOT_OBSERVABLE (no declared name: nothing is queried, never "no services"), TIMEOUT,
       DENIED, FAILED, COMPLETE, or PARTIAL (hints incomplete or capped, unexpected or duplicate rows).
     #>
-    param($ProviderHints = @(), [scriptblock]$Source = $null, $Deadline = $null, [int]$TimeoutSec = $script:AtmServiceTimeoutSec, [int]$MaxNames = $script:AtmServiceMaxNames, $NowUtc = $null)
+    param($ProviderHints = @(), [scriptblock]$Source = $null, $Deadline = $null, [int]$TimeoutSec = $script:AtmServiceTimeoutSec, [int]$MaxNames = $script:AtmServiceMaxNames, $NowUtc = $null, [switch]$HintsIncomplete)
     $reasons = New-Object System.Collections.Generic.List[string]
+    # A provider whose hints were never read (deadline, invalid contract) may declare names nobody asked for.
+    if ($HintsIncomplete) { $reasons.Add('SERVICE_HINTS_INCOMPLETE') }
     $byName = @{}
     foreach ($h in @($ProviderHints | Where-Object { $null -ne $_ })) {
         if ($h.Coverage.Status -cne 'COMPLETE' -and @($h.Coverage.Reasons | Where-Object { $_ -like 'HINT_*_SERVICE_HINTS' }).Count -gt 0) { $reasons.Add('SERVICE_HINTS_INCOMPLETE') }
@@ -3117,7 +3136,9 @@ function Invoke-AtmServiceQuery {
     }
     foreach ($e in @($byName.Values)) { $e.Providers = $e.Providers.ToArray() }
     $declared = @(Get-AtmOrdinalSorted -Items @($byName.Values) -Signature { param($x) $x.Name.ToUpperInvariant() })
-    $out = [ordered]@{ Declared = $declared; Rows = @{}; QueryUtc = $null; Capped = @(); Coverage = $null }
+    $out = [ordered]@{ Declared = $declared; Rows = @{}; QueryUtc = $null; QueryEndUtc = $null; Capped = @(); Coverage = $null }
+    # The deadline first: a run that ran out of time is TIMEOUT, never "nothing declared".
+    if ($null -ne $Deadline -and [datetime]::UtcNow -ge $Deadline) { $out.Coverage = New-AtmDeadlineCoverage 'services'; return [pscustomobject]$out }
     if ($declared.Count -eq 0) {
         $reasons.Insert(0, 'SERVICE_HINTS_NONE')
         $out.Coverage = New-AtmCoverage -Collector 'services' -Status 'NOT_OBSERVABLE' -Reasons @(Get-AtmSortedCodes $reasons) -ElevationWouldHelp 'NO' -Observed 0 -Expected 0
@@ -3125,7 +3146,6 @@ function Invoke-AtmServiceQuery {
     }
     $names = @($declared | ForEach-Object { $_.Name })
     if ($names.Count -gt $MaxNames) { $reasons.Add('SERVICE_HINTS_CAPPED'); $out.Capped = @($names[$MaxNames..($names.Count - 1)]); $names = @($names[0..($MaxNames - 1)]) }
-    if ($null -ne $Deadline -and [datetime]::UtcNow -ge $Deadline) { $out.Coverage = New-AtmDeadlineCoverage 'services'; return [pscustomobject]$out }
     $started = $(if ($null -ne $NowUtc) { ([datetime]$NowUtc).ToUniversalTime() } else { [datetime]::UtcNow })
     $out.QueryUtc = $started
     $budgetMs = [long]$TimeoutSec * 1000
@@ -3133,6 +3153,7 @@ function Invoke-AtmServiceQuery {
     $raw = $null; $ex = $null
     try { $raw = @(if ($null -ne $Source) { & $Source $names } else { Get-AtmServiceRaw -Names $names -TimeoutSec $TimeoutSec }) } catch { $ex = $_.Exception }
     $sw.Stop()
+    $out.QueryEndUtc = $started.AddTicks($sw.Elapsed.Ticks)
     if ($null -ne $ex) {
         # Exception type only, never its message (it could carry a command line).
         $code = ConvertTo-AtmExceptionCode $ex.GetType().Name
@@ -3159,18 +3180,24 @@ function Invoke-AtmServiceQuery {
     foreach ($d in @($dup.Keys)) { $rows[$d].Duplicate = $true }
     $out.Rows = $rows
     $st = $(if ($reasons.Count -gt 0) { 'PARTIAL' } else { 'COMPLETE' })
-    $out.Coverage = New-AtmCoverage -Collector 'services' -Status $st -Reasons @(Get-AtmSortedCodes $reasons) -ElevationWouldHelp $(if ($st -ceq 'COMPLETE') { 'NO' } else { 'UNKNOWN' }) -Observed @($rows.Keys).Count -Expected $declared.Count -StartedUtc $started -ElapsedMs $sw.ElapsedMilliseconds -BudgetMs $budgetMs
+    # The service control manager leaves out services the caller may not query: a name not listed is reported with
+    # SERVICE_NOT_LISTED_FOR_ACCOUNT, and another account (elevation included) might see it.
+    $notListed = @($names | Where-Object { -not $rows.ContainsKey($_) }).Count -gt 0
+    if ($notListed) { $reasons.Add('SERVICE_NOT_LISTED_FOR_ACCOUNT') }
+    $out.Coverage = New-AtmCoverage -Collector 'services' -Status $st -Reasons @(Get-AtmSortedCodes $reasons) -ElevationWouldHelp $(if ($st -ceq 'COMPLETE' -and -not $notListed) { 'NO' } else { 'UNKNOWN' }) -Observed @($rows.Keys).Count -Expected $declared.Count -StartedUtc $started -ElapsedMs $sw.ElapsedMilliseconds -BudgetMs $budgetMs
     return [pscustomobject]$out
 }
 
 function Resolve-AtmServiceProcess {
     # Link of a running service's PID to a process of a snapshot taken after the query (see the section header).
     # Returns Result MATCH (with Process) or a code of AtmServiceLinkCodes.
-    param($Collection, $ProcessId, $QueryUtc)
+    param($Collection, $ProcessId, $QueryUtc, $QueryEndUtc = $null)
     $id = ConvertTo-AtmProcessId $ProcessId
+    $endUtc = $(if ($null -ne $QueryEndUtc) { $QueryEndUtc } else { $QueryUtc })
     if ($null -eq $id -or $id -eq 0) { return [pscustomobject]@{ Result = 'PID_NOT_REPORTED'; Process = $null } }
     if ($null -eq $Collection -or $Collection.Failed -or $null -eq $QueryUtc) { return [pscustomobject]@{ Result = 'PROCESS_SNAPSHOT_UNAVAILABLE'; Process = $null } }
-    if ($null -eq $Collection.CollectedUtc -or ([datetime]$Collection.CollectedUtc) -lt ([datetime]$QueryUtc)) { return [pscustomobject]@{ Result = 'SNAPSHOT_BEFORE_QUERY'; Process = $null } }
+    # The snapshot must start after the query ended (and the process must have been created before it started).
+    if ($null -eq $Collection.CollectedUtc -or ([datetime]$Collection.CollectedUtc) -lt ([datetime]$endUtc)) { return [pscustomobject]@{ Result = 'SNAPSHOT_BEFORE_QUERY'; Process = $null } }
     if ($Collection.Duplicates.ContainsKey($id)) { return [pscustomobject]@{ Result = 'DUPLICATE_PID'; Process = $null } }
     if (-not $Collection.ByPid.ContainsKey($id)) { return [pscustomobject]@{ Result = 'PROCESS_NOT_COLLECTED'; Process = $null } }
     $p = $Collection.ByPid[$id]
@@ -3227,7 +3254,7 @@ function Get-AtmServiceFindings {
             # Process link: only for a running service, only through the snapshot taken after the query.
             $pid0 = ConvertTo-AtmProcessId $row.ProcessId
             if ($sc -ceq 'RUNNING' -and -not $row.Duplicate) {
-                $lk = Resolve-AtmServiceProcess -Collection $Collection -ProcessId $row.ProcessId -QueryUtc $Query.QueryUtc
+                $lk = Resolve-AtmServiceProcess -Collection $Collection -ProcessId $row.ProcessId -QueryUtc $Query.QueryUtc -QueryEndUtc $Query.QueryEndUtc
                 if ($lk.Result -ceq 'MATCH') { $list.Add((New-AtmEvidence -Code 'SERVICE_PROCESS_VERIFIED' -Source 'diagnose' -Collector 'process-snapshot' -ObservedUtc $now -Detail $lk.Process.Key)) }
                 else { $list.Add((New-AtmEvidence -Code 'SERVICE_PROCESS_UNVERIFIED' -Source 'diagnose' -Collector 'process-snapshot' -ObservedUtc $now -Detail $lk.Result)); $propReasons.Add('SERVICE_PROCESS_UNVERIFIED'); $ok = $false }
             } elseif ($null -ne $pid0 -and $pid0 -ne 0) {
@@ -3489,7 +3516,8 @@ function Invoke-AtmDiagnoseRun {
     # Services (P2-A): queried here, before the process snapshot of the agent runtime, so that a PID the service
     # control manager reports can be proved to belong to a snapshot process (Resolve-AtmServiceProcess). Only names
     # declared by providers; none declared: nothing is queried.
-    $svcQuery = Invoke-AtmServiceQuery -ProviderHints $hints.ToArray() -Source $ServiceSource -Deadline $deadline
+    $svcIncomplete = (@($coverage | Where-Object { $_.Collector.StartsWith('provider-', [StringComparison]::Ordinal) -and ($_.Status -ceq 'TIMEOUT' -or @($_.Reasons) -ccontains 'PROVIDER_CONTRACT_INVALID') }).Count -gt 0)
+    $svcQuery = Invoke-AtmServiceQuery -ProviderHints $hints.ToArray() -Source $ServiceSource -Deadline $deadline -HintsIncomplete:$svcIncomplete
 
     # Agent runtime (P1-B4-c): a process collection with a CPU sample, the session registries of every profile, SELF,
     # the agent findings (P1-B4-b) and the resource totals. Each collector has exactly one record, TIMEOUT when the
