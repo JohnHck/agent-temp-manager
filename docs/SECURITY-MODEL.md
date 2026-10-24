@@ -114,6 +114,14 @@ called by `Invoke-AtmGitCommand`):
 * **Worktree diagnostics gate (P3-B0):** reading repositories and running Git in them are both behind
   `$script:AtmWorktreeDiagnosticsEnabled`, `$false` in every shipped copy (checked by the test suite and the install
   e2e). Only `git --version` runs while it is closed. Opening it for real repositories is a maintainer decision.
+* **Services (P2-A, ADR-0005):** one local `Get-CimInstance Win32_Service` query, only for the exact names providers
+  declare, the allowed properties only, with a CIM operation timeout (enforced by CIM; not a guaranteed cancellation).
+  No service is started, stopped, paused or reconfigured; no CIM method is invoked; no other machine and no CIM
+  session is used; nothing is run from a service command line (static tests). `PathName` is reduced in memory to the
+  executable (full path only under the Windows or program files folders, otherwise the file name) and dropped; its
+  arguments never reach evidence, coverage, the report, the JSON or an error. A service PID is linked to a process only
+  when the snapshot taken after the query holds it with a verified identity created before the query; no process is
+  opened for it.
 * **Open-file diagnostics gate (P1-C-S):** the Restart Manager collector (`handles`, D-2) is behind
   `$script:AtmHandleDiagnosticsEnabled`, `$false` in every shipped copy (single assignment; no option, environment
   variable or configuration file; checked by the test suite and the install e2e). It is checked by the diagnose and
@@ -221,6 +229,11 @@ called by `Invoke-AtmGitCommand`):
   holder is identified by PID and start time against the process snapshot, otherwise reported as unverified; no file
   path or process name is exported. `RmGetList` cannot be cancelled: one query is bounded only by the few files
   registered.
+* **Services not listed for the account (P2-A)**: `NOT_PRESENT` means that the service control manager did not list
+  the name for the account that ran the diagnose. A service whose security descriptor denies that account the right
+  to query it may be left out of the list (a known way to hide a service); this cannot be tested without changing a
+  real service, and no other source (for example the registry) is read. Not resolved. A `NOT_PRESENT` service
+  authorizes nothing.
 * **Process coverage**: protected processes remain uninspectable even for administrators. On a real Windows
   installation there are always some (17 on the CI runners), so the coverage gate blocks every candidate: in V0.1
   `clean` stops before the release gate is even reached. Enabling real deletion (V0.3) requires a reviewed decision

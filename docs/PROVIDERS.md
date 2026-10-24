@@ -50,7 +50,7 @@ A v2 provider declares:
 | Runtime member | Signature | Returns |
 |---|---|---|
 | `GetProcessMatchers` | `{ }` | `@({ ImageName; CommandLineMarker })`: exact image file name (`*.exe`), optional marker matched in memory against the command line (the command line is never stored or printed). |
-| `GetServiceHints` | `{ }` | `@({ Name; Role })`: exact Windows service names; `Role` is an optional lower-case id. |
+| `GetServiceHints` | `{ }` | `@({ Name; Role })`: exact Windows service names; `Role` is an optional lower-case id. Since V0.2-P2-A the diagnose queries only these names (one local `Win32_Service` query, read-only), never similar names; a name declared by two providers is reported once with the attribution ambiguous. Declaring no service means that no service is checked, never that none exists. |
 | `GetVirtualizationHints` | `{ }` | `@({ Kind; Value })` with `Kind` `ServiceOwner` (a service that owns a VM) or `VmName`. |
 | `GetWorktreeHints` | `{ param($ProfileInfo, $Registry) }` | `{ Readable; Dirs }`: absolute local starting directories (used from V0.2-P3). |
 

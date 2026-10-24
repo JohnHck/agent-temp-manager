@@ -353,6 +353,7 @@ function Show-AtmDiagnose {
     Write-Host ('  ' + (Get-AtmText 'diag.notYet'))
 
     Show-AtmDiagnoseRuntime -Result $r
+    Show-AtmDiagnoseServices -Result $r
     Show-AtmDiagnoseWorktrees -Result $r
     Show-AtmDiagnoseHandles -Result $r
 
@@ -472,6 +473,40 @@ function Show-AtmDiagnoseRuntime {
     }
     Write-Host ('  ' + (Get-AtmText 'diag.runtimeScope'))
     Write-Host ('  ' + (Get-AtmText 'diag.runtimeNoDelete')) -ForegroundColor Green
+}
+
+function Show-AtmDiagnoseServices {
+    # Windows services (P2-A): only names declared by providers. No declared name: says that nothing was checked
+    # (never "no services"). Per service: state, start mode, delayed start, account, executable (full path only in a
+    # well-known program location), verified process key, provider; then coverage gaps and the meaning of the codes.
+    param($Result)
+    $r = $Result
+    $cov = @($r.Coverage | Where-Object { $_.Collector -ceq 'services' -or $_.Collector -ceq 'service-properties' })
+    if ($cov.Count -eq 0) { return }
+    Write-AtmHeader (Get-AtmText 'diag.svcTitle')
+    $sf = @($r.Findings | Where-Object { $_.Kind -ceq 'Service' })
+    if (@($cov | Where-Object { $_.Collector -ceq 'services' -and @($_.Reasons) -ccontains 'SERVICE_HINTS_NONE' }).Count -gt 0) { Write-Host ('  ' + (Get-AtmText 'diag.svcNone')) }
+    $val = { param($F, [string]$Code) $e = @($F.Evidence | Where-Object { $_.Code -ceq $Code }); if ($e.Count -gt 0 -and $e[0].Detail) { [string]$e[0].Detail } else { Get-AtmText 'diag.svcUnknownValue' } }
+    foreach ($s in @($sf | Select-Object -First $script:AtmRuntimeListMax)) {
+        Write-Host ('  ' + (Get-AtmText 'diag.svcLine' $s.Key $s.State) + '  ' + (Get-AtmText "state.Service.$($s.State)"))
+        if (@($s.Evidence | Where-Object { $_.Code -ceq 'SERVICE_STATE' }).Count -eq 0) { continue }
+        $acct = $(if (@($s.Evidence | Where-Object { $_.Code -ceq 'SERVICE_ACCOUNT' }).Count -gt 0) { (& $val $s 'SERVICE_ACCOUNT_KIND') + ' ' + (& $val $s 'SERVICE_ACCOUNT') } else { Get-AtmText 'diag.svcUnknownValue' })
+        $exe = $(if (@($s.Evidence | Where-Object { $_.Code -ceq 'SERVICE_EXECUTABLE' }).Count -gt 0) { & $val $s 'SERVICE_EXECUTABLE' } else { & $val $s 'SERVICE_EXECUTABLE_NAME' })
+        $proc = $(if (@($s.Evidence | Where-Object { $_.Code -ceq 'SERVICE_PROCESS_VERIFIED' }).Count -gt 0) { & $val $s 'SERVICE_PROCESS_VERIFIED' } elseif (@($s.Evidence | Where-Object { $_.Code -ceq 'SERVICE_PROCESS_UNVERIFIED' }).Count -gt 0) { 'UNVERIFIED (' + (& $val $s 'SERVICE_PROCESS_UNVERIFIED') + ')' } else { '-' })
+        $who = $(if ($s.Provider) { $s.Provider } else { & $val $s 'PROVIDER_ATTRIBUTION_AMBIGUOUS' })
+        Write-Host ('    ' + (Get-AtmText 'diag.svcDetail' (& $val $s 'SERVICE_START_MODE') (& $val $s 'SERVICE_DELAYED_AUTO_START') $acct $exe $proc $who))
+    }
+    if ($sf.Count -gt $script:AtmRuntimeListMax) { Write-Host ('  ' + (Get-AtmText 'diag.runtimeMore' ($sf.Count - $script:AtmRuntimeListMax))) }
+    foreach ($c in @($cov | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status })) { Write-Host ('  ' + (Get-AtmText 'diag.runtimeCoverageLine' $c.Collector $c.Status (@($c.Reasons) -join ', '))) -ForegroundColor Yellow }
+    $codes = New-Object System.Collections.Generic.List[string]
+    foreach ($x in @($cov | ForEach-Object { @($_.Reasons) })) { $tx = Get-AtmCodeText 'reason' $x; if ($tx -and -not $codes.Contains("$x|$tx")) { $codes.Add("$x|$tx") } }
+    foreach ($x in @($sf | ForEach-Object { @($_.Evidence | ForEach-Object { $_.Code }) })) { $tx = Get-AtmCodeText 'evidence' $x; if ($tx -and -not $codes.Contains("$x|$tx")) { $codes.Add("$x|$tx") } }
+    if ($codes.Count -gt 0) {
+        Write-Host ('  ' + (Get-AtmText 'diag.runtimeLegendTitle'))
+        foreach ($c in @($codes | Sort-Object)) { $i = $c.IndexOf('|'); Write-Host ('    ' + (Get-AtmText 'diag.runtimeLegendLine' $c.Substring(0, $i) $c.Substring($i + 1))) }
+    }
+    if ($sf.Count -gt 0) { Write-Host ('  ' + (Get-AtmText 'diag.svcNotPresentNote')) }
+    Write-Host ('  ' + (Get-AtmText 'diag.svcNoDelete')) -ForegroundColor Green
 }
 
 function Show-AtmDiagnoseHandles {

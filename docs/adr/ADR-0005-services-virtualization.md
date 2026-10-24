@@ -73,3 +73,39 @@ error; nothing may be started, stopped or reconfigured.
 * Read-only assertion on the real machine: services' `State` and `StartMode` snapshot identical before and after a
   diagnose run.
 * Static tests listed above; privacy test that no `PathName` argument appears in output or JSON.
+
+## Implementation (P2-A, 2026-10-24)
+
+The decisions above are unchanged; this records how P2-A implemented rules 1 to 6 (virtualization, rules 7 to 9, is
+P2-B; the Claude Desktop hints are P2-C).
+
+* **Query.** `Get-AtmServiceRaw`: one local `Get-CimInstance -ClassName Win32_Service` with the properties of rule 1
+  except `DisplayName` (not needed: it is never used to match), filtered by `Name='...'` for the declared names (at most
+  64 per run; names are checked again against the contract's character set before the filter is built) and
+  `-OperationTimeoutSec 30`. The answer is matched again in memory, case-insensitively, with the declared names; a name
+  that was not asked for (for example a similar name) or a repeated name makes the query `PARTIAL`.
+* **Coverage.** `services` (one per run): `NOT_OBSERVABLE` / `SERVICE_HINTS_NONE` when no provider declares a service
+  (nothing is queried; this is the case of every run until a provider declares one), `TIMEOUT` (deadline before the
+  query, or a failure after the budget), `DENIED` (access denied by exception type, CIM code or HRESULT), `FAILED`,
+  `PARTIAL` (declared names incomplete because a provider's member failed, names capped, unexpected or repeated rows) or
+  `COMPLETE`. Only the exception type is kept. `service-properties` (one per run) carries unreadable values and
+  unverified process links, so an unreadable value of one service never turns another service's absence into
+  `UNKNOWN`.
+* **States.** `Service`: `RUNNING`, `STOPPED`, `PAUSED`, `PENDING`, `NOT_PRESENT`, `UNKNOWN`. `NOT_PRESENT` is an
+  absence state: `New-AtmFinding` keeps it only when the `services` record is conclusive. Denied, failed, timed-out,
+  capped or incomplete queries give `UNKNOWN`.
+* **Process link (rule 5).** `Win32_Service.ProcessId` has no creation time, so the services query runs before the
+  process snapshot of the run. A PID is linked (`SERVICE_PROCESS_VERIFIED`, with the process key) only when the service
+  is running and the snapshot, taken after the query, holds that PID with a verified identity created at least 1 us
+  before the query started: such a process was alive during the whole query, and a live PID belongs to one process.
+  Otherwise `SERVICE_PROCESS_UNVERIFIED` with the reason. No process is opened.
+* **Privacy (rules 4 and 6).** `ConvertFrom-AtmServicePathName` keeps only the executable: the full path when it is
+  under the Windows folder or a program files folder (textually, no relative segment or variable), otherwise the file
+  name; quoted and unquoted forms, `\??\`, `\SystemRoot\` and the matching variables are read; anything else is a code.
+  The command line is dropped when the row is read. Accounts: `LocalSystem`, `NT AUTHORITY\...`, `NT SERVICE\...` and
+  managed service accounts are shown as such; any other account is shown by its name (rule 6), which can be a person's
+  account: a privacy point for the maintainer.
+* **Two providers** declaring one name: one finding, provider `null`, `PROVIDER_ATTRIBUTION_AMBIGUOUS`.
+* **Not resolved:** a service whose security descriptor denies the caller the right to query it may be omitted by the
+  service control manager, so `NOT_PRESENT` means "not listed for this account" (not tested: it needs a modified real
+  service).

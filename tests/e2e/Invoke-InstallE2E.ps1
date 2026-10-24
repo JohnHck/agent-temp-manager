@@ -183,6 +183,33 @@ $b = $T::Open($f, $false); $c = $T::Open($f, $true)
     "$($summary.arch): clean $($line.Split('|')[0]), junction without flag $($line.Split('|')[1]), with OBJ_DONT_REPARSE $($line.Split('|')[2])"
 }
 
+Step 'services-read-only' {
+    # P2-A (ADR-0005): the installed engine queries two services that every Windows has and one name that does not
+    # exist, read-only, in the installer's shell; State and StartMode are identical before and after, and the process
+    # of Winmgmt (svchost, shared) is linked through the snapshot taken after the query. Nothing is started or changed.
+    $probe = @'
+param([string]$Lib)
+$ErrorActionPreference = 'Stop'
+. (Join-Path $Lib 'Engine.Audit.ps1')
+. (Join-Path $Lib 'Engine.Diagnose.ps1')
+$snap = { (@(Get-CimInstance -ClassName Win32_Service -Filter "Name='EventLog' OR Name='Winmgmt'" -Property Name, State, StartMode | Sort-Object Name | ForEach-Object { '{0}/{1}/{2}' -f $_.Name, $_.State, $_.StartMode })) -join ',' }
+$before = & $snap
+$names = @('EventLog', 'Winmgmt', 'AtmNoSuchServiceP2A')
+$h = [pscustomobject]@{ ProviderId = 'e2e'; ProcessMatchers = @(); ServiceHints = @($names | ForEach-Object { [pscustomobject]@{ Name = $_; Role = $null } }); VirtualizationHints = @(); Coverage = (New-AtmCoverage -Collector 'provider-e2e' -Status 'COMPLETE') }
+$q = Invoke-AtmServiceQuery -ProviderHints @($h)
+$r = Get-AtmServiceFindings -Query $q -Collection (Get-AtmProcessCollection)
+$after = & $snap
+$wm = @($r.Findings | Where-Object { $_.Key -eq 'Winmgmt' })[0]
+$link = @($wm.Evidence | Where-Object { $_.Code -eq 'SERVICE_PROCESS_VERIFIED' }).Count
+'{0}|{1}|{2}|{3}' -f $q.Coverage.Status, (@($r.Findings | ForEach-Object { $_.Key + '=' + $_.State }) -join ','), $link, [int]($before -ceq $after -and $before.Length -gt 0)
+'@
+    $probeFile = Join-Path $OutDir 'services-probe.ps1'
+    [IO.File]::WriteAllText($probeFile, $probe)
+    $line = (& $installerExe -NoProfile -ExecutionPolicy Bypass -File $probeFile -Lib (Join-Path $installDir 'lib') 2>&1 | Select-Object -Last 1) -as [string]
+    Assert ($line -ceq 'COMPLETE|AtmNoSuchServiceP2A=NOT_PRESENT,EventLog=RUNNING,Winmgmt=RUNNING|1|1') "services: $line"
+    "$($summary.arch) ($InstallerShell): query COMPLETE, EventLog/Winmgmt RUNNING, unknown name NOT_PRESENT, Winmgmt process verified, state and start mode unchanged"
+}
+
 Step 'shipped-release-gate' {
     $clean = [IO.File]::ReadAllText((Join-Path $installDir 'lib\Engine.Clean.ps1'))
     Assert ([regex]::Matches($clean, '\$script:AtmRealDeletionEnabled\s*=').Count -eq 1) 'mais de uma atribuicao da trava'

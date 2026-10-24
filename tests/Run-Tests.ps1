@@ -4364,9 +4364,11 @@ try {
         $r1 = New-TestRoot -ProfileInfo $p
         $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -PseudonymKey $testPseudonymKey
         Assert-Eq $d.SchemaVersion 'atm.diagnose/2' 'schema'
-        Assert-Eq (@($d.Coverage | ForEach-Object { $_.Collector }) -join ',') 'identity,provider-claude-code,inventory,processes,temp-profiles,process-snapshot,sessions-claude-code,agent-processes,agent-resources,process-cwd,handles' 'coletores (Claude Code v2: dicas de runtime lidas; runtime de agentes da P1-B4-c; P1-C)'
-        foreach ($c in @($d.Coverage | Where-Object { $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' })) { Assert-Eq $c.Status 'COMPLETE' "$($c.Collector) completo" }
+        Assert-Eq (@($d.Coverage | ForEach-Object { $_.Collector }) -join ',') 'identity,provider-claude-code,inventory,processes,temp-profiles,process-snapshot,sessions-claude-code,agent-processes,agent-resources,services,service-properties,process-cwd,handles' 'coletores (Claude Code v2: dicas de runtime lidas; runtime de agentes da P1-B4-c; P2-A; P1-C)'
+        foreach ($c in @($d.Coverage | Where-Object { $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' -and $_.Collector -notlike 'service*' })) { Assert-Eq $c.Status 'COMPLETE' "$($c.Collector) completo" }
         $hc = @($d.Coverage | Where-Object { $_.Collector -eq 'handles' })[0]; $wc = @($d.Coverage | Where-Object { $_.Collector -eq 'process-cwd' })[0]
+        $sv = @($d.Coverage | Where-Object { $_.Collector -like 'service*' })
+        Assert-True ($sv.Count -eq 2 -and @($sv | Where-Object { $_.Status -ceq 'NOT_OBSERVABLE' -and @($_.Reasons) -ccontains 'SERVICE_HINTS_NONE' }).Count -eq 2) 'P2-A: nenhum servico declarado pelo Claude Code: servicos NOT_OBSERVABLE, nunca ausencia'
         Assert-True ($hc.Status -eq 'NOT_OBSERVABLE' -and (@($hc.Reasons) -join ',') -eq 'HANDLE_SECURITY_GATE_CLOSED' -and $wc.Status -eq 'NOT_OBSERVABLE' -and @($wc.Reasons) -contains 'WORKING_DIRECTORY_DEFERRED' -and -not $d.CoverageComplete) 'P1-C-S: arquivos abertos nao observados (trava fechada), diretorios de trabalho nao observados; cobertura nunca completa'
         Assert-True ($null -eq @($d.Coverage | Where-Object { $_.Collector -eq 'inventory' })[0].BudgetMs) 'inventario V0.1 sem orcamento declarado (nao interrompivel)'
         $f = @($d.Findings | Where-Object { $_.Key -ceq (& $b4PKey $r1) })
@@ -4407,7 +4409,7 @@ try {
             $control = ($n -eq 'controle')
             Assert-Eq ([bool]$d.Inventory.CoverageComplete) $control ("$n`: Inventory.CoverageComplete (bases $(@($d.Inventory.Bases | ForEach-Object { $_.Status }) -join ','); registros legiveis $(@($d.Inventory.Registries.Values | ForEach-Object { $_.Readable }) -join ','))")
             # P1-C: process-cwd (deferred) and handles (a sample) are never complete; apart from them the control is complete.
-            $incomplete = @($d.Coverage | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status -and $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' })
+            $incomplete = @($d.Coverage | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status -and $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' -and $_.Collector -notlike 'service*' })
             Assert-True (-not $d.CoverageComplete -and (($incomplete.Count -eq 0) -eq $control)) "$n`: diagnose incompleto; fora de process-cwd/handles, completo so no controle ($(@($incomplete | ForEach-Object { $_.Collector }) -join ','))"
             if (-not $control) {
                 $c = @($d.Coverage | Where-Object { $_.Collector -eq $row.Collector })[0]
@@ -4418,7 +4420,7 @@ try {
                 if ($n -eq 'inaccessible') { Assert-Eq @($d.Inventory.InaccessibleProfiles).Count 1 'perfil inacessivel no inventario' }
                 if ($n -eq 'unverified') { Assert-Eq @($d.Inventory.UnverifiedTempProfiles).Count 1 'TEMP nao verificavel no inventario' }
             } else {
-                foreach ($c in @($d.Coverage | Where-Object { $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' })) { Assert-Eq $c.Status 'COMPLETE' "controle: $($c.Collector) completo" }
+                foreach ($c in @($d.Coverage | Where-Object { $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' -and $_.Collector -notlike 'service*' })) { Assert-Eq $c.Status 'COMPLETE' "controle: $($c.Collector) completo" }
             }
             $j = (ConvertTo-AtmDiagnoseJson -Result $d) | ConvertFrom-Json
             Assert-Eq ([bool]$j.coverageComplete) $false "$n`: JSON coverageComplete (P1-C: nunca completo)"
@@ -4451,7 +4453,7 @@ try {
         Assert-Eq @($d.Coverage | Where-Object { $_.Collector -eq 'processes' })[0].Status 'FAILED' 'processos desconhecidos'
         $badProv = [pscustomobject]@{ Id = 'fake-bad'; DisplayName = 'B'; ContractVersion = 9 }
         $rt = [pscustomobject]@{ Id = 'fake-runtime'; DisplayName = 'F'; ContractVersion = 2; Capabilities = @('runtime'); GetServiceHints = { @([pscustomobject]@{ Name = 'FakeAgentService' }) } }
-        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0], $badProv, $rt)
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0], $badProv, $rt) -ServiceSource { param($Names) @() }
         Assert-Eq @($d.Coverage | Where-Object { $_.Collector -eq 'provider-fake-bad' })[0].Status 'FAILED' 'contrato invalido isolado'
         Assert-Eq @($d.Coverage | Where-Object { $_.Collector -eq 'provider-fake-runtime' })[0].Status 'COMPLETE' 'dicas de runtime lidas'
         Assert-Eq @($d.Coverage | Where-Object { $_.Collector -eq 'inventory' })[0].Status 'COMPLETE' 'inventario segue com o provider temp'
@@ -5790,6 +5792,228 @@ try {
         Assert-True ((& $hex $T::Open((Join-Path $d 'real\last'), $true)) -in @('0xC000050B', '0xC00000BA')) "componente final juncao: recusado ($(& $hex $T::Open((Join-Path $d 'real\last'), $true)))"
         Assert-Eq $T::Open('\\atm-unc-probe.invalid\share\x', $true) -1 'caminho de rede: recusado antes de qualquer abertura'
         Assert-Eq $T::Open('relative\x', $true) -1 'caminho relativo: recusado'
+    }
+    # ------------------------------------------------------------------ P2-A (Windows services, ADR-0005)
+    # Service rows and process rows are injected; no service is started, stopped or changed. Only the CI-runner case
+    # queries the local service control manager (read-only) and compares states before and after.
+    $svcT0 = [datetime]::UtcNow.AddMinutes(-30)
+    $svcHints = { param([string]$Provider, [object[]]$Hints, [string]$Status = 'COMPLETE', [string[]]$Reasons = @())
+        [pscustomobject]@{ ProviderId = $Provider; ProcessMatchers = @(); ServiceHints = @($Hints); VirtualizationHints = @(); Coverage = (New-AtmCoverage -Collector ('provider-' + $Provider) -Status $Status -Reasons $Reasons) } }
+    $svcHint = { param([string]$Name, $Role = $null) [pscustomobject]@{ Name = $Name; Role = $Role } }
+    $svcSys = "`"$env:SystemRoot\System32\svchost.exe`" -k test"
+    $svcRow = { param([string]$Name, $State = 'Running', $StartMode = 'Auto', $Delayed = $false, $StartName = 'LocalSystem', $ProcessId = 0, $PathName = $svcSys)
+        [pscustomobject]@{ Name = $Name; State = $State; StartMode = $StartMode; DelayedAutoStart = $Delayed; StartName = $StartName; ProcessId = $ProcessId; PathName = $PathName } }
+    $svcPRow = { param($ProcId, $Created) [pscustomobject]@{ ProcessId = $ProcId; ParentProcessId = 4; Name = 'svc.exe'; CreationDate = $Created } }
+    $svcProcs = { param([object[]]$Rows) $pr = @($Rows); Get-AtmProcessCollection -Source ({ $pr }.GetNewClosure()) }
+    $svcRun = { param($Hints, $Rows, $Collection, $Tq = $svcT0) $rr = @($Rows); $q = Invoke-AtmServiceQuery -ProviderHints @($Hints) -Source ({ param($Names) $rr }.GetNewClosure()) -NowUtc $Tq; Get-AtmServiceFindings -Query $q -Collection $Collection }
+    # Always an array (one value is not unrolled into a string).
+    $svcEv = { param($F, [string]$Code) return , @($F.Evidence | Where-Object { $_.Code -ceq $Code } | ForEach-Object { [string]$_.Detail }) }
+    $svcByKey = { param($R) $m = @{}; foreach ($x in @($R.Findings)) { $m[$x.Key] = $x }; $m }
+    $svcCov = { param($R, [string]$Collector) @($R.Coverage | Where-Object { $_.Collector -ceq $Collector })[0] }
+    Test-Case 'Servicos' 'P2-A: servico declarado presente (em execucao, processo verificado), parado, ausente em consulta completa; estados, tipo de inicio, inicio atrasado e contas' {
+        $h = & $svcHints 'fake' @((& $svcHint 'FakeSvc' 'vm-host'), (& $svcHint 'GoneSvc'), (& $svcHint 'StopSvc'))
+        $coll = & $svcProcs @((& $svcPRow 4 $svcT0.AddHours(-1)), (& $svcPRow 4321 $svcT0.AddMinutes(-10)))
+        $r = & $svcRun $h @((& $svcRow 'FakeSvc' 'Running' 'Auto' $true 'NT SERVICE\FakeSvc' 4321), (& $svcRow 'StopSvc' 'Stopped' 'Manual' $false 'NT AUTHORITY\LocalService' 777)) $coll
+        $f = & $svcByKey $r
+        Assert-Eq (@($r.Findings | ForEach-Object { $_.Key }) -join ',') 'FakeSvc,GoneSvc,StopSvc' 'um achado por nome declarado, em ordem ordinal'
+        Assert-True ($f['FakeSvc'].State -ceq 'RUNNING' -and $f['FakeSvc'].Provider -ceq 'fake' -and (& $svcEv $f['FakeSvc'] 'SERVICE_HINT')[0] -ceq 'fake:vm-host') 'presente, em execucao, com o provider e o papel declarados'
+        Assert-Eq (& $svcEv $f['FakeSvc'] 'SERVICE_PROCESS_VERIFIED')[0] (ConvertTo-AtmProcessKey -ProcessId 4321 -CreationUtc $svcT0.AddMinutes(-10)) 'processo do servico verificado (criado antes da consulta, presente no snapshot posterior)'
+        Assert-True ((& $svcEv $f['FakeSvc'] 'SERVICE_START_MODE')[0] -ceq 'AUTO' -and (& $svcEv $f['FakeSvc'] 'SERVICE_DELAYED_AUTO_START')[0] -ceq 'TRUE' -and (& $svcEv $f['FakeSvc'] 'SERVICE_ACCOUNT_KIND')[0] -ceq 'VIRTUAL' -and (& $svcEv $f['FakeSvc'] 'SERVICE_ACCOUNT')[0] -ceq 'NT SERVICE\FakeSvc') 'tipo de inicio, inicio atrasado e conta virtual'
+        Assert-Eq (& $svcEv $f['FakeSvc'] 'SERVICE_EXECUTABLE')[0] "$env:SystemRoot\System32\svchost.exe" 'executavel com caminho completo (local conhecido), sem argumentos'
+        Assert-True ($f['StopSvc'].State -ceq 'STOPPED' -and (& $svcEv $f['StopSvc'] 'SERVICE_PROCESS_VERIFIED').Count -eq 0 -and (& $svcEv $f['StopSvc'] 'SERVICE_PROCESS_UNVERIFIED')[0] -ceq 'SERVICE_NOT_RUNNING') 'parado: PID informado nunca vinculado'
+        Assert-True ((& $svcEv $f['StopSvc'] 'SERVICE_START_MODE')[0] -ceq 'MANUAL' -and (& $svcEv $f['StopSvc'] 'SERVICE_DELAYED_AUTO_START')[0] -ceq 'FALSE' -and (& $svcEv $f['StopSvc'] 'SERVICE_ACCOUNT_KIND')[0] -ceq 'LOCAL_SERVICE') 'manual, sem inicio atrasado, LocalService'
+        Assert-True ($f['GoneSvc'].State -ceq 'NOT_PRESENT' -and (& $svcEv $f['GoneSvc'] 'SERVICE_NOT_LISTED').Count -eq 1 -and (@($f['GoneSvc'].Coverage | ForEach-Object { $_.Collector }) -join ',') -ceq 'services') 'ausente em consulta completa: NOT_PRESENT, dependendo so da consulta'
+        Assert-True ((& $svcCov $r 'services').Status -ceq 'COMPLETE' -and (& $svcCov $r 'services').Observed -eq 2 -and (& $svcCov $r 'services').Expected -eq 3 -and (& $svcCov $r 'service-properties').Status -ceq 'COMPLETE') 'coberturas: consulta completa (2 de 3 listados), propriedades completas'
+        # Every state and start mode the source can report; anything else is unreadable, never guessed.
+        $names = @('S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7')
+        $h2 = & $svcHints 'fake' @($names | ForEach-Object { & $svcHint $_ })
+        $rows2 = @((& $svcRow 'S1' 'Paused' 'Boot'), (& $svcRow 'S2' 'Start Pending' 'System'), (& $svcRow 'S3' 'Stop Pending' 'Disabled'), (& $svcRow 'S4' 'Continue Pending' 'Manual'), (& $svcRow 'S5' 'Pause Pending' 'Auto'), (& $svcRow 'S6' 'Unknown' 'Unknown'), (& $svcRow 'S7' 'running' 'auto'))
+        $f2 = & $svcByKey (& $svcRun $h2 $rows2 $coll)
+        Assert-Eq (@($names | ForEach-Object { $f2[$_].State }) -join ',') 'PAUSED,PENDING,PENDING,PENDING,PENDING,UNKNOWN,UNKNOWN' 'estados: pausado, pendentes; desconhecido e grafia inesperada ilegiveis'
+        Assert-Eq (@($names | ForEach-Object { ((& $svcEv $f2[$_] 'SERVICE_START_MODE') + @('-'))[0] }) -join ',') 'BOOT,SYSTEM,DISABLED,MANUAL,AUTO,-,-' 'tipos de inicio; valor desconhecido ilegivel'
+        # Accounts (ADR-0005 rule 6).
+        foreach ($cs in @(@('LocalSystem', 'LOCAL_SYSTEM'), @('NT AUTHORITY\SYSTEM', 'LOCAL_SYSTEM'), @('NT AUTHORITY\LocalService', 'LOCAL_SERVICE'), @('NT AUTHORITY\NetworkService', 'NETWORK_SERVICE'), @('NT SERVICE\Agent', 'VIRTUAL'), @('NT AUTHORITY\Other', 'BUILTIN'), @('CORP\svc-gmsa$', 'MANAGED'), @('.\agentuser', 'USER'), @('CORP\agentuser', 'USER'))) {
+            $a = ConvertTo-AtmServiceAccount $cs[0]
+            Assert-True ($a.Kind -ceq $cs[1] -and $a.Account -ceq $cs[0]) "conta '$($cs[0])': $($a.Kind)"
+        }
+        Assert-True ($null -eq (ConvertTo-AtmServiceAccount $null) -and $null -eq (ConvertTo-AtmServiceAccount '') -and $null -eq (ConvertTo-AtmServiceAccount 5)) 'conta ausente ou de outro tipo: ilegivel'
+    }
+    Test-Case 'Servicos' 'P2-A: propriedade ausente ou ilegivel vira null com service-properties PARTIAL (nunca 0 ou false) e nao torna desconhecida a ausencia de outro servico' {
+        $h = & $svcHints 'fake' @((& $svcHint 'OddSvc'), (& $svcHint 'GoneSvc'))
+        $odd = [pscustomobject]@{ Name = 'OddSvc'; State = 'Running'; StartMode = $null; DelayedAutoStart = 'False'; StartName = $null; ProcessId = $null; PathName = $null }
+        $r = & $svcRun $h @($odd) (& $svcProcs @((& $svcPRow 4 $svcT0.AddHours(-1))))
+        $f = & $svcByKey $r
+        foreach ($c in @('SERVICE_START_MODE_UNREADABLE', 'SERVICE_DELAYED_AUTO_START_UNREADABLE', 'SERVICE_ACCOUNT_UNREADABLE', 'SERVICE_EXECUTABLE_UNREADABLE')) { Assert-Eq (& $svcEv $f['OddSvc'] $c).Count 1 "$c" }
+        Assert-True ((& $svcEv $f['OddSvc'] 'SERVICE_DELAYED_AUTO_START').Count -eq 0 -and (& $svcEv $f['OddSvc'] 'SERVICE_START_MODE').Count -eq 0) 'nenhum valor inventado (texto "False" nao vira false)'
+        Assert-True ($f['OddSvc'].State -ceq 'RUNNING' -and (& $svcEv $f['OddSvc'] 'SERVICE_PROCESS_UNVERIFIED')[0] -ceq 'PID_NOT_REPORTED') 'em execucao sem PID: processo nao verificado'
+        $pc = & $svcCov $r 'service-properties'
+        Assert-True ($pc.Status -ceq 'PARTIAL' -and @($pc.Reasons) -ccontains 'SERVICE_PROPERTY_UNREADABLE' -and @($pc.Reasons) -ccontains 'SERVICE_PROCESS_UNVERIFIED' -and $pc.Observed -eq 0 -and $pc.Expected -eq 1) 'service-properties PARTIAL'
+        Assert-True ((& $svcCov $r 'services').Status -ceq 'COMPLETE' -and $f['GoneSvc'].State -ceq 'NOT_PRESENT') 'a ausencia de outro nome depende so da consulta completa'
+        $x = ConvertFrom-AtmServicePathName 12
+        Assert-True ($null -eq $x.Path -and $null -eq $x.Name -and $x.Reason -ceq 'EXECUTABLE_UNREADABLE') 'PathName de outro tipo: ilegivel'
+    }
+    Test-Case 'Servicos' 'P2-A: consulta negada, com falha, tempo esgotado e prazo; nunca NOT_PRESENT; somente o tipo da excecao' {
+        $h = & $svcHints 'fake' @((& $svcHint 'FakeSvc'), (& $svcHint 'GoneSvc'))
+        $secret = 'S3cr3t-P2A-exc'
+        $cases = [ordered]@{
+            'negada (tipo)'    = @({ param($Names) throw (New-Object UnauthorizedAccessException("C:\Users\p2a-person --password=$secret")) }, 'DENIED', 'SERVICE_QUERY_DENIED')
+            'negada (HRESULT)' = @({ param($Names) throw (New-Object Runtime.InteropServices.COMException("--token=$secret", -2147024891)) }, 'DENIED', 'SERVICE_QUERY_DENIED')
+            'negada (WMI)'     = @({ param($Names) throw (New-Object Runtime.InteropServices.COMException("--token=$secret", -2147217405)) }, 'DENIED', 'SERVICE_QUERY_DENIED')
+            'falha'            = @({ param($Names) throw (New-Object IO.IOException("C:\Users\p2a-person $secret")) }, 'FAILED', 'SERVICE_QUERY_FAILED')
+        }
+        foreach ($n in $cases.Keys) {
+            $src = $cases[$n][0]
+            $q = Invoke-AtmServiceQuery -ProviderHints @($h) -Source $src
+            $r = Get-AtmServiceFindings -Query $q
+            Assert-True ($q.Coverage.Status -ceq $cases[$n][1] -and @($q.Coverage.Reasons) -ccontains $cases[$n][2] -and @($q.Coverage.Reasons | Where-Object { $_ -like 'EXCEPTION_*' }).Count -eq 1) "$n`: $($q.Coverage.Status) $(@($q.Coverage.Reasons) -join ',')"
+            Assert-True (@($r.Findings | Where-Object { $_.State -cne 'UNKNOWN' }).Count -eq 0 -and @($r.Findings | Where-Object { (& $svcEv $_ 'SERVICE_NOT_QUERIED').Count -ne 1 }).Count -eq 0) "$n`: todos UNKNOWN, nunca NOT_PRESENT"
+            Assert-True ((& $svcCov $r 'service-properties').Status -ceq 'NOT_OBSERVABLE') "$n`: propriedades nao observadas"
+            Assert-True (-not ((ConvertTo-Json -InputObject @($r.Coverage + @($r.Findings)) -Depth 6) -match 'S3cr3t|p2a-person|token')) "$n`: mensagem da excecao nunca guardada"
+        }
+        $q = Invoke-AtmServiceQuery -ProviderHints @($h) -TimeoutSec 1 -Source { param($Names) Start-Sleep -Milliseconds 1100; throw (New-Object TimeoutException('x')) }
+        Assert-True ($q.Coverage.Status -ceq 'TIMEOUT' -and @($q.Coverage.Reasons) -ccontains 'SERVICE_QUERY_TIMEOUT' -and $q.Coverage.BudgetMs -eq 1000) 'falha depois do orcamento: TIMEOUT'
+        $calls = @{ N = 0 }
+        $q = Invoke-AtmServiceQuery -ProviderHints @($h) -Deadline ([datetime]::UtcNow.AddSeconds(-1)) -Source ({ param($Names) $calls.N++; @() }.GetNewClosure())
+        $r = Get-AtmServiceFindings -Query $q
+        Assert-True ($calls.N -eq 0 -and $q.Coverage.Status -ceq 'TIMEOUT' -and @($q.Coverage.Reasons) -ccontains 'DEADLINE_EXCEEDED' -and @($r.Findings | Where-Object { $_.State -cne 'UNKNOWN' }).Count -eq 0) 'prazo: nada consultado, nada ausente'
+    }
+    Test-Case 'Servicos' 'P2-A: vinculo de PID so com identidade verificada no snapshot posterior; PID inexistente, reutilizado, duplicado, sem horario, snapshot indisponivel ou anterior a consulta ficam UNVERIFIED' {
+        $tq = $svcT0
+        $c = & $svcProcs @((& $svcPRow 4 $tq.AddHours(-1)), (& $svcPRow 100 $tq.AddMinutes(-1)), (& $svcPRow 200 $tq.AddMinutes(1)), (& $svcPRow 300 $tq.AddTicks(-5)), (& $svcPRow 400 $null), (& $svcPRow 500 $tq.AddHours(-2)), (& $svcPRow 500 $tq.AddHours(-3)))
+        $cases = @(@(100, 'MATCH'), @(200, 'CREATED_AFTER_QUERY'), @(300, 'CREATED_AFTER_QUERY'), @(400, 'CREATION_TIME_UNKNOWN'), @(500, 'DUPLICATE_PID'), @(999, 'PROCESS_NOT_COLLECTED'), @(0, 'PID_NOT_REPORTED'), @($null, 'PID_NOT_REPORTED'), @('abc', 'PID_NOT_REPORTED'))
+        foreach ($cs in $cases) { Assert-Eq (Resolve-AtmServiceProcess -Collection $c -ProcessId $cs[0] -QueryUtc $tq).Result $cs[1] "PID '$($cs[0])'" }
+        $failed = Get-AtmProcessCollection -Source { throw (New-Object IO.IOException('x')) }
+        Assert-Eq (Resolve-AtmServiceProcess -Collection $failed -ProcessId 100 -QueryUtc $tq).Result 'PROCESS_SNAPSHOT_UNAVAILABLE' 'snapshot com falha'
+        Assert-Eq (Resolve-AtmServiceProcess -Collection $null -ProcessId 100 -QueryUtc $tq).Result 'PROCESS_SNAPSHOT_UNAVAILABLE' 'sem snapshot (runtime nao executado)'
+        Assert-Eq (Resolve-AtmServiceProcess -Collection $c -ProcessId 100 -QueryUtc ([datetime]::UtcNow.AddHours(1))).Result 'SNAPSHOT_BEFORE_QUERY' 'snapshot anterior a consulta: nada provado'
+        # In findings: an unverified link keeps the reported state and makes service-properties PARTIAL.
+        $h = & $svcHints 'fake' @((& $svcHint 'ReusedSvc'))
+        $r = & $svcRun $h @((& $svcRow 'ReusedSvc' 'Running' 'Auto' $false 'LocalSystem' 200)) $c
+        $f = & $svcByKey $r
+        Assert-True ($f['ReusedSvc'].State -ceq 'RUNNING' -and (& $svcEv $f['ReusedSvc'] 'SERVICE_PROCESS_UNVERIFIED')[0] -ceq 'CREATED_AFTER_QUERY' -and (& $svcEv $f['ReusedSvc'] 'SERVICE_PROCESS_VERIFIED').Count -eq 0) 'PID reutilizado: nunca vinculado'
+        Assert-True ((& $svcCov $r 'service-properties').Status -ceq 'PARTIAL' -and @((& $svcCov $r 'service-properties').Reasons) -ccontains 'SERVICE_PROCESS_UNVERIFIED') 'vinculo nao verificado declarado'
+    }
+    Test-Case 'Servicos' 'P2-A: dois providers com o mesmo servico, nenhum servico declarado, dicas incompletas, nomes semelhantes, limite de nomes, nome com aspas recusado' {
+        $a = & $svcHints 'prov-a' @((& $svcHint 'SharedSvc'))
+        $b = & $svcHints 'prov-b' @((& $svcHint 'sharedsvc' 'vm-host'))
+        $r = & $svcRun @($a, $b) @((& $svcRow 'SharedSvc' 'Stopped' 'Manual')) $null
+        Assert-True (@($r.Findings).Count -eq 1 -and $null -eq $r.Findings[0].Provider -and (& $svcEv $r.Findings[0] 'PROVIDER_ATTRIBUTION_AMBIGUOUS')[0] -ceq 'prov-a,prov-b' -and (& $svcEv $r.Findings[0] 'SERVICE_HINT').Count -eq 2) 'mesmo servico em dois providers: um achado, atribuicao ambigua, nunca escolhida'
+        $calls = @{ N = 0 }
+        $q = Invoke-AtmServiceQuery -ProviderHints @((& $svcHints 'none' @())) -Source ({ param($Names) $calls.N++; @() }.GetNewClosure())
+        $r = Get-AtmServiceFindings -Query $q
+        Assert-True ($calls.N -eq 0 -and $q.Coverage.Status -ceq 'NOT_OBSERVABLE' -and @($q.Coverage.Reasons) -ccontains 'SERVICE_HINTS_NONE' -and @($r.Findings).Count -eq 0 -and (& $svcCov $r 'service-properties').Status -ceq 'NOT_OBSERVABLE') 'nenhum servico declarado: nada consultado, NOT_OBSERVABLE, nunca "sem servicos"'
+        $bad = & $svcHints 'broken' @() 'FAILED' @('HINT_FAILED_SERVICE_HINTS', 'EXCEPTION_IOEXCEPTION')
+        $r = & $svcRun @($bad, (& $svcHints 'ok' @((& $svcHint 'GoneSvc')))) @() $null
+        Assert-True ((& $svcCov $r 'services').Status -ceq 'PARTIAL' -and @((& $svcCov $r 'services').Reasons) -ccontains 'SERVICE_HINTS_INCOMPLETE' -and $r.Findings[0].State -ceq 'UNKNOWN') 'dicas de um provider ilegiveis: ausencia nunca confirmada'
+        # Similar names are never linked: a returned name that was not asked for leaves the query incomplete.
+        $h = & $svcHints 'fake' @((& $svcHint 'FakeAgentService'))
+        $r = & $svcRun $h @((& $svcRow 'FakeAgentService2'), (& $svcRow 'FakeAgent Service')) $null
+        Assert-True (@($r.Findings).Count -eq 1 -and $r.Findings[0].Key -ceq 'FakeAgentService' -and $r.Findings[0].State -ceq 'UNKNOWN' -and @((& $svcCov $r 'services').Reasons) -ccontains 'SERVICE_UNEXPECTED_ROW' -and (& $svcEv $r.Findings[0] 'SERVICE_STATE').Count -eq 0) 'nomes semelhantes: nunca associados; ausencia nao confirmada'
+        $r = & $svcRun $h @() $null
+        Assert-Eq $r.Findings[0].State 'NOT_PRESENT' 'sem linha para o nome exato numa consulta completa: NOT_PRESENT'
+        $r = & $svcRun $h @((& $svcRow 'FakeAgentService'), (& $svcRow 'fakeagentservice')) $null
+        Assert-True ($r.Findings[0].State -ceq 'UNKNOWN' -and @((& $svcCov $r 'services').Reasons) -ccontains 'SERVICE_DUPLICATE_ROW') 'mesmo nome duas vezes: estado nao confiavel'
+        $asked = @{ Names = $null }
+        $q = Invoke-AtmServiceQuery -ProviderHints @((& $svcHints 'fake' @((& $svcHint 'A1'), (& $svcHint 'B2')))) -MaxNames 1 -Source ({ param($Names) $asked.Names = @($Names); @() }.GetNewClosure())
+        $r = Get-AtmServiceFindings -Query $q
+        $f = & $svcByKey $r
+        Assert-True ((@($asked.Names) -join ',') -ceq 'A1' -and $q.Coverage.Status -ceq 'PARTIAL' -and @($q.Coverage.Reasons) -ccontains 'SERVICE_HINTS_CAPPED' -and $f['B2'].State -ceq 'UNKNOWN' -and (& $svcEv $f['B2'] 'SERVICE_NOT_QUERIED')[0] -ceq 'SERVICE_HINTS_CAPPED' -and $f['A1'].State -ceq 'UNKNOWN') 'limite de nomes: o resto nao e consultado; nenhuma ausencia confirmada com consulta parcial'
+        $quote = [pscustomobject]@{ Id = 'fake-quote'; DisplayName = 'F'; ContractVersion = 2; Capabilities = @('runtime'); GetServiceHints = { @([pscustomobject]@{ Name = "a' OR Name='b" }) } }
+        $qh = Get-AtmProviderRuntimeHints $quote
+        Assert-True ($qh.Coverage.Status -ceq 'FAILED' -and @($qh.ServiceHints).Count -eq 0) 'nome com aspas recusado no contrato'
+        $threw = $false; try { $null = Get-AtmServiceRaw -Names @("a' OR Name='b") -TimeoutSec 1 } catch { $threw = $true }
+        Assert-True $threw 'nome com aspas recusado antes de montar o filtro'
+    }
+    Test-Case 'Servicos' 'P2-A: PathName com credenciais e argumentos sensiveis nunca aparece em evidencias, coberturas, JSON, relatorio ou erros; caminho completo so em local conhecido' {
+        $pf = $env:ProgramFiles
+        $cases = @(
+            @("`"C:\Users\p2a-person\AppData\Local\agent\svc.exe`" --password=S3cr3t-P2A", $null, 'svc.exe', $null),
+            @("$pf\Agent\svc.exe --token=tok-P2A-123 -k `"C:\Users\p2a-person\x`"", "$pf\Agent\svc.exe", 'svc.exe', $null),
+            @('C:\Users\p2a-person\run.cmd /pw S3cr3t-P2A', $null, $null, 'EXECUTABLE_UNPARSEABLE'),
+            @("`"$pf\..\Users\p2a-person\svc.exe`" -p S3cr3t-P2A", $null, 'svc.exe', $null),
+            @('\??\C:\Users\p2a-person\drv.exe S3cr3t-P2A', $null, 'drv.exe', $null),
+            @('%SystemRoot%\System32\svchost.exe -k tok-P2A-123', "$env:SystemRoot\System32\svchost.exe", 'svchost.exe', $null),
+            @('%APPDATA%\agent\svc.exe tok-P2A-123', $null, 'svc.exe', $null),
+            @('"unterminated --password=S3cr3t-P2A', $null, $null, 'EXECUTABLE_UNPARSEABLE'),
+            @('svc.exe --password=S3cr3t-P2A', $null, 'svc.exe', $null))
+        foreach ($cs in $cases) {
+            $x = ConvertFrom-AtmServicePathName $cs[0]
+            Assert-True ($x.Path -ceq $cs[1] -and $x.Name -ceq $cs[2] -and $x.Reason -ceq $cs[3]) "PathName -> $($x.Path)|$($x.Name)|$($x.Reason)"
+        }
+        # Integrated: a runtime provider declaring the services; the rows carry secrets in PathName.
+        $rt = [pscustomobject]@{ Id = 'fake-svc'; DisplayName = 'F'; ContractVersion = 2; Capabilities = @('runtime'); GetServiceHints = { @([pscustomobject]@{ Name = 'SecretSvc1' }, [pscustomobject]@{ Name = 'SecretSvc2' }, [pscustomobject]@{ Name = 'SecretSvc3' }) } }
+        $rows = @((& $svcRow 'SecretSvc1' 'Running' 'Auto' $false 'NT SERVICE\SecretSvc1' 4321 $cases[0][0]), (& $svcRow 'SecretSvc2' 'Running' 'Auto' $false 'LocalSystem' 0 $cases[1][0]), (& $svcRow 'SecretSvc3' 'Stopped' 'Manual' $false 'LocalSystem' 0 $cases[2][0]))
+        $p = New-TestProfile 'p2a-priv'
+        $null = New-TestRoot -ProfileInfo $p
+        $procRows = @([pscustomobject]@{ ProcessId = 4; ParentProcessId = 0; Name = 'System'; CreationDate = [datetime]::UtcNow.AddHours(-2) }, [pscustomobject]@{ ProcessId = 4321; ParentProcessId = 4; Name = 'svc.exe'; CreationDate = [datetime]::UtcNow.AddHours(-1) })
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0], $rt) -ProcessSource ({ $procRows }.GetNewClosure()) -CpuSampleMs 0 -PseudonymKey $testPseudonymKey -ServiceSource ({ param($Names) $rows }.GetNewClosure())
+        $json = ConvertTo-AtmDiagnoseJson -Result $d
+        $txt = (Show-AtmDiagnose -Result $d 6>&1 | ForEach-Object { [string]$_ }) -join "`n"
+        $all = $json + "`n" + $txt + "`n" + (@($d.Coverage | ForEach-Object { @($_.Reasons) }) -join ' ') + "`n" + (@($d.Findings | ForEach-Object { @($_.Evidence | ForEach-Object { [string]$_.Detail }) }) -join ' ')
+        foreach ($sx in @('S3cr3t-P2A', 'tok-P2A-123', 'p2a-person', '--password', '--token', '/pw', 'run.cmd')) { Assert-True (-not $all.Contains($sx)) "nenhum '$sx' na saida" }
+        $f = & $svcByKey ([pscustomobject]@{ Findings = @($d.Findings | Where-Object { $_.Kind -ceq 'Service' }) })
+        Assert-True ((& $svcEv $f['SecretSvc1'] 'SERVICE_EXECUTABLE_NAME')[0] -ceq 'svc.exe' -and (& $svcEv $f['SecretSvc2'] 'SERVICE_EXECUTABLE')[0] -ceq "$pf\Agent\svc.exe" -and (& $svcEv $f['SecretSvc3'] 'SERVICE_EXECUTABLE_UNREADABLE')[0] -ceq 'EXECUTABLE_UNPARSEABLE') 'fora de local conhecido so o nome; em local conhecido o caminho; ilegivel so o codigo'
+        Assert-True ($txt.Contains((Get-AtmText 'diag.svcTitle')) -and $txt.Contains('SecretSvc1') -and $txt.Contains((Get-AtmText 'diag.svcNoDelete'))) 'relatorio: secao de servicos'
+    }
+    Test-Case 'Servicos' 'P2-A: integracao ao diagnose - consulta antes do snapshot (processo verificado), coberturas, JSON e relatorio; sem servico declarado nada e consultado' {
+        $p = New-TestProfile 'p2a-int'
+        $null = New-TestRoot -ProfileInfo $p
+        $rt = [pscustomobject]@{ Id = 'fake-svc'; DisplayName = 'F'; ContractVersion = 2; Capabilities = @('runtime'); GetServiceHints = { @([pscustomobject]@{ Name = 'LinkedSvc'; Role = 'vm-host' }, [pscustomobject]@{ Name = 'AbsentSvc' }) } }
+        $procRows = @([pscustomobject]@{ ProcessId = 4; ParentProcessId = 0; Name = 'System'; CreationDate = [datetime]::UtcNow.AddHours(-2) }, [pscustomobject]@{ ProcessId = 6000; ParentProcessId = 4; Name = 'svc.exe'; CreationDate = [datetime]::UtcNow.AddHours(-1) })
+        $rows = @(& $svcRow 'LinkedSvc' 'Running' 'Auto' $true 'LocalSystem' 6000)
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0], $rt) -ProcessSource ({ $procRows }.GetNewClosure()) -CpuSampleMs 0 -PseudonymKey $testPseudonymKey -ServiceSource ({ param($Names) $rows }.GetNewClosure())
+        $cols = @($d.Coverage | ForEach-Object { $_.Collector })
+        Assert-True ($cols.IndexOf('services') -eq $cols.IndexOf('agent-resources') + 1 -and $cols.IndexOf('service-properties') -eq $cols.IndexOf('services') + 1) "coberturas services e service-properties depois do runtime ($($cols -join ','))"
+        $sf = @($d.Findings | Where-Object { $_.Kind -ceq 'Service' })
+        $f = & $svcByKey ([pscustomobject]@{ Findings = $sf })
+        Assert-True ($sf.Count -eq 2 -and $f['LinkedSvc'].State -ceq 'RUNNING' -and $f['AbsentSvc'].State -ceq 'NOT_PRESENT') 'achados de servico no diagnose'
+        Assert-True ((& $svcEv $f['LinkedSvc'] 'SERVICE_PROCESS_VERIFIED').Count -eq 1) 'consulta antes do snapshot do runtime: processo do servico verificado'
+        Assert-True (@($d.Findings | Where-Object { $_.Kind -ceq 'TempPartition' -and $_.State -cne 'RUNTIME_NOT_DIAGNOSED' -and $_.State -cne 'UNKNOWN' }).Count -eq 0) 'servicos nao mudam estados de particoes'
+        $j = (ConvertTo-AtmDiagnoseJson -Result $d) | ConvertFrom-Json
+        $js = @($j.findings | Where-Object { $_.kind -eq 'Service' })
+        Assert-True ($js.Count -eq 2 -and @($j.coverage | Where-Object { $_.collector -eq 'services' -and $_.status -eq 'COMPLETE' }).Count -eq 1 -and @($js | Where-Object { $_.key -eq 'AbsentSvc' -and $_.state -eq 'NOT_PRESENT' }).Count -eq 1) 'JSON: achados e cobertura de servicos'
+        # Only Claude Code (no service declared): the source is never called.
+        $calls = @{ N = 0 }
+        $d2 = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0]) -ProcessSource ({ $procRows }.GetNewClosure()) -CpuSampleMs 0 -PseudonymKey $testPseudonymKey -ServiceSource ({ param($Names) $calls.N++; @() }.GetNewClosure())
+        Assert-True ($calls.N -eq 0 -and @($d2.Findings | Where-Object { $_.Kind -ceq 'Service' }).Count -eq 0 -and @($d2.Coverage | Where-Object { $_.Collector -ceq 'services' -and $_.Status -ceq 'NOT_OBSERVABLE' }).Count -eq 1) 'sem servico declarado: nenhuma consulta'
+        $txt = (Show-AtmDiagnose -Result $d2 6>&1 | ForEach-Object { [string]$_ }) -join "`n"
+        Assert-True ($txt.Contains((Get-AtmText 'diag.svcNone'))) 'relatorio: nada verificado, nunca "sem servicos"'
+    }
+    Test-Case 'Servicos' 'P2-A (estatico): nenhuma chamada que altere servicos, nenhum acesso remoto, uma unica consulta Win32_Service; PathName so na secao de servicos; CLI sem fonte injetada' {
+        $diag = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Diagnose.ps1'))
+        foreach ($pat in @('Start-Service', 'Stop-Service', 'Set-Service', 'Restart-Service', 'Suspend-Service', 'Resume-Service', 'New-Service', 'Remove-Service', 'Invoke-CimMethod', 'Invoke-WmiMethod', 'Get-WmiObject', 'Set-WmiInstance', 'Set-CimInstance', 'New-CimSession', '-CimSession', '-ComputerName', 'Invoke-Expression', 'sc.exe', 'Start-Process')) { Assert-True (-not $diag.Contains($pat)) "motor sem '$pat'" }
+        Assert-True (-not ($diag -match '(?i)\b(StartService|StopService|PauseService|ResumeService|ChangeStartMode|UserControlService|ControlService)\b')) 'nenhum metodo de controle de servico'
+        Assert-Eq ([regex]::Matches($diag, 'Get-CimInstance[^\r\n]*Win32_Service').Count) 1 'uma unica consulta Win32_Service'
+        $sec = $diag.IndexOf('# Windows services (P2-A'); $end = $diag.IndexOf('# Open-file evidence (D-2')
+        $outside = @([regex]::Matches($diag, 'PathName') | Where-Object { $_.Index -lt $sec -or $_.Index -gt $end })
+        Assert-True ($sec -gt 0 -and $end -gt $sec -and $outside.Count -eq 0) 'PathName so dentro da secao de servicos'
+        $raw = $diag.Substring($diag.IndexOf('function Get-AtmServiceRaw'), $diag.IndexOf('function Test-AtmAccessDeniedException') - $diag.IndexOf('function Get-AtmServiceRaw'))
+        Assert-True ($raw.Contains('Get-CimInstance -ClassName Win32_Service') -and $raw.Contains('-OperationTimeoutSec')) 'consulta local com tempo limite'
+        foreach ($f in @('agent-temp.ps1', 'lib\Report.ps1', 'lib\Tui.ps1')) { $t = [IO.File]::ReadAllText((Join-Path $srcDir $f)); Assert-True (-not $t.Contains('ServiceSource') -and -not $t.Contains('PathName')) "$f sem fonte injetada nem PathName" }
+        foreach ($l in @('en-US', 'pt-BR')) {
+            foreach ($x in $script:AtmServiceReasonCodes) { Assert-True $script:AtmMessages[$l].ContainsKey("reason.$x") "reason.$x ($l)" }
+            foreach ($x in $script:AtmServiceEvidenceCodes) { Assert-True $script:AtmMessages[$l].ContainsKey("evidence.$x") "evidence.$x ($l)" }
+            foreach ($x in $script:AtmFindingStates['Service']) { Assert-True $script:AtmMessages[$l].ContainsKey("state.Service.$x") "state.Service.$x ($l)" }
+        }
+        Assert-True ($script:AtmAbsenceStates -ccontains 'NOT_PRESENT') 'NOT_PRESENT exige cobertura conclusiva (New-AtmFinding)'
+        $nf = New-AtmFinding -Kind 'Service' -Key 'X' -State 'NOT_PRESENT' -Coverage @(New-AtmCoverage -Collector 'services' -Status 'PARTIAL' -Reasons @('SERVICE_UNEXPECTED_ROW'))
+        Assert-Eq $nf.State 'UNKNOWN' 'ausencia com consulta parcial vira UNKNOWN'
+    }
+    Test-Case 'Servicos' 'P2-A (runner de CI, somente leitura): consulta real de EventLog, Winmgmt e um nome inexistente; estado e tipo de inicio identicos antes e depois; processo do Winmgmt verificado' {
+        if ($env:GITHUB_ACTIONS -ne 'true') { $script:caseSkipped = $true; $script:caseNote = 'somente em runner de CI (consulta real, somente leitura)'; return }
+        $snap = { (@(Get-CimInstance -ClassName Win32_Service -Filter "Name='EventLog' OR Name='Winmgmt'" -Property Name, State, StartMode -ErrorAction Stop | Sort-Object Name | ForEach-Object { '{0}/{1}/{2}' -f $_.Name, $_.State, $_.StartMode })) -join ',' }
+        $before = & $snap
+        $h = & $svcHints 'fake-ci' @((& $svcHint 'EventLog'), (& $svcHint 'Winmgmt'), (& $svcHint 'AtmNoSuchServiceP2A'))
+        $q = Invoke-AtmServiceQuery -ProviderHints @($h)
+        $coll = Get-AtmProcessCollection
+        $r = Get-AtmServiceFindings -Query $q -Collection $coll
+        $after = & $snap
+        $f = & $svcByKey $r
+        Assert-Eq $after $before 'estado e tipo de inicio identicos antes e depois'
+        Assert-True ($q.Coverage.Status -ceq 'COMPLETE' -and $f['EventLog'].State -ceq 'RUNNING' -and $f['Winmgmt'].State -ceq 'RUNNING' -and $f['AtmNoSuchServiceP2A'].State -ceq 'NOT_PRESENT') "consulta real: $($q.Coverage.Status), $(@($r.Findings | ForEach-Object { $_.Key + '=' + $_.State }) -join ',')"
+        Assert-Eq (& $svcEv $f['Winmgmt'] 'SERVICE_PROCESS_VERIFIED').Count 1 "Winmgmt: processo verificado ($(@(& $svcEv $f['Winmgmt'] 'SERVICE_PROCESS_UNVERIFIED') -join ','))"
+        Assert-True ((& $svcEv $f['Winmgmt'] 'SERVICE_EXECUTABLE')[0] -like '*\svchost.exe' -and (& $svcEv $f['Winmgmt'] 'SERVICE_ACCOUNT_KIND')[0] -ceq 'LOCAL_SYSTEM') 'Winmgmt: svchost.exe em local conhecido, LocalSystem'
+        $script:caseNote = "services $($q.Coverage.Status) em $($q.Coverage.ElapsedMs) ms; propriedades $((& $svcCov $r 'service-properties').Status) $(@((& $svcCov $r 'service-properties').Reasons) -join ',')"
     }
     Test-Case 'I18n' 'P1-C: todo motivo e evidencia de arquivos abertos tem texto nos dois idiomas' {
         foreach ($l in @('en-US', 'pt-BR')) {

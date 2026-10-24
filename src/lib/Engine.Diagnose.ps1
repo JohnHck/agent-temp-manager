@@ -20,15 +20,17 @@ $script:AtmFindingKinds = @('Process', 'Service', 'VirtualMachine', 'Worktree', 
 $script:AtmNoDependencyStates = @('NO_DEPENDENCY_OBSERVED', 'CLEAN_AND_PUBLISHED_UNKNOWN')
 # States meaning "the process was looked for and is not there". Same rule: New-AtmFinding replaces them with UNKNOWN
 # unless every coverage record of the finding is conclusive (a PARTIAL or failed collection never proves absence).
-$script:AtmAbsenceStates = @('SESSION_PROCESS_NOT_FOUND')
+$script:AtmAbsenceStates = @('SESSION_PROCESS_NOT_FOUND', 'NOT_PRESENT')
 # Closed list of states per finding kind (ADR-0001 rule 2). Only states with an accepted basis are listed:
 # TempPartition: RUNTIME_NOT_DIAGNOSED (P1-A) and the graph states of ADR-0002; Worktree: the summary states of
-# ADR-0006 rule 14; Process and AgentSession: the runtime states of P1-B4-b (Get-AtmAgentRuntimeFindings). The other
-# kinds have no state yet: each later phase adds its own, with tests. UNKNOWN is in every list because New-AtmFinding
-# may replace a requested state with it. No Process or AgentSession state says anything about a temporary directory.
+# ADR-0006 rule 14; Process and AgentSession: the runtime states of P1-B4-b (Get-AtmAgentRuntimeFindings); Service:
+# the state reported by the service control manager for a provider-declared name (P2-A, ADR-0005), NOT_PRESENT only
+# when the query completed and the name was not listed. The other kinds have no state yet: each later phase adds its
+# own, with tests. UNKNOWN is in every list because New-AtmFinding may replace a requested state with it. No Process,
+# AgentSession or Service state says anything about a temporary directory.
 $script:AtmFindingStates = @{
     'Process'        = @('SELF', 'AGENT_PROCESS', 'AGENT_DESCENDANT', 'IDENTITY_UNVERIFIED', 'UNKNOWN')
-    'Service'        = @('UNKNOWN')
+    'Service'        = @('RUNNING', 'STOPPED', 'PAUSED', 'PENDING', 'NOT_PRESENT', 'UNKNOWN')
     'VirtualMachine' = @('UNKNOWN')
     'Worktree'       = @('IN_USE', 'LOCAL_WORK', 'UNPUBLISHED_COMMITS', 'APPARENT_ORPHAN', 'CLEAN_AND_PUBLISHED_UNKNOWN', 'UNKNOWN')
     'Repository'     = @('UNKNOWN')
@@ -2968,6 +2970,289 @@ function Get-AtmInventoryCoverage {
 }
 
 # ---------------------------------------------------------------------------------------------
+# Windows services (P2-A, ADR-0005). One local CIM query of Win32_Service, filtered by the exact names that providers
+# declare (GetServiceHints, ADR-0008); nothing is started, stopped or reconfigured, no other machine is asked, and no
+# name is guessed from display names or paths. The query runs before the process snapshot of the run: a PID reported
+# by the service control manager is linked to a process only when the snapshot (taken after the query) holds that PID
+# with a verified identity created before the query started, so the process owned the PID during the whole query.
+# PathName is reduced in memory to the executable (full path only in a well-known program location, otherwise the file
+# name) and dropped; its arguments are never kept. A NOT_PRESENT service is one the service control manager did not
+# list for this account; no service state authorizes anything.
+# ---------------------------------------------------------------------------------------------
+
+$script:AtmServiceCimProperties = @('Name', 'State', 'StartMode', 'DelayedAutoStart', 'StartName', 'ProcessId', 'PathName')
+$script:AtmServiceMaxNames = 64
+$script:AtmServiceTimeoutSec = 30
+$script:AtmServiceStateMap = @{ 'Running' = 'RUNNING'; 'Stopped' = 'STOPPED'; 'Paused' = 'PAUSED'; 'Start Pending' = 'PENDING'; 'Stop Pending' = 'PENDING'; 'Continue Pending' = 'PENDING'; 'Pause Pending' = 'PENDING' }
+$script:AtmServiceStartModes = @('Boot', 'System', 'Auto', 'Manual', 'Disabled')
+$script:AtmServiceAccountKinds = @('LOCAL_SYSTEM', 'LOCAL_SERVICE', 'NETWORK_SERVICE', 'VIRTUAL', 'BUILTIN', 'MANAGED', 'USER')
+$script:AtmServiceReasonCodes = @('SERVICE_HINTS_NONE', 'SERVICE_HINTS_INCOMPLETE', 'SERVICE_HINTS_CAPPED', 'SERVICE_QUERY_DENIED', 'SERVICE_QUERY_FAILED', 'SERVICE_QUERY_TIMEOUT',
+    'SERVICE_QUERY_NOT_COMPLETED', 'SERVICE_UNEXPECTED_ROW', 'SERVICE_DUPLICATE_ROW', 'SERVICE_PROPERTY_UNREADABLE', 'SERVICE_PROCESS_UNVERIFIED', 'SERVICE_NOT_LISTED_FOR_ACCOUNT')
+$script:AtmServiceEvidenceCodes = @('SERVICE_HINT', 'SERVICE_NOT_LISTED', 'SERVICE_NOT_QUERIED', 'SERVICE_STATE', 'SERVICE_STATE_UNREADABLE', 'SERVICE_START_MODE', 'SERVICE_START_MODE_UNREADABLE',
+    'SERVICE_DELAYED_AUTO_START', 'SERVICE_DELAYED_AUTO_START_UNREADABLE', 'SERVICE_ACCOUNT_KIND', 'SERVICE_ACCOUNT', 'SERVICE_ACCOUNT_UNREADABLE', 'SERVICE_EXECUTABLE', 'SERVICE_EXECUTABLE_NAME',
+    'SERVICE_EXECUTABLE_UNREADABLE', 'SERVICE_PROCESS_VERIFIED', 'SERVICE_PROCESS_UNVERIFIED', 'SERVICE_DUPLICATE_ROW')
+# Why a reported PID is not linked (detail of SERVICE_PROCESS_UNVERIFIED).
+$script:AtmServiceLinkCodes = @('PID_NOT_REPORTED', 'SERVICE_NOT_RUNNING', 'PROCESS_SNAPSHOT_UNAVAILABLE', 'SNAPSHOT_BEFORE_QUERY', 'DUPLICATE_PID', 'PROCESS_NOT_COLLECTED', 'CREATION_TIME_UNKNOWN', 'CREATED_AFTER_QUERY')
+
+function Get-AtmServiceProgramRoots {
+    # Well-known program locations (ADR-0005): the Windows folder and the program files folders, drive-absolute, each
+    # ending with a backslash.
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($v in @($env:SystemRoot, [Environment]::GetFolderPath('Windows'), $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramW6432)) {
+        if ([string]::IsNullOrWhiteSpace($v) -or $v -notmatch '^[A-Za-z]:\\[^%*?"<>|]*$') { continue }
+        $r = $v.TrimEnd('\') + '\'
+        if (-not $out.Contains($r)) { $out.Add($r) }
+    }
+    return $out.ToArray()
+}
+
+function ConvertFrom-AtmServicePathName {
+    <#
+      The executable of a service command line, in memory only (ADR-0005 rule 4). Returns Path (the full path, only
+      under a well-known program location), Name (the file name) and Reason (EXECUTABLE_UNREADABLE when there is no
+      value, EXECUTABLE_UNPARSEABLE otherwise); the command line and its arguments are never returned, and a failure
+      keeps only that code. Quoted: up to the closing quote. Unquoted: up to the first ".exe" followed by a space or
+      the end (how Windows resolves it). \??\, \SystemRoot\, %SystemRoot%, %windir% and the program files variables
+      are read as their folders; any other variable or a relative path gives the file name only.
+    #>
+    param($PathName, [string[]]$Roots = (Get-AtmServiceProgramRoots))
+    $out = [ordered]@{ Path = $null; Name = $null; Reason = $null }
+    if (-not ($PathName -is [string]) -or [string]::IsNullOrWhiteSpace($PathName)) { $out.Reason = 'EXECUTABLE_UNREADABLE'; return [pscustomobject]$out }
+    try {
+        $s = $PathName.TrimStart()
+        $exe = $null
+        if ($s.StartsWith('"')) {
+            $end = $s.IndexOf('"', 1)
+            if ($end -gt 1) { $exe = $s.Substring(1, $end - 1) }
+        } else {
+            $m = [regex]::Match($s, '^(.+?\.exe)(?=\s|$)', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            if ($m.Success) { $exe = $m.Groups[1].Value }
+        }
+        if ($null -ne $exe -and $exe.StartsWith('\??\')) { $exe = $exe.Substring(4) }
+        if ($null -eq $exe -or $exe -match '[\x00-\x1f"*?<>|]') { $out.Reason = 'EXECUTABLE_UNPARSEABLE'; return [pscustomobject]$out }
+        $map =[ordered]@{ '\SystemRoot\' = $env:SystemRoot; '%SystemRoot%\' = $env:SystemRoot; '%windir%\' = $env:SystemRoot; '%ProgramFiles%\' = $env:ProgramFiles; '%ProgramFiles(x86)%\' = ${env:ProgramFiles(x86)}; '%ProgramW6432%\' = $env:ProgramW6432 }
+        foreach ($k in $map.Keys) {
+            if ($exe.StartsWith($k, [StringComparison]::OrdinalIgnoreCase)) { if ($map[$k]) { $exe = $map[$k].TrimEnd('\') + '\' + $exe.Substring($k.Length) }; break }
+        }
+        $i = [Math]::Max($exe.LastIndexOf('\'), $exe.LastIndexOf('/'))
+        $leaf = $(if ($i -ge 0) { $exe.Substring($i + 1) } else { $exe })
+        if ($leaf -notmatch '^[^\\/:*?"<>|]+\.exe$') { $out.Reason = 'EXECUTABLE_UNPARSEABLE'; return [pscustomobject]$out }
+        $out.Name = $leaf
+        # Full path only when it is drive-absolute, without relative segments, variables or forward slashes, and
+        # textually under a well-known program location.
+        if ($exe -match '^[A-Za-z]:\\' -and $exe -notmatch '\\\.\.?\\|[/%~]' -and $exe.IndexOf(':', 2) -lt 0) {
+            foreach ($r in @($Roots)) { if ($exe.StartsWith($r, [StringComparison]::OrdinalIgnoreCase)) { $out.Path = $exe; break } }
+        }
+    } catch { $out.Path = $null; $out.Name = $null; $out.Reason = 'EXECUTABLE_UNPARSEABLE' }
+    return [pscustomobject]$out
+}
+
+function ConvertTo-AtmServiceAccount {
+    # Account kind and name (ADR-0005 rule 6): LocalSystem, NT AUTHORITY\..., virtual service accounts (NT SERVICE\...)
+    # and managed service accounts (ending with $) are shown as such; any other account is USER, shown by its name.
+    # $null when unreadable.
+    param($StartName)
+    if (-not (Test-AtmHintText -Value $StartName -Max 256)) { return $null }
+    $n = $StartName.Trim()
+    if (-not $n) { return $null }
+    $u = $n.ToUpperInvariant()
+    $kind = 'USER'
+    if ($u -ceq 'LOCALSYSTEM' -or $u -ceq 'NT AUTHORITY\SYSTEM' -or $u -ceq '.\LOCALSYSTEM') { $kind = 'LOCAL_SYSTEM' }
+    elseif ($u -ceq 'NT AUTHORITY\LOCALSERVICE' -or $u -ceq 'NT AUTHORITY\LOCAL SERVICE') { $kind = 'LOCAL_SERVICE' }
+    elseif ($u -ceq 'NT AUTHORITY\NETWORKSERVICE' -or $u -ceq 'NT AUTHORITY\NETWORK SERVICE') { $kind = 'NETWORK_SERVICE' }
+    elseif ($u.StartsWith('NT SERVICE\', [StringComparison]::Ordinal)) { $kind = 'VIRTUAL' }
+    elseif ($u.StartsWith('NT AUTHORITY\', [StringComparison]::Ordinal)) { $kind = 'BUILTIN' }
+    elseif ($u.EndsWith('$')) { $kind = 'MANAGED' }
+    return [pscustomobject]@{ Kind = $kind; Account = $n }
+}
+
+function Get-AtmServiceRaw {
+    # One local CIM query of Win32_Service for the given exact names, the allowed properties only, bounded by the CIM
+    # operation timeout (enforced by CIM; not a guaranteed cancellation). Names are checked again here (letters,
+    # digits, space, '_', '.', '-'), so the filter holds only quoted literals.
+    param([string[]]$Names, [int]$TimeoutSec)
+    foreach ($n in $Names) { if ($n -notmatch '^[A-Za-z0-9_.\- ]+$') { throw (New-Object ArgumentException('name')) } }
+    $filter = (@($Names | ForEach-Object { "Name='$_'" }) -join ' OR ')
+    @(Get-CimInstance -ClassName Win32_Service -Property $script:AtmServiceCimProperties -Filter $filter -OperationTimeoutSec $TimeoutSec -ErrorAction Stop |
+        ForEach-Object {
+            $row = [ordered]@{}
+            foreach ($p in $script:AtmServiceCimProperties) { $row[$p] = $_.$p }
+            [pscustomobject]$row
+        })
+}
+
+function Test-AtmAccessDeniedException {
+    # Access denied by type (UnauthorizedAccessException), CIM native code (AccessDenied) or HRESULT (E_ACCESSDENIED,
+    # WBEM_E_ACCESS_DENIED). Nothing of the message is read.
+    param($Exception)
+    if ($null -eq $Exception) { return $false }
+    if ($Exception -is [UnauthorizedAccessException]) { return $true }
+    $nc = $Exception.PSObject.Properties['NativeErrorCode']
+    if ($null -ne $nc -and [string]$nc.Value -ceq 'AccessDenied') { return $true }
+    # 0x80070005 and 0x80041003 as signed 32-bit values (the same literal reads differently in 5.1 and 7).
+    return (@(-2147024891, -2147217405) -contains [int]$Exception.HResult)
+}
+
+function Invoke-AtmServiceQuery {
+    <#
+      The services query of a run (before its process snapshot). -ProviderHints: Get-AtmProviderRuntimeHints results.
+      -Source (tests): param($Names) returning rows with AtmServiceCimProperties (or throwing). -NowUtc (tests): the
+      query start. Returns Declared (one entry per name, case-insensitive, with its providers and roles), Rows (by
+      declared name; PathName already reduced to the executable and dropped), QueryUtc, Capped (names not queried) and
+      Coverage ('services'): NOT_OBSERVABLE (no declared name: nothing is queried, never "no services"), TIMEOUT,
+      DENIED, FAILED, COMPLETE, or PARTIAL (hints incomplete or capped, unexpected or duplicate rows).
+    #>
+    param($ProviderHints = @(), [scriptblock]$Source = $null, $Deadline = $null, [int]$TimeoutSec = $script:AtmServiceTimeoutSec, [int]$MaxNames = $script:AtmServiceMaxNames, $NowUtc = $null)
+    $reasons = New-Object System.Collections.Generic.List[string]
+    $byName = @{}
+    foreach ($h in @($ProviderHints | Where-Object { $null -ne $_ })) {
+        if ($h.Coverage.Status -cne 'COMPLETE' -and @($h.Coverage.Reasons | Where-Object { $_ -like 'HINT_*_SERVICE_HINTS' }).Count -gt 0) { $reasons.Add('SERVICE_HINTS_INCOMPLETE') }
+        foreach ($s in @($h.ServiceHints)) {
+            $k = ([string]$s.Name).ToUpperInvariant()
+            if (-not $byName.ContainsKey($k)) { $byName[$k] = [pscustomobject]@{ Name = [string]$s.Name; Providers = New-Object System.Collections.Generic.List[object] } }
+            $e = $byName[$k]
+            if ([string]::CompareOrdinal([string]$s.Name, $e.Name) -lt 0) { $e.Name = [string]$s.Name }
+            if (@($e.Providers | Where-Object { $_.Id -ceq [string]$h.ProviderId -and $_.Role -ceq [string]$s.Role }).Count -eq 0) { $e.Providers.Add([pscustomobject]@{ Id = [string]$h.ProviderId; Role = $(if ($s.Role) { [string]$s.Role } else { $null }) }) }
+        }
+    }
+    foreach ($e in @($byName.Values)) { $e.Providers = $e.Providers.ToArray() }
+    $declared = @(Get-AtmOrdinalSorted -Items @($byName.Values) -Signature { param($x) $x.Name.ToUpperInvariant() })
+    $out = [ordered]@{ Declared = $declared; Rows = @{}; QueryUtc = $null; Capped = @(); Coverage = $null }
+    if ($declared.Count -eq 0) {
+        $reasons.Insert(0, 'SERVICE_HINTS_NONE')
+        $out.Coverage = New-AtmCoverage -Collector 'services' -Status 'NOT_OBSERVABLE' -Reasons @(Get-AtmSortedCodes $reasons) -ElevationWouldHelp 'NO' -Observed 0 -Expected 0
+        return [pscustomobject]$out
+    }
+    $names = @($declared | ForEach-Object { $_.Name })
+    if ($names.Count -gt $MaxNames) { $reasons.Add('SERVICE_HINTS_CAPPED'); $out.Capped = @($names[$MaxNames..($names.Count - 1)]); $names = @($names[0..($MaxNames - 1)]) }
+    if ($null -ne $Deadline -and [datetime]::UtcNow -ge $Deadline) { $out.Coverage = New-AtmDeadlineCoverage 'services'; return [pscustomobject]$out }
+    $started = $(if ($null -ne $NowUtc) { ([datetime]$NowUtc).ToUniversalTime() } else { [datetime]::UtcNow })
+    $out.QueryUtc = $started
+    $budgetMs = [long]$TimeoutSec * 1000
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $raw = $null; $ex = $null
+    try { $raw = @(if ($null -ne $Source) { & $Source $names } else { Get-AtmServiceRaw -Names $names -TimeoutSec $TimeoutSec }) } catch { $ex = $_.Exception }
+    $sw.Stop()
+    if ($null -ne $ex) {
+        # Exception type only, never its message (it could carry a command line).
+        $code = ConvertTo-AtmExceptionCode $ex.GetType().Name
+        if (Test-AtmAccessDeniedException $ex) { $st = 'DENIED'; $rs = @('SERVICE_QUERY_DENIED', $code); $help = 'UNKNOWN' }
+        elseif ($sw.ElapsedMilliseconds -ge $budgetMs) { $st = 'TIMEOUT'; $rs = @('SERVICE_QUERY_TIMEOUT', $code); $help = 'NO' }
+        else { $st = 'FAILED'; $rs = @('SERVICE_QUERY_FAILED', $code); $help = 'UNKNOWN' }
+        $out.Coverage = New-AtmCoverage -Collector 'services' -Status $st -Reasons (@($rs) + @($reasons)) -ElevationWouldHelp $help -Observed 0 -Expected $declared.Count -StartedUtc $started -ElapsedMs $sw.ElapsedMilliseconds -BudgetMs $budgetMs
+        return [pscustomobject]$out
+    }
+    $want = @{}; foreach ($n in $names) { $want[$n.ToUpperInvariant()] = $n }
+    $rows = @{}; $dup = @{}
+    foreach ($r in @($raw | Where-Object { $null -ne $_ })) {
+        $rn = Get-AtmHintProperty -Item $r -Name 'Name'
+        if (-not ($rn -is [string]) -or -not $want.ContainsKey($rn.ToUpperInvariant())) { $reasons.Add('SERVICE_UNEXPECTED_ROW'); continue }
+        $dn = $want[$rn.ToUpperInvariant()]
+        if ($rows.ContainsKey($dn)) { $dup[$dn] = $true; $reasons.Add('SERVICE_DUPLICATE_ROW'); continue }
+        # The command line is reduced here and never stored.
+        $exe = ConvertFrom-AtmServicePathName (Get-AtmHintProperty -Item $r -Name 'PathName')
+        $rows[$dn] = [pscustomobject]@{
+            State = Get-AtmHintProperty -Item $r -Name 'State'; StartMode = Get-AtmHintProperty -Item $r -Name 'StartMode'; DelayedAutoStart = Get-AtmHintProperty -Item $r -Name 'DelayedAutoStart'
+            StartName = Get-AtmHintProperty -Item $r -Name 'StartName'; ProcessId = Get-AtmHintProperty -Item $r -Name 'ProcessId'; Executable = $exe; Duplicate = $false
+        }
+    }
+    foreach ($d in @($dup.Keys)) { $rows[$d].Duplicate = $true }
+    $out.Rows = $rows
+    $st = $(if ($reasons.Count -gt 0) { 'PARTIAL' } else { 'COMPLETE' })
+    $out.Coverage = New-AtmCoverage -Collector 'services' -Status $st -Reasons @(Get-AtmSortedCodes $reasons) -ElevationWouldHelp $(if ($st -ceq 'COMPLETE') { 'NO' } else { 'UNKNOWN' }) -Observed @($rows.Keys).Count -Expected $declared.Count -StartedUtc $started -ElapsedMs $sw.ElapsedMilliseconds -BudgetMs $budgetMs
+    return [pscustomobject]$out
+}
+
+function Resolve-AtmServiceProcess {
+    # Link of a running service's PID to a process of a snapshot taken after the query (see the section header).
+    # Returns Result MATCH (with Process) or a code of AtmServiceLinkCodes.
+    param($Collection, $ProcessId, $QueryUtc)
+    $id = ConvertTo-AtmProcessId $ProcessId
+    if ($null -eq $id -or $id -eq 0) { return [pscustomobject]@{ Result = 'PID_NOT_REPORTED'; Process = $null } }
+    if ($null -eq $Collection -or $Collection.Failed -or $null -eq $QueryUtc) { return [pscustomobject]@{ Result = 'PROCESS_SNAPSHOT_UNAVAILABLE'; Process = $null } }
+    if ($null -eq $Collection.CollectedUtc -or ([datetime]$Collection.CollectedUtc) -lt ([datetime]$QueryUtc)) { return [pscustomobject]@{ Result = 'SNAPSHOT_BEFORE_QUERY'; Process = $null } }
+    if ($Collection.Duplicates.ContainsKey($id)) { return [pscustomobject]@{ Result = 'DUPLICATE_PID'; Process = $null } }
+    if (-not $Collection.ByPid.ContainsKey($id)) { return [pscustomobject]@{ Result = 'PROCESS_NOT_COLLECTED'; Process = $null } }
+    $p = $Collection.ByPid[$id]
+    if ($p.IdentityStatus -cne 'VERIFIED') { return [pscustomobject]@{ Result = 'CREATION_TIME_UNKNOWN'; Process = $null } }
+    # The CIM creation time is truncated to 1 us: created before the query only with that margin.
+    if ($p.CreationUtc.Ticks + $script:AtmCimCreationResolutionTicks -gt ([datetime]$QueryUtc).ToUniversalTime().Ticks) { return [pscustomobject]@{ Result = 'CREATED_AFTER_QUERY'; Process = $null } }
+    return [pscustomobject]@{ Result = 'MATCH'; Process = $p }
+}
+
+function Get-AtmServiceFindings {
+    <#
+      Service findings of a run from its query (Invoke-AtmServiceQuery) and the process snapshot taken after it.
+      One finding per declared name, ordered by key (ordinal); key = the declared name. Provider: the declaring
+      provider, or $null with PROVIDER_ATTRIBUTION_AMBIGUOUS when several declare it. Coverage: 'services' (the query;
+      NOT_PRESENT depends on it alone) and 'service-properties' (unreadable values and unverified links: a value that
+      cannot be read is absent from the evidence with an _UNREADABLE code, never 0 or false).
+    #>
+    param($Query, $Collection = $null)
+    $svcCov = $Query.Coverage
+    $now = $(if ($null -ne $Query.QueryUtc) { $Query.QueryUtc } else { [datetime]::UtcNow })
+    $queried = (@('COMPLETE', 'PARTIAL') -ccontains [string]$svcCov.Status)
+    $propReasons = New-Object System.Collections.Generic.List[string]
+    $present = 0; $fullyRead = 0
+    $items = New-Object System.Collections.Generic.List[object]
+    $ev = { param($Code, $Detail) New-AtmEvidence -Code $Code -Source 'service-control-manager' -Collector 'services' -ObservedUtc $now -Detail $Detail }
+    foreach ($d in @($Query.Declared)) {
+        $list = New-Object System.Collections.Generic.List[object]
+        foreach ($p in @(Get-AtmOrdinalSorted -Items @($d.Providers) -Signature { param($x) '{0}|{1}' -f $x.Id, $x.Role })) { $list.Add((New-AtmEvidence -Code 'SERVICE_HINT' -Source 'provider' -Collector 'services' -ObservedUtc $now -Detail $(if ($p.Role) { $p.Id + ':' + $p.Role } else { $p.Id }))) }
+        $ids = @($d.Providers | ForEach-Object { $_.Id } | Sort-Object -Unique)
+        $prov = $(if ($ids.Count -eq 1) { $ids[0] } else { $null })
+        if ($ids.Count -gt 1) { $list.Add((New-AtmEvidence -Code 'PROVIDER_ATTRIBUTION_AMBIGUOUS' -Source 'diagnose' -Collector 'services' -ObservedUtc $now -Detail (@(Get-AtmOrdinalSorted -Items $ids -Signature { param($x) $x }) -join ','))) }
+        $state = 'UNKNOWN'; $cov = @($svcCov)
+        if (-not $queried -or @($Query.Capped) -ccontains $d.Name) {
+            $list.Add((& $ev 'SERVICE_NOT_QUERIED' $(if (@($Query.Capped) -ccontains $d.Name) { 'SERVICE_HINTS_CAPPED' } else { [string]$svcCov.Status })))
+        } elseif (-not $Query.Rows.ContainsKey($d.Name)) {
+            # Not listed by the service control manager for this account; NOT_PRESENT only with a complete query.
+            $list.Add((& $ev 'SERVICE_NOT_LISTED' $null)); $state = 'NOT_PRESENT'
+        } else {
+            $present++
+            $row = $Query.Rows[$d.Name]; $ok = $true
+            $cov = @($svcCov, $null)
+            if ($row.Duplicate) { $list.Add((& $ev 'SERVICE_DUPLICATE_ROW' $null)); $ok = $false }
+            # Exact spelling only (the table lookup itself ignores case).
+            $sc = $(if ($row.State -is [string] -and @($script:AtmServiceStateMap.Keys) -ccontains $row.State) { $script:AtmServiceStateMap[$row.State] } else { $null })
+            if ($null -ne $sc) { $list.Add((& $ev 'SERVICE_STATE' $sc)); if (-not $row.Duplicate) { $state = $sc } } else { $list.Add((& $ev 'SERVICE_STATE_UNREADABLE' $null)); $ok = $false }
+            $sm = @(if ($row.StartMode -is [string]) { $script:AtmServiceStartModes | Where-Object { $_ -ceq $row.StartMode } })
+            if ($sm.Count -eq 1) { $list.Add((& $ev 'SERVICE_START_MODE' $sm[0].ToUpperInvariant())) } else { $list.Add((& $ev 'SERVICE_START_MODE_UNREADABLE' $null)); $ok = $false }
+            if ($row.DelayedAutoStart -is [bool]) { $list.Add((& $ev 'SERVICE_DELAYED_AUTO_START' $(if ($row.DelayedAutoStart) { 'TRUE' } else { 'FALSE' }))) } else { $list.Add((& $ev 'SERVICE_DELAYED_AUTO_START_UNREADABLE' $null)); $ok = $false }
+            $acc = ConvertTo-AtmServiceAccount $row.StartName
+            if ($null -ne $acc) { $list.Add((& $ev 'SERVICE_ACCOUNT_KIND' $acc.Kind)); $list.Add((& $ev 'SERVICE_ACCOUNT' $acc.Account)) } else { $list.Add((& $ev 'SERVICE_ACCOUNT_UNREADABLE' $null)); $ok = $false }
+            $x = $row.Executable
+            if ($x.Path) { $list.Add((& $ev 'SERVICE_EXECUTABLE' $x.Path)) } elseif ($x.Name) { $list.Add((& $ev 'SERVICE_EXECUTABLE_NAME' $x.Name)) } else { $list.Add((& $ev 'SERVICE_EXECUTABLE_UNREADABLE' $x.Reason)); $ok = $false }
+            if (-not $ok) { $propReasons.Add('SERVICE_PROPERTY_UNREADABLE') }
+            # Process link: only for a running service, only through the snapshot taken after the query.
+            $pid0 = ConvertTo-AtmProcessId $row.ProcessId
+            if ($sc -ceq 'RUNNING' -and -not $row.Duplicate) {
+                $lk = Resolve-AtmServiceProcess -Collection $Collection -ProcessId $row.ProcessId -QueryUtc $Query.QueryUtc
+                if ($lk.Result -ceq 'MATCH') { $list.Add((New-AtmEvidence -Code 'SERVICE_PROCESS_VERIFIED' -Source 'diagnose' -Collector 'process-snapshot' -ObservedUtc $now -Detail $lk.Process.Key)) }
+                else { $list.Add((New-AtmEvidence -Code 'SERVICE_PROCESS_UNVERIFIED' -Source 'diagnose' -Collector 'process-snapshot' -ObservedUtc $now -Detail $lk.Result)); $propReasons.Add('SERVICE_PROCESS_UNVERIFIED'); $ok = $false }
+            } elseif ($null -ne $pid0 -and $pid0 -ne 0) {
+                $list.Add((New-AtmEvidence -Code 'SERVICE_PROCESS_UNVERIFIED' -Source 'diagnose' -Collector 'process-snapshot' -ObservedUtc $now -Detail 'SERVICE_NOT_RUNNING'))
+            }
+            if ($ok) { $fullyRead++ }
+        }
+        $items.Add([pscustomobject]@{ Declared = $d; State = $state; Evidence = $list.ToArray(); Coverage = $cov; Provider = $prov })
+    }
+    # One record for the values and links of the services that were listed.
+    if (-not $queried) { $pc = New-AtmCoverage -Collector 'service-properties' -Status 'NOT_OBSERVABLE' -Reasons @($(if (@($svcCov.Reasons) -ccontains 'SERVICE_HINTS_NONE') { 'SERVICE_HINTS_NONE' } else { 'SERVICE_QUERY_NOT_COMPLETED' })) -ElevationWouldHelp $svcCov.ElevationWouldHelp }
+    else {
+        $pst = $(if ($propReasons.Count -gt 0) { 'PARTIAL' } else { 'COMPLETE' })
+        $pc = New-AtmCoverage -Collector 'service-properties' -Status $pst -Reasons @(Get-AtmSortedCodes $propReasons) -ElevationWouldHelp $(if ($pst -ceq 'COMPLETE') { 'NO' } else { 'UNKNOWN' }) -Observed $fullyRead -Expected $present -StartedUtc $svcCov.StartedUtc
+    }
+    $findings = New-Object System.Collections.Generic.List[object]
+    foreach ($it in $items) {
+        $c = @($it.Coverage | ForEach-Object { if ($null -eq $_) { $pc } else { $_ } })
+        $findings.Add((New-AtmFinding -Kind 'Service' -Key $it.Declared.Name -State $it.State -Evidence $it.Evidence -Coverage $c -Provider $it.Provider))
+    }
+    $sorted = @(Get-AtmOrdinalSorted -Items $findings.ToArray() -Signature { param($f) $f.Key })
+    return [pscustomobject]@{ Findings = $sorted; Coverage = @($svcCov, $pc) }
+}
+
+# ---------------------------------------------------------------------------------------------
 # Open-file evidence (D-2, ADR-0004, P1-C) and working directories (D-1, deferred). Restart Manager lists the processes
 # holding a bounded sample of files of each indexed node (temporary partitions; worktrees when discovery ran); a holder
 # is matched with the process snapshot by PID and start time. A sample never proves that a node is free, a holder never
@@ -3121,16 +3406,17 @@ function Invoke-AtmDiagnose {
       Pseudonyms (ADR-0010, P1-B4-d): -PseudonymKey: the operator's key bytes (Read-AtmPseudonymKeyFile); without it
       the key is ephemeral. The key lives only in this call: the pseudonymizer is closed (HMAC disposed, buffer cleared)
       when it returns or throws. -PartitionKeyFunction: test override of the partition key.
+      Services (P2-A): -ServiceSource: test override of the Win32_Service rows (param($Names)).
     #>
     param([hashtable]$InventoryArgs = @{}, [scriptblock]$IdentitySource, $Providers, [int]$DeadlineSeconds = $script:AtmDiagnoseDefaultDeadlineSeconds,
         [scriptblock]$ProcessSource = $null, [int]$CpuSampleMs = $script:AtmDiagnoseCpuSampleMs, $SelfPid = $PID, $SelfCreationUtc = $null,
-        [byte[]]$PseudonymKey = $null, [scriptblock]$PartitionKeyFunction = $null, [string[]]$RepositoryPaths = @(), [scriptblock]$HandleQuery = $null)
+        [byte[]]$PseudonymKey = $null, [scriptblock]$PartitionKeyFunction = $null, [string[]]$RepositoryPaths = @(), [scriptblock]$HandleQuery = $null, [scriptblock]$ServiceSource = $null)
     if ($DeadlineSeconds -lt 0) { throw (Get-AtmText 'err.diagDeadline' $DeadlineSeconds) }
     if ($CpuSampleMs -ne 0 -and ($CpuSampleMs -lt $script:AtmCpuSampleMinMs -or $CpuSampleMs -gt $script:AtmCpuSampleMaxMs)) { throw (Get-AtmText 'err.diagProcess' "CpuSampleMs $CpuSampleMs") }
     $pz = New-AtmPseudonymizer -Key $PseudonymKey
     try {
         $runArgs = @{ InventoryArgs = $InventoryArgs; IdentitySource = $IdentitySource; Providers = $Providers; DeadlineSeconds = $DeadlineSeconds; ProcessSource = $ProcessSource
-            CpuSampleMs = $CpuSampleMs; SelfPid = $SelfPid; SelfCreationUtc = $SelfCreationUtc; Pseudonymizer = $pz; PartitionKeyFunction = $PartitionKeyFunction; RepositoryPaths = $RepositoryPaths; HandleQuery = $HandleQuery }
+            CpuSampleMs = $CpuSampleMs; SelfPid = $SelfPid; SelfCreationUtc = $SelfCreationUtc; Pseudonymizer = $pz; PartitionKeyFunction = $PartitionKeyFunction; RepositoryPaths = $RepositoryPaths; HandleQuery = $HandleQuery; ServiceSource = $ServiceSource }
         return (Invoke-AtmDiagnoseRun @runArgs)
     } finally { Close-AtmPseudonymizer $pz }
 }
@@ -3138,7 +3424,7 @@ function Invoke-AtmDiagnose {
 function Invoke-AtmDiagnoseRun {
     # The body of Invoke-AtmDiagnose, with its pseudonymizer (parameters already checked there).
     param([hashtable]$InventoryArgs, [scriptblock]$IdentitySource, $Providers, [int]$DeadlineSeconds, [scriptblock]$ProcessSource, [int]$CpuSampleMs, $SelfPid, $SelfCreationUtc,
-        $Pseudonymizer, [scriptblock]$PartitionKeyFunction, [string[]]$RepositoryPaths = @(), [scriptblock]$HandleQuery = $null)
+        $Pseudonymizer, [scriptblock]$PartitionKeyFunction, [string[]]$RepositoryPaths = @(), [scriptblock]$HandleQuery = $null, [scriptblock]$ServiceSource = $null)
     $started = [datetime]::UtcNow
     $deadline = $started.AddSeconds($DeadlineSeconds)
     $coverage = New-Object System.Collections.Generic.List[object]
@@ -3200,6 +3486,11 @@ function Invoke-AtmDiagnoseRun {
         }
     }
 
+    # Services (P2-A): queried here, before the process snapshot of the agent runtime, so that a PID the service
+    # control manager reports can be proved to belong to a snapshot process (Resolve-AtmServiceProcess). Only names
+    # declared by providers; none declared: nothing is queried.
+    $svcQuery = Invoke-AtmServiceQuery -ProviderHints $hints.ToArray() -Source $ServiceSource -Deadline $deadline
+
     # Agent runtime (P1-B4-c): a process collection with a CPU sample, the session registries of every profile, SELF,
     # the agent findings (P1-B4-b) and the resource totals. Each collector has exactly one record, TIMEOUT when the
     # deadline came first.
@@ -3247,6 +3538,11 @@ function Invoke-AtmDiagnoseRun {
         # Temporary partitions first (ordered by pseudonym, ADR-0010 D-8); runtime findings follow, ordered by Kind and Key.
         foreach ($f in $runtime.Findings) { $findings.Add($f) }
     }
+
+    # Service findings, with the snapshot taken after the query (none when the runtime part did not run).
+    $svc = Get-AtmServiceFindings -Query $svcQuery -Collection $procCollection
+    foreach ($c in $svc.Coverage) { $coverage.Add($c) }
+    foreach ($f in $svc.Findings) { $findings.Add($f) }
 
     $wtNodes = @()
     # Worktrees (P3-B): only with the worktree diagnostics gate open (closed in every shipped copy). Closed, the output is
