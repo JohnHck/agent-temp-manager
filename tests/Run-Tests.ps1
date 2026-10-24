@@ -4908,7 +4908,9 @@ try {
             $iso = Invoke-AtmBoundedProcess -Executable $testGit.Path -CommandLine $line -WorkingDirectory $plain -Environment (Get-AtmGitEnvironment -Ceiling $gitRoot -IsolatedHome $testGit.IsolatedHome) -TimeoutMs 10000 -MaxOutputBytes 65536 -JobMemoryBytes 1GB -ActiveProcessLimit 8
             $origins = @(([Text.Encoding]::UTF8.GetString($iso.Output)).Split("`n") | Where-Object { $_ } | ForEach-Object { ($_ -split "`t")[0] } | Select-Object -Unique)
             Assert-True ($iso.ExitCode -eq 0 -and $origins.Count -ge 1 -and @($origins | Where-Object { $_ -ne 'command line:' }).Count -eq 0) "isolada: so 'command line:' ($($origins -join ', '))"
-            $raw = Invoke-AtmBoundedProcess -Executable $testGit.Path -CommandLine ('"' + $testGit.Path + '" config --list --show-origin') -WorkingDirectory $plain -Environment @([Environment]::GetEnvironmentVariables().GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -TimeoutMs 10000 -MaxOutputBytes 65536 -JobMemoryBytes 1GB -ActiveProcessLimit 8
+            # Control: the caller's environment without any GIT_* variable (none left over by other tests), HOME on the fake home.
+            $ctl = @([Environment]::GetEnvironmentVariables().GetEnumerator() | Where-Object { -not ([string]$_.Key).StartsWith('GIT_', [StringComparison]::OrdinalIgnoreCase) -and @('HOME', 'USERPROFILE') -notcontains [string]$_.Key } | ForEach-Object { "$($_.Key)=$($_.Value)" }) + @("HOME=$fakeHome", "USERPROFILE=$fakeHome")
+            $raw = Invoke-AtmBoundedProcess -Executable $testGit.Path -CommandLine ('"' + $testGit.Path + '" config --list --show-origin') -WorkingDirectory $plain -Environment $ctl -TimeoutMs 10000 -MaxOutputBytes 65536 -JobMemoryBytes 1GB -ActiveProcessLimit 8
             $rawText = [Text.Encoding]::UTF8.GetString($raw.Output)
             Assert-True ($rawText -match 'file:' -and $rawText -match 'from-home') 'contraprova: sem isolamento o Git le arquivos de configuracao (inclusive o HOME)'
         } finally { foreach ($k in $saved.Keys) { & $setEnvVar $k $saved[$k] } }
@@ -4956,7 +4958,9 @@ try {
         [IO.File]::WriteAllText((Join-Path $fxS.Repo 'big.txt'), ('x' * 5000)); & $gitFx $fxS.Repo @('add', 'big.txt') $fxS.Repo; & $gitFx $fxS.Repo @('commit', '-q', '-m', 'big') $fxS.Repo
         $client = Join-Path $gitRoot 'lazy-client'
         $srcUrl = 'file:///' + $fxS.Repo.Replace('\', '/')
-        $res = & $gitFxOut $gitRoot @('-c', 'protocol.file.allow=always', '-c', 'uploadpack.allowFilter=true', 'clone', '-q', '--no-checkout', '--filter=blob:none', $srcUrl, $client) $null
+        # The filter is honoured only when the serving repository allows it.
+        & $gitFx $fxS.Repo @('config', 'uploadpack.allowFilter', 'true') $fxS.Repo
+        $res = & $gitFxOut $gitRoot @('-c', 'protocol.file.allow=always', 'clone', '-q', '--no-checkout', '--filter=blob:none', $srcUrl, $client) $null
         Assert-Eq $res.Code 0 "clone parcial da fixture: $($res.Out)"
         $missing = @((& $gitFxOut $client @('rev-list', '--objects', '--missing=print', 'HEAD') $client).Out.Split("`n") | Where-Object { $_ -match '^\?[0-9a-f]{40}' } | ForEach-Object { $_.Substring(1, 40) })
         Assert-True ($missing.Count -ge 1) "blob ausente no clone parcial ($($missing.Count))"
