@@ -4406,7 +4406,9 @@ try {
             finally { ${function:script:Get-AtmProcessSnapshot} = $origSnapshot }
             $control = ($n -eq 'controle')
             Assert-Eq ([bool]$d.Inventory.CoverageComplete) $control ("$n`: Inventory.CoverageComplete (bases $(@($d.Inventory.Bases | ForEach-Object { $_.Status }) -join ','); registros legiveis $(@($d.Inventory.Registries.Values | ForEach-Object { $_.Readable }) -join ','))")
-            Assert-Eq ([bool]$d.CoverageComplete) $control "$n`: diagnose CoverageComplete"
+            # P1-C: process-cwd (deferred) and handles (a sample) are never complete; apart from them the control is complete.
+            $incomplete = @($d.Coverage | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status -and $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' })
+            Assert-True (-not $d.CoverageComplete -and (($incomplete.Count -eq 0) -eq $control)) "$n`: diagnose incompleto; fora de process-cwd/handles, completo so no controle ($(@($incomplete | ForEach-Object { $_.Collector }) -join ','))"
             if (-not $control) {
                 $c = @($d.Coverage | Where-Object { $_.Collector -eq $row.Collector })[0]
                 Assert-True ($c.Status -ceq $row.Status -and @($c.Reasons) -ccontains $row.Reason) "$n`: $($row.Collector) $($row.Status) $($row.Reason) (obtido $($c.Status) $(@($c.Reasons) -join ','))"
@@ -5602,7 +5604,9 @@ try {
         $held = Join-Path $d 'held.txt'; [IO.File]::WriteAllText($held, "x`n")
         $c = & $rmHolder $held
         try {
-            $coll = Get-AtmProcessCollection -Source ({ @(& $rmRow $c) }.GetNewClosure())
+            # GetNewClosure copies only this scope's variables: the row is built here, not inside the closure.
+            $helperRow = & $rmRow $c
+            $coll = Get-AtmProcessCollection -Source ({ @($helperRow) }.GetNewClosure())
             $node = [pscustomobject]@{ Key = 'claude-code/p-test'; Files = @($held); Capped = $false; Error = $null }
             $r = Get-AtmHandleEvidence -Nodes @($node) -Collection $coll
             $ev = @($r.Evidence['claude-code/p-test'])
@@ -5681,7 +5685,8 @@ try {
         Assert-Eq (& $hex $T::Open($f, $true)) '0xC000050B' 'juncao em ancestral: STATUS_REPARSE_POINT_ENCOUNTERED'
         # Final component a junction (a directory link where a file was): refused too.
         New-Junction -Link (Join-Path $d 'real\last') -Target (Join-Path $d 'evil\anc')
-        Assert-Eq (& $hex $T::Open((Join-Path $d 'real\last'), $true)) '0xC000050B' 'componente final reparse point: recusado'
+        # A directory junction as the final component of a file open: refused (STATUS_FILE_IS_A_DIRECTORY comes first).
+        Assert-True ((& $hex $T::Open((Join-Path $d 'real\last'), $true)) -in @('0xC000050B', '0xC00000BA')) "componente final juncao: recusado ($(& $hex $T::Open((Join-Path $d 'real\last'), $true)))"
         Assert-Eq $T::Open('\\atm-unc-probe.invalid\share\x', $true) -1 'caminho de rede: recusado antes de qualquer abertura'
         Assert-Eq $T::Open('relative\x', $true) -1 'caminho relativo: recusado'
     }
