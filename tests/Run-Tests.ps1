@@ -7479,7 +7479,7 @@ public static class AtmTestReparse {
             while (-not $Flag.Stop) {
                 try {
                     [IO.Directory]::Move($Dir, $Dir + '-real')
-                    try { $null = cmd /c "mklink /J `"$Dir`" `"$Target`" >nul 2>nul"; Start-Sleep -Milliseconds 2; if ((Test-Path -LiteralPath $Dir) -and ((Get-Item -LiteralPath $Dir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { [IO.Directory]::Delete($Dir, $false) } }
+                    try { $null = cmd /c "mklink /J `"$Dir`" `"$Target`" >nul 2>nul"; Start-Sleep -Milliseconds 2; if ((Test-Path -LiteralPath $Dir) -and ((Get-Item -LiteralPath $Dir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { for ($k = 0; $k -lt 500; $k++) { try { [IO.Directory]::Delete($Dir, $false); break } catch { Start-Sleep -Milliseconds 1 } } } }
                     finally { if (-not (Test-Path -LiteralPath $Dir)) { [IO.Directory]::Move($Dir + '-real', $Dir) } }
                     $Flag.Swaps++
                 }
@@ -7498,6 +7498,8 @@ public static class AtmTestReparse {
             }
             $during = $flag.Swaps - $s0
         } finally { $flag.Stop = $true; try { [void]$ps.EndInvoke($h) } catch { $null = $_ }; $ps.Dispose() }
+        # A pinned junction cannot be deleted at once: the swapper retries, so it never stays stuck in one state.
+        $endedSwapped = Test-Path -LiteralPath ($rd + '-real')
         # Fixture restored (the swapper may stop between its steps): the junction link goes, the real folder comes back.
         # Only a junction link is ever removed here (never a real folder); the real folder is moved back when its name is free.
         if (Test-Path -LiteralPath ($rd + '-real')) {
@@ -7508,7 +7510,7 @@ public static class AtmTestReparse {
         Assert-Eq ($made + $refused) $i 'cada criacao criou ou recusou'
         # No swap while the creations ran: the race was not exercised on this run (never a PASS for it).
         if ($during -eq 0) { $script:caseSkipped = $true; $script:caseNote = "corrida nao exercitada: nenhuma troca concluida durante as $i criacoes ($($flag.Swaps) no total, $($flag.Errors) tentativas recusadas); nenhum arquivo no alvo"; return }
-        $script:caseNote = "corrida: $made criados, $refused recusados, $during trocas durante as $i criacoes"
+        $script:caseNote = "corrida: $made criados, $refused recusados, $during trocas durante as $i criacoes; $($flag.Errors) tentativas de troca recusadas; terminou trocada: $endedSwapped"
     }
     Test-Case 'Diagnose' 'FINAL-A: saidas da V0.1 - a verificacao lexica aceita um alias subst de uma base (lacuna demonstrada); audit -ExportJson agora cria pelo escritor pinado (F-02); clean -LogFile segue por nome (latente, trava de exclusao fechada)' {
         $base = Join-Path $sandbox 'finala-v01base'; [void][IO.Directory]::CreateDirectory($base)
