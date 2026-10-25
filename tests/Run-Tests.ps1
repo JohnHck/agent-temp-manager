@@ -7387,7 +7387,7 @@ try {
         } finally { $script:AtmDiagnoseExportEnabled = $false }
         Assert-Eq $script:AtmDiagnoseExportEnabled $false '10: trava false depois do teste'
     }
-    Test-Case 'Diagnose' 'FINAL-A: criacao segura de arquivo (fixtures) - ancestrais e pasta pinados por handle sem compartilhamento de exclusao, criacao relativa ao handle (OBJ_DONT_REPARSE, nunca nome existente), DACL protegida, verificacao antes de escrever; corrida adversarial antes do pin (estocastica) e conversao da pasta em juncao DENTRO da janela pinada (deterministica, FSCTL); politica reavaliada dentro da janela' {
+    Test-Case 'Diagnose' 'FINAL-A: criacao segura de arquivo (fixtures) - ancestrais e pasta pinados por handle sem compartilhamento de exclusao, criacao relativa ao handle (OBJ_DONT_REPARSE, nunca nome existente), DACL protegida, verificacao antes de escrever; conversao da pasta em juncao DENTRO da janela pinada (deterministica, FSCTL); politica reavaliada dentro da janela' {
         $fa = Join-Path $sandbox 'finala'; $anc = Join-Path $fa 'anc'; $par = Join-Path $anc 'par'; $else = Join-Path $fa 'else'
         foreach ($d in @($par, $else)) { [void][IO.Directory]::CreateDirectory($d) }
         $none = [pscustomobject]@{ Bases = @() }
@@ -7457,10 +7457,22 @@ public static class AtmTestReparse {
         } finally { $si.Dispose() }
         # The fixture folder is now a junction link (removing it removes only the link).
         if (([IO.File]::GetAttributes($ip) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { [IO.Directory]::Delete($ip, $false) }
+        # The policy runs again inside the pinned window: a .git created after a by-name pre-check still refuses.
+        $pol = Join-Path $fa 'pol'; [void][IO.Directory]::CreateDirectory($pol)
+        $script:AtmDiagnoseExportEnabled = $true
+        try {
+            Assert-True ($null -eq (Test-AtmDiagnoseExportPath -Path (Join-Path $pol 'x.json') -Inventory $none)) 'pre-verificacao por nome aceita'
+            [void][IO.Directory]::CreateDirectory((Join-Path $pol '.git'))
+            Assert-Eq (Write-AtmNewTextFile -Path (Join-Path $pol 'x.json') -Text '{}' -Inventory $none) 'EXPORT_INSIDE_REPOSITORY' 'politica reavaliada sob o pin: repositorio criado depois recusado'
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $pol 'x.json'))) 'nada criado'
+        } finally { $script:AtmDiagnoseExportEnabled = $false }
+        Assert-Eq $script:AtmDiagnoseExportEnabled $false 'trava fechada de novo'
+    }
+    Test-Case 'Diagnose' 'FINAL-A: corrida adversarial antes do pin (estocastica, fixtures) - a pasta trocada por juncao em laco; arquivo criado ou recusado, nunca no alvo da juncao; sem troca durante as criacoes: NAO_TESTADO' {
         # Adversarial race (stochastic, BEFORE the pin): another runspace swaps the folder with a junction in a loop between
         # iterations, so Pin meets the folder, the junction or nothing; it does not attack inside the pinned window (that is
         # the deterministic FSCTL case above). A file may be created or refused, but never in the junction target.
-        $rd = Join-Path $fa 'race'; $rt = Join-Path $fa 'race-target'; foreach ($d in @($rd, $rt)) { [void][IO.Directory]::CreateDirectory($d) }
+        $fa = Join-Path $sandbox 'finala-race'; $rd = Join-Path $fa 'race'; $rt = Join-Path $fa 'race-target'; foreach ($d in @($rd, $rt)) { [void][IO.Directory]::CreateDirectory($d) }
         $flag = [hashtable]::Synchronized(@{ Stop = $false; Swaps = 0; Errors = 0 })
         $ps = [PowerShell]::Create()
         [void]$ps.AddScript({ param($Dir, $Target, $Flag)
@@ -7474,12 +7486,17 @@ public static class AtmTestReparse {
                 catch { $Flag.Errors++; Start-Sleep -Milliseconds 1 }
             } }).AddArgument($rd).AddArgument($rt).AddArgument($flag)
         $h = $ps.BeginInvoke()
-        $made = 0; $refused = 0
+        $made = 0; $refused = 0; $i = 0; $during = 0
         try {
-            for ($i = 0; $i -lt 150; $i++) {
+            # The swapper must really be running before the creations start (bounded wait); then at least 150 creations,
+            # continued (up to 1500) until 3 swaps completed while they ran.
+            $w = [Diagnostics.Stopwatch]::StartNew(); while ($flag.Swaps -eq 0 -and $w.ElapsedMilliseconds -lt 10000) { Start-Sleep -Milliseconds 10 }
+            $s0 = $flag.Swaps
+            for (; $i -lt 1500 -and ($i -lt 150 -or ($flag.Swaps - $s0) -lt 3); $i++) {
                 $sr = [AgentTempManager.AtmSafeCreate]::Pin($rd)
                 try { if ($sr.IsPinned -and $null -eq [AgentTempManager.AtmSafeCreate]::CreateNew($sr, "f$i.json", [byte[]]@(123, 125))) { $made++ } else { $refused++ } } finally { $sr.Dispose() }
             }
+            $during = $flag.Swaps - $s0
         } finally { $flag.Stop = $true; try { [void]$ps.EndInvoke($h) } catch { $null = $_ }; $ps.Dispose() }
         # Fixture restored (the swapper may stop between its steps): the junction link goes, the real folder comes back.
         # Only a junction link is ever removed here (never a real folder); the real folder is moved back when its name is free.
@@ -7488,18 +7505,10 @@ public static class AtmTestReparse {
             if (-not (Test-Path -LiteralPath $rd)) { [IO.Directory]::Move($rd + '-real', $rd) }
         }
         Assert-True (@(Get-ChildItem -LiteralPath $rt -Force).Count -eq 0) "corrida antes do pin: nenhum arquivo no alvo da juncao ($made criados, $refused recusados, $($flag.Swaps) trocas)"
-        Assert-True ($made + $refused -eq 150 -and $flag.Swaps -gt 0) 'corrida exercitada (trocas reais durante as criacoes)'
-        $script:caseNote = "$script:caseNote; corrida: $made criados, $refused recusados, $($flag.Swaps) trocas"
-        # The policy runs again inside the pinned window: a .git created after a by-name pre-check still refuses.
-        $pol = Join-Path $fa 'pol'; [void][IO.Directory]::CreateDirectory($pol)
-        $script:AtmDiagnoseExportEnabled = $true
-        try {
-            Assert-True ($null -eq (Test-AtmDiagnoseExportPath -Path (Join-Path $pol 'x.json') -Inventory $none)) 'pre-verificacao por nome aceita'
-            [void][IO.Directory]::CreateDirectory((Join-Path $pol '.git'))
-            Assert-Eq (Write-AtmNewTextFile -Path (Join-Path $pol 'x.json') -Text '{}' -Inventory $none) 'EXPORT_INSIDE_REPOSITORY' 'politica reavaliada sob o pin: repositorio criado depois recusado'
-            Assert-True (-not (Test-Path -LiteralPath (Join-Path $pol 'x.json'))) 'nada criado'
-        } finally { $script:AtmDiagnoseExportEnabled = $false }
-        Assert-Eq $script:AtmDiagnoseExportEnabled $false 'trava fechada de novo'
+        Assert-Eq ($made + $refused) $i 'cada criacao criou ou recusou'
+        # No swap while the creations ran: the race was not exercised on this run (never a PASS for it).
+        if ($during -eq 0) { $script:caseSkipped = $true; $script:caseNote = "corrida nao exercitada: nenhuma troca concluida durante as $i criacoes ($($flag.Swaps) no total, $($flag.Errors) tentativas recusadas); nenhum arquivo no alvo"; return }
+        $script:caseNote = "corrida: $made criados, $refused recusados, $during trocas durante as $i criacoes"
     }
     Test-Case 'Diagnose' 'FINAL-A: saidas da V0.1 - a verificacao lexica aceita um alias subst de uma base (lacuna demonstrada); audit -ExportJson agora cria pelo escritor pinado (F-02); clean -LogFile segue por nome (latente, trava de exclusao fechada)' {
         $base = Join-Path $sandbox 'finala-v01base'; [void][IO.Directory]::CreateDirectory($base)
