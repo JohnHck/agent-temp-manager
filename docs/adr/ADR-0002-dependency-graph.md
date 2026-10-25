@@ -152,3 +152,24 @@ above is kept as written for the review (with its alternatives); these decisions
   dependency edge. `vmms`, `vmmem` or the platform alone never link anything to Claude Desktop.
 * **D4 — VM and worker: `RUNS_VM` stays PROPOSED, not implemented** (amendment point 4). It is not added without a
   later decision.
+
+## Implementation (P4-B, 2026-10-25)
+
+Rule 6 as implemented: the graph summaries decide the diagnose state of each `TempPartition` and `Worktree` finding,
+inside the closed lists of ADR-0001 (no contract change).
+
+* **Partitions:** `DEPENDENCY_OBSERVED` gives `IN_USE`; `NONE_OBSERVED` requests `NO_DEPENDENCY_OBSERVED`; anything else
+  (`ANCESTOR_REFERENCE`, `DEPENDENCY_AMBIGUOUS`, `UNKNOWN`, a key collision) gives `UNKNOWN`. Worktrees: `IN_USE` first
+  (ADR-0006 rule 14), otherwise their own facts; a no-dependency worktree state (`CLEAN_AND_PUBLISHED_UNKNOWN`) needs
+  the graph to observe nothing.
+* **Absence is checked twice:** the rebuilt finding carries the coverage of every relevant collector and of the graph
+  (`dependency-graph`), so `New-AtmFinding` refuses `NO_DEPENDENCY_OBSERVED` with any non-conclusive record even if a
+  summary said otherwise; a relevant collector that did not run is attached as `NOT_OBSERVABLE` (`COLLECTOR_NOT_RUN`).
+* **Why:** evidence `GRAPH_DEPENDENCY` (the summary), `GRAPH_SOURCE_<STRENGTH>` (relation and process key of each
+  incoming edge, at most 16, then `GRAPH_SOURCES_CAPPED`), `GRAPH_AGENT_ROOT` and `GRAPH_REASON`. Provenance is the
+  process key; no finding is created for a node without one (D2), and no provider is claimed for an ambiguous
+  attribution (D1).
+* **Cost:** one pass over the edges and the summaries of the graph already built (indexed by target and key); the graph
+  is never rebuilt per partition.
+* **V0.1:** the audit classes and flags stay as evidence (`AUDIT_CLASS`, `AUDIT_FLAG`); the audit, the preview and
+  `clean` read no diagnose state (static test).

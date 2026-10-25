@@ -232,14 +232,33 @@ function Get-AtmProjectEvidenceNames {
 # Profile discovery
 # ---------------------------------------------------------------------------------------------
 
+# Discovery sources (V0.2 P4-B, SECURITY-MODEL "Discovery visibility"). The default is exactly the Windows registry
+# (HKLM and HKU, read-only OpenSubKey/GetValue/GetSubKeyNames: no write, no hive loading, no remote key) and the
+# directory listing of ProfilesDirectory; tests inject objects with the same members to simulate unreadable sources.
+function New-AtmProfileSource {
+    [pscustomobject]@{
+        LocalMachine   = [Microsoft.Win32.Registry]::LocalMachine
+        Users          = [Microsoft.Win32.Registry]::Users
+        GetDirectories = { param([string]$Path) (New-Object IO.DirectoryInfo($Path)).GetDirectories() }
+    }
+}
+
+# Discovery gaps of the last Get-AtmProfiles call: stable codes with counts (no path, name or exception text), read by
+# the inventory (DiscoveryStatus) and by the diagnose coverage of 'profile-discovery'.
+$script:AtmDiscoveryGapCodes = @('PROFILE_LIST_UNREADABLE', 'PROFILE_LIST_ENTRY_UNREADABLE', 'PROFILE_LIST_VALUE_UNREADABLE', 'LOADED_HIVES_UNREADABLE', 'PROFILES_DIRECTORY_UNRESOLVED',
+    'PROFILES_DIRECTORY_UNREADABLE', 'PROFILE_IMAGE_PATH_MISSING', 'USER_ENVIRONMENT_NOT_LOADED', 'USER_ENVIRONMENT_MISSING', 'USER_ENVIRONMENT_DENIED', 'VOLATILE_ENVIRONMENT_UNREADABLE')
+$script:AtmDiscoveryGaps = @{}
+function Add-AtmDiscoveryGap { param([string]$Code) if ($script:AtmDiscoveryGaps.ContainsKey($Code)) { $script:AtmDiscoveryGaps[$Code]++ } else { $script:AtmDiscoveryGaps[$Code] = 1 } }
+
 function Get-AtmUserEnvironment {
     # Reads HKU\<SID>\Environment (unexpanded) and HKU\<SID>\Volatile Environment. Never loads hives.
-    param([string]$Sid, [string[]]$LoadedHives, [string[]]$VarNames = @())
-    $res = [ordered]@{ Status = 'NOT_LOADED'; Env = @{}; Volatile = @{} }
+    # VolatileStatus: OK, MISSING (no such key), DENIED (unreadable) or NOT_READ (environment not read).
+    param([string]$Sid, [string[]]$LoadedHives, [string[]]$VarNames = @(), $Users = [Microsoft.Win32.Registry]::Users)
+    $res = [ordered]@{ Status = 'NOT_LOADED'; Env = @{}; Volatile = @{}; VolatileStatus = 'NOT_READ' }
     if ($LoadedHives -notcontains $Sid) { return [pscustomobject]$res }
     $wanted = @('TEMP', 'TMP') + @($VarNames)
     try {
-        $k = [Microsoft.Win32.Registry]::Users.OpenSubKey("$Sid\Environment")
+        $k = $Users.OpenSubKey("$Sid\Environment")
         if ($null -eq $k) { $res.Status = 'MISSING'; return [pscustomobject]$res }
         foreach ($n in $k.GetValueNames()) {
             if ($wanted -contains $n) {
@@ -249,16 +268,18 @@ function Get-AtmUserEnvironment {
         $k.Close()
         $res.Status = 'OK'
         try {
-            $v = [Microsoft.Win32.Registry]::Users.OpenSubKey("$Sid\Volatile Environment")
+            $v = $Users.OpenSubKey("$Sid\Volatile Environment")
             if ($v) {
                 foreach ($n in @('LOCALAPPDATA', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA')) {
                     $val = $v.GetValue($n, $null)
                     if ($val) { $res.Volatile[$n] = [string]$val }
                 }
                 $v.Close()
-            }
-        # Volatile environment unreadable: expansion falls back to the profile's default folders (documented limit).
-        } catch { $null = $_ }
+                $res.VolatileStatus = 'OK'
+            } else { $res.VolatileStatus = 'MISSING' }
+        # Volatile environment unreadable: expansion falls back to the profile's default folders (documented limit),
+        # and the gap is recorded (VOLATILE_ENVIRONMENT_UNREADABLE), never hidden.
+        } catch { $res.VolatileStatus = 'DENIED' }
     } catch { $res.Status = 'DENIED' }
     return [pscustomobject]$res
 }
@@ -290,20 +311,38 @@ function Expand-AtmProfileValue {
 function Get-AtmProfiles {
     # Generic Windows profile discovery. Provider-declared variables are collected into EnvValues
     # (name -> values from the user's registry and, for the current user, the current process).
-    param($Identity, [string[]]$VarNames = @())
+    # -Source: New-AtmProfileSource (default) or a test double with the same members. Every gap is recorded in
+    # $script:AtmDiscoveryGaps (codes and counts) and, for the audit report, in $script:AtmDiscoveryNotes.
+    param($Identity, [string[]]$VarNames = @(), $Source = $null)
+    $src = $(if ($null -ne $Source) { $Source } else { New-AtmProfileSource })
+    $script:AtmDiscoveryGaps = @{}
+    $script:AtmDiscoveryNotes = New-Object System.Collections.Generic.List[string]
     $profiles = New-Object System.Collections.Generic.List[object]
     $loaded = @()
-    # Loaded hives unknown: no profile is assumed to be loaded.
-    try { $loaded = [Microsoft.Win32.Registry]::Users.GetSubKeyNames() } catch { $loaded = @() }
-    $pl = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList')
+    # Loaded hives unknown: no profile is assumed to be loaded (recorded: the environments are then not read).
+    try { $loaded = @($src.Users.GetSubKeyNames()) } catch { $loaded = @(); Add-AtmDiscoveryGap 'LOADED_HIVES_UNREADABLE'; $script:AtmDiscoveryNotes.Add((Get-AtmText 'note.loadedHivesUnreadable')) }
+    # The profile list is the discovery itself: unreadable is a failure, never an empty list of profiles.
+    $pl = $null
+    try { $pl = $src.LocalMachine.OpenSubKey('SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList') } catch { $pl = $null }
+    $sidKeys = $null
+    if ($null -ne $pl) { try { $sidKeys = @($pl.GetSubKeyNames()) } catch { $sidKeys = $null } }
+    if ($null -eq $sidKeys) { Add-AtmDiscoveryGap 'PROFILE_LIST_UNREADABLE'; throw (Get-AtmText 'err.profileListUnreadable') }
     $profilesDir = $null
-    # Not resolvable: residual profile folders are not listed (documented limit); ProfileList profiles are unaffected.
-    try { $profilesDir = [Environment]::ExpandEnvironmentVariables([string]$pl.GetValue('ProfilesDirectory')) } catch { $profilesDir = $null }
+    # Not resolvable: residual profile folders are not listed (documented limit, now reported); ProfileList profiles
+    # are unaffected.
+    try { $raw = [string]$pl.GetValue('ProfilesDirectory'); if ($raw) { $profilesDir = [Environment]::ExpandEnvironmentVariables($raw) } } catch { $profilesDir = $null }
+    if (-not $profilesDir -or $profilesDir -match '%[^%]+%' -or -not (Get-AtmNormalizedPath $profilesDir)) {
+        $profilesDir = $null
+        Add-AtmDiscoveryGap 'PROFILES_DIRECTORY_UNRESOLVED'
+        $script:AtmDiscoveryNotes.Add((Get-AtmText 'note.profilesDirUnresolved'))
+    }
     $known = @{}
 
-    foreach ($sidKey in $pl.GetSubKeyNames()) {
+    foreach ($sidKey in $sidKeys) {
+        # An entry that throws still aborts the discovery, as in V0.1; an entry that is gone (null) is skipped, as in
+        # V0.1, and now counted.
         $k = $pl.OpenSubKey($sidKey)
-        if ($null -eq $k) { continue }
+        if ($null -eq $k) { Add-AtmDiscoveryGap 'PROFILE_LIST_ENTRY_UNREADABLE'; continue }
         $img = [string]$k.GetValue('ProfileImagePath')
         $k.Close()
         $sid = $sidKey
@@ -315,7 +354,9 @@ function Get-AtmProfiles {
         if ($img) { $profilePath = Get-AtmNormalizedPath $img }
         if ($profilePath) { $known[$profilePath.ToLowerInvariant()] = $true }
         $special = $sid -in @('S-1-5-18', 'S-1-5-19', 'S-1-5-20')
-        $envInfo = Get-AtmUserEnvironment -Sid $sid -LoadedHives $loaded -VarNames $VarNames
+        $envInfo = Get-AtmUserEnvironment -Sid $sid -LoadedHives $loaded -VarNames $VarNames -Users $src.Users
+        switch ($envInfo.Status) { 'NOT_LOADED' { Add-AtmDiscoveryGap 'USER_ENVIRONMENT_NOT_LOADED' } 'MISSING' { Add-AtmDiscoveryGap 'USER_ENVIRONMENT_MISSING' } 'DENIED' { Add-AtmDiscoveryGap 'USER_ENVIRONMENT_DENIED' } }
+        if ($envInfo.VolatileStatus -ceq 'DENIED') { Add-AtmDiscoveryGap 'VOLATILE_ENVIRONMENT_UNREADABLE'; $notes.Add('VOLATILE_ENVIRONMENT_ILEGIVEL (' + (Get-AtmText 'note.volatileUnreadable') + ')') }
 
         $temps = New-Object System.Collections.Generic.List[object]
         $envValues = @{}
@@ -349,6 +390,7 @@ function Get-AtmProfiles {
             }
         } else {
             $notes.Add('PROFILEIMAGEPATH_AUSENTE')
+            Add-AtmDiscoveryGap 'PROFILE_IMAGE_PATH_MISSING'
         }
         $profiles.Add([pscustomobject]@{
                 Sid            = $sid
@@ -373,18 +415,17 @@ function Get-AtmProfiles {
             $v = [string]$pl.GetValue($vn)
             if ($v) { $np = Get-AtmNormalizedPath ([Environment]::ExpandEnvironmentVariables($v)); if ($np) { $nonUser[$np.ToLowerInvariant()] = $vn } }
         # Unreadable: the folder is treated as a residual profile, which is more restrictive (other-user and owner gates).
-        } catch { $v = $null }
+        } catch { $v = $null; Add-AtmDiscoveryGap 'PROFILE_LIST_VALUE_UNREADABLE' }
     }
     $pl.Close()
 
     # Other directories under ProfilesDirectory (one level only): shared/template dirs declared by Windows,
     # or residual directories with no ProfileList entry. Reparse points (e.g. 'All Users', 'Default User')
     # are recorded and never traversed.
-    $script:AtmDiscoveryNotes = New-Object System.Collections.Generic.List[string]
     if ($profilesDir) {
         $pd = Get-AtmNormalizedPath $profilesDir
         $entries = @()
-        try { $entries = (New-Object IO.DirectoryInfo($pd)).GetDirectories() } catch { $script:AtmDiscoveryNotes.Add((Get-AtmText 'note.profilesDirUnreadable' $pd $_.Exception.GetType().Name)) }
+        try { $entries = @(& $src.GetDirectories $pd) } catch { Add-AtmDiscoveryGap 'PROFILES_DIRECTORY_UNREADABLE'; $script:AtmDiscoveryNotes.Add((Get-AtmText 'note.profilesDirUnreadable' $pd $_.Exception.GetType().Name)) }
         foreach ($d in $entries) {
             if (($d.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $script:AtmDiscoveryNotes.Add((Get-AtmText 'note.reparseSkipped' $d.FullName)); continue }
             $key = $d.FullName.ToLowerInvariant()
@@ -410,6 +451,8 @@ function Get-AtmProfiles {
                 })
         }
     }
+    if ($script:AtmDiscoveryGaps.ContainsKey('VOLATILE_ENVIRONMENT_UNREADABLE')) { $script:AtmDiscoveryNotes.Add((Get-AtmText 'note.volatileUnreadableCount' $script:AtmDiscoveryGaps['VOLATILE_ENVIRONMENT_UNREADABLE'])) }
+    if ($script:AtmDiscoveryGaps.ContainsKey('PROFILE_LIST_ENTRY_UNREADABLE')) { $script:AtmDiscoveryNotes.Add((Get-AtmText 'note.profileEntriesUnreadable' $script:AtmDiscoveryGaps['PROFILE_LIST_ENTRY_UNREADABLE'])) }
     return $profiles.ToArray()
 }
 
@@ -542,11 +585,13 @@ function Add-AtmFlag { param($Partition, [string]$Flag) if (-not $Partition.Flag
 function Invoke-AtmInventory {
     <#
       Full read-only inventory.
-      -ProfilesOverride / -ProcessesOverride / -NowUtc / -IdentityOverride exist for automated tests.
+      -ProfilesOverride / -ProcessesOverride / -NowUtc / -IdentityOverride exist for automated tests; -ProfileSource
+      replaces the registry and directory sources of profile discovery (tests; default: the real ones).
       -OnlyRootPath: measure only that partition (others are listed as NotScanned) - used by clean revalidation.
     #>
     param(
         $ProfilesOverride,
+        $ProfileSource,
         $ProcessesOverride,
         $NowUtc,
         $IdentityOverride,
@@ -570,8 +615,12 @@ function Invoke-AtmInventory {
 
     # Phase 1: profiles
     $script:AtmDiscoveryNotes = New-Object System.Collections.Generic.List[string]
+    $script:AtmDiscoveryGaps = @{}
     if ($progress) { & $ProgressCallback (5) (Get-AtmText 'progress.1') }
-    $profiles = @(if ($null -ne $ProfilesOverride) { $ProfilesOverride } else { Get-AtmProfiles -Identity $identity -VarNames (Get-AtmProviderEnvVarNames $providerList) })
+    $profiles = @(if ($null -ne $ProfilesOverride) { $ProfilesOverride } else { Get-AtmProfiles -Identity $identity -VarNames (Get-AtmProviderEnvVarNames $providerList) -Source $ProfileSource })
+    # Codes and counts only (sorted); Overridden: the profiles were supplied by the caller (tests), not discovered.
+    $gapKeys = [string[]]@($script:AtmDiscoveryGaps.Keys); [Array]::Sort($gapKeys, [StringComparer]::Ordinal)
+    $discoveryStatus = [pscustomobject]@{ Overridden = ($null -ne $ProfilesOverride); Gaps = @(foreach ($gk in $gapKeys) { [pscustomobject]@{ Code = $gk; Count = [int]$script:AtmDiscoveryGaps[$gk] } }) }
 
     # Phase 2: resolve and validate bases (<TEMP>\<provider.TempSubdir>) for every profile x provider
     if ($progress) { & $ProgressCallback (10) (Get-AtmText 'progress.2') }
@@ -766,6 +815,7 @@ function Invoke-AtmInventory {
         CoverageComplete     = $procCoverageComplete -and ($inaccessibleProfiles.Count -eq 0) -and ($unverifiedTemp.Count -eq 0)
         OnlyRootPath         = $OnlyRootPath
         DiscoveryNotes       = @($script:AtmDiscoveryNotes)
+        DiscoveryStatus      = $discoveryStatus
     }
 }
 

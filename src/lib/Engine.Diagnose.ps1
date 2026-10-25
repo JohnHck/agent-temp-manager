@@ -2977,7 +2977,26 @@ function Get-AtmInventoryCoverage {
     $st = $(if ($reasons.Count -gt 0) { 'PARTIAL' } else { 'COMPLETE' })
     $help = $(if ($reasons.Count -eq 0) { 'NO' } elseif ($admin) { 'UNKNOWN' } else { 'YES' })
     $out.Add((New-AtmCoverage -Collector 'temp-profiles' -Status $st -Reasons $reasons -ElevationWouldHelp $help -Observed ($profiles.Count - $inacc - $unver) -Expected $profiles.Count))
+    $out.Add((Get-AtmProfileDiscoveryCoverage -Inventory $Inventory -Identity $Identity))
     return $out.ToArray()
+}
+
+function Get-AtmProfileDiscoveryCoverage {
+    <#
+      Coverage of Windows profile discovery (P4-B, SECURITY-MODEL "Discovery visibility"), from the gap codes the
+      inventory recorded (Get-AtmProfiles): codes only, never a path, a profile name or an exception message. A gap is a
+      reason (PARTIAL): a source that could not be read is not proof that a profile or a TEMP folder does not exist.
+      Profiles supplied by the caller (tests) were not discovered: COMPLETE, nothing to report.
+    #>
+    param($Inventory, $Identity)
+    $ds = Get-AtmHintProperty -Item $Inventory -Name 'DiscoveryStatus'
+    if ($null -eq $ds) { return New-AtmCoverage -Collector 'profile-discovery' -Status 'NOT_OBSERVABLE' -Reasons @('DISCOVERY_STATUS_UNAVAILABLE') -ElevationWouldHelp 'NO' }
+    $gaps = @($ds.Gaps | Where-Object { $null -ne $_ -and $script:AtmDiscoveryGapCodes -ccontains [string]$_.Code })
+    $n = @($Inventory.Profiles).Count
+    if ($ds.Overridden -or $gaps.Count -eq 0) { return New-AtmCoverage -Collector 'profile-discovery' -Status 'COMPLETE' -ElevationWouldHelp 'NO' -Observed $n }
+    $denied = @($gaps | Where-Object { @('USER_ENVIRONMENT_DENIED', 'VOLATILE_ENVIRONMENT_UNREADABLE', 'PROFILES_DIRECTORY_UNREADABLE', 'LOADED_HIVES_UNREADABLE') -ccontains [string]$_.Code }).Count
+    $help = $(if ($denied -eq 0) { 'NO' } elseif ([bool]$Identity.IsElevatedAdministrator) { 'UNKNOWN' } else { 'YES' })
+    return New-AtmCoverage -Collector 'profile-discovery' -Status 'PARTIAL' -Reasons @(Get-AtmSortedCodes @($gaps | ForEach-Object { [string]$_.Code })) -ElevationWouldHelp $help -Observed $n
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -3936,6 +3955,98 @@ function Get-AtmDependencyGraph {
 }
 
 # ---------------------------------------------------------------------------------------------
+# Graph to findings (P4-B, ADR-0002 rule 6). The summaries of the graph of the same run decide the state of each
+# TempPartition and Worktree finding, inside the closed lists of ADR-0001: DEPENDENCY_OBSERVED (a DIRECT edge from a
+# verified process) is IN_USE; NONE_OBSERVED requests NO_DEPENDENCY_OBSERVED, which New-AtmFinding keeps only with
+# conclusive coverage (the relevant collectors and the graph are attached to the finding, so the engine checks it
+# again); anything else (ancestor, ambiguous, unknown, collision) is UNKNOWN for a partition and leaves a worktree's
+# own facts in place (a no-dependency worktree state needs the same conclusive coverage). The evidence says why: the
+# summary, the sources of the incoming edges by strength (process key and relation), the agent roots and the reasons.
+# Nothing is collected here, no finding is created for a node without one, and nothing authorizes anything.
+# ---------------------------------------------------------------------------------------------
+
+$script:AtmGraphFindingEvidenceCodes = @('GRAPH_DEPENDENCY', 'GRAPH_SOURCE_DIRECT', 'GRAPH_SOURCE_ANCESTOR', 'GRAPH_SOURCE_AMBIGUOUS', 'GRAPH_SOURCES_CAPPED', 'GRAPH_AGENT_ROOT', 'GRAPH_REASON')
+$script:AtmGraphFindingMaxSources = 16
+
+function ConvertTo-AtmGraphCoverage {
+    # The graph's own coverage as a coverage record (collector 'dependency-graph'), so findings can depend on it.
+    param($Graph)
+    $gc = $Graph.Coverage
+    $rs = @($gc.Reasons)
+    if ([string]$gc.Status -ceq 'COMPLETE' -and $rs.Count -eq 0) { return New-AtmCoverage -Collector 'dependency-graph' -Status 'COMPLETE' -ElevationWouldHelp 'NO' -Observed $gc.Edges -StartedUtc $gc.StartedUtc -ElapsedMs $gc.ElapsedMs }
+    return New-AtmCoverage -Collector 'dependency-graph' -Status 'PARTIAL' -Reasons @($(if ($rs.Count -gt 0) { $rs } else { 'GRAPH_INCOMPLETE' })) -ElevationWouldHelp 'NO' -Observed $gc.Edges -StartedUtc $gc.StartedUtc -ElapsedMs $gc.ElapsedMs
+}
+
+function Set-AtmGraphFindingStates {
+    <#
+      -Findings: the run's findings (in order); -Graph: Get-AtmDependencyGraph of the same findings; -Coverage: the run's
+      coverage records; -GraphCoverage: ConvertTo-AtmGraphCoverage of the graph. Returns the findings in the same
+      order, with TempPartition and Worktree findings rebuilt from their summary (one pass over edges and summaries).
+    #>
+    param($Findings, $Graph, $Coverage, $GraphCoverage)
+    $sumBy = @{}
+    foreach ($sm in @($Graph.Summaries)) { $sumBy[[string]$sm.Kind + '|' + [string]$sm.Key] = $sm }
+    $inBy = @{}
+    foreach ($e in @($Graph.Edges)) {
+        if (@('REFERENCES_PATH', 'HOLDS_HANDLE_IN', 'WORKING_DIRECTORY_IN') -cnotcontains $e.Relation) { continue }
+        $tk = [string]$e.ToKind + '|' + [string]$e.To
+        if (-not $inBy.ContainsKey($tk)) { $inBy[$tk] = [System.Collections.Generic.List[object]]::new() }
+        $inBy[$tk].Add($e)
+    }
+    # Worst record per collector (one non-conclusive record is enough to block an absence).
+    $covBy = @{}
+    foreach ($c in @($Coverage | Where-Object { $null -ne $_ })) {
+        $ck = [string]$c.Collector
+        if (-not $covBy.ContainsKey($ck) -or ($script:AtmConclusiveCoverage -ccontains [string]$covBy[$ck].Status -and $script:AtmConclusiveCoverage -cnotcontains [string]$c.Status)) { $covBy[$ck] = $c }
+    }
+    $now = [datetime]::UtcNow
+    $out = [System.Collections.Generic.List[object]]::new()
+    foreach ($f in @($Findings)) {
+        $kind = [string]$f.Kind
+        $nk = $kind + '|' + [string]$f.Key
+        if (($kind -cne 'TempPartition' -and $kind -cne 'Worktree') -or -not $sumBy.ContainsKey($nk)) { $out.Add($f); continue }
+        $sm = $sumBy[$nk]
+        $ev = [System.Collections.Generic.List[object]]::new()
+        $ev.Add((New-AtmEvidence -Code 'GRAPH_DEPENDENCY' -Source 'diagnose' -Collector 'dependency-graph' -ObservedUtc $now -Detail ([string]$sm.Dependency)))
+        if ($inBy.ContainsKey($nk)) {
+            $srcs = [string[]]@(foreach ($e in $inBy[$nk]) { [string]$e.Strength + '|' + [string]$e.Relation + ' ' + [string]$e.From })
+            [Array]::Sort($srcs, [StringComparer]::Ordinal)
+            $i = 0
+            foreach ($sx in $srcs) {
+                if ($i -ge $script:AtmGraphFindingMaxSources) { $ev.Add((New-AtmEvidence -Code 'GRAPH_SOURCES_CAPPED' -Source 'diagnose' -Collector 'dependency-graph' -ObservedUtc $now -Detail ([string]$srcs.Count))); break }
+                $cut = $sx.IndexOf('|')
+                $ev.Add((New-AtmEvidence -Code ('GRAPH_SOURCE_' + $sx.Substring(0, $cut)) -Source 'diagnose' -Collector 'dependency-graph' -ObservedUtc $now -Detail $sx.Substring($cut + 1)))
+                $i++
+            }
+        }
+        $ri = 0
+        foreach ($r in @($sm.Roots)) { if ($ri -ge $script:AtmGraphFindingMaxSources) { break }; $ev.Add((New-AtmEvidence -Code 'GRAPH_AGENT_ROOT' -Source 'diagnose' -Collector 'dependency-graph' -ObservedUtc $now -Detail ([string]$r))); $ri++ }
+        foreach ($r in @($sm.Reasons)) { $ev.Add((New-AtmEvidence -Code 'GRAPH_REASON' -Source 'diagnose' -Collector 'dependency-graph' -ObservedUtc $now -Detail ([string]$r))) }
+        # Coverage the state depends on: the finding's own, the graph's and every relevant collector (a collector that
+        # did not run at all is NOT_OBSERVABLE here, never assumed complete).
+        $cov = [System.Collections.Generic.List[object]]::new()
+        $have = @{}
+        foreach ($c in @($f.Coverage)) { $cov.Add($c); $have[[string]$c.Collector] = $true }
+        if ($null -ne $GraphCoverage) { $cov.Add($GraphCoverage) }
+        foreach ($rc in @($script:AtmGraphRelevantCollectors[$kind])) {
+            if ($have.ContainsKey($rc)) { continue }
+            if ($covBy.ContainsKey($rc)) { $cov.Add($covBy[$rc]) } else { $cov.Add((New-AtmCoverage -Collector $rc -Status 'NOT_OBSERVABLE' -Reasons @('COLLECTOR_NOT_RUN') -ElevationWouldHelp 'NO')) }
+        }
+        $requested = [string]$f.RequestedState
+        $collided = @($f.Evidence | Where-Object { $_.Code -ceq 'PARTITION_KEY_COLLISION' }).Count -gt 0
+        if ($kind -ceq 'TempPartition') {
+            $state = $(if ($collided) { 'UNKNOWN' } elseif ($sm.Dependency -ceq 'DEPENDENCY_OBSERVED') { 'IN_USE' } elseif ($sm.Dependency -ceq 'NONE_OBSERVED') { 'NO_DEPENDENCY_OBSERVED' } else { 'UNKNOWN' })
+        } else {
+            # ADR-0006 rule 14: IN_USE first; otherwise the worktree's own facts, and a no-dependency state only when the
+            # graph observed nothing (New-AtmFinding then checks the attached coverage).
+            $state = $(if ($sm.Dependency -ceq 'DEPENDENCY_OBSERVED') { 'IN_USE' } elseif ($script:AtmNoDependencyStates -ccontains $requested -and $sm.Dependency -cne 'NONE_OBSERVED') { 'UNKNOWN' } else { $requested })
+        }
+        $out.Add((New-AtmFinding -Kind $kind -Key ([string]$f.Key) -State $state -Evidence (@($f.Evidence) + @($ev.ToArray())) -Coverage $cov.ToArray() -Provider $f.Provider))
+    }
+    return , $out.ToArray()
+}
+
+# ---------------------------------------------------------------------------------------------
 # Open-file evidence (D-2, ADR-0004, P1-C) and working directories (D-1, deferred). Restart Manager lists the processes
 # holding a bounded sample of files of each indexed node (temporary partitions; worktrees when discovery ran); a holder
 # is matched with the process snapshot by PID and start time. A sample never proves that a node is free, a holder never
@@ -4151,7 +4262,7 @@ function Invoke-AtmDiagnoseRun {
     # V0.1 temporary-directory inventory (read-only) and the coverage it implies.
     $inv = $null
     if ([datetime]::UtcNow -ge $deadline) {
-        foreach ($c in @('inventory', 'processes', 'temp-profiles')) { $coverage.Add((New-AtmDeadlineCoverage $c)) }
+        foreach ($c in @('inventory', 'processes', 'temp-profiles', 'profile-discovery')) { $coverage.Add((New-AtmDeadlineCoverage $c)) }
     } else {
         $ia = @{} + $InventoryArgs
         if ($null -ne $Providers) { $ia['Providers'] = @($validProviders | Where-Object { (Get-AtmProviderCapabilities $_) -ccontains 'temp' }) }
@@ -4164,6 +4275,8 @@ function Invoke-AtmDiagnoseRun {
         if ($null -eq $inv) {
             $coverage.Add((New-AtmCoverage -Collector 'inventory' -Status 'FAILED' -Reasons @('INVENTORY_FAILED', (ConvertTo-AtmExceptionCode $err)) -ElevationWouldHelp 'UNKNOWN' -StartedUtc $invStarted -ElapsedMs $sw.ElapsedMilliseconds))
             foreach ($c in @('processes', 'temp-profiles')) { $coverage.Add((New-AtmCoverage -Collector $c -Status 'FAILED' -Reasons @('INVENTORY_FAILED'))) }
+            # An unreadable profile list fails the discovery itself (never an empty list of profiles).
+            $coverage.Add((New-AtmCoverage -Collector 'profile-discovery' -Status 'FAILED' -Reasons @($(if ($script:AtmDiscoveryGaps.ContainsKey('PROFILE_LIST_UNREADABLE')) { 'PROFILE_LIST_UNREADABLE' } else { 'INVENTORY_FAILED' })) -ElevationWouldHelp 'UNKNOWN'))
         } else {
             $invCov = @(Get-AtmInventoryCoverage -Inventory $inv -Identity $identity -StartedUtc $invStarted -ElapsedMs $sw.ElapsedMilliseconds -OverDeadline ([datetime]::UtcNow -gt $deadline))
             foreach ($c in $invCov) { $coverage.Add($c) }
@@ -4283,6 +4396,11 @@ function Invoke-AtmDiagnoseRun {
     $graphLeft = ($deadline - [datetime]::UtcNow).TotalMilliseconds
     $graphMs = $(if ($graphLeft -le 0) { -1 } else { [int][Math]::Min([double]$script:AtmGraphMaxMs, $graphLeft) })
     $graph = Get-AtmDependencyGraph -MaxMs $graphMs -Findings $findings.ToArray() -Collection $procCollection -LegacySnapshot $(if ($null -ne $inv) { $inv.Snapshot } else { $null }) -Partitions $(if ($null -ne $inv) { @($inv.Partitions) } else { @() }) -PartitionKeyFunction $graphKeyFn -Coverage $coverage.ToArray()
+    # P4-B: partition and worktree states from the graph summaries (same findings, same order; no collector runs).
+    $graphCov = ConvertTo-AtmGraphCoverage -Graph $graph
+    $promoted = Set-AtmGraphFindingStates -Findings $findings.ToArray() -Graph $graph -Coverage $coverage.ToArray() -GraphCoverage $graphCov
+    $findings = [System.Collections.Generic.List[object]]::new(); foreach ($f in $promoted) { $findings.Add($f) }
+    $coverage.Add($graphCov)
     $covArr = $coverage.ToArray()
     [pscustomobject]@{
         SchemaVersion    = $script:AtmDiagnoseSchema

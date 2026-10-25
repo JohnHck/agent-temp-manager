@@ -357,6 +357,7 @@ function Show-AtmDiagnose {
     Show-AtmDiagnoseVirtualization -Result $r
     Show-AtmDiagnoseWorktrees -Result $r
     Show-AtmDiagnoseGraph -Result $r
+    Show-AtmDiagnosePartitions -Result $r
     Show-AtmDiagnoseHandles -Result $r
 
     Write-AtmHeader (Get-AtmText 'diag.summaryTitle')
@@ -655,6 +656,41 @@ function Show-AtmDiagnoseGraph {
     }
     Write-Host ('  ' + (Get-AtmText 'diag.graphNotes'))
     Write-Host ('  ' + (Get-AtmText 'diag.graphNoDelete')) -ForegroundColor Green
+}
+
+function Show-AtmDiagnosePartitions {
+    # Temporary partitions and worktrees with the state the graph gave them (P4-B): counts by state and graph summary,
+    # why an item is in use (sources and agent roots, keys only), why others stay UNKNOWN (reasons), and the profile
+    # discovery gaps. Reads the findings only; never says an item is free.
+    param($Result)
+    $items = @(@($Result.Findings) | Where-Object { ($_.Kind -ceq 'TempPartition' -or $_.Kind -ceq 'Worktree') })
+    $disc = @(@($Result.Coverage) | Where-Object { $_.Collector -ceq 'profile-discovery' })
+    if ($items.Count -eq 0 -and $disc.Count -eq 0) { return }
+    Write-AtmHeader (Get-AtmText 'diag.partitionsTitle')
+    $depOf = { param($F) $d = @($F.Evidence | Where-Object { $_.Code -ceq 'GRAPH_DEPENDENCY' }); if ($d.Count -gt 0) { [string]$d[0].Detail } else { '-' } }
+    foreach ($grp in @($items | Group-Object { $_.Kind + '|' + $_.State + '|' + (& $depOf $_) } | Sort-Object Name)) {
+        $p = $grp.Name.Split('|')
+        Write-Host ('  ' + (Get-AtmText 'diag.partitionStateLine' $p[0] $p[1] $p[2] $grp.Count))
+    }
+    $inUse = @($items | Where-Object { $_.State -ceq 'IN_USE' })
+    $shown = 0
+    foreach ($f in $inUse) {
+        if ($shown -ge 20) { Write-Host ('    ' + (Get-AtmText 'diag.partitionMore' ($inUse.Count - $shown))); break }
+        $src = @($f.Evidence | Where-Object { $_.Code -ceq 'GRAPH_SOURCE_DIRECT' } | ForEach-Object { $_.Detail })
+        $roots = @($f.Evidence | Where-Object { $_.Code -ceq 'GRAPH_AGENT_ROOT' } | ForEach-Object { $_.Detail })
+        Write-Host ('    ' + (Get-AtmText 'diag.partitionInUseLine' $f.Key ($src -join '; ') $(if ($roots.Count) { $roots -join ', ' } else { '-' })))
+        $shown++
+    }
+    $why = @($items | Where-Object { $_.State -ceq 'UNKNOWN' } | ForEach-Object { @($_.Evidence | Where-Object { $_.Code -ceq 'GRAPH_REASON' } | ForEach-Object { $_.Detail }) } | Group-Object | Sort-Object Name)
+    foreach ($w in $why) { Write-Host ('    ' + (Get-AtmText 'diag.partitionReasonLine' $w.Name $w.Count (Get-AtmCodeText 'reason' $w.Name))) }
+    foreach ($c in $disc) {
+        if ($script:AtmConclusiveCoverage -ccontains [string]$c.Status) { Write-Host ('  ' + (Get-AtmText 'diag.discoveryComplete')) }
+        else {
+            Write-Host ('  ' + (Get-AtmText 'diag.discoveryIncomplete' $c.Status)) -ForegroundColor Yellow
+            foreach ($x in @($c.Reasons)) { Write-Host ('    ' + (Get-AtmText 'diag.runtimeLegendLine' $x (Get-AtmCodeText 'reason' $x))) -ForegroundColor Yellow }
+        }
+    }
+    Write-Host ('  ' + (Get-AtmText 'diag.partitionNotes'))
 }
 
 function ConvertTo-AtmDiagnoseJson {

@@ -4554,7 +4554,7 @@ try {
         $old = Get-AtmLanguage
         try { Set-AtmLanguage -Requested 'en-US'; $txt = (Show-AtmDiagnose -Result $d 6>&1 | Out-String) } finally { Set-AtmLanguage -Requested $old }
         foreach ($w in @('Cobertura', 'somente leitura', 'Coletor', 'ACHADOS', 'RESUMO')) { Assert-True (-not $txt.Contains($w)) "en-US sem '$w'" }
-        Assert-True ($txt.Contains('COVERAGE BY COLLECTOR') -and $txt.Contains('RUNTIME_NOT_DIAGNOSED')) 'en-US e codigos'
+        Assert-True ($txt.Contains('COVERAGE BY COLLECTOR') -and $txt.Contains('TEMPORARY PARTITIONS AND WORKTREES') -and $txt.Contains('GRAPH')) 'en-US e codigos (estado das particoes pelo grafo, P4-B)'
     }
     # ------------------------------------------------------------------ Git runner (P3-A, ADR-0006, D-4)
     # Fixtures are built with raw Git in the sandbox only: isolated configuration (no global or system file), hooks and
@@ -5675,7 +5675,7 @@ try {
         $res = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -ProcessSource { @([pscustomobject]@{ ProcessId = 1; ParentProcessId = 0; Name = 'x'; CreationDate = [datetime]::UtcNow.AddDays(-1) }) } -CpuSampleMs 0 -PseudonymKey $testPseudonymKey -HandleQuery $hq
         $tp = @($res.Findings | Where-Object { $_.Kind -eq 'TempPartition' })
         Assert-True ($tp.Count -ge 1 -and @($tp | Where-Object { @($_.Evidence | Where-Object { $_.Code -eq 'FILE_HELD_OPEN_UNVERIFIED' -and $_.Detail -eq 'pid:424242' }).Count -eq 1 }).Count -ge 1) 'evidencia de arquivo aberto na particao (identidade nao verificada)'
-        Assert-True (@($tp | Where-Object { $_.State -ne 'RUNTIME_NOT_DIAGNOSED' -and $_.State -ne 'UNKNOWN' }).Count -eq 0) 'estado da particao inalterado (dependencias sao da P4)'
+        Assert-True (@($tp | Where-Object { $_.State -ceq 'NO_DEPENDENCY_OBSERVED' -or $_.State -ceq 'RUNTIME_NOT_DIAGNOSED' -or ($_.State -ceq 'IN_USE' -and @($_.Evidence | Where-Object { $_.Code -ceq 'GRAPH_SOURCE_DIRECT' }).Count -eq 0) }).Count -eq 0) 'particao nunca livre nem sem diagnostico; IN_USE so com fonte direta (P4-B)'
         $json = ConvertTo-AtmDiagnoseJson -Result $res
         foreach ($x in @($marker, $root, $root.Replace('\', '\\'))) { Assert-True (-not $json.Contains($x)) "JSON sem caminho nem nome de arquivo: $(Split-Path -Leaf $x)" }
         $txt = (Show-AtmDiagnose -Result $res 6>&1 | Out-String)
@@ -6079,7 +6079,7 @@ try {
         $f = & $svcByKey ([pscustomobject]@{ Findings = $sf })
         Assert-True ($sf.Count -eq 2 -and $f['LinkedSvc'].State -ceq 'RUNNING' -and $f['AbsentSvc'].State -ceq 'UNKNOWN' -and $f['AbsentSvc'].RequestedState -ceq 'UNKNOWN') 'achados de servico no diagnose; nao listado UNKNOWN'
         Assert-True ((& $svcEv $f['LinkedSvc'] 'SERVICE_PROCESS_VERIFIED').Count -eq 1) 'consulta antes do snapshot do runtime: processo do servico verificado'
-        Assert-True (@($d.Findings | Where-Object { $_.Kind -ceq 'TempPartition' -and $_.State -cne 'RUNTIME_NOT_DIAGNOSED' -and $_.State -cne 'UNKNOWN' }).Count -eq 0) 'servicos nao mudam estados de particoes'
+        Assert-True (@($d.Findings | Where-Object { $_.Kind -ceq 'TempPartition' -and ($_.State -ceq 'NO_DEPENDENCY_OBSERVED' -or $_.State -ceq 'RUNTIME_NOT_DIAGNOSED' -or ($_.State -ceq 'IN_USE' -and @($_.Evidence | Where-Object { $_.Code -ceq 'GRAPH_SOURCE_DIRECT' }).Count -eq 0)) }).Count -eq 0) 'servicos nao tornam particao livre (P4-B: estado so pelo grafo, IN_USE so com fonte direta)'
         $j = (ConvertTo-AtmDiagnoseJson -Result $d) | ConvertFrom-Json
         $js = @($j.findings | Where-Object { $_.kind -eq 'Service' })
         Assert-True ($js.Count -eq 2 -and @($j.coverage | Where-Object { $_.collector -eq 'services' -and $_.status -eq 'PARTIAL' -and @($_.reasons) -contains 'SERVICE_NOT_LISTED_FOR_ACCOUNT' }).Count -eq 1 -and @($js | Where-Object { $_.key -eq 'AbsentSvc' -and $_.state -eq 'UNKNOWN' -and $_.requestedState -eq 'UNKNOWN' }).Count -eq 1 -and @($js | Where-Object { $_.state -eq 'NOT_PRESENT' -or $_.requestedState -eq 'NOT_PRESENT' }).Count -eq 0) 'JSON: achados e cobertura de servicos; nenhum NOT_PRESENT'
@@ -6310,7 +6310,7 @@ try {
         Assert-True ($cols.IndexOf('virtualization-platform') -eq $cols.IndexOf('service-properties') + 1 -and $cols.IndexOf('virtual-machines') -eq $cols.IndexOf('virtualization-platform') + 1 -and $cols.IndexOf('virtualization-processes') -eq $cols.IndexOf('virtual-machines') + 1) "coberturas por camada ($($cols -join ','))"
         $vm = @($d.Findings | Where-Object { $_.Kind -ceq 'VirtualMachine' })
         Assert-True ($vm.Count -eq 1 -and $vm[0].State -ceq 'RUNNING' -and $vm[0].Provider -ceq 'fake-virt' -and (& $vEv $vm[0] 'VM_WORKER_VERIFIED').Count -eq 1 -and @($d.Findings | Where-Object { $_.Kind -ceq 'VirtualizationPlatform' -and $_.State -ceq 'PRESENT' }).Count -eq 1) 'VM no diagnose: em execucao, atribuida pelo nome, vmwp verificado (consulta antes do snapshot)'
-        Assert-True (@($d.Findings | Where-Object { $_.Kind -ceq 'TempPartition' -and $_.State -cne 'RUNTIME_NOT_DIAGNOSED' -and $_.State -cne 'UNKNOWN' }).Count -eq 0) 'virtualizacao nao muda estados de particoes'
+        Assert-True (@($d.Findings | Where-Object { $_.Kind -ceq 'TempPartition' -and ($_.State -ceq 'NO_DEPENDENCY_OBSERVED' -or $_.State -ceq 'RUNTIME_NOT_DIAGNOSED' -or ($_.State -ceq 'IN_USE' -and @($_.Evidence | Where-Object { $_.Code -ceq 'GRAPH_SOURCE_DIRECT' }).Count -eq 0)) }).Count -eq 0) 'virtualizacao nao torna particao livre (P4-B: estado so pelo grafo, IN_USE so com fonte direta)'
         $json = ConvertTo-AtmDiagnoseJson -Result $d
         $txt = (Show-AtmDiagnose -Result $d 6>&1 | ForEach-Object { [string]$_ }) -join "`n"
         foreach ($x in @('P2B-Secret-VM-Name', 'P2B-HOSTNAME', 'P2BSecretVm', $vG1)) { Assert-True (-not $json.Contains($x) -and -not $txt.Contains($x)) 'JSON e relatorio sem nome de VM, host, nome bruto de processo ou GUID' }
@@ -6444,7 +6444,7 @@ try {
         $sf = @($d.Findings | Where-Object { $_.Kind -ceq 'Service' })
         Assert-True ($sf.Count -eq 1 -and $sf[0].Provider -ceq 'claude-desktop' -and $sf[0].State -ceq 'RUNNING' -and (& $svcEv $sf[0] 'SERVICE_PROCESS_VERIFIED').Count -eq 1) 'CoworkVMService no diagnose, processo verificado'
         Assert-True (@($d.Findings | Where-Object { ($_.Kind -ceq 'VirtualMachine' -or $_.Kind -ceq 'VirtualizationPlatform') -and $_.Provider }).Count -eq 0) 'virtualizacao sem atribuicao'
-        Assert-True (@($d.Findings | Where-Object { $_.Kind -ceq 'TempPartition' -and $_.State -cne 'RUNTIME_NOT_DIAGNOSED' -and $_.State -cne 'UNKNOWN' }).Count -eq 0) 'nenhuma particao declarada descartavel'
+        Assert-True (@($d.Findings | Where-Object { $_.Kind -ceq 'TempPartition' -and ($_.State -ceq 'NO_DEPENDENCY_OBSERVED' -or $_.State -ceq 'RUNTIME_NOT_DIAGNOSED' -or ($_.State -ceq 'IN_USE' -and @($_.Evidence | Where-Object { $_.Code -ceq 'GRAPH_SOURCE_DIRECT' }).Count -eq 0)) }).Count -eq 0) 'nenhuma particao declarada descartavel (IN_USE so com fonte direta)'
         $json = ConvertTo-AtmDiagnoseJson -Result $d
         $txt = (Show-AtmDiagnose -Result $d 6>&1 | ForEach-Object { [string]$_ }) -join "`n"
         foreach ($x in @('p2c-secret', '--token', 'p2c-acct', 'CORPDOM')) { Assert-True (-not $json.Contains($x) -and -not $txt.Contains($x)) "JSON e relatorio sem '$x'" }
@@ -6644,7 +6644,7 @@ try {
         $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -PseudonymKey $testPseudonymKey -ServiceSource { param($Names) @() } -VirtualizationSource (& $vSrc (& $vBase @($vHostRow)))
         Assert-True ($null -ne $d.Graph -and @($d.Graph.Summaries | Where-Object { $_.Kind -ceq 'TempPartition' }).Count -ge 1) 'grafo no resultado, resumo por particao'
         Assert-True (@($d.Graph.Summaries | Where-Object { $_.Dependency -ceq 'NONE_OBSERVED' }).Count -eq 0 -and @($d.Graph.Summaries | Where-Object { @($_.IncompleteCoverage) -contains 'process-cwd' -and @($_.IncompleteCoverage) -contains 'handles' }).Count -eq @($d.Graph.Summaries).Count) 'diretorios de trabalho e arquivos abertos nao observaveis: nunca NONE_OBSERVED'
-        Assert-True (@($d.Findings | Where-Object { $_.Kind -ceq 'TempPartition' -and $_.State -cne 'RUNTIME_NOT_DIAGNOSED' -and $_.State -cne 'UNKNOWN' }).Count -eq 0) 'nenhum estado de particao alterado (P4-B)'
+        Assert-True (@($d.Findings | Where-Object { $_.Kind -ceq 'TempPartition' -and ($_.State -ceq 'NO_DEPENDENCY_OBSERVED' -or $_.State -ceq 'RUNTIME_NOT_DIAGNOSED' -or ($_.State -ceq 'IN_USE' -and @($_.Evidence | Where-Object { $_.Code -ceq 'GRAPH_SOURCE_DIRECT' }).Count -eq 0)) }).Count -eq 0) 'P4-B: nenhuma particao livre ou sem diagnostico; IN_USE so com fonte direta'
         $json = ConvertTo-AtmDiagnoseJson -Result $d
         $txt = (Show-AtmDiagnose -Result $d 6>&1 | ForEach-Object { [string]$_ }) -join "`n"
         foreach ($x in @($root, $root.Replace('\', '\\'), $p.ProfilePath.Replace('\', '\\'))) { Assert-True (-not $json.Contains($x) -and -not $txt.Contains($x)) 'JSON e relatorio sem caminhos' }
@@ -6668,6 +6668,222 @@ try {
             Assert-True $script:AtmMessages[$l].ContainsKey('evidence.SESSION_PROCESS_KEY') "evidence.SESSION_PROCESS_KEY ($l)"
         }
         Assert-True ($script:AtmRealDeletionEnabled -eq $true -and $shippedDeletionGate -eq $false -and $script:AtmHandleDiagnosticsEnabled -eq $false -and $script:AtmWorktreeDiagnosticsEnabled -eq $false) 'travas distribuidas fechadas (a suite so abre a de exclusao no proprio processo)'
+    }
+    # ------------------------------------------------------------------ P4-B (temporary partitions and runtime evidence)
+    # Graph summaries to finding states (synthetic findings; the P4-A helpers above) and profile discovery through an
+    # injected source (fake registry keys: no real profile, registry key, ACL or temporary folder is touched).
+    $bState = { param($Fs, $Cov = $gCovAll, $Parts = @(), $Rows = $null, [hashtable]$Lim = @{})
+        $r0 = $(if ($null -ne $Rows) { @($Rows) } else { @($gBase) })
+        $g = Get-AtmDependencyGraph -Findings @($Fs) -Collection (& $gRows $r0) -LegacySnapshot (& $gLegacy $r0) -Partitions @($Parts) -PartitionKeyFunction $gKf -Coverage @($Cov) @Lim
+        $gc = ConvertTo-AtmGraphCoverage -Graph $g
+        [pscustomobject]@{ Graph = $g; Findings = (Set-AtmGraphFindingStates -Findings @($Fs) -Graph $g -Coverage @($Cov) -GraphCoverage $gc) } }
+    $bFind = { param($R, [string]$Key) @($R.Findings | Where-Object { $_.Key -ceq $Key })[0] }
+    $bEv = { param($F, [string]$Code) return , [string[]]@(@($F.Evidence) | Where-Object { $_.Code -ceq $Code } | ForEach-Object { [string]$_.Detail }) }
+    $bTp = { param([string]$Leaf, $Ev = @()) & $gF 'TempPartition' "claude-code/p-$Leaf" 'RUNTIME_NOT_DIAGNOSED' $Ev 'claude-code' }
+    $bCovNo = @(@('inventory', 'processes', 'process-snapshot', 'worktree-discovery') | ForEach-Object { New-AtmCoverage -Collector $_ -Status 'COMPLETE' }) + @(@('handles', 'process-cwd') | ForEach-Object { New-AtmCoverage -Collector $_ -Status 'NOT_OBSERVABLE' -Reasons @('GATE') })
+    # A fake registry key: values (a scriptblock value throws when read), sub keys (a scriptblock opens or throws) and,
+    # for HKU, the names of the loaded hives. It has no write member: a write would fail the test.
+    $bKey = { param([hashtable]$Values = @{}, [hashtable]$Subs = @{}, $Names = $null, [bool]$ThrowNames = $false)
+        $o = [pscustomobject]@{ V = $Values; S = $Subs; N = $Names; T = $ThrowNames }
+        $o | Add-Member -MemberType ScriptMethod -Name GetValue -Value { param($n, $d, $opt) $v = $this.V[$n]; if ($v -is [scriptblock]) { & $v } elseif ($null -eq $v) { $d } else { $v } }
+        $o | Add-Member -MemberType ScriptMethod -Name GetValueNames -Value { [string[]]@($this.V.Keys) }
+        $o | Add-Member -MemberType ScriptMethod -Name GetSubKeyNames -Value { if ($this.T) { throw 'denied' }; if ($null -ne $this.N) { [string[]]@($this.N) } else { [string[]]@($this.S.Keys) } }
+        $o | Add-Member -MemberType ScriptMethod -Name OpenSubKey -Value { param($n) $x = $this.S[$n]; if ($x -is [scriptblock]) { & $x } else { $x } }
+        $o | Add-Member -MemberType ScriptMethod -Name Close -Value { }
+        $o }
+    $bSidA = 'S-1-5-21-7-8-9-2001'; $bSidB = 'S-1-5-21-7-8-9-2002'; $bSidC = 'S-1-5-21-7-8-9-2003'
+    $bSource = { param([hashtable]$Opt = @{})
+        $pl = @{}
+        foreach ($sd in @($bSidA, $bSidB, $bSidC)) { $pl[$sd] = (& $bKey @{ ProfileImagePath = ('C:\Users\' + @{ $bSidA = 'alice'; $bSidB = 'x'; $bSidC = 'nome' }[$sd]) }) }
+        if ($Opt.ContainsKey('NullEntry')) { $pl['S-1-5-21-7-8-9-2009'] = { $null } }
+        $plv = @{ ProfilesDirectory = 'C:\Users'; Public = 'C:\Users\Public'; Default = 'C:\Users\Default' }
+        if ($Opt.ContainsKey('PdThrows')) { $plv['ProfilesDirectory'] = { throw 'denied' } }
+        if ($Opt.ContainsKey('PdMissing')) { $plv.Remove('ProfilesDirectory') }
+        $plKey = $(if ($Opt.ContainsKey('PlNull')) { $null } else { & $bKey $plv $pl })
+        $users = @{}
+        $users["$bSidA\Environment"] = (& $bKey @{ TEMP = '%USERPROFILE%\AppData\Local\Temp' })
+        $users["$bSidA\Volatile Environment"] = $(if ($Opt.ContainsKey('VolThrows')) { { throw 'SECRET-volatile-message' } } else { & $bKey @{ LOCALAPPDATA = 'C:\Users\alice\AppData\Local' } })
+        $users["$bSidB\Environment"] = { throw 'denied' }
+        $hku = & $bKey @{} $users @($bSidA, $bSidB) ([bool]$Opt.ContainsKey('HivesThrow'))
+        $dirs = @([pscustomobject]@{ Name = 'alice'; FullName = 'C:\Users\alice'; Attributes = [IO.FileAttributes]::Directory }, [pscustomobject]@{ Name = 'U'; FullName = 'C:\Users\U'; Attributes = [IO.FileAttributes]::Directory },
+            [pscustomobject]@{ Name = 'Public'; FullName = 'C:\Users\Public'; Attributes = [IO.FileAttributes]::Directory }, [pscustomobject]@{ Name = 'EXAMPL~1'; FullName = 'C:\Users\EXAMPL~1'; Attributes = ([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint) })
+        $enumThrows = $Opt.ContainsKey('EnumThrows')
+        [pscustomobject]@{ LocalMachine = (& $bKey @{} @{ 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList' = $plKey }); Users = $hku
+            GetDirectories = $(if ($enumThrows) { { param($Path) throw [UnauthorizedAccessException]::new('SECRET-enum-message') } } else { { param($Path) $dirs }.GetNewClosure() }) } }
+    $bGaps = { @($script:AtmDiscoveryGaps.Keys | Sort-Object) -join ',' }
+
+    Test-Case 'Particoes' 'P4-B: grafo para achado - DIRECT vira IN_USE com proveniencia; ancestral, ambigua e sem arestas ficam UNKNOWN com o motivo; coletores bloqueados; NO_DEPENDENCY_OBSERVED so com cobertura conclusiva (verificada de novo pelo motor)' {
+        $f = @($gProcF) + @((& $bTp 'a'), (& $bTp 'b'), (& $bTp 'c'), (& $bTp 'd'))
+        $parts = @((& $gPart 'a' @('PID 102 (node.exe)')), (& $gPart 'b' @() @('PID 102 (node.exe) -> base')), (& $gPart 'c' @() @() @('PID 102 (node.exe) -> unresolved')), (& $gPart 'd'))
+        $r = & $bState $f $bCovNo $parts
+        $a = & $bFind $r 'claude-code/p-a'
+        $k102 = & $gK 102 $b4T0.AddMinutes(2)
+        Assert-True ($a.State -ceq 'IN_USE' -and (& $bEv $a 'GRAPH_SOURCE_DIRECT') -contains ('REFERENCES_PATH ' + $k102) -and (& $bEv $a 'GRAPH_AGENT_ROOT') -contains (& $gK 100 $b4T0) -and (& $bEv $a 'GRAPH_DEPENDENCY') -contains 'DEPENDENCY_OBSERVED') '1: referencia direta de processo verificado: IN_USE, fonte, raiz do agente'
+        Assert-True ((& $bEv $a 'AUDIT_CLASS').Count -eq 0 -and $a.Provider -ceq 'claude-code') 'provider e evidencias anteriores preservados'
+        $b = & $bFind $r 'claude-code/p-b'
+        Assert-True ($b.State -ceq 'UNKNOWN' -and (& $bEv $b 'GRAPH_DEPENDENCY') -contains 'ANCESTOR_REFERENCE' -and (& $bEv $b 'GRAPH_SOURCE_ANCESTOR').Count -eq 1 -and (& $bEv $b 'GRAPH_AGENT_ROOT').Count -eq 0) '2: referencia ancestral: UNKNOWN, nunca IN_USE, sem raiz'
+        $c = & $bFind $r 'claude-code/p-c'
+        Assert-True ($c.State -ceq 'UNKNOWN' -and (& $bEv $c 'GRAPH_DEPENDENCY') -contains 'DEPENDENCY_AMBIGUOUS' -and (& $bEv $c 'GRAPH_SOURCE_AMBIGUOUS').Count -eq 1) '3: referencia ambigua: UNKNOWN'
+        $d = & $bFind $r 'claude-code/p-d'
+        Assert-True ($d.State -ceq 'UNKNOWN' -and (& $bEv $d 'GRAPH_REASON') -contains 'COVERAGE_INCOMPLETE' -and @($d.Coverage | Where-Object { $_.Collector -ceq 'handles' -and $_.Status -ceq 'NOT_OBSERVABLE' }).Count -eq 1 -and @($d.Coverage | Where-Object { $_.Collector -ceq 'dependency-graph' }).Count -eq 1) '4/5: sem arestas, handles e process-cwd bloqueados: UNKNOWN, coberturas anexadas'
+        $full = & $bState $f $gCovAll $parts
+        Assert-Eq (& $bFind $full 'claude-code/p-d').State 'NO_DEPENDENCY_OBSERVED' 'cobertura conclusiva em fixture: NO_DEPENDENCY_OBSERVED'
+        # Backstop: a summary that says NONE_OBSERVED next to a non-conclusive collector still gives UNKNOWN.
+        $fake = [pscustomobject]@{ Summaries = @([pscustomobject]@{ Kind = 'TempPartition'; Key = 'claude-code/p-d'; Dependency = 'NONE_OBSERVED'; Strength = $null; Incoming = 0; Roots = [string[]]@(); IncompleteCoverage = [string[]]@(); Reasons = [string[]]@() }); Edges = @(); Coverage = $full.Graph.Coverage }
+        $bk = @(Set-AtmGraphFindingStates -Findings @(& $bTp 'd') -Graph $fake -Coverage $bCovNo -GraphCoverage (ConvertTo-AtmGraphCoverage -Graph $full.Graph))[0]
+        Assert-True ($bk.State -ceq 'UNKNOWN' -and $bk.RequestedState -ceq 'NO_DEPENDENCY_OBSERVED') 'resumo NONE_OBSERVED com handles NOT_OBSERVABLE: o motor recusa a ausencia'
+        $nr = @(Set-AtmGraphFindingStates -Findings @(& $bTp 'd') -Graph $fake -Coverage @() -GraphCoverage (ConvertTo-AtmGraphCoverage -Graph $full.Graph))[0]
+        Assert-True ($nr.State -ceq 'UNKNOWN' -and @($nr.Coverage | Where-Object { $_.Status -ceq 'NOT_OBSERVABLE' -and @($_.Reasons) -ccontains 'COLLECTOR_NOT_RUN' }).Count -ge 1) 'coletor que nao rodou: NOT_OBSERVABLE, nunca presumido completo'
+        Assert-Eq (@($r.Findings | ForEach-Object { $_.Kind + '|' + $_.Key }) -join ',') (@($f | ForEach-Object { $_.Kind + '|' + $_.Key }) -join ',') 'mesmos achados, mesma ordem (nenhum criado)'
+    }
+    Test-Case 'Particoes' 'P4-B: worktrees (so fixtures), identidade inconclusiva, PID reutilizado, SELF, atribuicao ambigua, CoworkVMService sem VM, no sem achado, limite, evidencia ilegivel' {
+        $k101 = & $gK 101 $b4T0.AddMinutes(1)
+        $wt = @((& $gF 'Worktree' 'wt/w-1' 'LOCAL_WORK' @((& $gE 'FILE_HELD_OPEN' $k101 'handles'))), (& $gF 'Worktree' 'wt/w-2' 'LOCAL_WORK' @((& $gE 'FILE_HELD_OPEN_UNVERIFIED' 'pid:9' 'handles'))), (& $gF 'Worktree' 'wt/w-3' 'CLEAN_AND_PUBLISHED_UNKNOWN' @((& $gE 'FILE_HELD_OPEN_UNVERIFIED' 'pid:9' 'handles'))))
+        $r = & $bState (@($gProcF) + @($wt)) $gCovAll
+        Assert-Eq (& $bFind $r 'wt/w-1').State 'IN_USE' '6: worktree com arquivo aberto (fixture) por processo verificado: IN_USE (regra 14, primeiro)'
+        Assert-True ((& $bFind $r 'wt/w-2').State -ceq 'LOCAL_WORK' -and (& $bEv (& $bFind $r 'wt/w-2') 'GRAPH_DEPENDENCY') -contains 'DEPENDENCY_AMBIGUOUS') '7: identidade inconclusiva: fatos proprios mantidos, nunca IN_USE'
+        Assert-Eq (& $bFind $r 'wt/w-3').State 'UNKNOWN' '7: evidencia ambigua bloqueia o estado sem dependencia (CLEAN_AND_PUBLISHED_UNKNOWN vira UNKNOWN)'
+        # 8: a reference by a PID whose creation time differs in the snapshot (reused PID): never IN_USE.
+        $legacy = & $gLegacy @((& $b4Row 102 101 'node.exe' $b4T0.AddMinutes(-90)))
+        $g8 = Get-AtmDependencyGraph -Findings (@($gProcF) + @(& $bTp 'r')) -Collection (& $gRows $gBase) -LegacySnapshot $legacy -Partitions @((& $gPart 'r' @('PID 102 (node.exe)'))) -PartitionKeyFunction $gKf -Coverage $gCovAll
+        $f8 = & $bFind ([pscustomobject]@{ Findings = (Set-AtmGraphFindingStates -Findings (@($gProcF) + @(& $bTp 'r')) -Graph $g8 -Coverage $gCovAll -GraphCoverage (ConvertTo-AtmGraphCoverage -Graph $g8)) }) 'claude-code/p-r'
+        Assert-True ($f8.State -ceq 'UNKNOWN' -and (& $bEv $f8 'GRAPH_SOURCE_AMBIGUOUS') -contains 'REFERENCES_PATH pid:102') '8: PID reutilizado: AMBIGUOUS de pid:102, UNKNOWN'
+        # 9: only SELF references the partition.
+        $rows9 = @($gBase) + @(,(& $b4Row 400 100 'atm.exe' $b4T0.AddMinutes(3)))
+        $f9 = @($gProcF) + @((& $gF 'Process' (& $gK 400 $b4T0.AddMinutes(3)) 'SELF'), (& $bTp 's'))
+        $r9 = & $bState $f9 $bCovNo @((& $gPart 's' @('PID 400 (atm.exe)'))) $rows9
+        $s9 = & $bFind $r9 'claude-code/p-s'
+        Assert-True ($s9.State -ceq 'UNKNOWN' -and (& $bEv $s9 'GRAPH_SOURCE_DIRECT').Count -eq 0 -and (& $bEv $s9 'GRAPH_SOURCE_AMBIGUOUS').Count -eq 0) '9: referencia so do SELF: excluida (nenhuma fonte), UNKNOWN com a cobertura distribuida'
+        $r9f = & $bState $f9 $gCovAll @((& $gPart 's' @('PID 400 (atm.exe)'))) $rows9
+        Assert-Eq (& $bFind $r9f 'claude-code/p-s').State 'NO_DEPENDENCY_OBSERVED' '9: o proprio diagnostico nunca e dependencia (como na V0.1): com cobertura conclusiva em fixture, nenhuma dependencia'
+        # 10: the referencing process has an ambiguous attribution: the partition is in use by that process, no provider is claimed.
+        $f10 = @((& $gF 'Process' (& $gK 100 $b4T0) 'AGENT_PROCESS' @((& $gE 'PROVIDER_ATTRIBUTION_AMBIGUOUS' 'claude-code,claude-desktop'))), (& $gF 'Process' $k101 'AGENT_DESCENDANT'), (& $gF 'Process' (& $gK 102 $b4T0.AddMinutes(2)) 'AGENT_DESCENDANT'), (& $gF 'TempPartition' 'claude-code/p-q' 'RUNTIME_NOT_DIAGNOSED'))
+        $r10 = & $bState $f10 $gCovAll @((& $gPart 'q' @('PID 102 (node.exe)')))
+        $q = & $bFind $r10 'claude-code/p-q'
+        Assert-True ($q.State -ceq 'IN_USE' -and [string]::IsNullOrEmpty([string]$q.Provider) -and -not (@($q.Evidence | ForEach-Object { [string]$_.Detail }) -join ' ').Contains('claude-desktop') -and @($r10.Graph.Edges | Where-Object { $_.Relation -ceq 'ATTRIBUTED_TO' -and $_.Strength -ceq 'DIRECT' }).Count -eq 0) '10: atribuicao ambigua: nenhum provider exclusivo na particao nem no grafo'
+        # 11: CoworkVMService with its verified process and no VM: nothing reaches a partition.
+        $svc = & $gF 'Service' 'claude-desktop/CoworkVMService' 'RUNNING' @((& $gE 'SERVICE_PROCESS_VERIFIED' $k101 'services')) 'claude-desktop'
+        $r11 = & $bState (@($gProcF) + @($svc, (& $bTp 'v'))) $bCovNo @((& $gPart 'v'))
+        Assert-True ((& $bFind $r11 'claude-code/p-v').State -ceq 'UNKNOWN' -and (& $bEv (& $bFind $r11 'claude-code/p-v') 'GRAPH_SOURCE_DIRECT').Count -eq 0) '11: CoworkVMService sem VM: nenhuma cadeia ate a particao'
+        # 12: a verified process without a finding references the partition: IN_USE by that process, no finding created, no agent root.
+        $rows12 = @($gBase) + @(,(& $b4Row 700 4 'other.exe' $b4T0.AddMinutes(4)))
+        $r12 = & $bState (@($gProcF) + @(& $bTp 'n')) $gCovAll @((& $gPart 'n' @('PID 700 (other.exe)'))) $rows12
+        $n12 = & $bFind $r12 'claude-code/p-n'
+        Assert-True ($n12.State -ceq 'IN_USE' -and (& $bEv $n12 'GRAPH_AGENT_ROOT').Count -eq 0 -and @($r12.Findings).Count -eq 4 -and @($r12.Graph.Nodes | Where-Object { $_.Key -ceq (& $gK 700 $b4T0.AddMinutes(4)) -and -not $_.Finding }).Count -eq 1) '12: no sem achado: evidencia direta mantida, nenhum achado criado, nenhuma raiz de agente'
+        # 13: a limit hit: positive kept, the item without edges UNKNOWN with GRAPH_LIMIT.
+        $r13 = & $bState (@($gProcF) + @((& $bTp 'a'), (& $bTp 'd'))) $gCovAll @((& $gPart 'a' @('PID 102 (node.exe)')), (& $gPart 'd')) $null @{ MaxDepth = 1 }
+        Assert-True ((& $bFind $r13 'claude-code/p-a').State -ceq 'IN_USE' -and (& $bFind $r13 'claude-code/p-d').State -ceq 'UNKNOWN' -and (& $bEv (& $bFind $r13 'claude-code/p-d') 'GRAPH_REASON') -contains 'GRAPH_LIMIT' -and @((& $bFind $r13 'claude-code/p-d').Coverage | Where-Object { $_.Collector -ceq 'dependency-graph' -and $_.Status -ceq 'PARTIAL' }).Count -eq 1) '13: limite: positiva mantida, ausencia nao concluida, cobertura do grafo PARTIAL'
+        # 14: unreadable evidence.
+        $r14 = & $bState @((& $bTp 'm' @((& $gE 'FILE_HELD_OPEN' 'garbage' 'handles')))) $gCovAll
+        Assert-True ((& $bFind $r14 'claude-code/p-m').State -ceq 'UNKNOWN' -and (& $bEv (& $bFind $r14 'claude-code/p-m') 'GRAPH_REASON') -contains 'REFERENCE_UNREADABLE') '14: evidencia ilegivel: UNKNOWN com o motivo'
+        # Collision: stays UNKNOWN.
+        $col = & $gF 'TempPartition' 'claude-code/p-e' 'UNKNOWN' @((& $gE 'PARTITION_KEY_COLLISION' '2' 'inventory'))
+        $rc = & $bState (@($gProcF) + @($col)) $gCovAll @((& $gPart 'e' @('PID 102 (node.exe)')))
+        Assert-Eq (& $bFind $rc 'claude-code/p-e').State 'UNKNOWN' 'colisao de chave: UNKNOWN mesmo com referencia direta'
+        # Sources capped (more than 16): counted, never silently dropped.
+        $many = @(1..20 | ForEach-Object { & $gE 'FILE_HELD_OPEN' ('pid:' + (900 + $_)) 'handles' })
+        $rm = & $bState @((& $bTp 'z' @($many | ForEach-Object { New-AtmEvidence -Code 'FILE_HELD_OPEN_UNVERIFIED' -Source 'diagnose' -Collector 'handles' -Detail $_.Detail }))) $gCovAll
+        $z = & $bFind $rm 'claude-code/p-z'
+        Assert-True ((& $bEv $z 'GRAPH_SOURCE_AMBIGUOUS').Count -eq 16 -and (& $bEv $z 'GRAPH_SOURCES_CAPPED') -contains '20') 'mais de 16 fontes: 16 listadas e o total declarado'
+    }
+    Test-Case 'Particoes' 'P4-B: descoberta de perfis com fonte injetada - varios perfis, ProfilesDirectory legivel e ilegivel, ambiente volatil indisponivel, fonte com erro, descoberta parcial visivel; nenhuma escrita' {
+        $ps = @(Get-AtmProfiles -Identity $null -Source (& $bSource))
+        $byP = @{}; foreach ($x in $ps) { $byP[[string]$x.ProfilePath] = $x }
+        Assert-True ($byP.ContainsKey('C:\Users\alice') -and $byP.ContainsKey('C:\Users\x') -and $byP.ContainsKey('C:\Users\nome') -and $byP['C:\Users\U'].Sid -ceq 'RESIDUAL' -and $byP['C:\Users\Public'].Sid -ceq 'SHARED-PUBLIC' -and -not $byP.ContainsKey('C:\Users\EXAMPL~1')) '16/17: tres perfis do ProfileList, residual e compartilhado pelo ProfilesDirectory legivel; reparse point nao atravessado'
+        Assert-True ($byP['C:\Users\alice'].EnvStatus -ceq 'OK' -and $byP['C:\Users\x'].EnvStatus -ceq 'DENIED' -and $byP['C:\Users\nome'].EnvStatus -ceq 'NOT_LOADED') 'perfis observados, negados e nao carregados distinguidos'
+        Assert-Eq (& $bGaps) 'USER_ENVIRONMENT_DENIED,USER_ENVIRONMENT_NOT_LOADED' 'lacunas da descoberta completa: so os ambientes nao lidos'
+        $null = Get-AtmProfiles -Identity $null -Source (& $bSource @{ PdThrows = 1 })
+        Assert-True ((& $bGaps).Contains('PROFILES_DIRECTORY_UNRESOLVED') -and @($script:AtmDiscoveryNotes | Where-Object { $_ -ceq (Get-AtmText 'note.profilesDirUnresolved') }).Count -eq 1) '18: ProfilesDirectory ilegivel: lacuna e nota visivel (residuais nao listados)'
+        $pm = @(Get-AtmProfiles -Identity $null -Source (& $bSource @{ PdMissing = 1 }))
+        Assert-True ((& $bGaps).Contains('PROFILES_DIRECTORY_UNRESOLVED') -and @($pm | Where-Object { $_.Sid -ceq 'RESIDUAL' }).Count -eq 0 -and @($pm | Where-Object { $_.Origin -like 'ProfileList*' }).Count -eq 3) '18: ProfilesDirectory ausente: os perfis do ProfileList continuam, nenhum TEMP inventado'
+        $null = Get-AtmProfiles -Identity $null -Source (& $bSource @{ EnumThrows = 1 })
+        Assert-True ((& $bGaps).Contains('PROFILES_DIRECTORY_UNREADABLE')) '18: ProfilesDirectory nao listavel: lacuna'
+        $pv = @(Get-AtmProfiles -Identity $null -Source (& $bSource @{ VolThrows = 1 }))
+        $al = @($pv | Where-Object { $_.ProfilePath -ceq 'C:\Users\alice' })[0]
+        Assert-True ((& $bGaps).Contains('VOLATILE_ENVIRONMENT_UNREADABLE') -and @($al.Notes | Where-Object { $_ -like 'VOLATILE_ENVIRONMENT_ILEGIVEL*' }).Count -eq 1 -and @($script:AtmDiscoveryNotes | Where-Object { $_ -ceq (Get-AtmText 'note.volatileUnreadableCount' 1) }).Count -eq 1) '19: ambiente volatil indisponivel: lacuna, nota do perfil e nota da descoberta'
+        $ph = @(Get-AtmProfiles -Identity $null -Source (& $bSource @{ HivesThrow = 1 }))
+        Assert-True ((& $bGaps).Contains('LOADED_HIVES_UNREADABLE') -and @($ph | Where-Object { $_.Origin -like 'ProfileList*' -and $_.EnvStatus -cne 'NOT_LOADED' }).Count -eq 0) '20: hives carregados ilegiveis: nenhum ambiente lido, lacuna registrada'
+        $pn = @(Get-AtmProfiles -Identity $null -Source (& $bSource @{ NullEntry = 1 }))
+        Assert-True ((& $bGaps).Contains('PROFILE_LIST_ENTRY_UNREADABLE') -and @($pn | Where-Object { $_.Origin -like 'ProfileList*' }).Count -eq 3) '20: entrada do ProfileList ausente: contada, nao inventada'
+        $threw = $false
+        try { $null = Get-AtmProfiles -Identity $null -Source (& $bSource @{ PlNull = 1 }) } catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -ceq (Get-AtmText 'err.profileListUnreadable') -and (& $bGaps).Contains('PROFILE_LIST_UNREADABLE')) '20: ProfileList ilegivel: falha explicita, nunca lista vazia de perfis'
+        # Coverage of the discovery (codes only).
+        $inv = [pscustomobject]@{ Profiles = @(1, 2, 3); DiscoveryStatus = [pscustomobject]@{ Overridden = $false; Gaps = @([pscustomobject]@{ Code = 'PROFILES_DIRECTORY_UNRESOLVED'; Count = 1 }, [pscustomobject]@{ Code = 'VOLATILE_ENVIRONMENT_UNREADABLE'; Count = 2 }) } }
+        $cv = Get-AtmProfileDiscoveryCoverage -Inventory $inv -Identity ([pscustomobject]@{ IsElevatedAdministrator = $false })
+        Assert-True ($cv.Status -ceq 'PARTIAL' -and (@($cv.Reasons) -join ',') -ceq 'PROFILES_DIRECTORY_UNRESOLVED,VOLATILE_ENVIRONMENT_UNREADABLE' -and $cv.ElevationWouldHelp -ceq 'YES') '21: descoberta parcial: PARTIAL com os codigos'
+        $ok = Get-AtmProfileDiscoveryCoverage -Inventory ([pscustomobject]@{ Profiles = @(); DiscoveryStatus = [pscustomobject]@{ Overridden = $false; Gaps = @() } }) -Identity ([pscustomobject]@{ IsElevatedAdministrator = $false })
+        $na = Get-AtmProfileDiscoveryCoverage -Inventory ([pscustomobject]@{ Profiles = @() }) -Identity ([pscustomobject]@{ IsElevatedAdministrator = $false })
+        Assert-True ($ok.Status -ceq 'COMPLETE' -and @($ok.Reasons).Count -eq 0 -and $na.Status -ceq 'NOT_OBSERVABLE') 'descoberta sem lacunas: COMPLETE; sem estado: NOT_OBSERVABLE (nunca completa por omissao)'
+        # Default source: the same objects as the real registry read (read-only).
+        $d1 = ConvertTo-Json -InputObject @(Get-AtmProfiles -Identity $null) -Depth 4; $g1 = & $bGaps
+        $d2 = ConvertTo-Json -InputObject @(Get-AtmProfiles -Identity $null -Source (New-AtmProfileSource)) -Depth 4; $g2 = & $bGaps
+        Assert-True ($d1 -ceq $d2 -and $g1 -ceq $g2) 'fonte padrao: mesmos perfis e lacunas que o registro real (equivalencia)'
+    }
+    Test-Case 'Particoes' 'P4-B: integracao ao diagnose - estado das particoes pelo grafo, cobertura profile-discovery e dependency-graph, JSON e relatorio sem caminhos, nomes ou mensagens; classes e flags V0.1 inalteradas' {
+        $p = New-TestProfile 'p4b-int'
+        $root = New-TestRoot -ProfileInfo $p
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -PseudonymKey $testPseudonymKey -ServiceSource { param($Names) @() } -VirtualizationSource (& $vSrc (& $vBase @($vHostRow)))
+        $tp = @($d.Findings | Where-Object { $_.Kind -ceq 'TempPartition' })
+        Assert-True ($tp.Count -ge 1 -and @($tp | Where-Object { $_.State -cne 'UNKNOWN' -and $_.State -cne 'IN_USE' }).Count -eq 0 -and @($tp | Where-Object { (& $bEv $_ 'GRAPH_DEPENDENCY').Count -ne 1 }).Count -eq 0) 'toda particao com estado do grafo (UNKNOWN ou IN_USE) e o resumo como evidencia'
+        Assert-True (@($d.Coverage | Where-Object { $_.Collector -ceq 'profile-discovery' -and $_.Status -ceq 'COMPLETE' }).Count -eq 1 -and @($d.Coverage | Where-Object { $_.Collector -ceq 'dependency-graph' }).Count -eq 1) 'coberturas profile-discovery (perfis fornecidos) e dependency-graph'
+        # V0.1 classes and flags: the evidence equals the inventory of the same run.
+        $invParts = @($d.Inventory.Partitions | Where-Object { $_.Kind -ne 'NotScanned' })
+        $fromInv = @($invParts | ForEach-Object { [string]$_.Class + '|' + (@($_.Flags | Sort-Object) -join ',') } | Sort-Object)
+        $fromFind = @($tp | ForEach-Object { (@(& $bEv $_ 'AUDIT_CLASS') -join '') + '|' + (@(& $bEv $_ 'AUDIT_FLAG' | Sort-Object) -join ',') } | Sort-Object)
+        Assert-Eq ($fromFind -join ';') ($fromInv -join ';') '23: classes e flags V0.1 dos achados iguais as do inventario da mesma execucao'
+        # Discovery through an injected source: gaps visible in the JSON and the report; no path, name or exception text.
+        $src = & $bSource @{ PdThrows = 1; VolThrows = 1; EnumThrows = 1 }
+        $ia = Get-InvArgs -Profiles $null; $ia.Remove('ProfilesOverride'); $ia['ProfileSource'] = $src
+        $d2 = Invoke-AtmDiagnose -InventoryArgs $ia -IdentitySource $diagIdUser -PseudonymKey $testPseudonymKey -ServiceSource { param($Names) @() } -VirtualizationSource (& $vSrc (& $vBase @($vHostRow)))
+        $pc = @($d2.Coverage | Where-Object { $_.Collector -ceq 'profile-discovery' })[0]
+        Assert-True ($pc.Status -ceq 'PARTIAL' -and @($pc.Reasons) -ccontains 'PROFILES_DIRECTORY_UNRESOLVED' -and @($pc.Reasons) -ccontains 'VOLATILE_ENVIRONMENT_UNREADABLE') '21: lacunas da fonte injetada na cobertura'
+        $json = ConvertTo-AtmDiagnoseJson -Result $d2
+        $txt = (Show-AtmDiagnose -Result $d2 6>&1 | ForEach-Object { [string]$_ }) -join "`n"
+        foreach ($x in @('Users\\alice', 'Users\alice', 'C:\\Users', 'SECRET-', $bSidA, $bSidB)) { Assert-True (-not $json.Contains($x)) "25: JSON sem $x" }
+        foreach ($x in @('SECRET-', 'C:\Users\alice')) { Assert-True (-not $txt.Contains($x)) "25: relatorio sem $x" }
+        Assert-True ($txt.Contains((Get-AtmText 'diag.discoveryIncomplete' 'PARTIAL')) -and $txt.Contains('PROFILES_DIRECTORY_UNRESOLVED')) '21: descoberta parcial visivel no relatorio'
+        $j = $json | ConvertFrom-Json
+        Assert-True (@($j.coverage | Where-Object { $_.collector -ceq 'profile-discovery' -and $_.status -ceq 'PARTIAL' }).Count -eq 1) 'JSON: cobertura profile-discovery'
+    }
+    Test-Case 'Particoes' 'P4-B: escala - milhares de particoes passadas do grafo aos achados em uma passada (indices, sem reconstruir o grafo)' {
+        $rows = New-Object System.Collections.Generic.List[object]; $f = New-Object System.Collections.Generic.List[object]; $parts = New-Object System.Collections.Generic.List[object]
+        $rows.Add((& $b4Row 4 0 'System' $b4T0.AddHours(-1)))
+        for ($i = 0; $i -lt 500; $i++) {
+            $pidv = 20000 + $i; $cr = $b4T0.AddSeconds($i)
+            $rows.Add((& $b4Row $pidv 4 'w.exe' $cr)); $f.Add((& $gF 'Process' (& $gK $pidv $cr) 'AGENT_PROCESS'))
+            for ($q = 0; $q -lt 6; $q++) { $f.Add((& $gF 'TempPartition' ("claude-code/p-$i-$q") 'RUNTIME_NOT_DIAGNOSED')); $parts.Add((& $gPart "$i-$q" $(if ($q -lt 3) { @("PID $pidv (w.exe)") } else { @() }))) }
+        }
+        $c = & $gRows $rows.ToArray()
+        $g = Get-AtmDependencyGraph -Findings $f.ToArray() -Collection $c -LegacySnapshot (& $gLegacy $rows.ToArray()) -Partitions $parts.ToArray() -PartitionKeyFunction $gKf -Coverage $gCovAll
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $out = Set-AtmGraphFindingStates -Findings $f.ToArray() -Graph $g -Coverage $gCovAll -GraphCoverage (ConvertTo-AtmGraphCoverage -Graph $g)
+        $sw.Stop()
+        $inUse = @($out | Where-Object { $_.Kind -ceq 'TempPartition' -and $_.State -ceq 'IN_USE' }).Count
+        $none = @($out | Where-Object { $_.Kind -ceq 'TempPartition' -and $_.State -ceq 'NO_DEPENDENCY_OBSERVED' }).Count
+        Assert-True ($inUse -eq 1500 -and $none -eq 1500 -and @($out).Count -eq $f.Count) "3000 particoes: 1500 IN_USE, 1500 sem dependencia (fixture conclusiva), mesma contagem de achados"
+        Assert-True ($sw.ElapsedMilliseconds -lt 60000) "tempo limitado ($($sw.ElapsedMilliseconds) ms)"
+        $script:caseNote = "3000 particoes: $($sw.ElapsedMilliseconds) ms"
+    }
+    Test-Case 'Particoes' 'P4-B (estatico): descoberta sem escrita no registro, sem hive carregado nem chave remota; a promocao nao chama coletor; clean e auditoria V0.1 nao leem o grafo; textos nos dois idiomas; travas fechadas' {
+        $audit = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Audit.ps1'))
+        foreach ($pat in @('SetValue(', 'CreateSubKey', 'DeleteSubKey', 'DeleteValue', 'OpenRemoteBaseKey', 'OpenBaseKey', 'RegLoadKey', 'reg.exe', 'reg load', 'Set-ItemProperty', 'New-ItemProperty', 'Remove-ItemProperty')) {
+            Assert-True (-not $audit.Contains($pat)) "22: Engine.Audit sem '$pat'"
+        }
+        Assert-True ($audit -notmatch 'OpenSubKey\([^)]*\$true') '22: nenhuma chave aberta para escrita'
+        $diag = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Diagnose.ps1'))
+        $fn = $diag.Substring($diag.IndexOf('function Set-AtmGraphFindingStates'), $diag.IndexOf('# Open-file evidence (D-2') - $diag.IndexOf('function Set-AtmGraphFindingStates'))
+        foreach ($pat in @('Get-CimInstance', 'Invoke-AtmInventory', 'Get-AtmProcessCollection', 'Get-AtmDependencyGraph -', 'Get-AtmHandleEvidence', 'Invoke-AtmGitCommand', '[IO.File]', 'Get-ChildItem', 'Registry')) { Assert-True (-not $fn.Contains($pat)) "promocao sem '$pat'" }
+        foreach ($fl in @('lib\Engine.Clean.ps1', 'lib\Engine.Audit.ps1')) {
+            $t = [IO.File]::ReadAllText((Join-Path $srcDir $fl))
+            foreach ($pat in @('Graph', 'GRAPH_', 'IN_USE', 'NO_DEPENDENCY_OBSERVED', 'Set-AtmGraphFindingStates')) { Assert-True (-not $t.Contains($pat)) "24: $fl sem '$pat'" }
+        }
+        foreach ($l in @('en-US', 'pt-BR')) {
+            foreach ($x in $script:AtmDiscoveryGapCodes) { Assert-True $script:AtmMessages[$l].ContainsKey("reason.$x") "reason.$x ($l)" }
+            foreach ($x in $script:AtmGraphFindingEvidenceCodes) { Assert-True $script:AtmMessages[$l].ContainsKey("evidence.$x") "evidence.$x ($l)" }
+            foreach ($x in @('DISCOVERY_STATUS_UNAVAILABLE', 'COLLECTOR_NOT_RUN', 'GRAPH_INCOMPLETE')) { Assert-True $script:AtmMessages[$l].ContainsKey("reason.$x") "reason.$x ($l)" }
+        }
+        Assert-True ($script:AtmRealDeletionEnabled -eq $true -and $shippedDeletionGate -eq $false -and $script:AtmHandleDiagnosticsEnabled -eq $false -and $script:AtmWorktreeDiagnosticsEnabled -eq $false) '30: travas distribuidas fechadas (a suite so abre a de exclusao no sandbox)'
     }
     Test-Case 'I18n' 'P1-C: todo motivo e evidencia de arquivos abertos tem texto nos dois idiomas' {
         foreach ($l in @('en-US', 'pt-BR')) {

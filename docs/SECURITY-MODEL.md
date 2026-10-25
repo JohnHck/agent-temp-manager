@@ -142,6 +142,10 @@ called by `Invoke-AtmGitCommand`):
   query, file read, process access or collector call of its own (static test). It lives in memory for the run and is
   not persisted; it exports only keys, provider ids, relations, strengths, codes and coverage. Its summaries are not
   finding states and authorize nothing: no deletion, termination or state change follows from them.
+* **Partition states (P4-B, ADR-0002 rule 6):** temporary partitions and worktrees take their diagnose state from the
+  graph of the same run (`IN_USE` only with a `DIRECT` edge from a verified process; `UNKNOWN` otherwise;
+  `NO_DEPENDENCY_OBSERVED` only with conclusive coverage, which a V0.2 run never has). Nothing is collected for it,
+  and no diagnose state is read by the audit, the preview or `clean`.
 * **Open-file diagnostics gate (P1-C-S):** the Restart Manager collector (`handles`, D-2) is behind
   `$script:AtmHandleDiagnosticsEnabled`, `$false` in every shipped copy (single assignment; no option, environment
   variable or configuration file; checked by the test suite and the install e2e). It is checked by the diagnose and
@@ -262,11 +266,16 @@ called by `Invoke-AtmGitCommand`):
   `clean` stops before the release gate is even reached. Enabling real deletion (V0.3) requires a reviewed decision
   on how known protected system processes are treated; the gate is not relaxed before that.
 * **Allocation** is an estimate (cluster rounding; MFT-resident files overestimated).
-* **Discovery visibility**: if the `ProfilesDirectory` value of the Windows profile list cannot be resolved, folders
-  under it that have no profile-list entry (residual profiles) are not listed and no note says so; if a profile's
-  volatile environment cannot be read, `%LOCALAPPDATA%`/`%APPDATA%` fall back to the profile's default folders.
-  Deletion stays safe in both cases (only inventoried paths can be candidates), but the audit can under-report.
-  Planned for V0.2 diagnostics, with injectable registry sources so it can be tested.
+* **Discovery visibility** (V0.2 P4-B: now reported, still a limit): if the `ProfilesDirectory` value of the Windows
+  profile list cannot be resolved or listed, folders under it that have no profile-list entry (residual profiles) are
+  not listed; if a profile's volatile environment cannot be read, `%LOCALAPPDATA%`/`%APPDATA%` fall back to the
+  profile's default folders; a user hive that is not loaded gives the default TEMP folder. Each case is now a note in
+  the audit report (*Discovery*) and a reason of the `profile-discovery` coverage in `diagnose` (codes only), never
+  hidden and never read as "does not exist"; an unreadable profile list fails the discovery instead of returning no
+  profiles. The audit can still under-report in these cases; deletion stays safe (only inventoried paths can be
+  candidates), and the V0.1 classes, flags, gates and `clean` are unchanged. The registry and directory sources are
+  injectable for tests (`-ProfileSource`); the default reads HKLM and HKU with read-only calls only (no write, no hive
+  loading, no remote registry; static test).
 * The agent itself may run its own periodic cleanup independently of this tool.
 
 ## Execution policy
