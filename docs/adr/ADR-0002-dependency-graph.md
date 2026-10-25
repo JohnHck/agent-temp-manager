@@ -81,7 +81,9 @@ alternative. Points 3 and 4 add nothing to the graph.
    holder of a file, a process whose identity could not be verified (`pid:<n>`, always `AMBIGUOUS`).
    *Alternatives:* (a) drop the edge — loses positive evidence; (b) create findings for them — the graph would
    change the findings, which P4-A must not do. *Chosen:* such endpoints are graph nodes marked `finding = false`;
-   they carry only their key (a process key or `pid:<n>`, both already exported by the findings).
+   they carry only their key (a process key or `pid:<n>`). Process keys are allowed exported identifiers; a process
+   named only by an ambiguous reference appears in the graph and not among the process findings. Every edge from a
+   `pid:<n>` source is `AMBIGUOUS`.
 3. **`VirtualizationPlatform` (ADR-0001, P2-B amendment) is a node and host context, not a dependency.** It has no
    relation in rule 2 and no edge is created to or from it; its presence never makes anything depend on a VM.
 4. **VM and worker process — not implemented, proposal only.** `VM_WORKER_VERIFIED` (P2-B) links a VM to its
@@ -109,19 +111,23 @@ Implementation record (P4-A):
   only fixtures produce it. `MAPS_PATH`: no source exposes it; never produced. `ATTRIBUTED_TO`: point 1.
 * **Transitivity (rule 3).** A summary per `TempPartition` and `Worktree` collects the incoming `REFERENCES_PATH`,
   `HOLDS_HANDLE_IN` and `WORKING_DIRECTORY_IN` edges and walks `PARENT_OF` upward from every verified source to its
-  agent roots (`AGENT_PROCESS`), with a visited set and a depth limit. The summary strength is the best source
-  strength; a source without a verified identity is `AMBIGUOUS` whatever the edge says. Nothing is inferred from
+  agent roots (`AGENT_PROCESS`), with a visited set and a depth limit, only from the sources of `DIRECT` edges (a root
+  is never stronger than its chain). The summary strength is the best incoming edge strength; an edge from a source
+  without a verified identity is always `AMBIGUOUS`. A finding with an ambiguous attribution never gets a `DIRECT`
+  `ATTRIBUTED_TO` edge. The tool's own process (`SELF`) is the source of no edge, on purpose. Nothing is inferred from
   names, locations, age or probability.
 * **Summary vocabulary (not finding states).** `DEPENDENCY_OBSERVED` (a `DIRECT` source), `ANCESTOR_REFERENCE`,
   `DEPENDENCY_AMBIGUOUS`, `NONE_OBSERVED` (no source, every relevant collector conclusive and no limit hit),
-  `UNKNOWN` (default; `COVERAGE_INCOMPLETE` or `KEY_COLLISION`). Relevant collectors: `inventory`, `processes`,
+  `UNKNOWN` (default; `COVERAGE_INCOMPLETE`, `GRAPH_LIMIT`, `REFERENCE_UNREADABLE` or `KEY_COLLISION`). A collector
+  with several coverage records counts by its worst one. Relevant collectors: `inventory`, `processes`,
   `process-snapshot`, `handles`, `process-cwd` for partitions; `worktree-discovery`, `process-snapshot`, `handles`,
   `process-cwd` for worktrees. In a shipped run `handles` and `process-cwd` are `NOT_OBSERVABLE`, so
   `NONE_OBSERVED` never appears (test). P4-A changes no finding state; promoting partition states is P4-B, and no
   summary authorizes deleting anything.
 * **Limits.** Nodes 100000, edges 400000, upward depth 256, 30 s. A limit hit is a graph coverage reason
   (`GRAPH_NODE_LIMIT`, `GRAPH_EDGE_LIMIT`, `GRAPH_DEPTH_LIMIT`, `GRAPH_TIME_LIMIT`), dropped edges are counted, the
-  edges already found are kept and no summary says `NONE_OBSERVED`. Everything is indexed (by kind, by edge target,
+  edges already found are kept and no summary says `NONE_OBSERVED`; the time limit is also bounded by the run deadline.
+  Every phase runs in ordinal key order, so what a limit keeps does not depend on the input order. Everything is indexed (by kind, by edge target,
   by PID); no step compares every item with every other.
 * **Privacy.** Only finding keys (pseudonyms and process keys), provider ids, relation, strength and evidence codes
   leave the function; no path, command line, VM name or GUID, account, token or session id. The graph lives in

@@ -192,7 +192,7 @@ ordinally. No path, command line, VM name, GUID, account or session id is in it.
 | `from` | string | Key of the source node. |
 | `toKind` | string | Kind of the target node. |
 | `to` | string | Key of the target node. |
-| `strength` | string | `DIRECT`, `ANCESTOR` (a reference to a parent path) or `AMBIGUOUS` (unresolved reference, unverified identity, ambiguous attribution); no numeric weight. |
+| `strength` | string | `DIRECT`, `ANCESTOR` (a reference to a parent path) or `AMBIGUOUS` (unresolved reference, ambiguous attribution, and every edge from a `pid:<pid>` source); no numeric weight. |
 | `evidence` | array | The evidence codes that created the edge. |
 
 ## graph.edges[].evidence[]
@@ -210,18 +210,18 @@ ordinally. No path, command line, VM name, GUID, account or session id is in it.
 | `kind` | string | `TempPartition` or `Worktree`. |
 | `key` | string | The finding key. |
 | `dependency` | string | `DEPENDENCY_OBSERVED` (a `DIRECT` edge from a verified process, through any chain of verified links), `ANCESTOR_REFERENCE` (only references to a parent path: not proof that this item is used), `DEPENDENCY_AMBIGUOUS` (only ambiguous evidence), `NONE_OBSERVED` (no edge and every relevant collector conclusive: never in a V0.2 run, since `process-cwd` and `handles` are not observable), `UNKNOWN`. Not a finding state; P4-B decides how states use it. |
-| `strength` | string or null | The strongest edge into the item (a source without a verified identity counts as `AMBIGUOUS`). |
+| `strength` | string or null | The strongest edge into the item (an edge from a source without a verified identity is always `AMBIGUOUS`). |
 | `incoming` | integer | Edges into the item (`REFERENCES_PATH`, `HOLDS_HANDLE_IN`, `WORKING_DIRECTORY_IN`). |
-| `roots` | array | Keys of `AGENT_PROCESS` processes reached upward through verified `PARENT_OF` edges from the verified sources. |
+| `roots` | array | Keys of `AGENT_PROCESS` processes reached upward through verified `PARENT_OF` edges, only from the sources of `DIRECT` edges (a root is never stronger than its chain; ancestor and ambiguous sources give none). |
 | `incompleteCoverage` | array | Relevant collectors that were not conclusive. |
-| `reasons` | array | `KEY_COLLISION`, `HOLDERS_CAPPED`, `COVERAGE_INCOMPLETE`. |
+| `reasons` | array | Why the item is `UNKNOWN` or ambiguous: `KEY_COLLISION`, `HOLDERS_CAPPED`, `COVERAGE_INCOMPLETE` (a relevant collector in `incompleteCoverage`), `GRAPH_LIMIT` (a limit of `graph.coverage` was hit), `REFERENCE_UNREADABLE` (evidence of the item could not be read as a process reference). |
 
 ## graph.coverage
 
 | Field | Type | Meaning |
 |---|---|---|
 | `status` | string | `COMPLETE` or `PARTIAL`. |
-| `reasons` | array | `GRAPH_NODE_LIMIT`, `GRAPH_EDGE_LIMIT`, `GRAPH_DEPTH_LIMIT`, `GRAPH_TIME_LIMIT`, `GRAPH_PROCESS_SNAPSHOT_UNAVAILABLE`, `GRAPH_LEGACY_SNAPSHOT_UNAVAILABLE`, `REFERENCE_IDENTITY_UNVERIFIED`. A limit that is hit keeps the positive edges found and turns every `NONE_OBSERVED` into `UNKNOWN`. |
+| `reasons` | array | `GRAPH_NODE_LIMIT`, `GRAPH_EDGE_LIMIT`, `GRAPH_DEPTH_LIMIT`, `GRAPH_TIME_LIMIT`, `GRAPH_PROCESS_SNAPSHOT_UNAVAILABLE`, `GRAPH_LEGACY_SNAPSHOT_UNAVAILABLE`, `REFERENCE_IDENTITY_UNVERIFIED`, `REFERENCE_UNREADABLE`. A limit that is hit keeps the positive edges found and no summary is `NONE_OBSERVED` (`GRAPH_LIMIT` in its reasons). Nodes, edges and summaries are processed and listed in ordinal key order, so what a limit keeps does not depend on the input order. The time limit is also bounded by the run deadline. |
 | `nodes` | integer | Nodes in the graph. |
 | `edges` | integer | Edges in the graph. |
 | `droppedEdges` | integer | Edges not added because of a limit (never silent). |

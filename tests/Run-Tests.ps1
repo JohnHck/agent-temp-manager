@@ -6550,7 +6550,8 @@ try {
         $g = Get-AtmDependencyGraph -Findings $f -Collection $c -LegacySnapshot (& $gLegacy $gBase) -Partitions @((& $gPart 'a' @('PID 102 (node.exe)'))) -PartitionKeyFunction $gKf -Coverage @($gCov)
         $e = & $gEdges $g
         Assert-True (@($e | Where-Object { $_.Contains('7100@') }).Count -eq 0 -and $e -contains 'ATTRIBUTED_TO|vm/v-1|fake-virt|DIRECT') 'VM com worker verificado: nenhuma relacao VM-worker inventada (proposta na ADR-0002); atribuicao da VM mantida'
-        Assert-True (@($e | Where-Object { $_.Contains('7200@') -or $_.Contains('|host|') -or $_.Contains('vm/v-2|') -and $_ -like 'ATTRIBUTED_TO*' }).Count -eq 0) 'vmmem e plataforma: contexto, nunca aresta nem atribuicao'
+        Assert-True (@($e | Where-Object { $_.Contains('7200@') -or $_.Contains('|host|') }).Count -eq 0) 'vmmem e plataforma: contexto, nunca aresta'
+        Assert-True (@($e | Where-Object { $_.Contains('vm/v-2|') -and $_ -like 'ATTRIBUTED_TO*' }).Count -eq 0) 'VM sem cadeia verificada: nenhuma atribuicao'
         Assert-True ($e -contains 'HOSTS_SERVICE|7300@639000000000000000|CoworkVMService|DIRECT' -and $e -contains 'ATTRIBUTED_TO|CoworkVMService|claude-desktop|DIRECT' -and @($e | Where-Object { $_.Contains('CoworkVMService') -and ($_.Contains('vm/') -or $_.Contains('p-a')) }).Count -eq 0) 'CoworkVMService: servico e provider, nenhuma VM nem particao ligada'
         Assert-True ($e -contains ('ATTRIBUTED_TO|' + (& $gK 100 $b4T0) + '|claude-code|AMBIGUOUS') -and $e -contains ('ATTRIBUTED_TO|' + (& $gK 100 $b4T0) + '|claude-desktop|AMBIGUOUS') -and @($e | Where-Object { $_ -like ('ATTRIBUTED_TO|' + (& $gK 100 $b4T0) + '|*|DIRECT') }).Count -eq 0) 'atribuicao ambigua: uma aresta AMBIGUOUS por provider, nenhuma exclusiva'
         $sa = & $gSum $g 'claude-code/p-a'
@@ -6573,6 +6574,48 @@ try {
         $args1 = @{} + $args0; $args1.Findings = @($f[($f.Count - 1)..0]); $args1.Partitions = @($parts[($parts.Count - 1)..0])
         $j2 = ConvertTo-Json -InputObject (ConvertTo-AtmGraphJson -Graph (Get-AtmDependencyGraph @args1)) -Depth 8
         Assert-Eq ($j2 -replace '"(startedUtc|elapsedMs)":\s*("[^"]*"|\d+)', '') ($j1 -replace '"(startedUtc|elapsedMs)":\s*("[^"]*"|\d+)', '') 'ordem das entradas invertida: grafo identico'
+    }
+    Test-Case 'Grafo' 'P4-A (revisao): ordem fixa sob limites, identidade nao verificada nunca DIRECT, raizes so por cadeia DIRECT, motivos de limite e de leitura, pior cobertura por coletor, atribuicao ambigua nunca DIRECT' {
+        $c = & $gRows $gBase
+        $kd = & $gK 102 $b4T0.AddMinutes(2)
+        $f = @($gProcF) + @(@('a', 'b', 'd') | ForEach-Object { & $gF 'TempPartition' "claude-code/p-$_" 'RUNTIME_NOT_DIAGNOSED' })
+        $parts = @((& $gPart 'a' @('PID 102 (node.exe)', 'PID 101 (bash.exe)')), (& $gPart 'b' @() @('PID 102 (node.exe) -> base')), (& $gPart 'd'))
+        $args0 = @{ Findings = $f; Collection = $c; LegacySnapshot = (& $gLegacy $gBase); Partitions = $parts; PartitionKeyFunction = $gKf; Coverage = $gCovAll }
+        $args1 = @{} + $args0; $args1.Findings = @($f[($f.Count - 1)..0]); $args1.Partitions = @($parts[($parts.Count - 1)..0])
+        $strip = { param($G) (ConvertTo-Json -InputObject (ConvertTo-AtmGraphJson -Graph $G) -Depth 8) -replace '"(startedUtc|elapsedMs)":\s*("[^"]*"|\d+)', '' }
+        foreach ($lim in @(@{ MaxEdges = 1 }, @{ MaxEdges = 3 }, @{ MaxNodes = 6 }, @{ MaxDepth = 1 })) {
+            Assert-Eq (& $strip (Get-AtmDependencyGraph @args1 @lim)) (& $strip (Get-AtmDependencyGraph @args0 @lim)) "entrada invertida sob limite ($(@($lim.Keys)[0])=$(@($lim.Values)[0])): grafo identico"
+        }
+        $g = Get-AtmDependencyGraph @args0
+        $b = & $gSum $g 'claude-code/p-b'
+        Assert-True ($b.Dependency -ceq 'ANCESTOR_REFERENCE' -and @($b.Roots).Count -eq 0 -and $b.Roots -is [array] -and $b.Reasons -is [array]) 'referencia ancestral: nenhuma raiz (raiz nunca mais forte que a cadeia); listas sempre arrays'
+        Assert-Eq (@((& $gSum $g 'claude-code/p-a').Roots) -join ',') (& $gK 100 $b4T0) 'referencia direta: raiz do agente'
+        # Depth limit with full coverage: the item without edges has the same reasons wherever it is in the input.
+        foreach ($a2 in @($args0, $args1)) {
+            $dl = Get-AtmDependencyGraph @a2 -MaxDepth 1
+            $d = & $gSum $dl 'claude-code/p-d'
+            Assert-True ($d.Dependency -ceq 'UNKNOWN' -and (@($d.Reasons) -join ',') -ceq 'GRAPH_LIMIT' -and @($d.IncompleteCoverage).Count -eq 0) "limite de profundidade: GRAPH_LIMIT (nunca COVERAGE_INCOMPLETE sem coletor incompleto), obtido $(@($d.Reasons) -join ',')"
+        }
+        # An unverified identity is never a DIRECT source, whatever the evidence says.
+        $pf = @((& $gF 'Process' 'pid:777' 'IDENTITY_UNVERIFIED' @() 'claude-code'), (& $gF 'TempPartition' 'claude-code/p-h' 'RUNTIME_NOT_DIAGNOSED' @((& $gE 'FILE_HELD_OPEN' 'pid:778' 'handles'))))
+        $ug = Get-AtmDependencyGraph -Findings $pf -Collection $c -Coverage $gCovAll
+        $ue = & $gEdges $ug
+        Assert-True ($ue -contains 'ATTRIBUTED_TO|pid:777|claude-code|AMBIGUOUS' -and @($ue | Where-Object { $_ -like '*|pid:*|DIRECT' -or $_ -like '*|pid:*|*|DIRECT' }).Count -eq 0) "identidade nao verificada: AMBIGUOUS ($($ue -join ' ; '))"
+        Assert-True ((& $gSum $ug 'claude-code/p-h').Dependency -ceq 'DEPENDENCY_AMBIGUOUS') 'arquivo aberto por pid nao verificado: nunca DEPENDENCY_OBSERVED'
+        # Evidence that cannot be read as a process reference blocks the absence.
+        $rf = @(& $gF 'TempPartition' 'claude-code/p-r' 'RUNTIME_NOT_DIAGNOSED') + @(& $gF 'TempPartition' 'claude-code/p-m' 'RUNTIME_NOT_DIAGNOSED' @((& $gE 'FILE_HELD_OPEN' 'garbage' 'handles')))
+        $rg = Get-AtmDependencyGraph -Findings $rf -Collection $c -LegacySnapshot (& $gLegacy $gBase) -Partitions @((& $gPart 'r' @('not a reference'))) -PartitionKeyFunction $gKf -Coverage $gCovAll
+        Assert-True ((& $gSum $rg 'claude-code/p-r').Dependency -ceq 'UNKNOWN' -and @((& $gSum $rg 'claude-code/p-r').Reasons) -ccontains 'REFERENCE_UNREADABLE' -and (& $gSum $rg 'claude-code/p-m').Dependency -ceq 'UNKNOWN' -and $rg.Coverage.Status -ceq 'PARTIAL' -and @($rg.Coverage.Reasons) -ccontains 'REFERENCE_UNREADABLE') 'referencia ou detalhe ilegivel: UNKNOWN, declarado'
+        $nk = Get-AtmDependencyGraph -Findings @(& $gF 'TempPartition' 'claude-code/p-r' 'RUNTIME_NOT_DIAGNOSED') -Collection $c -LegacySnapshot (& $gLegacy $gBase) -Partitions @((& $gPart 'r')) -PartitionKeyFunction $null -Coverage $gCovAll
+        Assert-True ((& $gSum $nk 'claude-code/p-r').Dependency -ceq 'UNKNOWN' -and @((& $gSum $nk 'claude-code/p-r').Reasons) -ccontains 'REFERENCE_UNREADABLE') 'sem funcao de chave: referencias nao lidas, nunca NONE_OBSERVED'
+        # Worst record per collector: a later COMPLETE does not hide an earlier FAILED.
+        $wc = @((New-AtmCoverage -Collector 'handles' -Status 'FAILED' -Reasons @('QUERY_FAILED'))) + @($gCovAll)
+        $wg = Get-AtmDependencyGraph -Findings $f -Collection $c -LegacySnapshot (& $gLegacy $gBase) -Partitions $parts -PartitionKeyFunction $gKf -Coverage $wc
+        Assert-True ((& $gSum $wg 'claude-code/p-d').Dependency -ceq 'UNKNOWN' -and @((& $gSum $wg 'claude-code/p-d').IncompleteCoverage) -ccontains 'handles') 'pior registro do coletor: FAILED prevalece sobre COMPLETE'
+        # A provider next to an ambiguous attribution: never a DIRECT edge.
+        $af = @(& $gF 'Process' $kd 'AGENT_DESCENDANT' @((& $gE 'PROVIDER_ATTRIBUTION_AMBIGUOUS' 'claude-code,claude-desktop')) 'claude-code')
+        $ae = & $gEdges (Get-AtmDependencyGraph -Findings $af -Collection $c -Coverage $gCovAll)
+        Assert-True ($ae -contains ('ATTRIBUTED_TO|' + $kd + '|claude-code|AMBIGUOUS') -and $ae -contains ('ATTRIBUTED_TO|' + $kd + '|claude-desktop|AMBIGUOUS') -and @($ae | Where-Object { $_ -like 'ATTRIBUTED_TO|*|DIRECT' }).Count -eq 0) 'atribuicao ambigua com provider: nenhuma aresta DIRECT'
     }
     Test-Case 'Grafo' 'P4-A: escala - milhares de processos, particoes e arestas em tempo e memoria limitados (sem O(N^2))' {
         $rows = New-Object System.Collections.Generic.List[object]; $f = New-Object System.Collections.Generic.List[object]; $parts = New-Object System.Collections.Generic.List[object]

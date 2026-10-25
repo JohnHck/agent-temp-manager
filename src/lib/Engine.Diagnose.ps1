@@ -3647,7 +3647,7 @@ $script:AtmGraphStrengths = @('DIRECT', 'ANCESTOR', 'AMBIGUOUS')
 # ambiguous evidence), NONE_OBSERVED (no edge and every relevant collector conclusive), UNKNOWN (anything else).
 $script:AtmGraphDependencies = @('DEPENDENCY_OBSERVED', 'ANCESTOR_REFERENCE', 'DEPENDENCY_AMBIGUOUS', 'NONE_OBSERVED', 'UNKNOWN')
 $script:AtmGraphReasonCodes = @('GRAPH_NODE_LIMIT', 'GRAPH_EDGE_LIMIT', 'GRAPH_DEPTH_LIMIT', 'GRAPH_TIME_LIMIT', 'GRAPH_PROCESS_SNAPSHOT_UNAVAILABLE', 'GRAPH_LEGACY_SNAPSHOT_UNAVAILABLE',
-    'REFERENCE_IDENTITY_UNVERIFIED', 'KEY_COLLISION', 'HOLDERS_CAPPED', 'COVERAGE_INCOMPLETE')
+    'REFERENCE_IDENTITY_UNVERIFIED', 'REFERENCE_UNREADABLE', 'KEY_COLLISION', 'HOLDERS_CAPPED', 'COVERAGE_INCOMPLETE', 'GRAPH_LIMIT')
 $script:AtmGraphEdgeEvidenceCodes = @('PATH_REFERENCE_DIRECT', 'PATH_REFERENCE_ANCESTOR', 'PATH_REFERENCE_AMBIGUOUS', 'PARENT_LINK_VERIFIED', 'SERVICE_PROCESS_VERIFIED', 'SESSION_PROCESS_KEY',
     'FILE_HELD_OPEN', 'FILE_HELD_OPEN_UNVERIFIED', 'WORKING_DIRECTORY_IN', 'IN_REPOSITORY', 'WORKTREE_REGISTERED', 'WORKTREE_MAIN', 'PROVIDER_ATTRIBUTION', 'PROVIDER_ATTRIBUTION_AMBIGUOUS')
 # Collectors whose coverage a "nothing observed" summary needs (any other status keeps it UNKNOWN).
@@ -3674,26 +3674,36 @@ function Get-AtmDependencyGraph {
     $edges = @{}          # "Relation|FromKind|From|ToKind|To" -> edge
     $byTo = @{}           # "Kind|Key" -> list of edge ids
     $byFrom = @{}
-    $ctr = @{ Dropped = 0 }
+    $ctr = @{ Dropped = 0; TimedOut = $false }
     $rank = @{ 'DIRECT' = 0; 'ANCESTOR' = 1; 'AMBIGUOUS' = 2 }
     $dropped = 0
     $limitHit = $false
     $finding = @{}        # "Kind|Key" -> finding
-    $byKind = @{}         # Kind -> list of "Kind|Key
+    $allOf = @{}          # "Kind|Key" -> every finding with that key (a duplicate is a collision; its evidence still counts)
+    $byKind = @{}         # Kind -> "Kind|Key" in ordinal order
     $self = @{}
     $collided = @{}
+    $unread = @{}         # "Kind|Key" -> evidence of the item that could not be read (blocks NONE_OBSERVED)
     foreach ($f in @($Findings | Where-Object { $null -ne $_ })) {
         $nk = [string]$f.Kind + '|' + [string]$f.Key
-        if ($finding.ContainsKey($nk)) { $collided[$nk] = $true; continue }
-        $finding[$nk] = $f
         if ($f.Kind -ceq 'Process' -and $f.State -ceq 'SELF') { $self[[string]$f.Key] = $true }
         foreach ($ce in @($f.Evidence)) { if ($ce.Code -ceq 'PARTITION_KEY_COLLISION' -or $ce.Code -ceq 'VM_KEY_COLLISION' -or $ce.Code -ceq 'SESSION_KEY_COLLISION') { $collided[$nk] = $true } }
-        if (-not $byKind.ContainsKey([string]$f.Kind)) { $byKind[[string]$f.Kind] = [System.Collections.Generic.List[string]]::new() }
-        $byKind[[string]$f.Kind].Add($nk)
+        if ($finding.ContainsKey($nk)) { $collided[$nk] = $true; $allOf[$nk].Add($f); continue }
+        $finding[$nk] = $f
+        $allOf[$nk] = [System.Collections.Generic.List[object]]::new(); $allOf[$nk].Add($f)
+    }
+    # Every loop runs in this order, so the items kept under a limit do not depend on the input order (and not on the
+    # hash order of a hashtable, which differs between processes in PowerShell 7).
+    $fkeys = [string[]]@($finding.Keys)
+    [Array]::Sort($fkeys, [StringComparer]::Ordinal)
+    foreach ($nk in $fkeys) {
+        $kd = [string]$finding[$nk].Kind
+        if (-not $byKind.ContainsKey($kd)) { $byKind[$kd] = [System.Collections.Generic.List[string]]::new() }
+        $byKind[$kd].Add($nk)
     }
     # The time limit is checked every 256 iterations ($tick), not on each one.
     $tick = 0
-    $timeUp = { if ($sw.ElapsedMilliseconds -gt $MaxMs) { if (-not $reasons.Contains('GRAPH_TIME_LIMIT')) { $reasons.Add('GRAPH_TIME_LIMIT') }; return $true }; return $false }
+    $timeUp = { if ($ctr.TimedOut) { return $true }; if ($sw.ElapsedMilliseconds -gt $MaxMs) { $ctr.TimedOut = $true; if (-not $reasons.Contains('GRAPH_TIME_LIMIT')) { $reasons.Add('GRAPH_TIME_LIMIT') }; return $true }; return $false }
     $addNode = {
         param([string]$Kind, [string]$Key)
         $nk = $Kind + '|' + $Key
@@ -3704,7 +3714,9 @@ function Get-AtmDependencyGraph {
     }
     $addEdge = {
         param([string]$Relation, [string]$FromKind, [string]$From, [string]$ToKind, [string]$To, [string]$Strength, [string]$Code, [string]$Collector, [string]$Detail)
+        # The tool's own process is not a dependency of anything (SELF is left out on purpose, not counted).
         if ($FromKind -ceq 'Process' -and $self.ContainsKey($From)) { return }
+        if ($FromKind -ceq 'Process' -and $From.StartsWith($script:AtmUnverifiedKeyPrefix, [StringComparison]::Ordinal)) { $Strength = 'AMBIGUOUS' }
         $id = $Relation + '|' + $FromKind + '|' + $From + '|' + $ToKind + '|' + $To
         if (-not $edges.ContainsKey($id)) {
             if ($edges.Count -ge $MaxEdges) { $ctr.Dropped++; if (-not $reasons.Contains('GRAPH_EDGE_LIMIT')) { $reasons.Add('GRAPH_EDGE_LIMIT') }; return }
@@ -3720,7 +3732,7 @@ function Get-AtmDependencyGraph {
         $sig = $Code + '|' + $Collector + '|' + $Detail
         if (-not $e.Seen.ContainsKey($sig)) { $e.Seen[$sig] = $true; $e.Evidence.Add([pscustomobject]@{ Code = $Code; Collector = $Collector; Detail = $(if ($Detail) { $Detail } else { $null }) }) }
     }
-    foreach ($nk in @($finding.Keys)) {
+    foreach ($nk in $fkeys) {
         if ($nodes.Count -ge $MaxNodes) { if (-not $reasons.Contains('GRAPH_NODE_LIMIT')) { $reasons.Add('GRAPH_NODE_LIMIT') }; break }
         $nodes[$nk] = [pscustomobject]@{ Kind = [string]$finding[$nk].Kind; Key = [string]$finding[$nk].Key; Finding = $true }
     }
@@ -3731,7 +3743,7 @@ function Get-AtmDependencyGraph {
     if ($null -eq $Collection -or $Collection.Failed) { $reasons.Add('GRAPH_PROCESS_SNAPSHOT_UNAVAILABLE') }
     else {
         foreach ($nk in (& $listOf 'Process')) {
-            if ((++$tick % 256) -eq 0 -and (& $timeUp)) { break }
+            if ($ctr.TimedOut -or ((++$tick % 256) -eq 0 -and (& $timeUp))) { break }
             $f = $finding[$nk]; $k = [string]$f.Key
             if ($self.ContainsKey($k) -or $k -notmatch '^(\d{1,10})@') { continue }
             $id = [long]$Matches[1]
@@ -3753,14 +3765,28 @@ function Get-AtmDependencyGraph {
     $parts = @($Partitions | Where-Object { $null -ne $_ -and [string](Get-AtmHintProperty -Item $_ -Name 'Kind') -cne 'NotScanned' })
     if ($parts.Count -gt 0 -and ($null -eq $LegacySnapshot -or $LegacySnapshot.Failed)) { $reasons.Add('GRAPH_LEGACY_SNAPSHOT_UNAVAILABLE') }
     $resolved = @{}
-    foreach ($part in $parts) {
-        if ((++$tick % 256) -eq 0 -and (& $timeUp)) { break }
-        if ($null -eq $PartitionKeyFunction) { break }
-        $pkey = [string](& $PartitionKeyFunction ([string]$part.Provider) ([string]$part.Path))
+    $refsUnread = $false
+    $partKeys = [System.Collections.Generic.List[string]]::new(); $partRows = [System.Collections.Generic.List[object]]::new()
+    if ($parts.Count -gt 0 -and $null -eq $PartitionKeyFunction) { $refsUnread = $true; $reasons.Add('REFERENCE_UNREADABLE') }
+    elseif ($parts.Count -gt 0) {
+        # The sort key includes the path only in memory, to order partitions that share a key (a collision).
+        foreach ($part in $parts) { $pk0 = [string](& $PartitionKeyFunction ([string]$part.Provider) ([string]$part.Path)); $partKeys.Add($pk0 + '|' + [string]$part.Provider + '|' + [string]$part.Path); $partRows.Add([pscustomobject]@{ Key = $pk0; Part = $part }) }
+    }
+    $pks = $partKeys.ToArray(); $prs = $partRows.ToArray()
+    if ($prs.Count -gt 1) { [Array]::Sort([Array]$pks, [Array]$prs, [Collections.IComparer][StringComparer]::Ordinal) }
+    foreach ($pr in $prs) {
+        if ($ctr.TimedOut -or ((++$tick % 256) -eq 0 -and (& $timeUp))) { break }
+        $part = $pr.Part; $pkey = $pr.Key
         foreach ($spec in @(@('DirectRefs', 'DIRECT', 'PATH_REFERENCE_DIRECT'), @('AncestorRefs', 'ANCESTOR', 'PATH_REFERENCE_ANCESTOR'), @('AmbiguousRefs', 'AMBIGUOUS', 'PATH_REFERENCE_AMBIGUOUS'))) {
-            foreach ($ref in @(Get-AtmHintProperty -Item $part -Name $spec[0])) {
+            $refs = [string[]]@(foreach ($r0 in @(Get-AtmHintProperty -Item $part -Name $spec[0])) { if ($null -ne $r0) { $r0 } })
+            if ($refs.Count -gt 1) { [Array]::Sort($refs, [StringComparer]::Ordinal) }
+            foreach ($ref in $refs) {
                 # The reference text (an image name and a path tail) is read here only for its PID.
-                if (-not ([string]$ref -match $script:AtmPathReferencePattern)) { continue }
+                if (-not ([string]$ref -match $script:AtmPathReferencePattern)) {
+                    $unread['TempPartition|' + $pkey] = $true
+                    if (-not $reasons.Contains('REFERENCE_UNREADABLE')) { $reasons.Add('REFERENCE_UNREADABLE') }
+                    continue
+                }
                 $rpid = [long]$Matches[1]
                 if (-not $resolved.ContainsKey($rpid)) {
                     $from = $null
@@ -3781,15 +3807,24 @@ function Get-AtmDependencyGraph {
     }
 
     # Evidence on findings: services, sessions, handles, working directories, worktrees, attribution.
-    foreach ($nk in @($finding.Keys)) {
-        if ((++$tick % 256) -eq 0 -and (& $timeUp)) { break }
-        $f = $finding[$nk]; $k = [string]$f.Key; $kind = [string]$f.Kind
+    $verifiedKey = '^\d{1,10}@\d{1,19}$'
+    $holder = { param([string]$Kind) $Kind -ceq 'TempPartition' -or $Kind -ceq 'Worktree' }
+    foreach ($nk in $fkeys) {
+      if ($ctr.TimedOut) { break }
+      foreach ($f in $allOf[$nk]) {
+        if ($ctr.TimedOut -or ((++$tick % 256) -eq 0 -and (& $timeUp))) { break }
+        $k = [string]$f.Key; $kind = [string]$f.Kind
         foreach ($e in @($f.Evidence)) {
             $d = [string]$e.Detail
+            # Evidence of a holder kind whose detail is not a process key cannot become an edge: recorded, never dropped silently.
+            if (@('FILE_HELD_OPEN', 'FILE_HELD_OPEN_UNVERIFIED', 'WORKING_DIRECTORY_IN') -ccontains $e.Code -and (& $holder $kind) -and -not (& $isProcKey $d) -and -not ($d -cmatch '^pid:\d{1,10}$') -and -not ($e.Code -ceq 'FILE_HELD_OPEN_UNVERIFIED' -and $d -ceq 'HOLDERS_CAPPED')) {
+                $unread[$nk] = $true
+                if (-not $reasons.Contains('REFERENCE_UNREADABLE')) { $reasons.Add('REFERENCE_UNREADABLE') }
+            }
             switch ($e.Code) {
-                'SERVICE_PROCESS_VERIFIED' { if ($kind -ceq 'Service' -and (& $isProcKey $d)) { & $addEdge 'HOSTS_SERVICE' 'Process' $d 'Service' $k 'DIRECT' 'SERVICE_PROCESS_VERIFIED' 'process-snapshot' $d } }
+                'SERVICE_PROCESS_VERIFIED' { if ($kind -ceq 'Service' -and $d -cmatch $verifiedKey) { & $addEdge 'HOSTS_SERVICE' 'Process' $d 'Service' $k 'DIRECT' 'SERVICE_PROCESS_VERIFIED' 'process-snapshot' $d } }
                 'SESSION_PROCESS_KEY' { if ($kind -ceq 'AgentSession' -and $f.State -ceq 'LIVE' -and $d -cmatch '^\d{1,10}@\d{1,19}$') { & $addEdge 'RUNS_SESSION' 'Process' $d 'AgentSession' $k 'DIRECT' 'SESSION_PROCESS_KEY' ([string]$e.Collector) $d } }
-                'FILE_HELD_OPEN' { if (($kind -ceq 'TempPartition' -or $kind -ceq 'Worktree') -and $d -cmatch '^\d{1,10}@\d{1,19}$') { & $addEdge 'HOLDS_HANDLE_IN' 'Process' $d $kind $k 'DIRECT' 'FILE_HELD_OPEN' 'handles' $d } }
+                'FILE_HELD_OPEN' { if (($kind -ceq 'TempPartition' -or $kind -ceq 'Worktree') -and (& $isProcKey $d)) { & $addEdge 'HOLDS_HANDLE_IN' 'Process' $d $kind $k 'DIRECT' 'FILE_HELD_OPEN' 'handles' $d } }
                 'FILE_HELD_OPEN_UNVERIFIED' { if (($kind -ceq 'TempPartition' -or $kind -ceq 'Worktree') -and $d -cmatch '^pid:\d{1,10}$') { & $addEdge 'HOLDS_HANDLE_IN' 'Process' $d $kind $k 'AMBIGUOUS' 'FILE_HELD_OPEN_UNVERIFIED' 'handles' $d } }
                 # No collector produces this in V0.2 (D-1 DEFERRED); fixtures only.
                 'WORKING_DIRECTORY_IN' { if (($kind -ceq 'TempPartition' -or $kind -ceq 'Worktree') -and (& $isProcKey $d)) { & $addEdge 'WORKING_DIRECTORY_IN' 'Process' $d $kind $k $(if ($d -cmatch '@') { 'DIRECT' } else { 'AMBIGUOUS' }) 'WORKING_DIRECTORY_IN' 'process-cwd' $d } }
@@ -3803,13 +3838,12 @@ function Get-AtmDependencyGraph {
             }
         }
         if (@('Process', 'AgentSession', 'Service', 'VirtualMachine') -ccontains $kind -and -not ($kind -ceq 'Process' -and $self.ContainsKey($k))) {
-            if ($f.Provider) { & $addEdge 'ATTRIBUTED_TO' $kind $k 'Provider' ([string]$f.Provider) 'DIRECT' 'PROVIDER_ATTRIBUTION' 'diagnose' $null }
-            foreach ($a in @($f.Evidence)) {
-                if ($a.Code -cne 'PROVIDER_ATTRIBUTION_AMBIGUOUS') { continue }
-                # An ambiguous attribution is one AMBIGUOUS edge per provider, never an exclusive one (P2-C D2).
-                foreach ($pv in ([string]$a.Detail).Split(',')) { if ($pv) { & $addEdge 'ATTRIBUTED_TO' $kind $k 'Provider' $pv 'AMBIGUOUS' 'PROVIDER_ATTRIBUTION_AMBIGUOUS' 'diagnose' $null } }
-            }
+            $amb = @(foreach ($a in @($f.Evidence)) { if ($a.Code -ceq 'PROVIDER_ATTRIBUTION_AMBIGUOUS') { foreach ($pv in ([string]$a.Detail).Split(',')) { if ($pv) { $pv } } } })
+            # An ambiguous attribution is one AMBIGUOUS edge per provider and never a DIRECT one, even next to a provider (P2-C D2).
+            if ($amb.Count -gt 0) { foreach ($pv in $amb) { & $addEdge 'ATTRIBUTED_TO' $kind $k 'Provider' $pv 'AMBIGUOUS' 'PROVIDER_ATTRIBUTION_AMBIGUOUS' 'diagnose' $null } }
+            elseif ($f.Provider) { & $addEdge 'ATTRIBUTED_TO' $kind $k 'Provider' ([string]$f.Provider) 'DIRECT' 'PROVIDER_ATTRIBUTION' 'diagnose' $null }
         }
+      }
     }
     # The time limit is also checked once at the end of the edge phase (a small graph never reaches tick 256).
     $null = & $timeUp
@@ -3818,31 +3852,35 @@ function Get-AtmDependencyGraph {
 
     # Summaries: TempPartition and Worktree findings. Upward walk through PARENT_OF (bounded, visited set) to the agent
     # roots of each source process.
-    $covBy = @{}; foreach ($c in @($Coverage | Where-Object { $null -ne $_ })) { $covBy[[string]$c.Collector] = $c }
+    # A collector with several records counts by its worst one (one non-conclusive record is enough to block absence).
+    $covBy = @{}
+    foreach ($c in @($Coverage | Where-Object { $null -ne $_ })) {
+        $ck = [string]$c.Collector
+        if (-not $covBy.ContainsKey($ck) -or ($script:AtmConclusiveCoverage -ccontains [string]$covBy[$ck].Status -and $script:AtmConclusiveCoverage -cnotcontains [string]$c.Status)) { $covBy[$ck] = $c }
+    }
     $summaries = New-Object System.Collections.Generic.List[object]
     # The relevant collectors are the same for every item of a kind: computed once.
     $incompleteBy = @{}
     foreach ($kd in @($script:AtmGraphRelevantCollectors.Keys)) { $incompleteBy[$kd] = @(Get-AtmOrdinalSorted -Items @($script:AtmGraphRelevantCollectors[$kd] | Where-Object { -not $covBy.ContainsKey($_) -or $script:AtmConclusiveCoverage -cnotcontains [string]$covBy[$_].Status }) -Signature { param($x) $x }) }
     $sumKeys = [System.Collections.Generic.List[string]]::new()
     foreach ($kd in @('TempPartition', 'Worktree')) { if ($byKind.ContainsKey($kd)) { $sumKeys.AddRange($byKind[$kd]) } }
+    $pending = [System.Collections.Generic.List[object]]::new()
     foreach ($nk in $sumKeys) {
-        $f = $finding[$nk]; $kind = [string]$f.Kind
+        $f = $finding[$nk]
         $sr = [System.Collections.Generic.List[string]]::new()
         $incoming = [System.Collections.Generic.List[object]]::new()
         if ($byTo.ContainsKey($nk)) { foreach ($id in $byTo[$nk]) { $e = $edges[$id]; if ($e.Relation -ceq 'REFERENCES_PATH' -or $e.Relation -ceq 'HOLDS_HANDLE_IN' -or $e.Relation -ceq 'WORKING_DIRECTORY_IN') { $incoming.Add($e) } } }
         $best = $null
-        foreach ($e in $incoming) {
-            # Strength of a source: the edge itself; a source without a verified identity is AMBIGUOUS whatever the edge.
-            $s = $(if ($e.From.StartsWith($script:AtmUnverifiedKeyPrefix, [StringComparison]::Ordinal)) { 'AMBIGUOUS' } else { $e.Strength })
-            if ($null -eq $best -or $rank[$s] -lt $rank[$best]) { $best = $s }
-        }
-        foreach ($he in @($f.Evidence)) { if ($he.Code -ceq 'FILE_HELD_OPEN_UNVERIFIED' -and [string]$he.Detail -ceq 'HOLDERS_CAPPED' -and -not $sr.Contains('HOLDERS_CAPPED')) { $sr.Add('HOLDERS_CAPPED'); if ($null -eq $best) { $best = 'AMBIGUOUS' } } }
-        # Agent roots: walk PARENT_OF upward from every verified source process.
+        foreach ($e in $incoming) { if ($null -eq $best -or $rank[$e.Strength] -lt $rank[$best]) { $best = $e.Strength } }
+        foreach ($hf in $allOf[$nk]) { foreach ($he in @($hf.Evidence)) { if ($he.Code -ceq 'FILE_HELD_OPEN_UNVERIFIED' -and [string]$he.Detail -ceq 'HOLDERS_CAPPED' -and -not $sr.Contains('HOLDERS_CAPPED')) { $sr.Add('HOLDERS_CAPPED'); if ($null -eq $best) { $best = 'AMBIGUOUS' } } } }
+        # Agent roots: PARENT_OF upward only from the DIRECT sources (a verified identity), so a root is never stronger
+        # than the chain that leads to it; ancestor and ambiguous sources give no root.
         $roots = [System.Collections.Generic.List[string]]::new()
         foreach ($e in $incoming) {
-            if ($e.From.IndexOf('@') -lt 0) { continue }
+            if ($e.Strength -cne 'DIRECT' -or -not ($e.From -cmatch $verifiedKey)) { continue }
             $cur = $e.From; $visited = @{}; $depth = 0
             while ($true) {
+                if ($ctr.TimedOut -or ((++$tick % 256) -eq 0 -and (& $timeUp))) { $limitHit = $true; break }
                 if ($visited.ContainsKey($cur)) { break }
                 $visited[$cur] = $true
                 $pf = $finding['Process|' + $cur]
@@ -3855,20 +3893,29 @@ function Get-AtmDependencyGraph {
                 $cur = $next
             }
         }
+        $rootArr = $roots.ToArray()
+        if ($rootArr.Count -gt 1) { [Array]::Sort($rootArr, [StringComparer]::Ordinal) }
+        $pending.Add([pscustomobject]@{ Key = $nk; Finding = $f; Best = $best; Incoming = $incoming.Count; Roots = $rootArr; Reasons = $sr })
+    }
+    # Decision, with every limit known: a positive source stays; absence needs every relevant collector conclusive, no
+    # graph limit and nothing unreadable; anything else is UNKNOWN with the reasons that stopped it.
+    foreach ($pd in $pending) {
+        $f = $pd.Finding; $kind = [string]$f.Kind; $sr = $pd.Reasons; $best = $pd.Best
         $incomplete = $incompleteBy[$kind]
         $dep = 'UNKNOWN'
-        if ($collided.ContainsKey($nk)) { $sr.Add('KEY_COLLISION') }
+        if ($collided.ContainsKey($pd.Key)) { $sr.Add('KEY_COLLISION'); $best = $null }
         elseif ($best -ceq 'DIRECT') { $dep = 'DEPENDENCY_OBSERVED' }
         elseif ($best -ceq 'ANCESTOR') { $dep = 'ANCESTOR_REFERENCE' }
         elseif ($best -ceq 'AMBIGUOUS') { $dep = 'DEPENDENCY_AMBIGUOUS' }
-        elseif ($incomplete.Count -eq 0 -and -not $limitHit) { $dep = 'NONE_OBSERVED' }
-        else { $sr.Add('COVERAGE_INCOMPLETE') }
-        if ($collided.ContainsKey($nk)) { $best = $null }
-        $summaries.Add([pscustomobject]@{ Kind = $kind; Key = [string]$f.Key; Dependency = $dep; Strength = $best; Incoming = $incoming.Count
-                Roots = $(if ($roots.Count -gt 1) { @(Get-AtmOrdinalSorted -Items $roots.ToArray() -Signature { param($x) $x }) } else { $roots.ToArray() }); IncompleteCoverage = @($incomplete); Reasons = $(if ($sr.Count -gt 1) { @(Get-AtmSortedCodes $sr) } else { $sr.ToArray() }) })
+        else {
+            if ($incomplete.Count -gt 0) { $sr.Add('COVERAGE_INCOMPLETE') }
+            if ($limitHit) { $sr.Add('GRAPH_LIMIT') }
+            if ($unread.ContainsKey($pd.Key) -or ($refsUnread -and $kind -ceq 'TempPartition')) { $sr.Add('REFERENCE_UNREADABLE') }
+            if ($sr.Count -eq 0) { $dep = 'NONE_OBSERVED' }
+        }
+        $summaries.Add([pscustomobject]@{ Kind = $kind; Key = [string]$f.Key; Dependency = $dep; Strength = $best; Incoming = $pd.Incoming
+                Roots = [string[]]@($pd.Roots); IncompleteCoverage = [string[]]@($incomplete); Reasons = [string[]]@(Get-AtmSortedCodes $sr) })
     }
-    # A limit that was hit: no summary may say that nothing was observed.
-    if ($limitHit) { foreach ($s in $summaries) { if ($s.Dependency -ceq 'NONE_OBSERVED') { $s.Dependency = 'UNKNOWN' } } }
     $sw.Stop()
     # The [Array]/IComparer casts select the non-generic keys/items overload: the generic one sorts a converted copy of the items.
     # Ordinal order by the ids already built (Relation|FromKind|From|ToKind|To and Kind|Key): no per-item scriptblock.
@@ -3878,7 +3925,7 @@ function Get-AtmDependencyGraph {
         $e.Evidence = $(if ($e.Evidence.Count -gt 1) { @(Get-AtmOrdinalSorted -Items $e.Evidence.ToArray() -Signature { param($x) '{0}|{1}|{2}' -f $x.Code, $x.Collector, $x.Detail }) } else { $e.Evidence.ToArray() })
         $e.PSObject.Properties.Remove('Seen')
     }
-    $graphReasons = @(Get-AtmSortedCodes @($reasons | Where-Object { @('GRAPH_NODE_LIMIT', 'GRAPH_EDGE_LIMIT', 'GRAPH_DEPTH_LIMIT', 'GRAPH_TIME_LIMIT', 'GRAPH_PROCESS_SNAPSHOT_UNAVAILABLE', 'GRAPH_LEGACY_SNAPSHOT_UNAVAILABLE', 'REFERENCE_IDENTITY_UNVERIFIED') -ccontains $_ }))
+    $graphReasons = @(Get-AtmSortedCodes @($reasons | Where-Object { @('GRAPH_NODE_LIMIT', 'GRAPH_EDGE_LIMIT', 'GRAPH_DEPTH_LIMIT', 'GRAPH_TIME_LIMIT', 'GRAPH_PROCESS_SNAPSHOT_UNAVAILABLE', 'GRAPH_LEGACY_SNAPSHOT_UNAVAILABLE', 'REFERENCE_IDENTITY_UNVERIFIED', 'REFERENCE_UNREADABLE') -ccontains $_ }))
     $st = $(if ($graphReasons.Count -gt 0) { 'PARTIAL' } else { 'COMPLETE' })
     return [pscustomobject]@{
         Nodes     = (& $byId $nodes)
@@ -4232,7 +4279,10 @@ function Invoke-AtmDiagnoseRun {
 
     # Dependency graph (P4-A): correlation over the evidence above; no collector runs here.
     $graphKeyFn = $(if ($null -ne $PartitionKeyFunction) { $PartitionKeyFunction } else { { param($Provider, $Path) ConvertTo-AtmPartitionKey -Pseudonymizer $Pseudonymizer -Provider $Provider -Path $Path } })
-    $graph = Get-AtmDependencyGraph -Findings $findings.ToArray() -Collection $procCollection -LegacySnapshot $(if ($null -ne $inv) { $inv.Snapshot } else { $null }) -Partitions $(if ($null -ne $inv) { @($inv.Partitions) } else { @() }) -PartitionKeyFunction $graphKeyFn -Coverage $coverage.ToArray()
+    # The graph's time limit is also bounded by the run deadline (past it, GRAPH_TIME_LIMIT is declared at once).
+    $graphLeft = ($deadline - [datetime]::UtcNow).TotalMilliseconds
+    $graphMs = $(if ($graphLeft -le 0) { -1 } else { [int][Math]::Min([double]$script:AtmGraphMaxMs, $graphLeft) })
+    $graph = Get-AtmDependencyGraph -MaxMs $graphMs -Findings $findings.ToArray() -Collection $procCollection -LegacySnapshot $(if ($null -ne $inv) { $inv.Snapshot } else { $null }) -Partitions $(if ($null -ne $inv) { @($inv.Partitions) } else { @() }) -PartitionKeyFunction $graphKeyFn -Coverage $coverage.ToArray()
     $covArr = $coverage.ToArray()
     [pscustomobject]@{
         SchemaVersion    = $script:AtmDiagnoseSchema
