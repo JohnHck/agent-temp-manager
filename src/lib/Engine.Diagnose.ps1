@@ -4043,7 +4043,9 @@ function Set-AtmGraphFindingStates {
         } else {
             # ADR-0006 rule 14: IN_USE first; otherwise the worktree's own facts, and a no-dependency state only when the
             # graph observed nothing (New-AtmFinding then checks the attached coverage).
-            $state = $(if ($sm.Dependency -ceq 'DEPENDENCY_OBSERVED') { 'IN_USE' } elseif ($script:AtmNoDependencyStates -ccontains $requested -and $sm.Dependency -cne 'NONE_OBSERVED') { 'UNKNOWN' } else { $requested })
+            # An apparent orphan with ambiguous or ancestor evidence is UNKNOWN: ambiguous evidence never leaves an item
+            # looking free (LOCAL_WORK and UNPUBLISHED_COMMITS are reasons to keep it and stay).
+            $state = $(if ($sm.Dependency -ceq 'DEPENDENCY_OBSERVED') { 'IN_USE' } elseif ($script:AtmNoDependencyStates -ccontains $requested -and $sm.Dependency -cne 'NONE_OBSERVED') { 'UNKNOWN' } elseif ($requested -ceq 'APPARENT_ORPHAN' -and ($sm.Dependency -ceq 'DEPENDENCY_AMBIGUOUS' -or $sm.Dependency -ceq 'ANCESTOR_REFERENCE')) { 'UNKNOWN' } else { $requested })
         }
         $out.Add((New-AtmFinding -Kind $kind -Key ([string]$f.Key) -State $state -Evidence (@($f.Evidence) + @($ev.ToArray())) -Coverage $cov.ToArray() -Provider $f.Provider))
     }
@@ -4274,18 +4276,23 @@ function Invoke-AtmDiagnoseRun {
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $err = $null
         # Inventory failure: reported as INVENTORY_FAILED (exception type only); nothing is reported as absent.
+        $script:AtmDiscoveryGaps = @{}; $script:AtmDiscoveryRan = $false
         try { $inv = Invoke-AtmInventory @ia } catch { $err = $_.Exception.GetType().Name; $inv = $null }
         $sw.Stop()
         if ($null -eq $inv) {
             $coverage.Add((New-AtmCoverage -Collector 'inventory' -Status 'FAILED' -Reasons @('INVENTORY_FAILED', (ConvertTo-AtmExceptionCode $err)) -ElevationWouldHelp 'UNKNOWN' -StartedUtc $invStarted -ElapsedMs $sw.ElapsedMilliseconds))
             foreach ($c in @('processes', 'temp-profiles')) { $coverage.Add((New-AtmCoverage -Collector $c -Status 'FAILED' -Reasons @('INVENTORY_FAILED'))) }
             # An unreadable profile list fails the discovery itself (never an empty list of profiles).
-            $coverage.Add((New-AtmCoverage -Collector 'profile-discovery' -Status 'FAILED' -Reasons @($(if ($script:AtmDiscoveryGaps.ContainsKey('PROFILE_LIST_UNREADABLE')) { 'PROFILE_LIST_UNREADABLE' } else { 'INVENTORY_FAILED' })) -ElevationWouldHelp 'UNKNOWN'))
+            # Discovery that did not start (the inventory failed before it) is not observed, never a failure of its own.
+            if ($script:AtmDiscoveryGaps.ContainsKey('PROFILE_LIST_UNREADABLE')) { $coverage.Add((New-AtmCoverage -Collector 'profile-discovery' -Status 'FAILED' -Reasons @('PROFILE_LIST_UNREADABLE') -ElevationWouldHelp 'UNKNOWN')) }
+            elseif (-not $script:AtmDiscoveryRan) { $coverage.Add((New-AtmCoverage -Collector 'profile-discovery' -Status 'NOT_OBSERVABLE' -Reasons @('DISCOVERY_NOT_RUN', 'INVENTORY_FAILED') -ElevationWouldHelp 'UNKNOWN')) }
+            else { $coverage.Add((New-AtmCoverage -Collector 'profile-discovery' -Status 'FAILED' -Reasons @('INVENTORY_FAILED') -ElevationWouldHelp 'UNKNOWN')) }
         } else {
             $invCov = @(Get-AtmInventoryCoverage -Inventory $inv -Identity $identity -StartedUtc $invStarted -ElapsedMs $sw.ElapsedMilliseconds -OverDeadline ([datetime]::UtcNow -gt $deadline))
             foreach ($c in $invCov) { $coverage.Add($c) }
             # Temporary partitions: keyed pseudonyms, never the path (ADR-0010).
-            foreach ($f in @(Get-AtmPartitionFindings -Partitions @($inv.Partitions) -InventoryCoverage $invCov -Pseudonymizer $Pseudonymizer -KeyFunction $PartitionKeyFunction)) { $findings.Add($f) }
+            # A discovery gap (another profile not read) says nothing about a partition already found: not attached.
+            foreach ($f in @(Get-AtmPartitionFindings -Partitions @($inv.Partitions) -InventoryCoverage @($invCov | Where-Object { $_.Collector -cne 'profile-discovery' }) -Pseudonymizer $Pseudonymizer -KeyFunction $PartitionKeyFunction)) { $findings.Add($f) }
         }
     }
 

@@ -4373,10 +4373,10 @@ try {
         Assert-True ($null -eq @($d.Coverage | Where-Object { $_.Collector -eq 'inventory' })[0].BudgetMs) 'inventario V0.1 sem orcamento declarado (nao interrompivel)'
         $f = @($d.Findings | Where-Object { $_.Key -ceq (& $b4PKey $r1) })
         Assert-Eq $f.Count 1 'achado da particao (pela chave pseudonima)'
-        Assert-Eq $f[0].State 'RUNTIME_NOT_DIAGNOSED' 'estado'
+        Assert-Eq $f[0].State 'UNKNOWN' 'estado (P4-B: pelo grafo; arquivos abertos e diretorios de trabalho nao observaveis, nunca livre)'
         Assert-Eq $f[0].Provider 'claude-code' 'provider'
         Assert-Eq (@($f[0].Evidence | Where-Object { $_.Code -eq 'AUDIT_CLASS' })[0].Detail) (Find-Part $d.Inventory $r1).Class 'classe da auditoria como evidencia'
-        Assert-Eq (@($f[0].Coverage | ForEach-Object { $_.Collector }) -join ',') 'inventory,processes,temp-profiles' 'cobertura do achado'
+        Assert-Eq (@($f[0].Coverage | ForEach-Object { $_.Collector }) -join ',') 'inventory,processes,temp-profiles,dependency-graph,process-snapshot,handles,process-cwd' 'cobertura do achado (P4-B: as do inventario, a do grafo e as dos coletores relevantes)'
         $procs = New-Procs -Extra @([pscustomobject]@{ ProcessId = 4242; Name = 'other.exe'; ParentProcessId = 1; CommandLine = $null; CreationDate = (Get-Date).AddHours(-1) })
         $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs) -IdentitySource $diagIdUser
         $pc = @($d.Coverage | Where-Object { $_.Collector -eq 'processes' })[0]
@@ -6714,13 +6714,13 @@ try {
     $bGaps = { @($script:AtmDiscoveryGaps.Keys | Sort-Object) -join ',' }
 
     Test-Case 'Particoes' 'P4-B: grafo para achado - DIRECT vira IN_USE com proveniencia; ancestral, ambigua e sem arestas ficam UNKNOWN com o motivo; coletores bloqueados; NO_DEPENDENCY_OBSERVED so com cobertura conclusiva (verificada de novo pelo motor)' {
-        $f = @($gProcF) + @((& $bTp 'a'), (& $bTp 'b'), (& $bTp 'c'), (& $bTp 'd'))
+        $f = @($gProcF) + @((& $bTp 'a' @((& $gE 'AUDIT_CLASS' 'ORPHAN_SUSPECTED' 'inventory'), (& $gE 'AUDIT_FLAG' 'OTHER_USER' 'inventory'))), (& $bTp 'b'), (& $bTp 'c'), (& $bTp 'd'))
         $parts = @((& $gPart 'a' @('PID 102 (node.exe)')), (& $gPart 'b' @() @('PID 102 (node.exe) -> base')), (& $gPart 'c' @() @() @('PID 102 (node.exe) -> unresolved')), (& $gPart 'd'))
         $r = & $bState $f $bCovNo $parts
         $a = & $bFind $r 'claude-code/p-a'
         $k102 = & $gK 102 $b4T0.AddMinutes(2)
         Assert-True ($a.State -ceq 'IN_USE' -and (& $bEv $a 'GRAPH_SOURCE_DIRECT') -contains ('REFERENCES_PATH ' + $k102) -and (& $bEv $a 'GRAPH_AGENT_ROOT') -contains (& $gK 100 $b4T0) -and (& $bEv $a 'GRAPH_DEPENDENCY') -contains 'DEPENDENCY_OBSERVED') '1: referencia direta de processo verificado: IN_USE, fonte, raiz do agente'
-        Assert-True ((& $bEv $a 'AUDIT_CLASS').Count -eq 0 -and $a.Provider -ceq 'claude-code') 'provider e evidencias anteriores preservados'
+        Assert-True ((& $bEv $a 'AUDIT_CLASS') -ccontains 'ORPHAN_SUSPECTED' -and (& $bEv $a 'AUDIT_FLAG') -ccontains 'OTHER_USER' -and $a.Evidence[0].Code -ceq 'AUDIT_CLASS' -and $a.Provider -ceq 'claude-code') 'provider e evidencias anteriores (classe e flag V0.1) preservados, na mesma ordem'
         $b = & $bFind $r 'claude-code/p-b'
         Assert-True ($b.State -ceq 'UNKNOWN' -and (& $bEv $b 'GRAPH_DEPENDENCY') -contains 'ANCESTOR_REFERENCE' -and (& $bEv $b 'GRAPH_SOURCE_ANCESTOR').Count -eq 1 -and (& $bEv $b 'GRAPH_AGENT_ROOT').Count -eq 0) '2: referencia ancestral: UNKNOWN, nunca IN_USE, sem raiz'
         $c = & $bFind $r 'claude-code/p-c'
@@ -6744,6 +6744,8 @@ try {
         Assert-Eq (& $bFind $r 'wt/w-1').State 'IN_USE' '6: worktree com arquivo aberto (fixture) por processo verificado: IN_USE (regra 14, primeiro)'
         Assert-True ((& $bFind $r 'wt/w-2').State -ceq 'LOCAL_WORK' -and (& $bEv (& $bFind $r 'wt/w-2') 'GRAPH_DEPENDENCY') -contains 'DEPENDENCY_AMBIGUOUS') '7: identidade inconclusiva: fatos proprios mantidos, nunca IN_USE'
         Assert-Eq (& $bFind $r 'wt/w-3').State 'UNKNOWN' '7: evidencia ambigua bloqueia o estado sem dependencia (CLEAN_AND_PUBLISHED_UNKNOWN vira UNKNOWN)'
+        $ro = & $bState (@($gProcF) + @(& $gF 'Worktree' 'wt/w-4' 'APPARENT_ORPHAN' @((& $gE 'FILE_HELD_OPEN_UNVERIFIED' 'pid:9' 'handles')))) $gCovAll
+        Assert-Eq (& $bFind $ro 'wt/w-4').State 'UNKNOWN' '7: orfao aparente com evidencia ambigua: UNKNOWN (nunca parece livre)'
         # 8: a reference by a PID whose creation time differs in the snapshot (reused PID): never IN_USE.
         $legacy = & $gLegacy @((& $b4Row 102 101 'node.exe' $b4T0.AddMinutes(-90)))
         $g8 = Get-AtmDependencyGraph -Findings (@($gProcF) + @(& $bTp 'r')) -Collection (& $gRows $gBase) -LegacySnapshot $legacy -Partitions @((& $gPart 'r' @('PID 102 (node.exe)'))) -PartitionKeyFunction $gKf -Coverage $gCovAll
@@ -6758,10 +6760,10 @@ try {
         $r9f = & $bState $f9 $gCovAll @((& $gPart 's' @('PID 400 (atm.exe)'))) $rows9
         Assert-Eq (& $bFind $r9f 'claude-code/p-s').State 'NO_DEPENDENCY_OBSERVED' '9: o proprio diagnostico nunca e dependencia (como na V0.1): com cobertura conclusiva em fixture, nenhuma dependencia'
         # 10: the referencing process has an ambiguous attribution: the partition is in use by that process, no provider is claimed.
-        $f10 = @((& $gF 'Process' (& $gK 100 $b4T0) 'AGENT_PROCESS' @((& $gE 'PROVIDER_ATTRIBUTION_AMBIGUOUS' 'claude-code,claude-desktop'))), (& $gF 'Process' $k101 'AGENT_DESCENDANT'), (& $gF 'Process' (& $gK 102 $b4T0.AddMinutes(2)) 'AGENT_DESCENDANT'), (& $gF 'TempPartition' 'claude-code/p-q' 'RUNTIME_NOT_DIAGNOSED'))
+        $f10 = @((& $gF 'Process' (& $gK 100 $b4T0) 'AGENT_PROCESS' @((& $gE 'PROVIDER_ATTRIBUTION_AMBIGUOUS' 'claude-code,claude-desktop'))), (& $gF 'Process' $k101 'AGENT_DESCENDANT'), (& $gF 'Process' (& $gK 102 $b4T0.AddMinutes(2)) 'AGENT_DESCENDANT'), (& $gF 'TempPartition' 'claude-code/p-q' 'RUNTIME_NOT_DIAGNOSED' @() 'claude-code'))
         $r10 = & $bState $f10 $gCovAll @((& $gPart 'q' @('PID 102 (node.exe)')))
         $q = & $bFind $r10 'claude-code/p-q'
-        Assert-True ($q.State -ceq 'IN_USE' -and [string]::IsNullOrEmpty([string]$q.Provider) -and -not (@($q.Evidence | ForEach-Object { [string]$_.Detail }) -join ' ').Contains('claude-desktop') -and @($r10.Graph.Edges | Where-Object { $_.Relation -ceq 'ATTRIBUTED_TO' -and $_.Strength -ceq 'DIRECT' }).Count -eq 0) '10: atribuicao ambigua: nenhum provider exclusivo na particao nem no grafo'
+        Assert-True ($q.State -ceq 'IN_USE' -and $q.Provider -ceq 'claude-code' -and -not (@($q.Evidence | ForEach-Object { [string]$_.Detail }) -join ' ').Contains('claude-desktop') -and @($r10.Graph.Edges | Where-Object { $_.Relation -ceq 'ATTRIBUTED_TO' -and $_.Strength -ceq 'DIRECT' }).Count -eq 0) '10: atribuicao ambigua: nenhum provider exclusivo na particao nem no grafo'
         # 11: CoworkVMService with its verified process and no VM: nothing reaches a partition.
         $svc = & $gF 'Service' 'claude-desktop/CoworkVMService' 'RUNNING' @((& $gE 'SERVICE_PROCESS_VERIFIED' $k101 'services')) 'claude-desktop'
         $r11 = & $bState (@($gProcF) + @($svc, (& $bTp 'v'))) $bCovNo @((& $gPart 'v'))
@@ -6816,10 +6818,14 @@ try {
         $ok = Get-AtmProfileDiscoveryCoverage -Inventory ([pscustomobject]@{ Profiles = @(); DiscoveryStatus = [pscustomobject]@{ Overridden = $false; Gaps = @() } }) -Identity ([pscustomobject]@{ IsElevatedAdministrator = $false })
         $na = Get-AtmProfileDiscoveryCoverage -Inventory ([pscustomobject]@{ Profiles = @() }) -Identity ([pscustomobject]@{ IsElevatedAdministrator = $false })
         Assert-True ($ok.Status -ceq 'COMPLETE' -and @($ok.Reasons).Count -eq 0 -and $na.Status -ceq 'NOT_OBSERVABLE') 'descoberta sem lacunas: COMPLETE; sem estado: NOT_OBSERVABLE (nunca completa por omissao)'
-        # Default source: the same objects as the real registry read (read-only).
+        # Without -Source the discovery reads the real registry through New-AtmProfileSource (read-only): same result.
         $d1 = ConvertTo-Json -InputObject @(Get-AtmProfiles -Identity $null) -Depth 4; $g1 = & $bGaps
         $d2 = ConvertTo-Json -InputObject @(Get-AtmProfiles -Identity $null -Source (New-AtmProfileSource)) -Depth 4; $g2 = & $bGaps
-        Assert-True ($d1 -ceq $d2 -and $g1 -ceq $g2) 'fonte padrao: mesmos perfis e lacunas que o registro real (equivalencia)'
+        Assert-True ($d1 -ceq $d2 -and $g1 -ceq $g2) 'sem -Source: a fonte padrao (registro real, somente leitura)'
+        # An inventory that fails before the discovery leaves no gap of an earlier run behind.
+        $script:AtmDiscoveryGaps = @{ 'PROFILE_LIST_UNREADABLE' = 1 }
+        try { $null = Invoke-AtmInventory -Providers @() -NoProgress } catch { $null = $_ }
+        Assert-True ($script:AtmDiscoveryGaps.Count -eq 0 -and -not $script:AtmDiscoveryRan) 'inventario que falha antes da descoberta: nenhuma lacuna antiga, descoberta nao executada'
     }
     Test-Case 'Particoes' 'P4-B: integracao ao diagnose - estado das particoes pelo grafo, cobertura profile-discovery e dependency-graph, JSON e relatorio sem caminhos, nomes ou mensagens; classes e flags V0.1 inalteradas' {
         $p = New-TestProfile 'p4b-int'

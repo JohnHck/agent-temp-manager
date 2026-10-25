@@ -1,4 +1,4 @@
-# ADR-0002: Dependency graph and correlation
+﻿# ADR-0002: Dependency graph and correlation
 
 Status: ACCEPTED (maintainer gate 2026-10-20, after PR #19)
 Date: 2026-10-20
@@ -161,7 +161,8 @@ inside the closed lists of ADR-0001 (no contract change).
 * **Partitions:** `DEPENDENCY_OBSERVED` gives `IN_USE`; `NONE_OBSERVED` requests `NO_DEPENDENCY_OBSERVED`; anything else
   (`ANCESTOR_REFERENCE`, `DEPENDENCY_AMBIGUOUS`, `UNKNOWN`, a key collision) gives `UNKNOWN`. Worktrees: `IN_USE` first
   (ADR-0006 rule 14), otherwise their own facts; a no-dependency worktree state (`CLEAN_AND_PUBLISHED_UNKNOWN`) needs
-  the graph to observe nothing.
+  the graph to observe nothing, and an `APPARENT_ORPHAN` with ambiguous or ancestor evidence is `UNKNOWN` (ambiguous
+  evidence never leaves an item looking free; `LOCAL_WORK` and `UNPUBLISHED_COMMITS` stay).
 * **Absence is checked twice:** the rebuilt finding carries the coverage of every relevant collector and of the graph
   (`dependency-graph`), so `New-AtmFinding` refuses `NO_DEPENDENCY_OBSERVED` with any non-conclusive record even if a
   summary said otherwise; a relevant collector that did not run is attached as `NOT_OBSERVABLE` (`COLLECTOR_NOT_RUN`).

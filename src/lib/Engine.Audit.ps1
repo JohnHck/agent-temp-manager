@@ -248,6 +248,7 @@ function New-AtmProfileSource {
 $script:AtmDiscoveryGapCodes = @('PROFILE_LIST_UNREADABLE', 'PROFILE_LIST_ENTRY_UNREADABLE', 'PROFILE_LIST_VALUE_UNREADABLE', 'LOADED_HIVES_UNREADABLE', 'PROFILES_DIRECTORY_UNRESOLVED',
     'PROFILES_DIRECTORY_UNREADABLE', 'PROFILE_IMAGE_PATH_MISSING', 'USER_ENVIRONMENT_NOT_LOADED', 'USER_ENVIRONMENT_MISSING', 'USER_ENVIRONMENT_DENIED', 'VOLATILE_ENVIRONMENT_UNREADABLE')
 $script:AtmDiscoveryGaps = @{}
+$script:AtmDiscoveryRan = $false
 function Add-AtmDiscoveryGap { param([string]$Code) if ($script:AtmDiscoveryGaps.ContainsKey($Code)) { $script:AtmDiscoveryGaps[$Code]++ } else { $script:AtmDiscoveryGaps[$Code] = 1 } }
 
 function Get-AtmUserEnvironment {
@@ -316,6 +317,7 @@ function Get-AtmProfiles {
     param($Identity, [string[]]$VarNames = @(), $Source = $null)
     $src = $(if ($null -ne $Source) { $Source } else { New-AtmProfileSource })
     $script:AtmDiscoveryGaps = @{}
+    $script:AtmDiscoveryRan = $true
     $script:AtmDiscoveryNotes = New-Object System.Collections.Generic.List[string]
     $profiles = New-Object System.Collections.Generic.List[object]
     $loaded = @()
@@ -603,6 +605,8 @@ function Invoke-AtmInventory {
         [string]$ConfigDir = (Join-AtmPath (Split-Path $PSScriptRoot -Parent) 'config')
     )
     Initialize-AtmNative
+    # Gaps of an earlier run never describe this one (reset before anything can fail).
+    $script:AtmDiscoveryGaps = @{}; $script:AtmDiscoveryRan = $false
     $startUtc = [datetime]::UtcNow
     $now = $(if ($null -ne $NowUtc) { ([datetime]$NowUtc).ToUniversalTime() } else { $startUtc })
     $config = Get-AtmConfig -ConfigDir $ConfigDir
