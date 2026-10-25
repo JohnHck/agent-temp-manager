@@ -152,8 +152,8 @@ made with `subst`. The export is also refused when the inventory did not run, be
 unknown. A refusal prints a code (`EXPORT_INVENTORY_NOT_RUN`, `EXPORT_DESTINATION_NOT_ALLOWED`,
 `EXPORT_SUBSTITUTED_DRIVE`, `EXPORT_INSIDE_REPOSITORY`, `EXPORT_ANCESTOR_UNREADABLE`), creates no file and exits with
 `10`; a write failure prints the exception type only and exits with `10` (a file it already created may then be
-incomplete; it is not deleted). A folder swapped for a junction after the check is a remaining
-window (SECURITY-MODEL, *Export*).
+incomplete; it is not deleted). A folder replaced by a junction after the check redirects the new file: this ancestor
+race is NOT RESOLVED, which is why the gate is closed (SECURITY-MODEL, *Diagnose export gate*).
 
 The export contains the machine name, the user name and SID and the token elevation state; temporary partitions and
 agent sessions appear only as keyed pseudonyms, and no path, command line, token or session id is exported. Review it
@@ -170,8 +170,8 @@ key offline) that only you, SYSTEM and Administrators can read or change, and pa
 The file is only read, never created or changed; it is refused (exit code `2`, nothing run, only a code is shown) when
 the path is not a drive-absolute path on a fixed drive, a folder in the path or the file is a reparse point, it is not a
 regular file, its size is out of range, its owner is not you, SYSTEM or Administrators, or any other account may read
-or change it. While `diagnose` runs, the progress line shows no path. Exports made with the same key show the same
-`keyId`. Anyone holding the key file can compute the pseudonyms from known identifiers: protect it like a password.
+or change it. While `diagnose` runs, the progress line shows no path. With the same key, the pseudonyms of two runs are
+the same (and an export, while disabled, would carry the same `keyId`). Anyone holding the key file can compute the pseudonyms from known identifiers: protect it like a password.
 Process keys, counts and coverage are not pseudonymized.
 
 Exit codes of `diagnose`: `0` when it ran (partial coverage is a result, not an error), `2` key file refused, `10`

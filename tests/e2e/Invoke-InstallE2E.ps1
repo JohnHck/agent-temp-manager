@@ -292,13 +292,15 @@ Step 'diagnose-export-and-tui-area' {
     $tui = [IO.File]::ReadAllText((Join-Path $installDir 'lib\Tui.ps1'))
     Assert ($tui.Contains("Key = 'D'") -and $tui.Contains('Invoke-AtmTuiDiagnose')) 'TUI instalada sem a area de diagnostico (D)'
     $rep = [IO.File]::ReadAllText((Join-Path $installDir 'lib\Report.ps1'))
-    Assert ([regex]::Matches($rep, '\$script:AtmDiagnoseExportEnabled\s*=').Count -eq 1 -and $rep -match '(?m)^\$script:AtmDiagnoseExportEnabled = \$false\r?$') 'trava da exportacao instalada nao e uma unica atribuicao $false'
+    $cliText = [IO.File]::ReadAllText((Join-Path $installDir 'agent-temp.ps1'))
+    Assert ([regex]::Matches($rep, '\$script:AtmDiagnoseExportEnabled\s*=').Count -eq 1 -and $rep -match '(?m)^\$script:AtmDiagnoseExportEnabled = \$false\r?$' -and [regex]::Matches($rep, 'AtmDiagnoseExportEnabled').Count -eq 3 -and [regex]::Matches($cliText, 'AtmDiagnoseExportEnabled').Count -eq 1) 'trava da exportacao instalada nao e uma unica atribuicao $false'
+    # A destination under a folder that does not exist: nothing is created on the runner, and a destination check would
+    # have answered with another code.
     $dir = Join-Path ([IO.Path]::GetTempPath()) ('atm-e2e-export-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
-    [void][IO.Directory]::CreateDirectory($dir)
-    $target = Join-Path (Get-Item -LiteralPath $dir).FullName 'diagnose.json'
+    $target = Join-Path $dir 'diagnose.json'
     $r = Invoke-Agent ('diagnose -NoProgress -Lang en-US -ExportJson "' + $target + '"') 'diagnose-export-gate'
     Assert ($r.Code -eq 10 -and $r.Text.Contains('EXPORT_SECURITY_GATE_CLOSED') -and -not $r.Text.Contains('COVERAGE BY COLLECTOR')) "exportacao instalada nao recusada pela trava: exit $($r.Code)"
-    Assert (-not (Test-Path -LiteralPath $target) -and @(Get-ChildItem -LiteralPath $dir -Force).Count -eq 0) 'arquivo criado com a trava fechada'
+    Assert (-not (Test-Path -LiteralPath $target) -and -not (Test-Path -LiteralPath $dir) -and -not $r.Text.Contains('EXPORT_DESTINATION')) 'arquivo ou pasta criados, ou destino verificado, com a trava fechada'
     "installed TUI has menu D; installed export gate = `$false (single assignment); installed export refused (EXPORT_SECURITY_GATE_CLOSED, exit 10, no file, nothing collected)"
 }
 Step 'clean-never-deletes' {

@@ -4540,7 +4540,7 @@ try {
             Assert-True (-not $s.Contains($boom)) 'mensagem de excecao nunca exportada'
         }
     }
-    Test-Case 'Diagnose' 'CLI diagnose com prazo 0 (nenhum temporario real e lido): codigo 0 e cobertura TIMEOUT; exportacao sem inventario recusada (codigo 10); ajuda' {
+    Test-Case 'Diagnose' 'CLI diagnose com prazo 0 (nenhum temporario real e lido): codigo 0 e cobertura TIMEOUT; exportacao recusada pela trava (codigo 10, EXPORT_SECURITY_GATE_CLOSED); ajuda' {
         $cmd = Join-Path $srcDir 'bin\agent-temp.cmd'
         $out = (& cmd.exe /c "`"$cmd`" diagnose -DeadlineSeconds 0 -NoProgress -Lang en-US" 2>&1) -join "`n"
         Assert-Eq $LASTEXITCODE 0 'cobertura parcial nao e erro'
@@ -4549,7 +4549,7 @@ try {
         $target = Join-Path $sandbox 'diag-export.json'
         $out = (& cmd.exe /c "`"$cmd`" diagnose -DeadlineSeconds 0 -NoProgress -Lang en-US -ExportJson `"$target`"" 2>&1) -join "`n"
         Assert-Eq $LASTEXITCODE 10 'exportacao recusada'
-        Assert-True ($out -match 'ExportJson refused' -and $out -match 'No deletion was performed') 'mensagem de recusa'
+        Assert-True ($out -match 'ExportJson refused' -and $out.Contains('EXPORT_SECURITY_GATE_CLOSED') -and $out -match 'No deletion was performed') 'mensagem de recusa (trava fechada; a recusa sem inventario e coberta com a trava aberta no harness)'
         Assert-True (-not (Test-Path -LiteralPath $target)) 'nenhum arquivo criado'
         $out = (& cmd.exe /c "`"$cmd`" help -Lang en-US" 2>&1) -join "`n"
         Assert-True ($out -match 'agent-temp diagnose' -and $out -match '-DeadlineSeconds') 'ajuda'
@@ -7256,6 +7256,10 @@ try {
         $srcAll = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1', '.psd1', '.cs', '.json', '.cmd', '.bat') } | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Text = [IO.File]::ReadAllText($_.FullName) } })
         Assert-Eq (@($srcAll | ForEach-Object { [regex]::Matches($_.Text, '\$script:AtmDiagnoseExportEnabled\s*=').Count } | Measure-Object -Sum).Sum) 1 'nenhuma outra atribuicao em src (CLI, TUI, configuracao)'
         Assert-True (@($srcAll | Where-Object { $_.Name -notin @('Report.ps1', 'agent-temp.ps1') -and $_.Text.Contains('AtmDiagnoseExportEnabled') }).Count -eq 0 -and -not (@($srcAll | ForEach-Object { $_.Text }) -join "`n").Contains('$env:ATM_DIAGNOSE_EXPORT')) 'nenhuma opcao, variavel de ambiente ou configuracao abre a trava'
+        # Any spelling counts (bare variable at script scope, Set-Variable): mentions pinned per file (1 assignment + 2 reads; 1 read).
+        Assert-Eq ([regex]::Matches(($srcAll | Where-Object { $_.Name -eq 'Report.ps1' }).Text, 'AtmDiagnoseExportEnabled').Count) 3 'Report.ps1: uma atribuicao e duas leituras'
+        Assert-Eq ([regex]::Matches(($srcAll | Where-Object { $_.Name -eq 'agent-temp.ps1' }).Text, 'AtmDiagnoseExportEnabled').Count) 1 'agent-temp.ps1: uma leitura'
+        Assert-True (-not ((@($srcAll | ForEach-Object { $_.Text }) -join "`n") -match '(?i)(Set|New)-Variable[^\r\n]*DiagnoseExport')) 'nenhum Set-Variable/New-Variable da trava'
         $cli = ($srcAll | Where-Object { $_.Name -eq 'agent-temp.ps1' }).Text
         $blk = $cli.Substring($cli.IndexOf("'diagnose' {"), $cli.IndexOf("'clean' {") - $cli.IndexOf("'diagnose' {"))
         $gateAt = $blk.IndexOf('-not $script:AtmDiagnoseExportEnabled')
@@ -7264,7 +7268,7 @@ try {
         $cmd = Join-Path $srcDir 'bin\agent-temp.cmd'
         $okDir = Join-Path $sandbox 'p5bs-ok'; [void][IO.Directory]::CreateDirectory($okDir)
         foreach ($t in @((Join-Path $sandbox 'p5bs-missing\x.json'), (Join-Path $okDir 'd.json'))) {
-            $o = (& cmd.exe /c "`"$cmd`" diagnose -NoProgress -Lang en-US -ExportJson `"$t`"" 2>&1) -join "`n"
+            $o = (& cmd.exe /c "`"$cmd`" diagnose -DeadlineSeconds 0 -NoProgress -Lang en-US -ExportJson `"$t`"" 2>&1) -join "`n"
             $code = $LASTEXITCODE
             Assert-True ($code -eq 10 -and $o.Contains('EXPORT_SECURITY_GATE_CLOSED') -and -not $o.Contains('EXPORT_DESTINATION') -and -not $o.Contains('COVERAGE BY COLLECTOR') -and -not (Test-Path -LiteralPath $t)) "1-5: recusado com codigo 10, sem verificacao, sem coleta, sem arquivo ($code)"
         }
@@ -7290,8 +7294,13 @@ try {
         } finally { $script:AtmDiagnoseExportEnabled = $false }
         Assert-Eq $script:AtmDiagnoseExportEnabled $false '10: trava false depois do teste'
     }
-    Test-Case 'Camadas' 'P5-B-S: todo script em src com texto nao ASCII comeca com BOM UTF-8 (o Windows PowerShell 5.1 leria o arquivo como ANSI e corromperia o texto)' {
-        foreach ($f in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File -Include '*.ps1', '*.psm1', '*.psd1')) {
+    Test-Case 'Camadas' 'P5-B-S: todo script (src, install, tests) com texto nao ASCII comeca com BOM UTF-8 (o Windows PowerShell 5.1 leria o arquivo como ANSI e corromperia o texto)' {
+        # -Include is ignored with -LiteralPath on Windows PowerShell 5.1: filtered by extension (scripts only; the .cmd
+        # launcher and JSON files must not get a BOM).
+        $repoRoot = Split-Path -Parent $testsDir
+        $scripts = @(foreach ($d in @($srcDir, (Join-Path $repoRoot 'install'), $testsDir)) { if (Test-Path -LiteralPath $d) { Get-ChildItem -LiteralPath $d -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1', '.psd1') } } })
+        Assert-True ($scripts.Count -gt 5 -and @($scripts | Where-Object { $_.Extension -notin @('.ps1', '.psm1', '.psd1') }).Count -eq 0) 'somente scripts verificados'
+        foreach ($f in $scripts) {
             $b = [IO.File]::ReadAllBytes($f.FullName)
             $hasBom = ($b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF)
             $nonAscii = $false; foreach ($x in $b) { if ($x -gt 0x7F) { $nonAscii = $true; break } }
