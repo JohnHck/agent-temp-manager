@@ -3999,13 +3999,17 @@ function Set-AtmGraphFindingStates {
         $ck = [string]$c.Collector
         if (-not $covBy.ContainsKey($ck) -or ($script:AtmConclusiveCoverage -ccontains [string]$covBy[$ck].Status -and $script:AtmConclusiveCoverage -cnotcontains [string]$c.Status)) { $covBy[$ck] = $c }
     }
-    $now = [datetime]::UtcNow
+    $runNow = [datetime]::UtcNow
     $out = [System.Collections.Generic.List[object]]::new()
     foreach ($f in @($Findings)) {
         $kind = [string]$f.Kind
         $nk = $kind + '|' + [string]$f.Key
         if (($kind -cne 'TempPartition' -and $kind -cne 'Worktree') -or -not $sumBy.ContainsKey($nk)) { $out.Add($f); continue }
         $sm = $sumBy[$nk]
+        # The graph evidence carries the observation time of the finding's own first evidence: every partition keeps one
+        # common time (ADR-0010 D-8), so no field gives the enumeration order back.
+        $fev = @($f.Evidence)
+        $now = $(if ($fev.Count -gt 0 -and $null -ne $fev[0].ObservedUtc) { $fev[0].ObservedUtc } else { $runNow })
         $ev = [System.Collections.Generic.List[object]]::new()
         $ev.Add((New-AtmEvidence -Code 'GRAPH_DEPENDENCY' -Source 'diagnose' -Collector 'dependency-graph' -ObservedUtc $now -Detail ([string]$sm.Dependency)))
         if ($inBy.ContainsKey($nk)) {

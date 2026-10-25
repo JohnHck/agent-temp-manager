@@ -4364,7 +4364,7 @@ try {
         $r1 = New-TestRoot -ProfileInfo $p
         $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -PseudonymKey $testPseudonymKey
         Assert-Eq $d.SchemaVersion 'atm.diagnose/2' 'schema'
-        Assert-Eq (@($d.Coverage | ForEach-Object { $_.Collector }) -join ',') 'identity,provider-claude-code,inventory,processes,temp-profiles,process-snapshot,sessions-claude-code,agent-processes,agent-resources,services,service-properties,virtualization-platform,virtual-machines,virtualization-processes,process-cwd,handles' 'coletores (Claude Code v2: dicas de runtime lidas; runtime de agentes da P1-B4-c; P2-A; P2-B; P1-C)'
+        Assert-Eq (@($d.Coverage | ForEach-Object { $_.Collector }) -join ',') 'identity,provider-claude-code,inventory,processes,temp-profiles,profile-discovery,process-snapshot,sessions-claude-code,agent-processes,agent-resources,services,service-properties,virtualization-platform,virtual-machines,virtualization-processes,process-cwd,handles,dependency-graph' 'coletores (Claude Code v2: dicas de runtime lidas; runtime de agentes da P1-B4-c; P2-A; P2-B; P1-C; P4-B: descoberta de perfis e grafo)'
         foreach ($c in @($d.Coverage | Where-Object { $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' -and $_.Collector -notlike 'service*' -and $_.Collector -notlike 'virtual*' })) { Assert-Eq $c.Status 'COMPLETE' "$($c.Collector) completo" }
         $hc = @($d.Coverage | Where-Object { $_.Collector -eq 'handles' })[0]; $wc = @($d.Coverage | Where-Object { $_.Collector -eq 'process-cwd' })[0]
         $sv = @($d.Coverage | Where-Object { $_.Collector -like 'service*' })
@@ -5742,7 +5742,8 @@ try {
             Assert-True ($hc.Count -eq 1 -and $hc[0].Status -ceq 'NOT_OBSERVABLE' -and (@($hc[0].Reasons) -join ',') -ceq 'HANDLE_SECURITY_GATE_CLOSED' -and $hc[0].ElevationWouldHelp -ceq 'NO') 'handles NOT_OBSERVABLE (trava), nunca NOT_PRESENT nem COMPLETE'
             Assert-True (-not $r.CoverageComplete) 'cobertura do diagnose incompleta'
             Assert-Eq @($r.Findings | ForEach-Object { @($_.Evidence) } | Where-Object { $_.Collector -ceq 'handles' }).Count 0 'nenhuma evidencia de arquivos abertos anexada'
-            Assert-Eq @($r.Findings | Where-Object { @($_.Coverage | Where-Object { $_.Collector -ceq 'handles' }).Count -gt 0 }).Count 0 'nenhum achado recebe a cobertura handles'
+            # P4-B attaches the relevant coverage to partitions (why absence is not concluded): handles only as the closed gate.
+            Assert-Eq @($r.Findings | ForEach-Object { @($_.Coverage) } | Where-Object { $_.Collector -ceq 'handles' -and ($_.Status -cne 'NOT_OBSERVABLE' -or (@($_.Reasons) -join ',') -cne 'HANDLE_SECURITY_GATE_CLOSED') }).Count 0 'cobertura handles nos achados so como a trava fechada (NOT_OBSERVABLE)'
         }
         # The spy sees the collector when the gate is open (the closed result above is the gate, not a missing spy).
         $script:AtmHandleDiagnosticsEnabled = $true
@@ -6830,7 +6831,7 @@ try {
         # V0.1 classes and flags: the evidence equals the inventory of the same run.
         $invParts = @($d.Inventory.Partitions | Where-Object { $_.Kind -ne 'NotScanned' })
         $fromInv = @($invParts | ForEach-Object { [string]$_.Class + '|' + (@($_.Flags | Sort-Object) -join ',') } | Sort-Object)
-        $fromFind = @($tp | ForEach-Object { (@(& $bEv $_ 'AUDIT_CLASS') -join '') + '|' + (@(& $bEv $_ 'AUDIT_FLAG' | Sort-Object) -join ',') } | Sort-Object)
+        $fromFind = @($tp | ForEach-Object { ((& $bEv $_ 'AUDIT_CLASS') -join '') + '|' + (((& $bEv $_ 'AUDIT_FLAG') | Sort-Object) -join ',') } | Sort-Object)
         Assert-Eq ($fromFind -join ';') ($fromInv -join ';') '23: classes e flags V0.1 dos achados iguais as do inventario da mesma execucao'
         # Discovery through an injected source: gaps visible in the JSON and the report; no path, name or exception text.
         $src = & $bSource @{ PdThrows = 1; VolThrows = 1; EnumThrows = 1 }
