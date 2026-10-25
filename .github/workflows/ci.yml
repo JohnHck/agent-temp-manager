@@ -44,8 +44,17 @@ jobs:
         run: |
           $PSVersionTable.PSVersion.ToString()
           ./tests/Run-Tests.ps1 -SkipHeavy -ReportFile test-results-pwsh.json
-      - name: Upload report
+      # FINAL-B: identifiers of this runner replaced by placeholders, then the privacy scanner; fails closed (a finding
+      # or a scan that cannot be trusted fails the job and nothing is uploaded). Locations only, never the values.
+      - name: Artifact privacy (sanitize and scan)
+        id: privacy
         if: always()
+        shell: powershell
+        run: |
+          ./tools/Protect-AtmArtifact.ps1 -Path "test-results-${{ matrix.shell }}.json"
+          exit $LASTEXITCODE
+      - name: Upload report
+        if: always() && steps.privacy.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: test-results-${{ matrix.shell }}
@@ -91,9 +100,18 @@ jobs:
         shell: pwsh
         run: |
           $PSVersionTable.PSVersion.ToString(); $env:PROCESSOR_ARCHITECTURE
-          ./tests/Run-Tests.ps1 -SkipHeavy -ReportFile test-results-arm64-pwsh.json -Only '* :: FINAL-A*', 'Servicos :: P2-A*', 'Virtualizacao :: P2-B*', 'Privacidade :: *'
-      - name: Upload report
+          ./tests/Run-Tests.ps1 -SkipHeavy -ReportFile test-results-arm64-pwsh.json -Only '* :: FINAL-A*', '* :: FINAL-B*', 'Servicos :: P2-A*', 'Virtualizacao :: P2-B*', 'Privacidade :: *'
+      # FINAL-B: identifiers of this runner replaced by placeholders, then the privacy scanner; fails closed (a finding
+      # or a scan that cannot be trusted fails the job and nothing is uploaded). Locations only, never the values.
+      - name: Artifact privacy (sanitize and scan)
+        id: privacy
         if: always()
+        shell: powershell
+        run: |
+          ./tools/Protect-AtmArtifact.ps1 -Path "test-results-arm64-${{ matrix.shell }}.json"
+          exit $LASTEXITCODE
+      - name: Upload report
+        if: always() && steps.privacy.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: test-results-arm64-${{ matrix.shell }}
@@ -154,6 +172,14 @@ jobs:
         run: |
           ./tools/Build-Release.ps1 -SkipTests
           exit $LASTEXITCODE
+      # FINAL-B: identifiers of this runner replaced by placeholders, then the privacy scanner; fails closed (a finding
+      # or a scan that cannot be trusted fails the job and nothing is uploaded). Locations only, never the values.
+      - name: Artifact privacy (sanitize and scan)
+        id: privacy
+        shell: powershell
+        run: |
+          ./tools/Protect-AtmArtifact.ps1 -Path dist -NoSanitize
+          exit $LASTEXITCODE
       - name: Upload package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -187,8 +213,17 @@ jobs:
         run: |
           ./tests/e2e/Invoke-InstallE2E.ps1 -OutDir "$env:RUNNER_TEMP\atm-e2e" -InstallerShell $env:INSTALLER_SHELL -ReleaseDir "$env:RUNNER_TEMP\release-package"
           exit $LASTEXITCODE
-      - name: Upload evidence
+      # FINAL-B: identifiers of this runner replaced by placeholders, then the privacy scanner; fails closed (a finding
+      # or a scan that cannot be trusted fails the job and nothing is uploaded). Locations only, never the values.
+      - name: Artifact privacy (sanitize and scan)
+        id: privacy
         if: always()
+        shell: powershell
+        run: |
+          ./tools/Protect-AtmArtifact.ps1 -Path "$env:RUNNER_TEMP\atm-e2e"
+          exit $LASTEXITCODE
+      - name: Upload evidence
+        if: always() && steps.privacy.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: install-e2e-${{ matrix.os }}-${{ matrix.installer }}
@@ -211,8 +246,17 @@ jobs:
         run: |
           ./tools/Invoke-AtmStaticAnalysis.ps1 -WorkDir "$env:RUNNER_TEMP\atm-static-analysis" -ReportFile static-analysis.json
           exit $LASTEXITCODE
-      - name: Upload report
+      # FINAL-B: identifiers of this runner replaced by placeholders, then the privacy scanner; fails closed (a finding
+      # or a scan that cannot be trusted fails the job and nothing is uploaded). Locations only, never the values.
+      - name: Artifact privacy (sanitize and scan)
+        id: privacy
         if: always()
+        shell: powershell
+        run: |
+          ./tools/Protect-AtmArtifact.ps1 -Path static-analysis.json
+          exit $LASTEXITCODE
+      - name: Upload report
+        if: always() && steps.privacy.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: static-analysis

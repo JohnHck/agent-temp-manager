@@ -5,7 +5,8 @@
   credential-like tokens, Claude Code session identifiers, and any identifier listed in an optional private
   needles file (kept OUTSIDE the repository).
 .OUTPUTS
-  One object per finding: File, Line, Kind, Excerpt (redacted). No output = clean.
+  One object per finding: File, Line, Kind, Excerpt (always '[redacted]': no part of the value is printed). No
+  output = clean.
 #>
 [CmdletBinding()]
 param(
@@ -111,12 +112,12 @@ foreach ($it in (Get-Items $Path)) {
                 if ($p.Kind -eq 'SID' -and ($allowedSids -contains $v -or $v -match '^S-1-5-21-\d-\d-\d')) { continue }
                 if ($p.Kind -eq 'EMAIL' -and $allowedEmails -contains $v) { continue }
                 if ($p.Kind -eq 'USER_PATH' -and $allowedUserDirs -contains $m.Groups[1].Value) { continue }
-                [pscustomobject]@{ File = $it.Name; Line = $i + 1; Kind = $p.Kind; Excerpt = ($v.Substring(0, [math]::Min(6, $v.Length)) + '...') }
+                [pscustomobject]@{ File = $it.Name; Line = $i + 1; Kind = $p.Kind; Excerpt = '[redacted]' }
             }
         }
         foreach ($n in $needles) {
             if ($ln.IndexOf($n, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                [pscustomobject]@{ File = $it.Name; Line = $i + 1; Kind = 'PRIVATE_IDENTIFIER'; Excerpt = ($n.Substring(0, [math]::Min(3, $n.Length)) + '...') }
+                [pscustomobject]@{ File = $it.Name; Line = $i + 1; Kind = 'PRIVATE_IDENTIFIER'; Excerpt = '[redacted]' }
             }
         }
     }

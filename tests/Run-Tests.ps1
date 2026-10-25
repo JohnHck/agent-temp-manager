@@ -115,6 +115,10 @@ function Assert-Eq { param($A, $B, [string]$Msg) if ($A -ne $B) { throw "ASSERT:
 
 $script:notSelected = 0
 $script:onlyHits = @{}
+# FINAL-B (artifact privacy): case details reach the console and the report with this machine's identifiers replaced
+# by placeholders (<temp>, <profile>, <account>, <machine>, <sid>...); the structure of each message is kept.
+. (Join-Path (Split-Path -Parent $testsDir) 'tools\AtmArtifactSanitizer.ps1')
+$script:safeIds = Get-AtmArtifactIdentifiers
 function Test-Case {
     param([string]$Area, [string]$Name, [scriptblock]$Body)
     if ($Only.Count -gt 0) {
@@ -128,10 +132,59 @@ function Test-Case {
     try { $null = & $Body 6>$null } catch { $status = 'FAIL'; $msg = $_.Exception.Message + ' @' + $_.InvocationInfo.ScriptLineNumber }
     if ($status -eq 'PASS' -and $script:caseSkipped) { $status = 'NAO_TESTADO' }
     if (-not $msg -and $script:caseNote) { $msg = $script:caseNote }
+    $msg = ConvertTo-AtmArtifactSafeText -Text $msg -Identifiers $script:safeIds
     $sw.Stop()
     $results.Add([pscustomobject]@{ Area = $Area; Test = $Name; Result = $status; Ms = $sw.ElapsedMilliseconds; Detail = $msg })
     $color = $(if ($status -eq 'PASS') { 'Green' } elseif ($status -eq 'NAO_TESTADO') { 'Yellow' } else { 'Red' })
     Write-Host ("[{0}] {1} :: {2} ({3} ms) {4}" -f $status, $Area, $Name, $sw.ElapsedMilliseconds, $msg) -ForegroundColor $color
+}
+
+# FINAL-B: a child process of the suite with a bounded wait. stdin is closed and stdout/stderr are read asynchronously
+# (a full pipe never blocks the child). On timeout only processes this call started are stopped: the child (its handle
+# is held) and descendants whose parent is one of them and whose creation time is not before the child's, checked
+# again on the process object right before it is stopped. Never a process that existed before the call.
+function Stop-AtmTestChildTree {
+    param([Diagnostics.Process]$Process)
+    $start = $Process.StartTime.ToUniversalTime()
+    $ids = @{ ([long]$Process.Id) = $start }
+    $rows = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, CreationDate -ErrorAction SilentlyContinue)
+    $grew = $true
+    while ($grew) {
+        $grew = $false
+        foreach ($r in $rows) {
+            if ($null -eq $r.CreationDate) { continue }
+            $cu = ([datetime]$r.CreationDate).ToUniversalTime()
+            if ($ids.ContainsKey([long]$r.ParentProcessId) -and -not $ids.ContainsKey([long]$r.ProcessId) -and $cu -ge $start) { $ids[[long]$r.ProcessId] = $cu; $grew = $true }
+        }
+    }
+    foreach ($id in @($ids.Keys | Where-Object { $_ -ne [long]$Process.Id })) {
+        try { $q = [Diagnostics.Process]::GetProcessById([int]$id); if ([math]::Abs(($q.StartTime.ToUniversalTime() - $ids[$id]).TotalSeconds) -lt 1) { $q.Kill() }; $q.Dispose() } catch { $null = $_ }
+    }
+    try { if (-not $Process.HasExited) { $Process.Kill() } } catch { $null = $_ }
+}
+function Invoke-AtmTestChild {
+    param([string]$CommandLine, [int]$TimeoutSec = 180, [hashtable]$Environment = $null)
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = Join-Path $env:SystemRoot 'System32\cmd.exe'
+    $psi.Arguments = '/s /c "' + $CommandLine + '"'
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = [Text.Encoding]::UTF8; $psi.StandardErrorEncoding = [Text.Encoding]::UTF8
+    # -Environment: the child gets exactly these variables (nothing inherited).
+    if ($null -ne $Environment) { $psi.EnvironmentVariables.Clear(); foreach ($k in $Environment.Keys) { if ($null -ne $Environment[$k]) { $psi.EnvironmentVariables[$k] = [string]$Environment[$k] } } }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $p = [Diagnostics.Process]::Start($psi)
+    try {
+        $p.StandardInput.Close()
+        $out = $p.StandardOutput.ReadToEndAsync(); $err = $p.StandardError.ReadToEndAsync()
+        if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+            Stop-AtmTestChildTree -Process $p
+            return [pscustomobject]@{ Exit = $null; TimedOut = $true; Text = 'CHILD_TIMEOUT'; Ms = $sw.ElapsedMilliseconds }
+        }
+        $p.WaitForExit()
+        $lines = @(($out.Result + "`n" + $err.Result) -split "`r?`n" | Where-Object { $_ -ne '' })
+        return [pscustomobject]@{ Exit = $p.ExitCode; TimedOut = $false; Text = ($lines -join ' '); Ms = $sw.ElapsedMilliseconds }
+    } finally { $p.Dispose() }
 }
 
 $script:profileCounter = 0
@@ -1105,6 +1158,41 @@ try {
         $src = [IO.File]::ReadAllText($scan)
         Assert-True ($src.Contains("`$machineNeedles.Add(@('ProfileList', `$leaf))") -and $src.Contains("`$productWords = @('installer')") -and -not $src.Contains("`$needles.Add(`$leaf)")) 'ProfileList passa pelo mesmo filtro; lista com uma unica palavra'
     }
+    Test-Case 'Privacidade' 'FINAL-B: artefatos de CI - identificadores desta maquina trocados por marcadores antes do envio; varredura falha fechada (achado, scanner ausente); arquivo compactado varrido e nunca alterado; relatorio sem nome de conta' {
+        $tool = Join-Path (Split-Path -Parent $testsDir) 'tools\Protect-AtmArtifact.ps1'
+        $shell = (Get-Process -Id $PID).Path
+        $run = { param([string]$ArgLine) Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$tool`" " + $ArgLine) -TimeoutSec 180 }
+        $d = Join-Path $sandbox 'artifact-ok'; [void][IO.Directory]::CreateDirectory($d)
+        $fakeSid = 'S-1-5-21-' + '111111111-222222222-333333333-1001'
+        $rep = Join-Path $d 'report.json'
+        $raw = '{ "detail": "' + ($sandbox + '\x.txt').Replace('\', '\\') + '", "who": "' + $env:USERNAME + '", "machine": "' + $env:COMPUTERNAME + '", "sid": "' + $fakeSid + '", "test": "S-1-5-21-1-2-3-777", "home": "' + $env:USERPROFILE + '" }'
+        [IO.File]::WriteAllText($rep, $raw)
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zsrc = Join-Path $sandbox 'artifact-zip-src'; [void][IO.Directory]::CreateDirectory($zsrc); [IO.File]::WriteAllText((Join-Path $zsrc 'a.txt'), 'clean')
+        $zip = Join-Path $d 'pkg.zip'; [IO.Compression.ZipFile]::CreateFromDirectory($zsrc, $zip)
+        $zh = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+        $r = & $run ("-Path `"$d`"")
+        Assert-Eq $r.Exit 0 "artefato limpo depois da troca: exit 0 ($($r.Text))"
+        $after = [IO.File]::ReadAllText($rep)
+        foreach ($x in @($env:USERNAME, $env:COMPUTERNAME, $fakeSid, $env:USERPROFILE, $env:USERPROFILE.Replace('\', '\\'))) { Assert-True ($after.IndexOf($x, [StringComparison]::OrdinalIgnoreCase) -lt 0) 'identificador desta maquina trocado no artefato' }
+        Assert-True ($after.Contains('<temp>') -and $after.Contains('<account>') -and $after.Contains('<sid>') -and $after.Contains('S-1-5-21-1-2-3-777') -and $after.Contains('<profile>')) "marcadores no lugar; SID ficticio do projeto mantido ($after)"
+        Assert-Eq (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash $zh 'arquivo compactado nunca alterado'
+        Assert-True ($r.Text -match '1 archive\(s\)') "arquivo compactado varrido ($($r.Text))"
+        # A value the sanitizer does not know (an address) is still found by the scanner: exit 1, location only.
+        $d2 = Join-Path $sandbox 'artifact-leak'; [void][IO.Directory]::CreateDirectory($d2)
+        $mail = 'maria.silva' + '@' + 'exemplo-real.com.br'
+        [IO.File]::WriteAllText((Join-Path $d2 'out.txt'), "contato $mail")
+        $r = & $run ("-Path `"$d2`"")
+        Assert-Eq $r.Exit 1 "achado: exit 1 ($($r.Text))"
+        Assert-True ($r.Text -match 'FINDING out\.txt:1 EMAIL' -and $r.Text -notmatch 'maria|exemplo-real') 'achado por arquivo, linha e tipo, sem o valor'
+        # The scan cannot be trusted: exit 2 (fail closed), never a silent pass.
+        $r = & $run ("-Path `"$d`" -Scanner `"$(Join-Path $sandbox 'nao-existe.ps1')`"")
+        Assert-Eq $r.Exit 2 "scanner ausente: exit 2 ($($r.Text))"
+        # The suite's own details and report: placeholders, no account name.
+        Assert-True ((ConvertTo-AtmArtifactSafeText -Text "$sandbox\y" -Identifiers $script:safeIds).StartsWith('<temp>')) 'detalhe dos casos: sandbox sob <temp>'
+        $self = [IO.File]::ReadAllText((Join-Path $testsDir 'Run-Tests.ps1'))
+        Assert-True ($self.Contains("accountKind = `$(if (`$me.IsAdmin)") -and -not $self.Contains('user = ' + '$me.Name')) 'relatorio: tipo de conta, sem nome'
+    }
     Test-Case 'Privacidade' 'Identidade Git: autor, committer e trailers; noreply aceito; pessoal detectado sem expor o endereco' {
         if (-not (Get-Command git -ErrorAction SilentlyContinue)) { $script:caseSkipped = $true; $script:caseNote = 'git indisponivel'; return }
         $tool = Join-Path (Split-Path -Parent $testsDir) 'tools\Test-AtmCommitIdentity.ps1'
@@ -1581,8 +1669,62 @@ function global:Get-FileHash { param([string]$LiteralPath, [string]$Algorithm)
     $e = @((Get-Content -LiteralPath (Join-Path $root 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json).files | Where-Object { (Join-Path $root $_.path) -eq $LiteralPath })
     [pscustomobject]@{ Hash = $(if ($e.Count -gt 0) { $e[0].sha256 } else { '' }) } }
 '@
-    function Invoke-Rb5Cli { param([string]$Cmd, [string]$Arguments) $ErrorActionPreference = 'Continue'; $o = & cmd.exe /c "`"$Cmd`" $Arguments" 2>&1; [pscustomobject]@{ Exit = $LASTEXITCODE; Text = (@($o | ForEach-Object { "$_" }) -join ' ') } }
+    # FINAL-B: each CLI call is a bounded child process (Invoke-AtmTestChild); its duration is recorded per verb, and a
+    # call that does not finish fails the case with a sanitized code (verb and call number) instead of hanging the run.
+    $script:rb5Calls = New-Object System.Collections.Generic.List[object]
+    function Invoke-Rb5Cli {
+        param([string]$Cmd, [string]$Arguments)
+        $r = Invoke-AtmTestChild -CommandLine ("`"$Cmd`" $Arguments") -TimeoutSec 180
+        $verb = @(([string]$Arguments).Trim() -split ' ')[0]
+        $script:rb5Calls.Add([pscustomobject]@{ Verb = $verb; Ms = $r.Ms })
+        if ($r.TimedOut) { throw ('CHILD_TIMEOUT: {0}, chamada {1}, limite 180 s' -f $verb, $script:rb5Calls.Count) }
+        [pscustomobject]@{ Exit = $r.Exit; Text = $r.Text }
+    }
+    function Format-Rb5Calls {
+        $c = $script:rb5Calls.ToArray()
+        if ($c.Count -eq 0) { return 'nenhuma chamada do CLI' }
+        $max = @($c | Sort-Object Ms -Descending)[0]
+        '{0} chamadas do CLI: media {1} ms, maxima {2} ms ({3}), total {4} s' -f $c.Count, [math]::Round((($c | Measure-Object Ms -Average).Average)), $max.Ms, $max.Verb, [math]::Round((($c | Measure-Object Ms -Sum).Sum) / 1000)
+    }
+    Test-Case 'Ambiente' 'FINAL-B: custo de processos filhos por camada - cmd, Windows PowerShell 5.1, lancador instalado (fixture) e o mesmo com ambiente minimo; somente medicao, tempos e nomes de variaveis' {
+        # Diagnostic for the ARM64 PowerShell 7 slowness (R-B5 verify: about 20 s per CLI call there, 0.5 s with Windows
+        # PowerShell 5.1 as the parent). The launcher always starts Windows PowerShell 5.1 and the native DLL is always
+        # compiled by a Windows PowerShell 5.1 child (New-AtmNativeAssembly), so the layers below locate the cost.
+        $inst = Join-Path $sandbox 'PF-probe\AgentTempManager'
+        [void][IO.Directory]::CreateDirectory($inst)
+        Copy-AtmTree -From $srcDir -To $inst
+        New-AtmNativeAssembly -Root $inst
+        Write-AtmManifest -Root $inst -Version (Get-AtmSourceVersion -SourceDir $srcDir)
+        $cmd = Join-Path $inst 'bin\agent-temp.cmd'
+        $ps51 = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $minimal = @{}
+        foreach ($n in @('SystemRoot', 'windir', 'SystemDrive', 'ComSpec', 'PATHEXT', 'TEMP', 'TMP', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA', 'HOMEDRIVE', 'HOMEPATH', 'USERNAME', 'USERDOMAIN', 'COMPUTERNAME', 'PROCESSOR_ARCHITECTURE', 'NUMBER_OF_PROCESSORS', 'OS', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'CommonProgramFiles', 'ATM_LANG')) { $minimal[$n] = [Environment]::GetEnvironmentVariable($n) }
+        $minimal['PATH'] = (@('System32', 'System32\Wbem', 'System32\WindowsPowerShell\v1.0') | ForEach-Object { Join-Path $env:SystemRoot $_ }) -join ';'
+        $layers = [ordered]@{
+            'cmd'                        = @("exit 0", $null, 0)
+            'powershell 5.1'             = @("`"$ps51`" -NoProfile -NonInteractive -Command exit 0", $null, 0)
+            'lancador version'           = @("`"$cmd`" version", $null, 0)
+            'lancador version, ambiente minimo' = @("`"$cmd`" version", $minimal, 0)
+        }
+        $notes = New-Object System.Collections.Generic.List[string]
+        foreach ($k in $layers.Keys) {
+            $ms = New-Object System.Collections.Generic.List[long]
+            for ($i = 0; $i -lt 3; $i++) {
+                $r = Invoke-AtmTestChild -CommandLine $layers[$k][0] -Environment $layers[$k][1] -TimeoutSec 180
+                Assert-True (-not $r.TimedOut) "$($k): terminou dentro do limite"
+                Assert-Eq $r.Exit $layers[$k][2] "$($k): codigo de saida ($($r.Text))"
+                $ms.Add($r.Ms)
+            }
+            $notes.Add(('{0} {1} ms' -f $k, @($ms | Sort-Object)[1]))
+        }
+        # Inherited variable NAMES (never values) that the minimal environment leaves out and that could steer a child
+        # PowerShell or .NET.
+        $inh = @([Environment]::GetEnvironmentVariables().Keys | ForEach-Object { [string]$_ } | Where-Object { $_ -match '^(PS|POWERSHELL|DOTNET|COMPLUS|__PS|CORECLR)' -and -not $minimal.ContainsKey($_) } | Sort-Object)
+        $notes.Add('variaveis herdadas fora do ambiente minimo: ' + $(if ($inh.Count) { $inh -join ',' } else { 'nenhuma' }))
+        $script:caseNote = 'mediana de 3: ' + ($notes -join '; ')
+    }
     Test-Case 'Instalacao' 'R-B5 verify: nenhum codigo carregado antes da verificacao; biblioteca removida, adulterada ou que sombreia Get-FileHash e provider plantado nunca executam nem forjam sucesso; manifesto invalido ou ausente recusado' {
+        $script:rb5Calls.Clear()
         $inst = Join-Path $sandbox 'PF8\AgentTempManager'
         [void][IO.Directory]::CreateDirectory($inst)
         Copy-AtmTree -From $srcDir -To $inst
@@ -1731,6 +1873,7 @@ function global:Get-FileHash { param([string]$LiteralPath, [string]$Algorithm)
         [IO.File]::Move("$mfp.aside", $mfp)
         $r = Invoke-Rb5Cli $cmd 'verify'; Assert-Eq $r.Exit 0 "restaurado ($($r.Text))"
         Assert-True (-not (Test-Path -LiteralPath $marker)) 'nenhum marcador em todo o teste'
+        $script:caseNote = Format-Rb5Calls
     }
     Test-Case 'Instalacao' 'R-B5 bootstrap: I18n.ps1 do pacote so executa depois de verificado (Install, Uninstall, Restore; -SourceDir diferente; Get-FileHash sombreado; pacote sem manifesto so com autorizacao explicita)' {
         $repoDir = Split-Path -Parent $testsDir
@@ -7775,7 +7918,7 @@ if ($Only.Count -gt 0) { Write-Host ("SUBCONJUNTO (-Only {0}): {1} casos nao sel
 Write-Host ("RESULTADO{6}: {0} PASS / {1} FAIL / {5} NAO_TESTADO / {2} total | PowerShell {3} {4}" -f $pass, $fail, $results.Count, $PSVersionTable.PSVersion, $PSVersionTable.PSEdition, $skipped, $(if ($Only.Count -gt 0) { ' (SUBCONJUNTO)' } else { '' })) -ForegroundColor $(if ($fail -eq 0) { 'Green' } else { 'Red' })
 Write-Host ("Sandbox removido: {0}" -f (-not [IO.Directory]::Exists($sandbox)))
 if ($ReportFile) {
-    $rep = [ordered]@{ psVersion = $PSVersionTable.PSVersion.ToString(); psEdition = $PSVersionTable.PSEdition; user = $me.Name; isAdmin = $me.IsAdmin; utc = [datetime]::UtcNow.ToString('o'); pass = $pass; fail = $fail; notTested = $skipped; subset = @($Only); notSelected = $script:notSelected; sandboxRemoved = (-not [IO.Directory]::Exists($sandbox)); results = $results }
+    $rep = [ordered]@{ psVersion = $PSVersionTable.PSVersion.ToString(); psEdition = $PSVersionTable.PSEdition; accountKind = $(if ($me.IsAdmin) { 'ADMINISTRATOR_ELEVATED' } else { 'NOT_ELEVATED' }); isAdmin = $me.IsAdmin; utc = [datetime]::UtcNow.ToString('o'); pass = $pass; fail = $fail; notTested = $skipped; subset = @($Only); notSelected = $script:notSelected; sandboxRemoved = (-not [IO.Directory]::Exists($sandbox)); results = $results }
     [IO.File]::WriteAllText($ReportFile, ($rep | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding($false)))
 }
 exit $fail
