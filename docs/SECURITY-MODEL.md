@@ -164,8 +164,8 @@ called by `Invoke-AtmGitCommand`):
   the re-checks), evaluates the destination policy inside that
   window, creates the file relative to the folder handle (`NtCreateFile`, `RootDirectory`, `OBJ_DONT_REPARSE`,
   `FILE_CREATE`) with a protected DACL, verifies it through its handle and only then writes (release/V0.2-SECURITY-AUDIT,
-  X-01, with fixture evidence and limits). Opening the gate remains a maintainer decision; ARM64 fixture execution is
-  NOT TESTED.
+  X-01, with fixture evidence and limits). Opening the gate remains a maintainer decision; the fixtures also run on
+  Windows 11 ARM64 with Windows PowerShell 5.1; ARM64 with PowerShell 7 is NOT TESTED.
 * **Diagnose export, when its gate is open (tests only, P5-B):** written only with `-ExportJson`, to a new file (`CreateNew`: never overwrites; a junction
   planted at the destination was refused on fixtures; a file symbolic link there is refused by the documented
   `CREATE_NEW` semantics but was not tested, since creating one needs a privilege), at an absolute local path whose
