@@ -8,6 +8,11 @@
 param([switch]$SkipHeavy, [string]$ReportFile, [int]$HeavyFiles = 200000)
 
 $ErrorActionPreference = 'Stop'
+# Native and child-process output (Git, the CLI, which writes UTF-8) is decoded as UTF-8, like the CLI itself does:
+# with a redirected console the code page is the OEM one (850 on pt-BR Windows) and a non-ASCII profile path or text
+# would be misread (P5-B, local FAIL matrix). Process-level only; restored at the end.
+$prevOutputEncoding = $null
+try { $prevOutputEncoding = [Console]::OutputEncoding; [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { $null = $_ }
 # Assertions on rendered text are written for pt-BR; dedicated i18n tests switch languages explicitly.
 $env:ATM_LANG = 'pt-BR'
 $testsDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -7107,6 +7112,140 @@ try {
         $pos = & $bState (@($gProcF) + @(& $bTp 'a')) $global @((& $gPart 'a' @('PID 102 (node.exe)')))
         Assert-Eq (& $bFind $pos 'claude-code/p-a').State 'IN_USE' 'positivo DIRECT inalterado com registro pior de outro coletor'
     }
+    # ------------------------------------------------------------------ P5-B (CLI, JSON contract, export, documentation)
+    # The schema document is the contract: every exported object has exactly its documented fields, with the documented
+    # types (string, number, integer, boolean, array, object, "... or null").
+    $sdSec = @{}; $sdCur = $null
+    foreach ($l in [IO.File]::ReadAllLines((Join-Path (Split-Path -Parent $testsDir) 'docs\DIAGNOSE-SCHEMA.md'))) {
+        if ($l -match '^## (.+)$') { $sdCur = $Matches[1].Trim(); $sdSec[$sdCur] = [ordered]@{}; continue }
+        if ($sdCur -and $l -match '^\| `([A-Za-z][A-Za-z0-9]*)` \| ([^|]+) \|') { $sdSec[$sdCur][$Matches[1]] = $Matches[2].Trim() }
+    }
+    $sdType = { param($v)
+        if ($null -eq $v) { return 'null' }
+        if ($v -is [bool]) { return 'boolean' }
+        if ($v -is [string] -or $v -is [datetime]) { return 'string' }
+        if ($v -is [int] -or $v -is [long] -or $v -is [int16] -or $v -is [byte]) { return 'integer' }
+        if ($v -is [double] -or $v -is [decimal] -or $v -is [single]) { return 'number' }
+        if ($v -is [array] -or $v -is [Collections.IList]) { return 'array' }
+        if ($v -is [pscustomobject] -or $v -is [Collections.IDictionary]) { return 'object' }
+        return $v.GetType().Name }
+    $sdCheck = { param($Obj, [string]$Sec, $Errs)
+        if (-not $sdSec.ContainsKey($Sec)) { $Errs.Add("secao ausente no documento: $Sec"); return }
+        $doc = $sdSec[$Sec]
+        $names = @($Obj.PSObject.Properties | ForEach-Object { $_.Name })
+        foreach ($n in $names) { if (-not $doc.Contains($n)) { $Errs.Add("${Sec}: campo exportado e nao documentado: $n") } }
+        foreach ($n in @($doc.Keys)) {
+            if ($names -notcontains $n) { $Errs.Add("${Sec}: campo documentado ausente: $n"); continue }
+            $t = & $sdType $Obj.$n; $allowed = @($doc[$n] -split ' or ' | ForEach-Object { $_.Trim() })
+            if (-not ($allowed -contains $t -or ($t -ceq 'integer' -and $allowed -contains 'number') -or ($t -ceq 'number' -and $allowed -contains 'integer' -and [math]::Floor([double]$Obj.$n) -eq [double]$Obj.$n))) { $Errs.Add("${Sec}.${n}: tipo $t, documentado $($doc[$n])") }
+        } }
+    $sdValidate = { param([string]$Json)
+        $e = New-Object System.Collections.Generic.List[string]
+        $j = $Json | ConvertFrom-Json
+        & $sdCheck $j 'Top level' $e; & $sdCheck $j.identity 'identity' $e; & $sdCheck $j.pseudonymization 'pseudonymization' $e; & $sdCheck $j.inventory 'inventory' $e
+        foreach ($x in @($j.providers)) { & $sdCheck $x 'providers[]' $e }
+        foreach ($x in @($j.coverage)) { & $sdCheck $x 'coverage[]' $e }
+        foreach ($x in @($j.findings)) { & $sdCheck $x 'findings[]' $e; foreach ($ev in @($x.evidence)) { & $sdCheck $ev 'findings[].evidence[]' $e } }
+        & $sdCheck $j.agentResources 'agentResources' $e
+        if ($null -ne $j.agentResources.counters) { & $sdCheck $j.agentResources.counters 'agentResources.counters' $e; foreach ($pp in $j.agentResources.counters.PSObject.Properties) { & $sdCheck $pp.Value 'agentResources.counters.*' $e } }
+        if ($null -ne $j.graph) {
+            & $sdCheck $j.graph 'graph' $e; & $sdCheck $j.graph.coverage 'graph.coverage' $e
+            foreach ($x in @($j.graph.nodes)) { & $sdCheck $x 'graph.nodes[]' $e }
+            foreach ($x in @($j.graph.edges)) { & $sdCheck $x 'graph.edges[]' $e; foreach ($ev in @($x.evidence)) { & $sdCheck $ev 'graph.edges[].evidence[]' $e } }
+            foreach ($x in @($j.graph.summaries)) { & $sdCheck $x 'graph.summaries[]' $e }
+        }
+        return [pscustomobject]@{ Errors = $e.ToArray(); Json = $j } }
+
+    Test-Case 'Diagnose' 'P5-B: contrato JSON - todo objeto exportado tem exatamente os campos e tipos do DIAGNOSE-SCHEMA (sintetico com grafo, execucao integrada, prazo 0, sem providers); listas vazias como arrays, null preservado, ids estaveis' {
+        $p = New-TestProfile 'p5b-json'
+        $null = New-TestRoot -ProfileInfo $p
+        $real = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -PseudonymKey $testPseudonymKey -ServiceSource { param($Names) @() } -VirtualizationSource (& $vSrc (& $vBase @($vHostRow)))
+        $zero = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -DeadlineSeconds 0
+        $none = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -Providers @() -ServiceSource { param($Names) @() } -VirtualizationSource (& $vSrc (& $vBase @($vHostRow)))
+        foreach ($case in @(@('sintetico', $tdRes), @('integrado', $real), @('prazo 0', $zero), @('sem providers', $none))) {
+            $raw = ConvertTo-AtmDiagnoseJson -Result $case[1]
+            $v = & $sdValidate $raw
+            Assert-Eq ($v.Errors -join ' | ') '' "1/2/15 ($($case[0])): campos e tipos iguais ao documento"
+            $j = $v.Json
+            # 5: identifiers stable inside the run: edges point to nodes, own-finding nodes are findings, keys unique per kind.
+            if ($null -ne $j.graph) {
+                $nodeKeys = @{}; foreach ($n in @($j.graph.nodes)) { $nodeKeys[[string]$n.kind + '|' + [string]$n.key] = $n }
+                $findKeys = @{}; foreach ($f in @($j.findings)) { $findKeys[[string]$f.kind + '|' + [string]$f.key] = $true }
+                Assert-True (@($j.graph.edges | Where-Object { -not $nodeKeys.ContainsKey([string]$_.fromKind + '|' + [string]$_.from) -or -not $nodeKeys.ContainsKey([string]$_.toKind + '|' + [string]$_.to) }).Count -eq 0) "5 ($($case[0])): toda aresta liga nos existentes"
+                Assert-True (@($j.graph.nodes | Where-Object { $_.finding -and -not $findKeys.ContainsKey([string]$_.kind + '|' + [string]$_.key) }).Count -eq 0) "5/finding=false ($($case[0])): no com achado proprio corresponde a um achado; os demais sao referencias"
+            }
+            # 8/10: incomplete coverage kept, never a conclusive absence on top of it.
+            $covSt = @{}; foreach ($c in @($j.coverage)) { if (-not $covSt.ContainsKey([string]$c.collector) -or $script:AtmConclusiveCoverage -ccontains $covSt[[string]$c.collector]) { $covSt[[string]$c.collector] = [string]$c.status } }
+            Assert-Eq ([bool]$j.coverageComplete) (@($j.coverage | Where-Object { $script:AtmConclusiveCoverage -cnotcontains [string]$_.status }).Count -eq 0) "8 ($($case[0])): coverageComplete coerente com os registros"
+            foreach ($f in @($j.findings | Where-Object { @($script:AtmNoDependencyStates) + @($script:AtmAbsenceStates) -ccontains [string]$_.state })) {
+                Assert-True (@($f.incompleteCoverage).Count -eq 0 -and @(@($f.coverage) | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $covSt[[string]$_] }).Count -eq 0) "10 ($($case[0])): ausencia $($f.state) so com cobertura conclusiva"
+            }
+            # 9: positive states carry their evidence.
+            foreach ($f in @($j.findings | Where-Object { [string]$_.state -ceq 'IN_USE' })) { Assert-True (@(@($f.evidence) | Where-Object { [string]$_.code -like 'GRAPH_SOURCE_DIRECT' -or [string]$_.code -ceq 'FILE_HELD_OPEN' }).Count -gt 0) "9 ($($case[0])): IN_USE com evidencia direta" }
+            # 3/4: raw text keeps empty lists as arrays and absent values as null.
+            Assert-True (-not ($raw -match '"(providers|coverage|findings|reasons|evidence|capabilities|incompleteCoverage|roots|nodes|edges|summaries)":\s*(\{\}|null)')) "3 ($($case[0])): listas nunca como {} ou null"
+        }
+        Assert-True ((ConvertTo-AtmDiagnoseJson -Result $tdRes) -match '"keyId":\s*null') '4: null preservado (keyId de chave efemera)'
+        Assert-True ((ConvertTo-AtmDiagnoseJson -Result $none) -match '"providers":\s*\[\s*\]') '3: sem providers: lista vazia'
+        $nc = @($none.Coverage | Where-Object { $_.Collector -ceq 'profile-discovery' })[0]
+        Assert-True ($null -ne $nc -and $nc.Status -ceq 'NOT_OBSERVABLE' -and @($none.Findings | Where-Object { @($script:AtmNoDependencyStates) + @($script:AtmAbsenceStates) -ccontains $_.State }).Count -eq 0) 'H1: todos os providers ausentes - nada concluido, descoberta nao executada'
+        # 11: the same result in both languages differs only in "language".
+        $prev = Get-AtmLanguage
+        try { Set-AtmLanguage -Requested 'pt-BR'; $jp = ConvertTo-AtmDiagnoseJson -Result $real; Set-AtmLanguage -Requested 'en-US'; $je = ConvertTo-AtmDiagnoseJson -Result $real } finally { Set-AtmLanguage -Requested $prev }
+        Assert-Eq ($je -replace '"language":\s*"[^"]*"', '') ($jp -replace '"language":\s*"[^"]*"', '') '11: pt-BR e en-US identicos salvo language'
+        foreach ($x in @($p.ProfilePath.Replace('\', '\\'), 'C:\\Users\\', 'node.exe', 'CommandLine')) { Assert-True (-not $jp.Contains($x)) "6/7: JSON sem '$x'" }
+    }
+    Test-Case 'Diagnose' 'P5-B: exportacao - destinos proibidos recusados (relativo, rede, dispositivo, fluxo, travessia, dentro de base, repositorio, worktree, juncao no caminho, existente, sem inventario) sem criar arquivo; destino valido criado sem sobrescrever; falha de escrita sem mensagem' {
+        $root = Join-Path $sandbox 'p5b-export'
+        $base = Join-Path $root 'base'; $repo = Join-Path $root 'repo'; $wt = Join-Path $root 'wt'; $out = Join-Path $root 'out'; $real = Join-Path $root 'real'
+        foreach ($d in @($base, (Join-Path $repo '.git'), $wt, $out, $real, (Join-Path $repo 'sub'))) { [void][IO.Directory]::CreateDirectory($d) }
+        [IO.File]::WriteAllText((Join-Path $wt '.git'), 'gitdir: elsewhere')
+        $junc = Join-Path $root 'junc'; New-Junction $junc $real
+        [IO.File]::WriteAllText((Join-Path $out 'exists.json'), 'x')
+        $inv = [pscustomobject]@{ Bases = @([pscustomobject]@{ Path = $base }) }
+        $cases = [ordered]@{
+            'relativo' = 'out\x.json'; 'rede' = '\\server\share\x.json'; 'dispositivo' = '\\?\C:\x.json'; 'fluxo' = ($out + '\x.json:ads'); 'travessia' = ($out + '\..\out\x.json')
+            'dentro da base' = (Join-Path $base 'x.json'); 'repositorio' = (Join-Path $repo 'sub\x.json'); 'worktree' = (Join-Path $wt 'x.json'); 'juncao' = (Join-Path $junc 'x.json'); 'existente' = (Join-Path $out 'exists.json')
+            'variavel' = ($out + '\%TEMP%\x.json'); 'pai inexistente' = (Join-Path $out 'nope\x.json')
+        }
+        foreach ($k in $cases.Keys) {
+            $code = Test-AtmDiagnoseExportPath -Path $cases[$k] -Inventory $inv
+            Assert-True ($null -ne $code -and $code -cmatch '^EXPORT_[A-Z_]+$') "12: $k recusado ($code)"
+        }
+        Assert-Eq (Test-AtmDiagnoseExportPath -Path (Join-Path $repo 'sub\x.json') -Inventory $inv) 'EXPORT_INSIDE_REPOSITORY' 'repositorio: codigo proprio'
+        Assert-Eq (Test-AtmDiagnoseExportPath -Path (Join-Path $out 'ok.json') -Inventory $null) 'EXPORT_INVENTORY_NOT_RUN' 'sem inventario: recusado'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $real 'x.json')) -and -not (Test-Path -LiteralPath (Join-Path $repo 'sub\x.json'))) 'nenhum arquivo criado por uma recusa'
+        $ok = Join-Path $out 'ok.json'
+        Assert-True ($null -eq (Test-AtmDiagnoseExportPath -Path $ok -Inventory $inv)) 'destino valido aceito'
+        Write-AtmNewTextFile -Path $ok -Text (ConvertTo-AtmDiagnoseJson -Result $tdRes)
+        Assert-Eq ((& $sdValidate ([IO.File]::ReadAllText($ok))).Errors -join ' | ') '' 'arquivo gravado e valido'
+        $threw = $null; try { Write-AtmNewTextFile -Path $ok -Text 'other' } catch { $threw = $_.Exception.GetType().Name }
+        Assert-True ($null -ne $threw -and ([IO.File]::ReadAllText($ok)).StartsWith('{')) "14: nunca sobrescreve (CreateNew: $threw)"
+        $threw = $null; try { Write-AtmNewTextFile -Path (Join-Path $out 'nope\y.json') -Text 'x' } catch { $threw = $_.Exception.GetType().Name }
+        Assert-True ($null -ne $threw) "14: falha de escrita lancada ao chamador ($threw)"
+        $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        $blk = $cli.Substring($cli.IndexOf("'diagnose' {"), $cli.IndexOf("'clean' {") - $cli.IndexOf("'diagnose' {"))
+        Assert-True ($blk.Contains('Test-AtmDiagnoseExportPath') -and $blk.Contains('Write-AtmNewTextFile') -and -not $blk.Contains('Exception.Message') -and -not $blk.Contains('WriteAllText')) '14: CLI diagnose usa o caminho verificado e nunca mostra a mensagem da excecao'
+    }
+    Test-Case 'Diagnose' 'P5-B: CLI - version, help, comando desconhecido, diagnose parcial com codigo 0, nenhuma gravacao sem -ExportJson, nenhuma opcao abre travas, sem elevacao nem limpeza no diagnose' {
+        $cmd = Join-Path $srcDir 'bin\agent-temp.cmd'
+        $cwd = Join-Path $sandbox 'p5b-cwd'; [void][IO.Directory]::CreateDirectory($cwd)
+
+        $o = (& cmd.exe /c "cd /d `"$cwd`" && `"$cmd`" diagnose -DeadlineSeconds 0 -NoProgress -Lang en-US" 2>&1) -join "`n"
+        Assert-Eq $LASTEXITCODE 0 '13: diagnose parcial: codigo 0'
+        Assert-True (@(Get-ChildItem -LiteralPath $cwd -Force).Count -eq 0) '13: nenhum arquivo criado sem -ExportJson (diretorio atual)'
+        $o = (& cmd.exe /c "`"$cmd`" version -Lang en-US" 2>&1) -join "`n"
+        Assert-True ($LASTEXITCODE -eq 0 -and $o -match ('agent-temp ' + [regex]::Escape($script:AtmVersion)) -and $o -match 'Claude Code' -and $o -match 'Claude Desktop') 'version: codigo 0, versao 0.1.0 e providers'
+        $o = (& cmd.exe /c "`"$cmd`" help -Lang en-US" 2>&1) -join "`n"
+        Assert-True ($LASTEXITCODE -eq 0 -and $o -match 'agent-temp diagnose' -and $o -match '-ExportJson' -and $o -match '-DeadlineSeconds' -and $o -match '-PseudonymKeyFile') 'help: codigo 0 e opcoes do diagnose'
+        $o = (& cmd.exe /c "`"$cmd`" nao-existe -Lang en-US" 2>&1) -join "`n"
+        Assert-Eq $LASTEXITCODE 1 'comando desconhecido: codigo 1'
+        $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        $param = $cli.Substring($cli.IndexOf('param('), $cli.IndexOf('$ErrorActionPreference') - $cli.IndexOf('param('))
+        foreach ($pat in @('Gate', 'Enable', 'Unlock', 'Handle', 'Worktree', 'Delete', 'Repository', 'Git')) { Assert-True (-not $param.Contains($pat)) "nenhum parametro publico '$pat' (travas fechadas, sem leitura Git adicional)" }
+        $blk = $cli.Substring($cli.IndexOf("'diagnose' {"), $cli.IndexOf("'clean' {") - $cli.IndexOf("'diagnose' {"))
+        foreach ($pat in @('Invoke-AtmClean', 'RunAs', 'Start-Process', 'Verb', 'AtmRealDeletionEnabled =', 'AtmHandleDiagnosticsEnabled =', 'AtmWorktreeDiagnosticsEnabled =')) { Assert-True (-not $blk.Contains($pat)) "diagnose sem '$pat'" }
+    }
     Test-Case 'I18n' 'P1-C: todo motivo e evidencia de arquivos abertos tem texto nos dois idiomas' {
         foreach ($l in @('en-US', 'pt-BR')) {
             foreach ($x in $script:AtmHandleReasonCodes) { Assert-True $script:AtmMessages[$l].ContainsKey("reason.$x") "reason.$x ($l)" }
@@ -7206,6 +7345,8 @@ try {
     cmd /c rd /s /q "`"$sandbox`"" 2>&1 | Out-Null
 }
 
+# The console encoding of this process is restored (cosmetic; a redirected console may refuse it).
+if ($null -ne $prevOutputEncoding) { try { [Console]::OutputEncoding = $prevOutputEncoding } catch { $null = $_ } }
 $pass = @($results | Where-Object Result -eq 'PASS').Count
 $fail = @($results | Where-Object Result -eq 'FAIL').Count
 $skipped = @($results | Where-Object Result -eq 'NAO_TESTADO').Count

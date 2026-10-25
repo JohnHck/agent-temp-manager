@@ -77,3 +77,12 @@ done or `NAO_TESTADO`, never assumed.
 
 Results are `PASS`, `FAIL` or `NAO_TESTADO` (a prerequisite was unavailable, e.g. no free drive letter for
 `subst` or no symlink privilege); `NAO_TESTADO` is never counted as a pass.
+
+## Local runs and the console encoding (P5-B)
+
+The suite decodes native and child-process output (Git, the CLI) as UTF-8, like the CLI itself; with a redirected
+console Windows uses the OEM code page (850 on pt-BR systems), and a profile path or text with non-ASCII characters
+was misread, which failed tests on such machines without any product defect. A local run can still fail for
+environmental reasons that the product reports correctly (for example a TEMP folder that other local accounts can
+write: the sandbox then inherits that ACL and the gates block it, as they should). Those failures stay failures; the
+record of a local run and its causes is in [release/V0.2-LOCAL-TEST-ENVIRONMENT.md](release/V0.2-LOCAL-TEST-ENVIRONMENT.md).

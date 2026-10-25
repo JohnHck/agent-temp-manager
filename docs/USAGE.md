@@ -64,57 +64,109 @@ review). Eligible paths are printed as allowlist lines `path|fingerprint`.
 
 ## Diagnose (read-only, V0.2 in development)
 
+V0.2 is **not released**: `diagnose` exists in the development version only, and its output may still change.
+
 ```powershell
 agent-temp diagnose
-agent-temp diagnose -ExportJson D:\reports\diagnose.json   # schema atm.diagnose/2, new file outside audited dirs
+agent-temp diagnose -Lang en-US -NoProgress
 agent-temp diagnose -DeadlineSeconds 60                     # global deadline (default 300 s), see below
+agent-temp diagnose -ExportJson D:\reports\diagnose.json   # schema atm.diagnose/2, a NEW file (see "Export")
+agent-temp diagnose -PseudonymKeyFile D:\private\atm-pseudonym.key -ExportJson D:\reports\diagnose.json
 ```
+
+Options of `diagnose`: `-ExportJson <new file>`, `-DeadlineSeconds <seconds>`, `-PseudonymKeyFile <file>`,
+`-NoProgress`, `-Lang en-US|pt-BR`. There is no option to give repository paths, to open a security gate or to request
+elevation. In the TUI, the same diagnostics are under **D** (see *Interactive dashboard*).
+
+### What it adds to V0.1
+
+V0.1 already audits every profile's temporary directories, classifies them conservatively and shows a cleanup plan
+without deleting anything. `diagnose` adds, read-only:
+
+* the identity of the process (user, elevated administrator, token elevation type, integrity level, session);
+* the Windows profile discovery and its gaps (`profile-discovery`);
+* the agent runtime: agent processes and sessions found through evidence (provider matchers, session registries,
+  path references of the audit, verified parent links), and their resource totals;
+* Windows services that providers declare (for example `CoworkVMService` for Claude Desktop), the virtualization
+  platform and its virtual machines;
+* a dependency graph (`graph`) that correlates that evidence, and from it the state of each temporary partition.
+
+### What it does not observe (yet)
+
+* Process working directories: deferred (`process-cwd` is `NOT_OBSERVABLE`).
+* Open files: the collector exists but is behind a closed security gate in every copy (`handles` is
+  `NOT_OBSERVABLE`, `HANDLE_SECURITY_GATE_CLOSED`).
+* Git worktrees: behind a closed security gate in every copy (`worktree-discovery` is `NOT_OBSERVABLE`,
+  `WORKTREE_DIAGNOSTICS_GATE_CLOSED`); no Git command is run.
+* Remote Cowork sessions, and the Cowork VM itself (an HCS compute system, not a Hyper-V Manager VM).
+
+The three gates (real deletion, open-file diagnostics, worktree diagnostics) are closed in every copy, and no option,
+environment variable or configuration file opens them.
+
+### How to read the results
+
+* **Coverage first.** Each collector reports `COMPLETE`, `PARTIAL`, `DENIED`, `TIMEOUT`, `NOT_PRESENT`,
+  `NOT_OBSERVABLE`, `UNAVAILABLE` or `FAILED`, with reason codes. Only `COMPLETE` and `NOT_PRESENT` are conclusive.
+  `PARTIAL` means some items were seen and some were not; `NOT_OBSERVABLE` means the source was not read at all (a
+  gate, a deferred collector, a missing prerequisite). Neither is ever "nothing there": **the absence of evidence does
+  not show that something is unused**, because the evidence that would show use may simply not have been observed.
+* **Temporary partitions.** `IN_USE`: a verified process references it directly (or holds a file in it, or works in
+  it). `UNKNOWN`: anything else (a reference to a parent folder, ambiguous evidence, incomplete coverage, a limit of the
+  graph, a key collision); `UNKNOWN` never means free. `NO_DEPENDENCY_OBSERVED` needs every relevant collector to be
+  conclusive, so it does not appear while open files and working directories are not observable. The V0.1 class and
+  flags of the partition stay next to it, unchanged.
+* **Providers are not dependencies.** A finding attributed to a provider says which agent the evidence points to; it
+  does not prove that a temporary partition depends on that agent. When the evidence fits two providers (a `claude.exe`
+  can belong to Claude Code or to Claude Desktop), the attribution is ambiguous and no provider is chosen.
+* **Claude Code, Claude Desktop and Cowork.** Claude Code is the CLI agent (temporary directories and runtime).
+  Claude Desktop is the desktop app (runtime only: its packaged processes and its service). Cowork is a Claude Desktop
+  feature that runs in a VM managed by the app; the tool sees only the local `CoworkVMService` service, which is
+  identified by a **publicly reported** name (provisional, not documented by Anthropic): a running service with a
+  verified process is evidence of the local Cowork service, never of a running VM.
+* **Privileges.** `diagnose` never asks for elevation. Without it, other accounts' processes and some services may be
+  unreadable; that is reported as `PARTIAL` or `DENIED` with `elevationWouldHelp` (`YES`, `NO` or `UNKNOWN`: unknown
+  means it is not known whether elevation would help).
+* **Nothing is authorized.** No state, coverage or graph result authorizes deleting files, terminating processes,
+  stopping services or shutting down VMs.
 
 **The deadline is not a maximum duration.** Collectors that have not started when it passes are skipped and reported
 as `TIMEOUT`. The V0.1 temporary-directory inventory cannot be interrupted once it has started: it runs to the end and
 is reported as `PARTIAL` (`DEADLINE_EXCEEDED`) if it finishes after the deadline. `-DeadlineSeconds 0` reads only the
 process identity.
 
-Shows the identity of the process (user, elevated administrator, token elevation type, integrity level, session),
-the providers, one **coverage** record per collector and the findings. In this development stage the collectors are
-the token identity, provider runtime hints, the V0.1 temporary-directory inventory and the **agent runtime**
-(`process-snapshot`, `sessions-<provider>`, `agent-processes`, `agent-resources`); services, virtualization and Git
-worktrees are added by later V0.2 phases.
+### Export
 
-The agent runtime section lists the processes and sessions related to agents, found only through evidence: the
-providers' process matchers, their session registries (every profile; the inventory's own reading is reused), path
-references of the V0.1 audit and descendants through verified parent links. This run, its launcher and its own children
-are `SELF` and are left out of the totals. A process related to several providers is shown as ambiguous: no provider is
-chosen. Resource totals count each process once, even when agent processes are nested, and are a lower bound of agent
-activity (only the processes identified by the observed sources). The CPU is sampled with a 500 ms wait inside the
-remaining time limit; the interval shown is the one measured between the two process queries, and values that could
-not be read are shown as unknown or partial, never as 0. Processes that exited during the run are marked, and their
-evidence is stale. `COMPLETE` covers only the observed sources: it never means that no other agent exists. No runtime
-state frees, authorizes or blocks the deletion of a temporary directory.
+`-ExportJson` writes the JSON (schema [DIAGNOSE-SCHEMA.md](DIAGNOSE-SCHEMA.md)) only when asked; without it, no file is
+written. The destination must be a **new** file (an existing file is never overwritten), given as an absolute local
+path (no network, device or relative path, no wildcard, stream or `..`), whose folders contain no junction or other
+reparse point, outside every audited temporary directory, and not inside a Git repository or worktree (no folder above
+it holds a `.git` entry; Git itself is not run). The export is also refused when the inventory did not run, because the
+audited directories are then unknown. A refusal prints a code (`EXPORT_INVENTORY_NOT_RUN`,
+`EXPORT_DESTINATION_NOT_ALLOWED`, `EXPORT_INSIDE_REPOSITORY`), creates no file and exits with `10`; a write failure
+prints the exception type only and exits with `10`. A folder swapped for a junction after the check is a remaining
+window (SECURITY-MODEL, *Export*).
+
+The export contains the machine name, the user name and SID and the token elevation state; temporary partitions and
+agent sessions appear only as keyed pseudonyms, and no path, command line, token or session id is exported. Review it
+before sharing.
 
 **Pseudonyms (ADR-0010).** Temporary partitions and agent sessions appear only as keyed pseudonyms
 (`<provider>/p-<32 hex>`, `<provider>/s-<32 hex>`): no path and no session identifier is shown or exported. By default
 the key exists for one run only, so two runs cannot be compared item by item, and partition findings, which are
 listed in pseudonym order, come in another order each run. To correlate runs, keep a key file of
 32 to 4096 bytes from a random generator (not a passphrase: the exported `keyId` lets anyone test guesses of a weak
-key offline) that only you, SYSTEM and Administrators can read or change, and pass it every time:
-
-```powershell
-agent-temp diagnose -PseudonymKeyFile D:\private\atm-pseudonym.key -ExportJson D:\reports\diagnose.json
-```
+key offline) that only you, SYSTEM and Administrators can read or change, and pass it every time with
+`-PseudonymKeyFile`.
 
 The file is only read, never created or changed; it is refused (exit code `2`, nothing run, only a code is shown) when
 the path is not a drive-absolute path on a fixed drive, a folder in the path or the file is a reparse point, it is not a
 regular file, its size is out of range, its owner is not you, SYSTEM or Administrators, or any other account may read
-or change it. While `diagnose` runs, the progress line shows no path. Exports made with the same key show the same `keyId`. Anyone holding the key file can compute
-the pseudonyms from known identifiers: protect it like a password. Process keys, counts and coverage are not
-pseudonymized.
+or change it. While `diagnose` runs, the progress line shows no path. Exports made with the same key show the same
+`keyId`. Anyone holding the key file can compute the pseudonyms from known identifiers: protect it like a password.
+Process keys, counts and coverage are not pseudonymized.
 
-Coverage statuses: `COMPLETE`, `PARTIAL`, `DENIED`, `TIMEOUT`, `NOT_PRESENT`, `NOT_OBSERVABLE`, `UNAVAILABLE`, `FAILED`.
-Only `COMPLETE` and `NOT_PRESENT` are conclusive; anything else means **unknown** and is never reported as absent,
-stopped or unused. Partial coverage is a result, not an error (exit code `0`). The export is refused (exit code `10`)
-when the inventory did not run, because the audited directories are then unknown. JSON fields:
-[DIAGNOSE-SCHEMA.md](DIAGNOSE-SCHEMA.md). `diagnose` never requests elevation and changes nothing.
+Exit codes of `diagnose`: `0` when it ran (partial coverage is a result, not an error), `2` key file refused, `10`
+export refused or not written, or an unexpected failure (reported by its exception type only; nothing is deleted).
 
 ## Clean (assisted, fail-closed)
 

@@ -1,6 +1,8 @@
-﻿# Diagnose JSON schema (`atm.diagnose/2`)
+# Diagnose JSON schema (`atm.diagnose/2`)
 
-Written by `agent-temp diagnose -ExportJson <new file>` (V0.2, in development). Decision record:
+Written by `agent-temp diagnose -ExportJson <new file>` (V0.2, in development, not released) and only then: the
+destination rules (a new file, outside the audited directories, not inside a Git repository or worktree) are in
+[USAGE.md](USAGE.md#export). The TUI diagnostics area renders this same document. Decision record:
 [ADR-0009](adr/ADR-0009-diagnose-engine-command-schema.md); evidence and coverage model:
 [ADR-0001](adr/ADR-0001-evidence-coverage-findings.md); pseudonyms of exported identifiers:
 [ADR-0010](adr/ADR-0010-pseudonymization-of-exported-identifiers.md). The V0.1 audit export (`agent-temp audit
@@ -173,7 +175,7 @@ ordinally. No path, command line, VM name, GUID, account or session id is in it.
 | `nodes` | array | Nodes. |
 | `edges` | array | Edges, one per relation and pair of nodes (their evidence merged). |
 | `summaries` | array | One per `TempPartition` and `Worktree` finding. |
-| `coverage` | object | The graph's own coverage (not part of `coverage[]` nor of `coverageComplete`). |
+| `coverage` | object | The graph's own coverage. Since P4-B the same status and reasons are also a record of `coverage[]` (collector `dependency-graph`), so they count in `coverageComplete`. |
 
 ## graph.nodes[]
 

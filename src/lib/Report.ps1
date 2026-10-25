@@ -693,6 +693,36 @@ function Show-AtmDiagnosePartitions {
     Write-Host ('  ' + (Get-AtmText 'diag.partitionNotes'))
 }
 
+function Test-AtmDiagnoseExportPath {
+    <#
+      Destination of a diagnose export (P5-B). $null when allowed, otherwise a refusal code. Everything
+      Test-AtmOutputPathOutsideBases checks (an absolute local path with no wildcard, stream or traversal, a parent chain
+      without reparse points, outside every audited base, not existing yet), and not inside a Git repository or
+      worktree: no ancestor of the destination holds a '.git' entry (the directory of a repository or the file of a
+      linked worktree). Existence checks only: Git is never run and nothing is read or expanded.
+    #>
+    param([string]$Path, $Inventory)
+    if ($null -eq $Inventory) { return 'EXPORT_INVENTORY_NOT_RUN' }
+    if (-not (Test-AtmOutputPathOutsideBases -Path $Path -Inventory $Inventory -MustNotExist)) { return 'EXPORT_DESTINATION_NOT_ALLOWED' }
+    $dir = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Path))
+    while ($dir) {
+        if (Test-Path -LiteralPath (Join-Path $dir '.git')) { return 'EXPORT_INSIDE_REPOSITORY' }
+        $up = [IO.Path]::GetDirectoryName($dir)
+        if (-not $up -or $up -eq $dir) { break }
+        $dir = $up
+    }
+    return $null
+}
+
+function Write-AtmNewTextFile {
+    # Creates the file and writes UTF-8 without BOM. CreateNew never overwrites and never follows a file or link that
+    # appears at the destination after the check; a failure is thrown to the caller (reported there by a code).
+    param([string]$Path, [string]$Text)
+    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($Text)
+    $fs = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $fs.Write($bytes, 0, $bytes.Length); $fs.Flush() } finally { $fs.Dispose() }
+}
+
 function ConvertTo-AtmDiagnoseJson {
     # Schema atm.diagnose/2 (docs/DIAGNOSE-SCHEMA.md). Codes only; no command lines, environment values, tokens,
     # exception messages or file contents. Every array is explicit, every time is ISO 8601 UTC.

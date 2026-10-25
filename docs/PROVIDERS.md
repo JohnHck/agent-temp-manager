@@ -118,5 +118,15 @@ read. Sources checked on 2026-10-24:
   (`\WindowsApps\`, which carries the version) is reported by file name only. The hints apply to MSIX builds since
   the reported 1.1.3647.
 
+## Provider attribution is not a dependency
+
+A provider attribution says which agent the evidence points to (a matched process, a declared service, a session
+registry). It is not, by itself, proof that a temporary partition, a worktree or a VM depends on that agent: a
+dependency needs an edge of the dependency graph from a verified source (ADR-0002). When the evidence fits several
+providers (Claude Code and Claude Desktop both run `claude.exe`), the attribution is ambiguous: no provider is chosen,
+and transitivity never turns it into an exclusive link. **Claude Code** is the CLI agent; **Claude Desktop** is the
+desktop app; **Cowork** is a Claude Desktop feature that runs in an app-managed VM, of which only the local
+`CoworkVMService` service is observed, under a publicly reported (provisional) name.
+
 Adding another agent = one new file in `src/providers/` + tests. No engine, gate, report or TUI change is
 expected; the automated test "provider ficticio" demonstrates this with a test-only provider.

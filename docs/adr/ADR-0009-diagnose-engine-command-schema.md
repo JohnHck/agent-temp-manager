@@ -92,3 +92,19 @@ The presentation layer gains a diagnostics area in the existing TUI (menu `D`); 
   `WORKTREE_DIAGNOSTICS_GATE_CLOSED`) when the worktree gate is closed, so the area never has to invent a coverage
   record; and the run's worst record of a relevant collector is attached to a rebuilt partition or worktree finding
   even when the finding already carries a conclusive record of it (defense in depth, P4-B).
+
+## Implementation (P5-B, 2026-10-25): CLI, JSON contract and export
+
+* **Contract test.** The suite parses `DIAGNOSE-SCHEMA.md` and checks every exported object (top level, identity,
+  providers, coverage, findings and evidence, agent resources and counters, graph nodes, edges, evidence, summaries and
+  coverage, pseudonymization, inventory) for exactly its documented fields and types, on a synthetic result with a
+  graph, an integrated run, a run with a zero deadline and a run without providers; plus stable identifiers, arrays for
+  empty lists, `null` kept, no conclusive absence over incomplete coverage, positive states with their evidence, and
+  identical documents in pt-BR and en-US except `language`. No published field changed meaning.
+* **Export.** `Test-AtmDiagnoseExportPath` adds to the V0.1 destination rules a refusal inside Git repositories and
+  worktrees (an ancestor holding `.git`; existence checks, no Git) and returns a code; `Write-AtmNewTextFile` creates
+  the file with `CreateNew`. The CLI reports refusals and write failures by code only (exit code `10`), never by
+  exception message. Remaining window (a folder replaced by a junction between check and creation): SECURITY-MODEL.
+* **CLI.** No option gives repository paths, opens a gate or requests elevation (static test); `diagnose` never calls
+  the clean engine and writes nothing without `-ExportJson`; version, help and exit codes are checked through the
+  launcher.

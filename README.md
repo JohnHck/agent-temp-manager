@@ -8,7 +8,7 @@ across **every local user profile**, with a safety engine built for a future hum
 > Real cleanup is planned for V0.3, after the runtime diagnostics of V0.2: see the [roadmap](docs/ROADMAP.md).
 
 * Global command: `agent-temp` (interactive TUI + scriptable subcommands)
-* Agents (providers): **Claude Code** in V0.1; the provider architecture allows others later
+* Agents (providers): **Claude Code** in V0.1; V0.2 (in development) adds a runtime-only **Claude Desktop** provider
 * Languages: **English (en-US)** and **Portuguese (pt-BR)**, chosen automatically from the Windows UI language,
   or with `-Lang en-US|pt-BR` / `ATM_LANG`; unknown values fall back to English
 * Windows PowerShell 5.1 and PowerShell 7; no modules, Node, Python, network, browser or agent installation needed
@@ -23,10 +23,26 @@ across **every local user profile**, with a safety engine built for a future hum
 | `agent-temp audit` | Full audit. **Strictly read-only.** Writes no file unless `-ExportJson` is given. |
 | `agent-temp preview` | Splits every path into *blocked*, *needs investigation* and *technically eligible*. Deletes nothing. |
 | `agent-temp clean -AllowListFile <file>` | **V0.1: plan only.** Validates an allowlist of exact paths against every gate and prints the exact plan. |
+| `agent-temp diagnose` | **V0.2, in development (not released).** Read-only runtime diagnostics with coverage per collector; writes no file unless `-ExportJson` is given. |
 | `agent-temp verify` | Checks the installed files against their SHA-256 manifest. |
 | `agent-temp version` | Version, native mode, deletion state and language. |
 
 Drill-down: `-User <name|SID>`, `-Project <name>`, `-Root <uuid|path>`, `-Path <path>`. Language: `-Lang`.
+
+## Diagnostics (V0.2, in development - not released)
+
+V0.1 audits the temporary directories and classifies them conservatively. The V0.2 `diagnose` command (and the
+**D** area of the TUI) adds what is running around them: agent processes and sessions, provider services, the
+virtualization platform and its VMs, and a dependency graph that explains why a temporary partition looks in use.
+
+* It only reads. It never deletes, stops, starts or changes anything, never asks for elevation and runs no Git.
+* Every collector reports its **coverage**. `PARTIAL`, `DENIED`, `TIMEOUT`, `NOT_OBSERVABLE`, `UNAVAILABLE` and
+  `FAILED` mean "we do not know", never "nothing there". A partition is `IN_USE` only with direct evidence from a
+  verified process; otherwise it is `UNKNOWN`, which never means free. **No result authorizes deleting files or
+  terminating processes.**
+* What it cannot observe yet: process working directories (deferred), open files and Git worktrees (both behind
+  closed security gates in every copy), remote Cowork sessions and the Cowork VM itself.
+* Reports show pseudonyms and codes, not paths. Details: [docs/USAGE.md](docs/USAGE.md#diagnose-read-only-v02-in-development).
 
 ## Works on any Windows machine
 

@@ -239,9 +239,13 @@ try {
             finally { if ($null -ne $keyRead -and $null -ne $keyRead.Key) { [Array]::Clear($keyRead.Key, 0, $keyRead.Key.Length) } }
             Show-AtmDiagnose -Result $res
             if ($ExportJson) {
-                # Fail closed: without an inventory the audited directories are unknown, so no path can be validated.
-                if ($null -eq $res.Inventory -or -not (Test-AtmOutputPathOutsideBases -Path $ExportJson -Inventory $res.Inventory -MustNotExist)) { throw (Get-AtmText 'cli.diagExportRefused') }
-                [IO.File]::WriteAllText($ExportJson, (ConvertTo-AtmDiagnoseJson -Result $res), (New-Object Text.UTF8Encoding($false)))
+                # Fail closed (P5-B): without an inventory the audited directories are unknown; the destination must be a
+                # new absolute path outside them, without reparse points, and not inside a Git repository or worktree.
+                # The refusal and a write failure are reported by a code only (no exception message); exit code 10.
+                $refusal = Test-AtmDiagnoseExportPath -Path $ExportJson -Inventory $res.Inventory
+                if ($null -ne $refusal) { Write-Host (Get-AtmText 'cli.diagExportRefusedCode' $refusal) -ForegroundColor Red; Write-Host (Get-AtmText 'cli.diagExportRefused') -ForegroundColor Red; Write-Host (Get-AtmText 'cli.errorNoDeletion') -ForegroundColor Yellow; exit 10 }
+                try { Write-AtmNewTextFile -Path $ExportJson -Text (ConvertTo-AtmDiagnoseJson -Result $res) }
+                catch { Write-Host (Get-AtmText 'cli.diagExportFailed' (ConvertTo-AtmExceptionCode $_.Exception.GetType().Name)) -ForegroundColor Red; Write-Host (Get-AtmText 'cli.errorNoDeletion') -ForegroundColor Yellow; exit 10 }
                 Write-Host (Get-AtmText 'cli.exportWritten' $ExportJson)
                 Write-Host (Get-AtmText 'cli.diagExportPrivacy') -ForegroundColor Yellow
             }

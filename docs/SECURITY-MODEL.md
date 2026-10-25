@@ -146,6 +146,14 @@ called by `Invoke-AtmGitCommand`):
   graph of the same run (`IN_USE` only with a `DIRECT` edge from a verified process; `UNKNOWN` otherwise;
   `NO_DEPENDENCY_OBSERVED` only with conclusive coverage, which a V0.2 run never has). Nothing is collected for it,
   and no diagnose state is read by the audit, the preview or `clean`.
+* **Diagnose export (P5-B):** written only with `-ExportJson`, to a new file (`CreateNew`: never overwrites, never
+  follows a file or link that appears at the destination), at an absolute local path whose parent chain has no reparse
+  point, outside every audited base and not inside a Git repository or worktree (an ancestor holding `.git`; existence
+  checks only, no Git). Refusals and write failures are reported by code, never by exception message; nothing is
+  created after a refusal. **NOT RESOLVED - export TOCTOU:** a folder of the destination could be replaced by a junction
+  between the check and the creation; the new file would then be created through it (never over an existing file).
+  Proposed for FINAL: create the file relative to a handle on the verified parent directory (as the deleter and the
+  direct reads pin their ancestors), or keep exports behind a specific gate; until then the window is documented.
 * **TUI diagnostics area (P5-A, ADR-0009):** presentation only. It runs `Invoke-AtmDiagnose` on an explicit action
   (entering the area without a result, or `U`) and renders the diagnose JSON export of that result: no collector,
   Git, Restart Manager, registry or file access of its own, no state change, no gate opened (static test); the
