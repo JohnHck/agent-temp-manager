@@ -4,12 +4,13 @@
   %TEMP%\atm-tests-<random> (outside every real <TEMP>\claude base). Real Claude Code temp files are never
   written; tests that touch the real machine are read-only.
   Usage: powershell -NoProfile -ExecutionPolicy Bypass -File tests\Run-Tests.ps1 [-SkipHeavy] [-ReportFile <path>]
-         [-Only '<Area> :: <name pattern>', ...]
-  -Only (FINAL-A-S): runs only the cases whose "<Area> :: <name>" matches one of the wildcard patterns. Every setup
-  step outside the cases still runs; a case left out is neither run nor counted (never a PASS), the summary says it is
-  a subset, and a pattern that matches no case is a FAIL.
+         [-Only '<Area> :: <name pattern>', ...] [-Except '<Area> :: <name pattern>', ...]
+  -Only (FINAL-A-S): runs only the cases whose "<Area> :: <name>" matches one of the wildcard patterns. -Except
+  (FINAL-B): leaves out the cases that match one of its patterns. Every setup step outside the cases still runs; a case
+  left out is neither run nor counted (never a PASS), the summary says it is a subset and names each case left out by
+  -Except, and a pattern (of either list) that matches no case is a FAIL.
 #>
-param([switch]$SkipHeavy, [string]$ReportFile, [int]$HeavyFiles = 200000, [string[]]$Only = @())
+param([switch]$SkipHeavy, [string]$ReportFile, [int]$HeavyFiles = 200000, [string[]]$Only = @(), [string[]]$Except = @())
 
 $ErrorActionPreference = 'Stop'
 # Native and child-process output (Git, the CLI, which writes UTF-8) is decoded as UTF-8, like the CLI itself does:
@@ -115,6 +116,8 @@ function Assert-Eq { param($A, $B, [string]$Msg) if ($A -ne $B) { throw "ASSERT:
 
 $script:notSelected = 0
 $script:onlyHits = @{}
+$script:exceptHits = @{}
+$script:excludedNames = New-Object System.Collections.Generic.List[string]
 # FINAL-B (artifact privacy): case details reach the console and the report with this machine's identifiers replaced
 # by placeholders (<temp>, <profile>, <account>, <machine>, <sid>...); the structure of each message is kept.
 . (Join-Path (Split-Path -Parent $testsDir) 'tools\AtmArtifactSanitizer.ps1')
@@ -125,6 +128,10 @@ function Test-Case {
         $sel = @($Only | Where-Object { ('{0} :: {1}' -f $Area, $Name) -like $_ })
         if ($sel.Count -eq 0) { $script:notSelected++; return }
         foreach ($o in $sel) { $script:onlyHits[$o] = $true }
+    }
+    if ($Except.Count -gt 0) {
+        $ex = @($Except | Where-Object { ('{0} :: {1}' -f $Area, $Name) -like $_ })
+        if ($ex.Count -gt 0) { foreach ($o in $ex) { $script:exceptHits[$o] = $true }; $script:notSelected++; $script:excludedNames.Add(('{0} :: {1}' -f $Area, $Name)); return }
     }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $status = 'PASS'; $msg = ''
@@ -1203,6 +1210,21 @@ try {
         Assert-True (& $gateClosed) 'trava distribuida fechada ao final'
         $script:caseNote = "janela: $($r1.AbortReason -replace ':.*$', ''); antes do inicio: $($r2.AbortReason -replace ':.*$', ''); ancestral: $($r3.AbortReason -replace ':.*$', '')"
     }
+    Test-Case 'Gate V0.1' 'FINAL-B F-10: verificacao do caminho final por handle - arvore alcancada por uma unidade subst recusada (PATH_REDIRECTED), nada apagado' {
+        $real = Join-Path $sandbox 'f10-subst'
+        foreach ($d in @($real, (Join-Path $real 'tree5\sub'))) { [void][IO.Directory]::CreateDirectory($d) }
+        [IO.File]::WriteAllText((Join-Path $real 'tree5\sub\file.txt'), 'f')
+        $sl = $null; foreach ($l in [char[]]'QRSTUVWXYZ') { if (-not (Test-Path "$($l):\")) { $sl = $l; break } }
+        if (-not $sl) { $script:caseSkipped = $true; $script:caseNote = 'nenhuma letra de unidade livre'; return }
+        $null = cmd /c subst "$($sl):" "`"$real`"" 2>&1
+        try {
+            if (-not (Test-Path "$($sl):\tree5")) { $script:caseSkipped = $true; $script:caseNote = 'subst indisponivel'; return }
+            $r = [AgentTempManager.AtmDeleter]::DeleteTree("$($sl):\tree5")
+            Assert-True (-not $r.Attempted -and $r.FilesDeleted -eq 0 -and [string]$r.AbortReason -like '*PATH_REDIRECTED*') "caminho final diferente do pedido: recusado ($($r.AbortReason -replace ':.*$', ''))"
+            Assert-True (Test-Path -LiteralPath (Join-Path $real 'tree5\sub\file.txt')) 'nada apagado'
+            $script:caseNote = "unidade subst: $($r.AbortReason -replace ':.*$', '')"
+        } finally { $null = cmd /c subst "$($sl):" /d 2>&1 }
+    }
     Test-Case 'Privacidade' 'Scanner detecta dados pessoais plantados e aceita apenas os valores ficticios do projeto' {
         $scan = Join-Path (Split-Path -Parent $testsDir) 'tools\Test-AtmPrivacy.ps1'
         $d = Join-Path $sandbox 'privacy-probe'; [void][IO.Directory]::CreateDirectory($d)
@@ -1774,13 +1796,44 @@ function global:Get-FileHash { param([string]$LiteralPath, [string]$Algorithm)
     Test-Case 'Instalacao' 'FINAL-B F-13 (estatico): instalador, produto e ferramentas de evidencia nunca acham um programa do sistema por busca no PATH (cmd, whoami, icacls, reg, subst, powershell...)' {
         $root = Split-Path -Parent $testsDir
         $files = @(Get-ChildItem -LiteralPath (Join-Path $root 'install'), $srcDir -Recurse -File -Filter '*.ps1') + @(Get-Item -LiteralPath (Join-Path $root 'tools\privilege-matrix\Invoke-PrivilegeProbe.ps1'))
-        $rx = '(&|\|)\s*(whoami|cmd|icacls|takeown|reg|subst|fsutil|powershell|pwsh|schtasks|net|sc|tasklist|taskkill)(\.exe)?(\s|$)'
+        $names = '(whoami|cmd|icacls|takeown|reg|subst|fsutil|powershell|pwsh|schtasks|net|sc|tasklist|taskkill)(\.exe)?'
+        # A name where a command starts (line start, ';', '{', '(', '=', '|', '&'), Start-Process and Process.Start with a name.
+        $rx = @("(^|[;{(=|&])\s*$names(\s|`$)", "Start-Process\s+(-FilePath\s+)?['""]?$names['""\s]", "Process\]::Start\(\s*['""]$names['""]")
+        $probe = { param([string]$Line) @($rx | Where-Object { $Line -match $_ }).Count -gt 0 }
+        foreach ($bad in @('cmd /c dir', '    $o = & cmd.exe /c x', 'Start-Process powershell -ArgumentList x', "[Diagnostics.Process]::Start('cmd.exe', 'x')", '$x = whoami.exe /groups | Out-Null')) { Assert-True (& $probe $bad) "padrao detecta: $bad" }
+        foreach ($ok in @('$o = & $cmdExe /c x', '& (Join-Path $env:SystemRoot ''System32\cmd.exe'') /c x', 'Write-Host cmd-like text')) { Assert-True (-not (& $probe $ok)) "padrao aceita: $ok" }
         foreach ($f in $files) {
-            $hits = @([IO.File]::ReadAllLines($f.FullName) | Where-Object { $_ -notmatch '^\s*#' -and $_ -match $rx })
+            # Code only: comment-based help (<# ... #>, usage examples) and line comments are left out.
+            $code = [regex]::Replace([IO.File]::ReadAllText($f.FullName), '(?s)<#.*?#>', '')
+            $hits = @(($code -split "`r?`n") | Where-Object { $l = $_; $l -notmatch '^\s*#' -and @($rx | Where-Object { $l -match $_ }).Count -gt 0 })
             Assert-Eq $hits.Count 0 "$($f.Name): programa do sistema chamado pelo nome ($($hits -join ' | '))"
         }
         $ic = [IO.File]::ReadAllText((Join-Path $root 'install\InstallCommon.ps1'))
         Assert-True ($ic.Contains("`$cmdExe = Join-Path `$env:SystemRoot 'System32\cmd.exe'")) 'verificacao pos-instalacao usa o cmd.exe do System32'
+    }
+    Test-Case 'Instalacao' 'FINAL-B: arquivo adicional nao listado fora de providers (lib e raiz da instalacao) - comportamento registrado; codigo plantado nunca executa' {
+        $inst = Join-Path $sandbox 'PF-extra\AgentTempManager'
+        [void][IO.Directory]::CreateDirectory($inst)
+        Copy-AtmTree -From $srcDir -To $inst
+        New-AtmNativeAssembly -Root $inst
+        Write-AtmManifest -Root $inst -Version (Get-AtmSourceVersion -SourceDir $srcDir)
+        $cmd = Join-Path $inst 'bin\agent-temp.cmd'
+        $marker = Join-Path $inst 'atm-extra-marker.txt'
+        $code = "[IO.File]::WriteAllText('$($marker.Replace("'", "''"))', 'x')"
+        $seen = New-Object System.Collections.Generic.List[string]
+        foreach ($rel in @('lib\Extra.ps1', 'Extra.ps1', 'lib\Extra.txt')) {
+            $f = Join-Path $inst $rel
+            [IO.File]::WriteAllText($f, $code)
+            try {
+                foreach ($a in @('verify', 'version', 'diagnose -DeadlineSeconds 0')) {
+                    $r = Invoke-AtmTestChild -CommandLine ("`"$cmd`" $a") -TimeoutSec 180
+                    Assert-True (-not $r.TimedOut) "$rel / $($a): terminou"
+                    Assert-True (-not (Test-Path -LiteralPath $marker)) "$rel / $($a): codigo plantado nunca executado"
+                    $seen.Add(('{0} {1}={2}' -f $rel, @($a -split ' ')[0], $r.Exit))
+                }
+            } finally { [IO.File]::Move($f, "$f.aside") }
+        }
+        $script:caseNote = 'codigos de saida: ' + ($seen -join '; ')
     }
     Test-Case 'Ambiente' 'FINAL-B: custo de processos filhos por camada - cmd, Windows PowerShell 5.1, lancador instalado (fixture) e o mesmo com ambiente minimo; somente medicao, tempos e nomes de variaveis' {
         # Diagnostic for the ARM64 PowerShell 7 slowness (R-B5 verify: about 20 s per CLI call there, 0.5 s with Windows
@@ -1849,34 +1902,10 @@ function global:Get-FileHash { param([string]$LiteralPath, [string]$Algorithm)
             $parts = $Matches[1]
             [pscustomobject]@{ Ms = [long](($parts -split ',')[-1] -split ' ')[-1]; Parts = $parts }
         }
-        $withVars = { param([string[]]$Names) $e = $min2.Clone(); foreach ($n in $Names) { $e[$n] = $inherit[$n] }; $e }
         $hm = & $hashRun $min2; $hi = & $hashRun $inherit
         $notes.Add(('hash em partes (ms acumulados) minimo: {0}; herdado: {1}' -f $hm.Parts, $hi.Parts))
-        $slow = 5000
-        if ($hm.Ms -ge $slow -and $hi.Ms -lt $slow) {
-            $cand = @($inherit.Keys | Where-Object { $_ -ne 'PSModulePath' -and (-not $min2.ContainsKey($_) -or [string]$min2[$_] -cne [string]$inherit[$_]) } | Sort-Object)
-            $rounds = 0
-            while ($cand.Count -gt 1 -and $rounds -lt 12) {
-                $rounds++
-                $half = [int][math]::Ceiling($cand.Count / 2)
-                $a = @($cand[0..($half - 1)]); $b = @($cand[$half..($cand.Count - 1)])
-                if ((& $hashRun (& $withVars $a)).Ms -lt $slow) { $cand = $a }
-                elseif ((& $hashRun (& $withVars $b)).Ms -lt $slow) { $cand = $b }
-                else { break }
-            }
-            $notes.Add(('variaveis que tornam o hash rapido (bisseccao, {0} rodadas): {1}' -f $rounds, ($cand -join ',')))
-        } else {
-            $notes.Add('bisseccao nao aplicavel: minimo e herdado ' + $(if ($hm.Ms -ge $slow -and $hi.Ms -ge $slow) { 'ambos lentos' } else { 'rapidos' }))
-        }
-        # Round 4 (round 3 bisected the cost to PSModuleAnalysisCachePath on every runner where it applies): the inherited
-        # cache file (exists or not; which edition wrote it is not read), and a private cache for the child: first run
-        # (it builds the cache) and second run (it reuses it).
-        $mac = [string]$inherit['PSModuleAnalysisCachePath']
-        $notes.Add(('cache herdado: variavel {0}, arquivo {1}' -f $(if ($mac) { 'presente' } else { 'ausente' }), $(if ($mac -and (Test-Path -LiteralPath $mac -PathType Leaf)) { 'existe' } else { 'nao existe' })))
-        $own = $min2.Clone(); $own['PSModuleAnalysisCachePath'] = Join-Path $sandbox 'psmac-probe\ModuleAnalysisCache'
-        [void][IO.Directory]::CreateDirectory((Split-Path -Parent $own['PSModuleAnalysisCachePath']))
-        $c1 = & $hashRun $own; $c2 = & $hashRun $own
-        $notes.Add(('cache privado do filho: 1a execucao {0} ms, 2a {1} ms' -f $c1.Ms, $c2.Ms))
+        # Rounds 3 and 4 (bisection: PSModuleAnalysisCachePath; a private cache for the child did not help) are recorded in
+        # release/V0.2-FINAL-B-VALIDATION.md, section C; only the measurements above stay in every run.
         $script:caseNote = 'mediana de 3: ' + ($notes -join '; ')
     }
     Test-Case 'Instalacao' 'R-B5 verify: nenhum codigo carregado antes da verificacao; biblioteca removida, adulterada ou que sombreia Get-FileHash e provider plantado nunca executam nem forjam sucesso; manifesto invalido ou ausente recusado' {
@@ -8036,21 +8065,26 @@ try {
 }
 
 # A selection pattern that matched nothing would make an empty subset look green.
-foreach ($o in $Only) {
-    if (-not $script:onlyHits.ContainsKey($o)) {
-        $results.Add([pscustomobject]@{ Area = 'Harness'; Test = "-Only sem caso correspondente: $o"; Result = 'FAIL'; Ms = 0; Detail = 'padrao nao corresponde a nenhum caso' })
-        Write-Host ("[FAIL] Harness :: -Only sem caso correspondente: {0}" -f $o) -ForegroundColor Red
+foreach ($pair in @(@('-Only', $Only, $script:onlyHits), @('-Except', $Except, $script:exceptHits))) {
+    foreach ($o in $pair[1]) {
+        if (-not $pair[2].ContainsKey($o)) {
+            $results.Add([pscustomobject]@{ Area = 'Harness'; Test = "$($pair[0]) sem caso correspondente: $o"; Result = 'FAIL'; Ms = 0; Detail = 'padrao nao corresponde a nenhum caso' })
+            Write-Host ("[FAIL] Harness :: {0} sem caso correspondente: {1}" -f $pair[0], $o) -ForegroundColor Red
+        }
     }
 }
 $pass = @($results | Where-Object Result -eq 'PASS').Count
 $fail = @($results | Where-Object Result -eq 'FAIL').Count
 $skipped = @($results | Where-Object Result -eq 'NAO_TESTADO').Count
 Write-Host ''
-if ($Only.Count -gt 0) { Write-Host ("SUBCONJUNTO (-Only {0}): {1} casos nao selecionados, nao executados e nao contados" -f ($Only -join ' | '), $script:notSelected) -ForegroundColor Yellow }
-Write-Host ("RESULTADO{6}: {0} PASS / {1} FAIL / {5} NAO_TESTADO / {2} total | PowerShell {3} {4}" -f $pass, $fail, $results.Count, $PSVersionTable.PSVersion, $PSVersionTable.PSEdition, $skipped, $(if ($Only.Count -gt 0) { ' (SUBCONJUNTO)' } else { '' })) -ForegroundColor $(if ($fail -eq 0) { 'Green' } else { 'Red' })
+if ($Only.Count -gt 0 -or $Except.Count -gt 0) {
+    foreach ($n in $script:excludedNames) { Write-Host ("EXCLUIDO (-Except): {0}" -f $n) -ForegroundColor Yellow }
+    Write-Host ("SUBCONJUNTO (-Only {0}; -Except {1}): {2} casos nao selecionados, nao executados e nao contados" -f ($Only -join ' | '), ($Except -join ' | '), $script:notSelected) -ForegroundColor Yellow
+}
+Write-Host ("RESULTADO{6}: {0} PASS / {1} FAIL / {5} NAO_TESTADO / {2} total | PowerShell {3} {4}" -f $pass, $fail, $results.Count, $PSVersionTable.PSVersion, $PSVersionTable.PSEdition, $skipped, $(if ($Only.Count -gt 0 -or $Except.Count -gt 0) { ' (SUBCONJUNTO)' } else { '' })) -ForegroundColor $(if ($fail -eq 0) { 'Green' } else { 'Red' })
 Write-Host ("Sandbox removido: {0}" -f (-not [IO.Directory]::Exists($sandbox)))
 if ($ReportFile) {
-    $rep = [ordered]@{ psVersion = $PSVersionTable.PSVersion.ToString(); psEdition = $PSVersionTable.PSEdition; accountKind = $(if ($me.IsAdmin) { 'ADMINISTRATOR_ELEVATED' } else { 'NOT_ELEVATED' }); isAdmin = $me.IsAdmin; utc = [datetime]::UtcNow.ToString('o'); pass = $pass; fail = $fail; notTested = $skipped; subset = @($Only); notSelected = $script:notSelected; sandboxRemoved = (-not [IO.Directory]::Exists($sandbox)); results = $results }
+    $rep = [ordered]@{ psVersion = $PSVersionTable.PSVersion.ToString(); psEdition = $PSVersionTable.PSEdition; accountKind = $(if ($me.IsAdmin) { 'ADMINISTRATOR_ELEVATED' } else { 'NOT_ELEVATED' }); isAdmin = $me.IsAdmin; utc = [datetime]::UtcNow.ToString('o'); pass = $pass; fail = $fail; notTested = $skipped; subset = @($Only); except = @($Except); excluded = @($script:excludedNames); notSelected = $script:notSelected; sandboxRemoved = (-not [IO.Directory]::Exists($sandbox)); results = $results }
     [IO.File]::WriteAllText($ReportFile, ($rep | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding($false)))
 }
 exit $fail
