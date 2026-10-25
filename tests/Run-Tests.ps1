@@ -1175,7 +1175,8 @@ try {
         Assert-Eq $r.Exit 0 "artefato limpo depois da troca: exit 0 ($($r.Text))"
         $after = [IO.File]::ReadAllText($rep)
         foreach ($x in @($env:USERNAME, $env:COMPUTERNAME, $fakeSid, $env:USERPROFILE, $env:USERPROFILE.Replace('\', '\\'))) { Assert-True ($after.IndexOf($x, [StringComparison]::OrdinalIgnoreCase) -lt 0) 'identificador desta maquina trocado no artefato' }
-        Assert-True ($after.Contains('<temp>') -and $after.Contains('<account>') -and $after.Contains('<sid>') -and $after.Contains('S-1-5-21-1-2-3-777') -and $after.Contains('<profile>')) "marcadores no lugar; SID ficticio do projeto mantido ($after)"
+        # The account may also be a profile folder name of this machine: either placeholder replaces it.
+        Assert-True ($after.Contains('<temp>') -and ($after.Contains('<account>') -or $after.Contains('<profile-name>')) -and $after.Contains('<sid>') -and $after.Contains('S-1-5-21-1-2-3-777') -and $after.Contains('<profile>')) "marcadores no lugar; SID ficticio do projeto mantido ($after)"
         Assert-Eq (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash $zh 'arquivo compactado nunca alterado'
         Assert-True ($r.Text -match '1 archive\(s\)') "arquivo compactado varrido ($($r.Text))"
         # A value the sanitizer does not know (an address) is still found by the scanner: exit 1, location only.
@@ -1717,9 +1718,27 @@ function global:Get-FileHash { param([string]$LiteralPath, [string]$Algorithm)
             }
             $notes.Add(('{0} {1} ms' -f $k, @($ms | Sort-Object)[1]))
         }
-        # Inherited variable NAMES (never values) that the minimal environment leaves out and that could steer a child
-        # PowerShell or .NET.
-        $inh = @([Environment]::GetEnvironmentVariables().Keys | ForEach-Object { [string]$_ } | Where-Object { $_ -match '^(PS|POWERSHELL|DOTNET|COMPLUS|__PS|CORECLR)' -and -not $minimal.ContainsKey($_) } | Sort-Object)
+        # Where the launcher's time goes: the same loading sequence, step by step, timed inside a Windows PowerShell 5.1
+        # child (module path pinned as the launcher pins it), with the inherited environment and with the minimal one.
+        $steps = @('lib\Engine.Audit.ps1', 'lib\I18n.ps1', 'lib\Engine.Clean.ps1', 'lib\Engine.Diagnose.ps1', 'lib\Report.ps1', 'lib\Tui.ps1', 'providers\ClaudeCode.ps1')
+        $probe = Join-Path $sandbox 'probe-load.ps1'
+        $body = @('$t = [Diagnostics.Stopwatch]::StartNew(); $o = New-Object System.Collections.Generic.List[string]', '$ErrorActionPreference = ''Stop''')
+        $body += ('$sha = [Security.Cryptography.SHA256]::Create(); foreach ($f in [IO.Directory]::GetFiles(''{0}'', ''*'', ''AllDirectories'')) {{ $s = [IO.File]::OpenRead($f); try {{ $null = $sha.ComputeHash($s) }} finally {{ $s.Dispose() }} }}; $o.Add(''hashes '' + $t.ElapsedMilliseconds)' -f $inst.Replace("'", "''"))
+        foreach ($st in $steps) { $body += ('. ''{0}''; $o.Add(''{1} '' + $t.ElapsedMilliseconds)' -f (Join-Path $inst $st).Replace("'", "''"), (Split-Path -Leaf $st)) }
+        $body += '[Console]::Out.Write(''LOAD['' + ($o -join '','') + '']'')'
+        # With a BOM: Windows PowerShell 5.1 reads a script without one in the ANSI code page (non-ASCII paths).
+        [IO.File]::WriteAllLines($probe, $body, (New-Object Text.UTF8Encoding($true)))
+        $pinned = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\Modules'
+        $inherit = @{}; foreach ($k in [Environment]::GetEnvironmentVariables().Keys) { $inherit[[string]$k] = [Environment]::GetEnvironmentVariable([string]$k) }
+        $inherit['PSModulePath'] = $pinned
+        $min2 = $minimal.Clone(); $min2['PSModulePath'] = $pinned
+        foreach ($e in @(@('herdado', $inherit), @('minimo', $min2))) {
+            $r = Invoke-AtmTestChild -CommandLine ("`"$ps51`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$probe`"") -Environment $e[1] -TimeoutSec 180
+            Assert-True (-not $r.TimedOut -and $r.Text -match 'LOAD\[([^\]]*)\]') "carga passo a passo ($($e[0])): concluida ($($r.Text))"
+            $notes.Add(('carga {0} (ms acumulados): {1}' -f $e[0], $Matches[1]))
+        }
+        # Inherited variable NAMES (never values) that the minimal environment leaves out.
+        $inh = @([Environment]::GetEnvironmentVariables().Keys | ForEach-Object { [string]$_ } | Where-Object { -not $minimal.ContainsKey($_) -and $_ -ne 'PATH' -and $_ -ne 'Path' } | Sort-Object)
         $notes.Add('variaveis herdadas fora do ambiente minimo: ' + $(if ($inh.Count) { $inh -join ',' } else { 'nenhuma' }))
         $script:caseNote = 'mediana de 3: ' + ($notes -join '; ')
     }
