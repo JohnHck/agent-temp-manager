@@ -24,8 +24,10 @@ $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $ps51 = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $id = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($id)
-# Column names of whoami are localized: read them by position.
-$groups = @(& whoami.exe /groups /fo csv /nh 2>$null | ConvertFrom-Csv -Header 'Group Name', 'Type', 'SID', 'Attributes')
+# Column names of whoami are localized: read them by position. Absolute path (FINAL-B): a PATH lookup found another
+# tool named whoami first when the probe was started from a shell that prepends its own directories.
+$whoami = Join-Path $env:SystemRoot 'System32\whoami.exe'
+$groups = @(& $whoami /groups /fo csv /nh 2>$null | ConvertFrom-Csv -Header 'Group Name', 'Type', 'SID', 'Attributes')
 $integrity = @($groups | Where-Object { $_.'SID' -like 'S-1-16-*' } | ForEach-Object { $_.'Group Name' }) -join ', '
 $adminGroup = @($groups | Where-Object { $_.'SID' -eq 'S-1-5-32-544' } | ForEach-Object { $_.'Attributes' }) -join ', '
 $uac = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -ErrorAction SilentlyContinue

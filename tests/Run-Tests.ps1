@@ -1771,6 +1771,17 @@ function global:Get-FileHash { param([string]$LiteralPath, [string]$Algorithm)
         $max = @($c | Sort-Object Ms -Descending)[0]
         '{0} chamadas do CLI: media {1} ms, maxima {2} ms ({3}), total {4} s' -f $c.Count, [math]::Round((($c | Measure-Object Ms -Average).Average)), $max.Ms, $max.Verb, [math]::Round((($c | Measure-Object Ms -Sum).Sum) / 1000)
     }
+    Test-Case 'Instalacao' 'FINAL-B F-13 (estatico): instalador, produto e ferramentas de evidencia nunca acham um programa do sistema por busca no PATH (cmd, whoami, icacls, reg, subst, powershell...)' {
+        $root = Split-Path -Parent $testsDir
+        $files = @(Get-ChildItem -LiteralPath (Join-Path $root 'install'), $srcDir -Recurse -File -Filter '*.ps1') + @(Get-Item -LiteralPath (Join-Path $root 'tools\privilege-matrix\Invoke-PrivilegeProbe.ps1'))
+        $rx = '(&|\|)\s*(whoami|cmd|icacls|takeown|reg|subst|fsutil|powershell|pwsh|schtasks|net|sc|tasklist|taskkill)(\.exe)?(\s|$)'
+        foreach ($f in $files) {
+            $hits = @([IO.File]::ReadAllLines($f.FullName) | Where-Object { $_ -notmatch '^\s*#' -and $_ -match $rx })
+            Assert-Eq $hits.Count 0 "$($f.Name): programa do sistema chamado pelo nome ($($hits -join ' | '))"
+        }
+        $ic = [IO.File]::ReadAllText((Join-Path $root 'install\InstallCommon.ps1'))
+        Assert-True ($ic.Contains("`$cmdExe = Join-Path `$env:SystemRoot 'System32\cmd.exe'")) 'verificacao pos-instalacao usa o cmd.exe do System32'
+    }
     Test-Case 'Ambiente' 'FINAL-B: custo de processos filhos por camada - cmd, Windows PowerShell 5.1, lancador instalado (fixture) e o mesmo com ambiente minimo; somente medicao, tempos e nomes de variaveis' {
         # Diagnostic for the ARM64 PowerShell 7 slowness (R-B5 verify: about 20 s per CLI call there, 0.5 s with Windows
         # PowerShell 5.1 as the parent). The launcher always starts Windows PowerShell 5.1 and the native DLL is always
@@ -1857,7 +1868,15 @@ function global:Get-FileHash { param([string]$LiteralPath, [string]$Algorithm)
         } else {
             $notes.Add('bisseccao nao aplicavel: minimo e herdado ' + $(if ($hm.Ms -ge $slow -and $hi.Ms -ge $slow) { 'ambos lentos' } else { 'rapidos' }))
         }
-        foreach ($n in @('ALLUSERSPROFILE', 'ProgramData', 'PUBLIC', 'ProgramW6432', 'CommonProgramW6432', 'PROCESSOR_IDENTIFIER', 'LOGONSERVER', 'PSModuleAnalysisCachePath', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA')) { $notes.Add(('{0}: {1}' -f $n, $(if ($inherit.ContainsKey($n) -and $inherit[$n]) { 'presente' } else { 'AUSENTE' }))) }
+        # Round 4 (round 3 bisected the cost to PSModuleAnalysisCachePath on every runner where it applies): the inherited
+        # cache file (exists or not; which edition wrote it is not read), and a private cache for the child: first run
+        # (it builds the cache) and second run (it reuses it).
+        $mac = [string]$inherit['PSModuleAnalysisCachePath']
+        $notes.Add(('cache herdado: variavel {0}, arquivo {1}' -f $(if ($mac) { 'presente' } else { 'ausente' }), $(if ($mac -and (Test-Path -LiteralPath $mac -PathType Leaf)) { 'existe' } else { 'nao existe' })))
+        $own = $min2.Clone(); $own['PSModuleAnalysisCachePath'] = Join-Path $sandbox 'psmac-probe\ModuleAnalysisCache'
+        [void][IO.Directory]::CreateDirectory((Split-Path -Parent $own['PSModuleAnalysisCachePath']))
+        $c1 = & $hashRun $own; $c2 = & $hashRun $own
+        $notes.Add(('cache privado do filho: 1a execucao {0} ms, 2a {1} ms' -f $c1.Ms, $c2.Ms))
         $script:caseNote = 'mediana de 3: ' + ($notes -join '; ')
     }
     Test-Case 'Instalacao' 'R-B5 verify: nenhum codigo carregado antes da verificacao; biblioteca removida, adulterada ou que sombreia Get-FileHash e provider plantado nunca executam nem forjam sucesso; manifesto invalido ou ausente recusado' {

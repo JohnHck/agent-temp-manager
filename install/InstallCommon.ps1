@@ -417,7 +417,9 @@ function Invoke-AtmRenameSteps {
 
 function Invoke-AtmVerifyInstalled {
     param([string]$InstallDir)
-    $out = & cmd.exe /c "`"$(Join-Path $InstallDir 'bin\agent-temp.cmd')`" verify" 2>&1
+    # Absolute path (FINAL-B, F-13): an administrative operation never finds a program through a PATH lookup.
+    $cmdExe = Join-Path $env:SystemRoot 'System32\cmd.exe'
+    $out = & $cmdExe /c "`"$(Join-Path $InstallDir 'bin\agent-temp.cmd')`" verify" 2>&1
     return [pscustomobject]@{ Ok = ($LASTEXITCODE -eq 0); Output = ($out -join "`n") }
 }
 

@@ -303,6 +303,65 @@ Step 'diagnose-export-and-tui-area' {
     Assert (-not (Test-Path -LiteralPath $target) -and -not (Test-Path -LiteralPath $dir) -and -not $r.Text.Contains('EXPORT_DESTINATION')) 'arquivo ou pasta criados, ou destino verificado, com a trava fechada'
     "installed TUI has menu D; installed export gate = `$false (single assignment); installed export refused (EXPORT_SECURITY_GATE_CLOSED, exit 10, no file, nothing collected)"
 }
+Step 'installed-tamper-variants' {
+    # FINAL-B: on this run's own installation. A listed provider missing, an unlisted provider planted and an altered
+    # manifest hash are each refused (exit 5) by verify and by a normal command; every change is undone afterwards.
+    $prov = Join-Path $installDir 'providers\ClaudeCode.ps1'
+    $aside = Join-Path $OutDir 'ClaudeCode.ps1.aside'
+    [IO.File]::Move($prov, $aside)
+    try {
+        $r = Invoke-Agent 'verify' 'verify-provider-missing'; Assert ($r.Code -eq 5) "provider ausente: verify exit $($r.Code)"
+        $r = Invoke-Agent 'version' 'version-provider-missing'; Assert ($r.Code -eq 5) "provider ausente: version exit $($r.Code)"
+    } finally { [IO.File]::Move($aside, $prov) }
+    $extra = Join-Path $installDir 'providers\Extra.ps1'
+    [IO.File]::WriteAllText($extra, '# planted by e2e')
+    try {
+        $r = Invoke-Agent 'verify' 'verify-provider-planted'; Assert ($r.Code -eq 5 -and $r.Text -match 'Extra\.ps1') "provider plantado: verify exit $($r.Code)"
+        $r = Invoke-Agent 'version' 'version-provider-planted'; Assert ($r.Code -eq 5) "provider plantado: version exit $($r.Code)"
+    } finally { [IO.File]::Move($extra, (Join-Path $OutDir 'Extra.ps1.aside')) }
+    $mf = Join-Path $installDir 'manifest.json'
+    $orig = [IO.File]::ReadAllBytes($mf)
+    try {
+        $m = [IO.File]::ReadAllText($mf) | ConvertFrom-Json
+        $m.files[0].sha256 = ('0' * 64)
+        [IO.File]::WriteAllText($mf, ($m | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding($false)))
+        $r = Invoke-Agent 'verify' 'verify-manifest-altered'; Assert ($r.Code -eq 5) "manifesto alterado: verify exit $($r.Code)"
+        $r = Invoke-Agent 'help' 'help-manifest-altered'; Assert ($r.Code -eq 5) "manifesto alterado: help exit $($r.Code)"
+    } finally { [IO.File]::WriteAllBytes($mf, $orig) }
+    $r = Invoke-Agent 'verify' 'verify-after-variants'; Assert ($r.Code -eq 0) "restaurado: verify exit $($r.Code)"
+    'provider missing, provider planted and manifest altered: each refused (exit 5); restored: verify 0'
+}
+Step 'installed-encoding' {
+    # FINAL-B: every installed script with non-ASCII text keeps its UTF-8 BOM (Windows PowerShell 5.1 would read it in
+    # the ANSI code page otherwise); the manifest check already proves the bytes equal the package's.
+    $bad = @(Get-ChildItem -LiteralPath $installDir -Recurse -File -Filter '*.ps1' | Where-Object {
+        $b = [IO.File]::ReadAllBytes($_.FullName)
+        (@($b | Where-Object { $_ -gt 127 }).Count -gt 0) -and -not ($b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF)
+    } | ForEach-Object { $_.Name })
+    Assert ($bad.Count -eq 0) "scripts nao ASCII sem BOM: $($bad -join ', ')"
+    'non-ASCII installed scripts all carry a UTF-8 BOM'
+}
+Step 'installed-audit-export' {
+    # FINAL-B: the installed audit export (V0.1, enabled) goes through the pinned writer: a new file with a protected
+    # DACL; an existing file is refused and left unchanged; a folder reached through a junction is refused. Written
+    # outside the uploaded evidence folder (the document names this machine's accounts).
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ('atm-e2e-audit-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    [void][IO.Directory]::CreateDirectory($dir)
+    $target = Join-Path $dir 'audit.json'
+    $r = Invoke-Agent ('audit -NoProgress -Lang en-US -ExportJson "' + $target + '"') 'audit-export'
+    Assert ($r.Code -eq 0 -and (Test-Path -LiteralPath $target)) "exportacao da auditoria: exit $($r.Code)"
+    $null = [IO.File]::ReadAllText($target) | ConvertFrom-Json
+    Assert ((Get-Acl -LiteralPath $target).AreAccessRulesProtected) 'arquivo exportado sem DACL protegida'
+    $h = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
+    $r = Invoke-Agent ('audit -NoProgress -Lang en-US -ExportJson "' + $target + '"') 'audit-export-existing'
+    Assert ($r.Code -eq 10 -and (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -eq $h) "arquivo existente: exit $($r.Code), deve recusar sem alterar"
+    $real = Join-Path $dir 'real'; [void][IO.Directory]::CreateDirectory($real)
+    $link = Join-Path $dir 'link'
+    $o = & (Join-Path $env:SystemRoot 'System32\cmd.exe') /c "mklink /J `"$link`" `"$real`"" 2>&1; Assert ($LASTEXITCODE -eq 0) "juncao de teste: $o"
+    $r = Invoke-Agent ('audit -NoProgress -Lang en-US -ExportJson "' + (Join-Path $link 'x.json') + '"') 'audit-export-junction'
+    Assert ($r.Code -eq 10 -and -not (Test-Path -LiteralPath (Join-Path $real 'x.json'))) "pasta por juncao: exit $($r.Code), nada no alvo"
+    'installed audit export: created with a protected DACL; existing file refused unchanged (10); junction folder refused (10), nothing in the target'
+}
 Step 'clean-never-deletes' {
     # A real-looking, old session root of the current user. V0.1 must stop without deleting it.
     $base = Join-Path ([IO.Path]::GetTempPath()) 'claude'
