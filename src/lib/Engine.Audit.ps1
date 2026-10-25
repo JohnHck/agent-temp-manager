@@ -132,9 +132,25 @@ function Get-AtmCurrentIdentity {
     }
 }
 
+function Test-AtmLocalPathForm {
+    <#
+      FINAL-A (F-01): $true only for a drive-absolute path ('X:\...') on a drive letter that is not a network drive, with
+      no control character and no stream. Paths that come from other users' registry or environment (TEMP,
+      CLAUDE_CONFIG_DIR, CLAUDE_CODE_TMPDIR) must pass this BEFORE any file-system call: a UNC (\\host\share, //host),
+      device (\\?\, \\.\) or WebDAV (\\host@80\x) form would make an elevated process authenticate to a host chosen by
+      that user (NTLM). Only the drive type is queried (no network access).
+    #>
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or $Path -notmatch '^[A-Za-z]:\\' -or $Path -match '[\x00-\x1f]' -or $Path.Substring(2).Contains(':')) { return $false }
+    try { $dt = ([IO.DriveInfo]::new($Path.Substring(0, 1))).DriveType } catch { return $false }
+    return ($dt -ne [IO.DriveType]::Network -and $dt -ne [IO.DriveType]::NoRootDirectory -and $dt -ne [IO.DriveType]::Unknown)
+}
+
 function Get-AtmNormalizedPath {
     param([string]$Path)
     if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    # F-01: no network or device form ever reaches GetLongPathName or GetFullPath (refused as not normalizable).
+    if (-not (Test-AtmLocalPathForm $Path)) { return $null }
     try {
         $long = [AgentTempManager.AtmNative]::GetLongPath($Path)
         if (-not $long) {
@@ -510,6 +526,10 @@ function Get-AtmSelfChainPids {
         $guard++
         $parent = $byPid[$cur.ParentPid]
         if (-not $parent -or -not $parent.CommandLine) { break }
+        # FINAL-A (F-06): a reused parent PID (created after its "child") is not the launcher: stop, never exclude it.
+        $pc = $(if ($parent.PSObject.Properties['CreationUtc']) { $parent.CreationUtc } else { $null })
+        $cc = $(if ($cur.PSObject.Properties['CreationUtc']) { $cur.CreationUtc } else { $null })
+        if ($pc -and $cc -and $pc -gt $cc) { break }
         $cl = $parent.CommandLine.ToLowerInvariant()
         $hit = $false
         foreach ($m in $Markers) { if ($m -and $cl.Contains($m.ToLowerInvariant())) { $hit = $true; break } }

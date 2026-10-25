@@ -30,9 +30,11 @@ function Get-AtmClaudeConfigDirs {
     $dirs = New-Object System.Collections.Generic.List[string]
     $vals = @()
     if ($ProfileInfo.EnvValues -and $ProfileInfo.EnvValues.ContainsKey('CLAUDE_CONFIG_DIR')) { $vals = @($ProfileInfo.EnvValues['CLAUDE_CONFIG_DIR']) }
-    foreach ($v in $vals) { if ($v) { $dirs.Add($v) } }
-    if ($dirs.Count -eq 0 -and $ProfileInfo.ProfilePath) { $dirs.Add((Join-AtmPath $ProfileInfo.ProfilePath '.claude')) }
-    return [pscustomobject]@{ Dirs = @($dirs | Select-Object -Unique); Known = [bool]$ProfileInfo.EnvKnown }
+    # FINAL-A (F-01): a value in a network or device form (another user may set it) is never read: counted as refused.
+    $refused = 0
+    foreach ($v in $vals) { if ($v) { if (Test-AtmLocalPathForm $v) { $dirs.Add($v) } else { $refused++ } } }
+    if ($dirs.Count -eq 0 -and $refused -eq 0 -and $ProfileInfo.ProfilePath) { $dirs.Add((Join-AtmPath $ProfileInfo.ProfilePath '.claude')) }
+    return [pscustomobject]@{ Dirs = @($dirs | Select-Object -Unique); Known = [bool]$ProfileInfo.EnvKnown; Refused = $refused }
 }
 
 function Get-AtmClaudeSessionEvidence {
@@ -43,7 +45,9 @@ function Get-AtmClaudeSessionEvidence {
     $entries = New-Object System.Collections.Generic.List[object]
     $byPid = @{}
     foreach ($p in $Snapshot.Processes) { $byPid[$p.Pid] = $p }
-    foreach ($cfg in (Get-AtmClaudeConfigDirs $ProfileInfo).Dirs) {
+    $cfgDirs = Get-AtmClaudeConfigDirs $ProfileInfo
+    if ($cfgDirs.Refused -gt 0) { $r.Readable = $false; $r.Notes += (Get-AtmText 'note.configDirRefused' $cfgDirs.Refused) }
+    foreach ($cfg in $cfgDirs.Dirs) {
         $dir = Join-AtmPath $cfg 'sessions'
         $files = @()
         try {
@@ -82,11 +86,12 @@ function Get-AtmClaudeSessionEvidence {
             $scope = $null; $projName = $null
             if ($o.PSObject.Properties.Name -contains 'cwd') {
                 $cwd = ([string]$o.cwd).TrimEnd('\', '/')
-                if ($cwd) { $scope = ConvertTo-AtmClaudeSlug $cwd; $projName = Split-Path -Leaf $cwd }
+                # FINAL-A (F-03): control characters (terminal escapes) in the leaf are replaced before display.
+                if ($cwd) { $scope = ConvertTo-AtmClaudeSlug $cwd; $projName = [regex]::Replace((Split-Path -Leaf $cwd), '[\x00-\x1f\x7f-\x9f]', '?') }
             }
             # StartUtc (contract v2, optional): the process creation time the session recorded, 100 ns precision, for
             # the diagnose engine's exact identity check (V0.2-P1-B4-b). State above is the V0.1 rule, unchanged.
-            $entries.Add([pscustomobject]@{ SessionId = ([string]$o.sessionId).ToLowerInvariant(); Pid = $pidVal; State = $state; Scope = $scope; ProjectName = $projName; StartUtc = $started })
+            $entries.Add([pscustomobject]@{ SessionId = [regex]::Replace(([string]$o.sessionId).ToLowerInvariant(), '[\x00-\x1f\x7f-\x9f]', '?'); Pid = $pidVal; State = $state; Scope = $scope; ProjectName = $projName; StartUtc = $started })
         }
     }
     $r.Entries = $entries.ToArray()
@@ -97,7 +102,9 @@ function Get-AtmClaudeActivityEvidence {
     # Session transcript <configDir>\projects\<slug>\<sessionId>.jsonl: last write time only, never content.
     param([Alias('Profile')]$ProfileInfo, [string]$Scope, [string]$RootName)
     $res = [ordered]@{ Readable = $true; LastWriteUtc = $null }
-    foreach ($cfg in (Get-AtmClaudeConfigDirs $ProfileInfo).Dirs) {
+    $cfgDirs = Get-AtmClaudeConfigDirs $ProfileInfo
+    if ($cfgDirs.Refused -gt 0) { $res.Readable = $false }
+    foreach ($cfg in $cfgDirs.Dirs) {
         $pd = Join-AtmPath (Join-AtmPath $cfg 'projects') $Scope
         $f = Join-AtmPath $pd ($RootName + '.jsonl')
         try {

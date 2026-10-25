@@ -444,6 +444,10 @@ function Assert-AtmInstallSource {
         if ($e.Count -gt 0) { throw (Get-AtmText 'inst.syntax' $f.FullName $e[0].Message) }
     }
     $version = Get-AtmSourceVersion -SourceDir $SourceDir
+    # FINAL-A (F-07): the manifest's own hash is taken before the source is verified, so the staged copy can be compared
+    # with exactly what was verified (a file or manifest swapped between verification and copy is refused).
+    $srcManifest = Join-Path $SourceDir 'manifest.json'
+    $srcManifestHash = $(if (Test-Path -LiteralPath $srcManifest -PathType Leaf) { (Get-FileHash -LiteralPath $srcManifest -Algorithm SHA256).Hash } else { $null })
     Test-AtmSourceIntegrity -SourceDir $SourceDir -AllowNoManifest:$SourceWithoutManifest
     return $version
 }
@@ -483,6 +487,11 @@ function Invoke-AtmInstallUnlocked {
     [void][IO.Directory]::CreateDirectory($staging)
     try {
         Copy-AtmTree -From $SourceDir -To $staging
+        if ($null -ne $srcManifestHash) {
+            $stagedManifest = Join-Path $staging 'manifest.json'
+            if (-not (Test-Path -LiteralPath $stagedManifest -PathType Leaf) -or (Get-FileHash -LiteralPath $stagedManifest -Algorithm SHA256).Hash -ne $srcManifestHash) { throw (Get-AtmText 'inst.hashMismatch' 'manifest.json') }
+            Test-AtmSourceIntegrity -SourceDir $staging
+        }
         if ($ProjectsFile) {
             $null = Get-Content -LiteralPath $ProjectsFile -Raw -Encoding UTF8 | ConvertFrom-Json
             Copy-Item -LiteralPath $ProjectsFile -Destination (Join-Path $staging 'config\projects.local.json')

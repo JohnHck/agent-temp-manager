@@ -53,6 +53,11 @@ agent-temp audit -ExportJson D:\reports\audit.json   # optional, explicit, outsi
 Sections: general summary (exclusive partitions), per user/SID, per project, per direct root,
 LIVENESS_UNKNOWN older than 72 h, errors/ambiguities/coverage, final summary.
 
+**Export safety (V0.2 FINAL-A).** The audit export keeps its rules (a new file outside the audited directories, no
+reparse point in its folders) and is now created with the folder and its ancestors pinned, relative to the folder, with
+access limited to its owner, SYSTEM and Administrators; a folder swapped during the export, or a `subst` drive letter, is
+refused with the same message.
+
 ## Preview (no deletion)
 
 ```powershell

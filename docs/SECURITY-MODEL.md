@@ -142,6 +142,11 @@ called by `Invoke-AtmGitCommand`):
   query, file read, process access or collector call of its own (static test). It lives in memory for the run and is
   not persisted; it exports only keys, provider ids, relations, strengths, codes and coverage. Its summaries are not
   finding states and authorize nothing: no deletion, termination or state change follows from them.
+* **Paths from other users (FINAL-A, F-01):** values read from other users' registry or environment (TEMP,
+  `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_TMPDIR`) are used only in a drive-absolute form on a non-network drive letter;
+  UNC, device and WebDAV forms are refused before any file-system call (an elevated run never authenticates to a host a
+  user chose), and the gap is reported (base `INVALID`, session evidence unreadable). Collected names shown on the console
+  have control characters replaced (F-03).
 * **Partition states (P4-B, ADR-0002 rule 6):** temporary partitions and worktrees take their diagnose state from the
   graph of the same run (`IN_USE` only with a `DIRECT` edge from a verified process; `UNKNOWN` otherwise;
   `NO_DEPENDENCY_OBSERVED` only with conclusive coverage, which a V0.2 run never has). Nothing is collected for it,
@@ -150,20 +155,22 @@ called by `Invoke-AtmGitCommand`):
   assignment in `Report.ps1`; no option, environment variable or configuration file; checked by the suite and the
   install e2e). Closed, `diagnose -ExportJson` is refused before anything is collected or checked
   (`EXPORT_SECURITY_GATE_CLOSED`, exit code 10) and no file is created; the destination check and the writer refuse
-  on their own too. Reason: **NOT RESOLVED - export ancestor TOCTOU.** The destination folders are checked by name and
-  the file is then created by name: a folder replaced by a junction in between redirects the new file. `CreateNew`
-  only prevents overwriting an existing file; it does not prove that the file is created in the checked folder (a
-  harness counter-proof on fixtures shows the redirection). The document holds the machine name, the account and its
-  SID. The gate opens only with a demonstrated mitigation and a maintainer decision (FINAL-A: create the file relative
-  to a handle on the validated parent, for example `NtCreateFile` with `OBJ_DONT_REPARSE`, with adversarial tests on
-  every supported Windows and architecture; otherwise the export stays disabled in V0.2).
+  on their own too. Reason (P5-B-S): the destination was checked by name and the file created by name, so a folder
+  replaced by a junction in between redirected the new file (a harness counter-proof still shows it for a by-name
+  creation); the document holds the machine name, the account and its SID. **FINAL-A: mitigated in code, export still
+  disabled.** The writer now pins the folder and every ancestor by handle (no reparse point, no redirection, not
+  renamable or replaceable while pinned; the folder without write sharing), evaluates the destination policy inside that
+  window, creates the file relative to the folder handle (`NtCreateFile`, `RootDirectory`, `OBJ_DONT_REPARSE`,
+  `FILE_CREATE`) with a protected DACL, verifies it through its handle and only then writes (release/V0.2-SECURITY-AUDIT,
+  X-01, with fixture evidence and limits). Opening the gate remains a maintainer decision; Windows 10 is NOT TESTED.
 * **Diagnose export, when its gate is open (tests only, P5-B):** written only with `-ExportJson`, to a new file (`CreateNew`: never overwrites; a junction
   planted at the destination was refused on fixtures; a file symbolic link there is refused by the documented
   `CREATE_NEW` semantics but was not tested, since creating one needs a privilege), at an absolute local path whose
   parent chain has no reparse point, not on a `subst` drive, outside every audited base and not inside a Git repository
   or worktree (an ancestor holding `.git`, or a bare repository; existence checks only, no Git; an ancestor that cannot
-  be checked refuses). The V0.1 outputs (`audit -ExportJson`, `clean -LogFile`) keep their V0.1 rules: a `subst` drive
-  over an audited folder is not detected there (V0.1 unchanged; proposed for FINAL). Refusals and write failures are reported by code, never by exception message; nothing is
+  be checked refuses). FINAL-A: `audit -ExportJson` keeps its V0.1 rules and now creates its file through the same pinned
+  writer (F-02: a race or a `subst` alias is refused; the refusal message is unchanged). `clean -LogFile` still appends
+  by name (F-04, latent while the deletion gate is closed; proposal recorded). Refusals and write failures are reported by code, never by exception message; nothing is
   created after a refusal. The ancestor TOCTOU above applies; that is why the gate is closed.
 * **TUI diagnostics area (P5-A, ADR-0009):** presentation only. It runs `Invoke-AtmDiagnose` on an explicit action
   (entering the area without a result, or `U`) and renders the diagnose JSON export of that result: no collector,

@@ -411,7 +411,7 @@ namespace AgentTempManager
         const uint ATTR_DIRECTORY = 0x10, ATTR_REPARSE = 0x400, ATTR_READONLY = 0x1, ATTR_SYSTEM = 0x4;
 
         [StructLayout(LayoutKind.Sequential)]
-        struct BY_HANDLE_FILE_INFORMATION
+        internal struct BY_HANDLE_FILE_INFORMATION
         {
             public uint FileAttributes;
             public uint CreationLow, CreationHigh, AccessLow, AccessHigh, WriteLow, WriteHigh;
@@ -422,7 +422,7 @@ namespace AgentTempManager
         struct FILE_DISPOSITION_INFO { [MarshalAs(UnmanagedType.U1)] public bool DeleteFile; }
 
         [DllImport("kernel32.dll", SetLastError = true)]
-        static extern bool GetFileInformationByHandle(SafeFileHandle h, out BY_HANDLE_FILE_INFORMATION info);
+        internal static extern bool GetFileInformationByHandle(SafeFileHandle h, out BY_HANDLE_FILE_INFORMATION info);
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         static extern uint GetFinalPathNameByHandleW(SafeFileHandle h, StringBuilder buf, uint len, uint flags);
@@ -432,7 +432,7 @@ namespace AgentTempManager
 
         sealed class Pinned { public string Path; public int Depth; public SafeFileHandle Handle; }
 
-        static string FinalPath(SafeFileHandle h)
+        internal static string FinalPath(SafeFileHandle h)
         {
             StringBuilder sb = new StringBuilder(1024);
             uint n = GetFinalPathNameByHandleW(h, sb, (uint)sb.Capacity, 0);
@@ -445,13 +445,13 @@ namespace AgentTempManager
         }
 
         // Opens and validates; returns null and sets 'why' on any problem.
-        static SafeFileHandle OpenChecked(string path, bool isDir, uint access, uint share, out string why)
+        internal static SafeFileHandle OpenChecked(string path, bool isDir, uint access, uint share, out string why)
         {
             BY_HANDLE_FILE_INFORMATION ignored;
             return OpenChecked(path, isDir, access, share, out why, out ignored);
         }
 
-        static SafeFileHandle OpenChecked(string path, bool isDir, uint access, uint share, out string why, out BY_HANDLE_FILE_INFORMATION info)
+        internal static SafeFileHandle OpenChecked(string path, bool isDir, uint access, uint share, out string why, out BY_HANDLE_FILE_INFORMATION info)
         {
             why = null;
             info = new BY_HANDLE_FILE_INFORMATION();
@@ -474,7 +474,7 @@ namespace AgentTempManager
         }
 
         // Re-reads attributes through the pinned handle: still a directory, still not a reparse point.
-        static bool StillPlainDirectory(SafeFileHandle h)
+        internal static bool StillPlainDirectory(SafeFileHandle h)
         {
             BY_HANDLE_FILE_INFORMATION info;
             if (!GetFileInformationByHandle(h, out info)) return false;
@@ -635,6 +635,186 @@ namespace AgentTempManager
     // (Engine.Audit.ps1), in native code because the diagnose engine checks thousands of paths per run. From the volume
     // root down to the path: a fixed drive, every component exists, is readable for attributes and is NOT a reparse
     // point. Returns OK | NOT_FOUND | INACCESSIBLE | REPARSE_IN_PATH | UNSUPPORTED_DRIVE | INVALID; -at names the component.
+
+    // Safe creation of a new file (FINAL-A, export ancestor TOCTOU). Pin(): every ancestor below the volume root is opened
+    // top-down without following reparse points (FILE_FLAG_OPEN_REPARSE_POINT), refused when it is a reparse point, not a
+    // directory or reached through a redirection (final path through the handle), and kept open without FILE_SHARE_DELETE
+    // so it cannot be renamed, deleted or replaced while pinned; the parent is pinned without write sharing too, so it
+    // cannot be turned into a junction in place. CreateNew(): re-checks the pinned parent, creates the file RELATIVE TO
+    // THE PARENT HANDLE (NtCreateFile, RootDirectory, OBJ_DONT_REPARSE, FILE_OPEN_REPARSE_POINT, FILE_CREATE: never an
+    // existing name, never through a reparse point) with a protected DACL (its owner, SYSTEM, Administrators),
+    // verifies the created file through its handle (not a reparse point, same volume, final path as expected) and only
+    // then writes. Nothing is written when anything is inconclusive (fail closed); an empty file may then remain.
+    public sealed class AtmSafeCreateSession : IDisposable
+    {
+        internal List<SafeFileHandle> Pins = new List<SafeFileHandle>();
+        internal SafeFileHandle Parent;
+        internal uint VolumeSerial;
+        public string ParentPath;
+        public string Error;
+        public bool IsPinned { get { return Error == null && Parent != null && !Parent.IsInvalid && !Parent.IsClosed; } }
+        public void Dispose()
+        {
+            if (Parent != null) { Parent.Dispose(); Parent = null; }
+            for (int i = Pins.Count - 1; i >= 0; i--) { Pins[i].Dispose(); }
+            Pins.Clear();
+        }
+    }
+
+    public static class AtmSafeCreate
+    {
+        const uint FILE_LIST_DIRECTORY = 0x0001, FILE_READ_ATTRIBUTES = 0x0080, SYNCHRONIZE = 0x00100000;
+        const uint FILE_SHARE_READ = 1, FILE_SHARE_WRITE = 2;
+        const uint FILE_GENERIC_WRITE = 0x00120116, READ_CONTROL = 0x00020000;
+        const uint OBJ_CASE_INSENSITIVE = 0x40, OBJ_DONT_REPARSE = 0x1000;
+        const uint FILE_CREATE = 2;
+        const uint FILE_SYNCHRONOUS_IO_NONALERT = 0x20, FILE_NON_DIRECTORY_FILE = 0x40, FILE_OPEN_REPARSE_POINT = 0x00200000;
+        const uint FILE_ATTRIBUTE_NORMAL = 0x80;
+        const uint ATTR_DIRECTORY = 0x10, ATTR_REPARSE = 0x400;
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct UNICODE_STRING { public ushort Length; public ushort MaximumLength; public IntPtr Buffer; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct OBJECT_ATTRIBUTES { public int Length; public IntPtr RootDirectory; public IntPtr ObjectName; public uint Attributes; public IntPtr SecurityDescriptor; public IntPtr SecurityQualityOfService; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct IO_STATUS_BLOCK { public IntPtr Status; public IntPtr Information; }
+
+        [DllImport("ntdll.dll")]
+        static extern int NtCreateFile(out IntPtr fileHandle, uint desiredAccess, ref OBJECT_ATTRIBUTES objectAttributes, out IO_STATUS_BLOCK ioStatusBlock, IntPtr allocationSize, uint fileAttributes, uint shareAccess, uint createDisposition, uint createOptions, IntPtr eaBuffer, uint eaLength);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string sddl, uint revision, out IntPtr securityDescriptor, out uint size);
+
+        [DllImport("kernel32.dll")]
+        static extern IntPtr LocalFree(IntPtr mem);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        static extern uint GetDriveTypeW(string rootPath);
+
+        // Pins the folder that will hold the new file. Check IsPinned / Error; always Dispose.
+        public static AtmSafeCreateSession Pin(string parentDir)
+        {
+            AtmSafeCreateSession s = new AtmSafeCreateSession();
+            string why;
+            try
+            {
+                if (parentDir == null || parentDir.Length < 4 || !char.IsLetter(parentDir[0]) || parentDir[0] > 'z' || parentDir[1] != ':' || parentDir[2] != '\\') { s.Error = "PARENT_INVALID"; return s; }
+                string full = Path.GetFullPath(parentDir).TrimEnd('\\');
+                if (!string.Equals(full, parentDir.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)) { s.Error = "PARENT_NOT_CANONICAL"; return s; }
+                if (full.Length >= 240) { s.Error = "PARENT_TOO_LONG"; return s; }
+                if (GetDriveTypeW(full.Substring(0, 3)) != 3) { s.Error = "UNSUPPORTED_DRIVE"; return s; }
+                if (AtmPathCheck.IsSubstitutedDrive(full)) { s.Error = "SUBSTITUTED_DRIVE"; return s; }
+                s.ParentPath = full;
+                string[] parts = full.Substring(3).Split('\\');
+                string cur = full.Substring(0, 3);
+                for (int i = 0; i < parts.Length - 1; i++)
+                {
+                    cur = Path.Combine(cur, parts[i]);
+                    SafeFileHandle h = AtmDeleter.OpenChecked(cur, true, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE, out why);
+                    if (h == null) { s.Error = "ANCESTOR_" + Code(why); return s; }
+                    s.Pins.Add(h);
+                }
+                AtmDeleter.BY_HANDLE_FILE_INFORMATION info;
+                SafeFileHandle p = AtmDeleter.OpenChecked(full, true, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE, FILE_SHARE_READ, out why, out info);
+                if (p == null) { s.Error = "PARENT_" + Code(why); return s; }
+                s.Parent = p;
+                s.VolumeSerial = info.VolumeSerialNumber;
+                return s;
+            }
+            catch (Exception ex) { s.Error = "PIN_" + ex.GetType().Name; return s; }
+        }
+
+        // Creates fileName in the pinned folder and writes content. Returns null on success, otherwise a code.
+        public static string CreateNew(AtmSafeCreateSession s, string fileName, byte[] content)
+        {
+            if (s == null || !s.IsPinned) return "NOT_PINNED";
+            if (!ValidName(fileName)) return "FILE_NAME_INVALID";
+            if (!AtmDeleter.StillPlainDirectory(s.Parent)) return "PARENT_CHANGED";
+            IntPtr sd = IntPtr.Zero, namePtr = IntPtr.Zero, objName = IntPtr.Zero, raw = IntPtr.Zero;
+            SafeFileHandle fh = null;
+            bool parentRef = false;
+            try
+            {
+                // Protected DACL: the file's owner (the account that creates it, OW), SYSTEM and Administrators only.
+                uint sdSize;
+                if (!ConvertStringSecurityDescriptorToSecurityDescriptorW("D:P(A;;FA;;;OW)(A;;FA;;;SY)(A;;FA;;;BA)", 1, out sd, out sdSize)) return "SECURITY_DESCRIPTOR_FAILED";
+                namePtr = Marshal.StringToHGlobalUni(fileName);
+                UNICODE_STRING us = new UNICODE_STRING();
+                us.Length = (ushort)(fileName.Length * 2); us.MaximumLength = (ushort)(fileName.Length * 2); us.Buffer = namePtr;
+                objName = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UNICODE_STRING)));
+                Marshal.StructureToPtr(us, objName, false);
+                s.Parent.DangerousAddRef(ref parentRef);
+                OBJECT_ATTRIBUTES oa = new OBJECT_ATTRIBUTES();
+                oa.Length = Marshal.SizeOf(typeof(OBJECT_ATTRIBUTES));
+                oa.RootDirectory = s.Parent.DangerousGetHandle();
+                oa.ObjectName = objName;
+                oa.Attributes = OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE;
+                oa.SecurityDescriptor = sd;
+                IO_STATUS_BLOCK io;
+                int st = NtCreateFile(out raw, FILE_GENERIC_WRITE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE, ref oa, out io, IntPtr.Zero, FILE_ATTRIBUTE_NORMAL, 0, FILE_CREATE, FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT, IntPtr.Zero, 0);
+                if (st != 0)
+                {
+                    // Name already taken (a file, a directory, a junction or a symbolic link): never reused.
+                    if (st == unchecked((int)0xC0000035) || st == unchecked((int)0xC00000BA)) return "EXISTS";
+                    if (st == unchecked((int)0xC0000022)) return "ACCESS_DENIED";
+                    if (st == unchecked((int)0xC000000D)) return "CREATE_INVALID_PARAMETER";
+                    if (st == unchecked((int)0xC000050B) || st == unchecked((int)0xC0000280)) return "REPARSE_REFUSED";
+                    return "NTSTATUS_0x" + st.ToString("X8");
+                }
+                fh = new SafeFileHandle(raw, true);
+                raw = IntPtr.Zero;
+                // Verify before writing: a file that is not exactly where it was asked for receives no byte.
+                AtmDeleter.BY_HANDLE_FILE_INFORMATION fi;
+                if (!AtmDeleter.GetFileInformationByHandle(fh, out fi)) return "CREATED_NO_INFO";
+                if ((fi.FileAttributes & (ATTR_REPARSE | ATTR_DIRECTORY)) != 0) return "CREATED_NOT_PLAIN";
+                if (fi.VolumeSerialNumber != s.VolumeSerial) return "CREATED_OTHER_VOLUME";
+                string fp = AtmDeleter.FinalPath(fh);
+                string expected = s.ParentPath + "\\" + fileName;
+                if (fp == null || !string.Equals(fp, expected, StringComparison.OrdinalIgnoreCase)) return "CREATED_ELSEWHERE";
+                if (!AtmDeleter.StillPlainDirectory(s.Parent)) return "PARENT_CHANGED";
+                using (FileStream fs = new FileStream(fh, FileAccess.Write))
+                {
+                    if (content != null && content.Length > 0) fs.Write(content, 0, content.Length);
+                    fs.Flush(true);
+                }
+                fh = null;
+                return null;
+            }
+            catch (Exception ex) { return "CREATE_" + ex.GetType().Name; }
+            finally
+            {
+                if (fh != null) fh.Dispose();
+                if (raw != IntPtr.Zero) { SafeFileHandle tmp = new SafeFileHandle(raw, true); tmp.Dispose(); }
+                if (parentRef) s.Parent.DangerousRelease();
+                if (objName != IntPtr.Zero) Marshal.FreeHGlobal(objName);
+                if (namePtr != IntPtr.Zero) Marshal.FreeHGlobal(namePtr);
+                if (sd != IntPtr.Zero) LocalFree(sd);
+            }
+        }
+
+        // One plain name: no separator, stream, wildcard, control character, trailing dot or space, dot names or DOS
+        // device names (CON, NUL, AUX, PRN, COM1-9, LPT1-9, with or without an extension).
+        public static bool ValidName(string n)
+        {
+            if (string.IsNullOrEmpty(n) || n.Length > 200) return false;
+            if (n == "." || n == ".." || n.EndsWith(".") || n.EndsWith(" ") || n.StartsWith(" ")) return false;
+            foreach (char c in n) { if (c < 32 || "\\/:*?\"<>|".IndexOf(c) >= 0) return false; }
+            string b = n.Split('.')[0].ToUpperInvariant();
+            if (b == "CON" || b == "NUL" || b == "AUX" || b == "PRN" || b == "CONIN$" || b == "CONOUT$") return false;
+            if (b.Length == 4 && (b.StartsWith("COM") || b.StartsWith("LPT")) && b[3] >= '0' && b[3] <= '9') return false;
+            return true;
+        }
+
+        static string Code(string why)
+        {
+            if (why == null) return "UNKNOWN";
+            int i = why.IndexOf(':');
+            return i > 0 ? why.Substring(0, i) : why;
+        }
+    }
+
     public static class AtmPathCheck
     {
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]

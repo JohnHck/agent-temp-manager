@@ -128,3 +128,13 @@ the machine name, the account and its SID. Decision:
   PowerShell 5.1 and PowerShell 7; the supported Windows 10, 11 and Server versions; fail closed; no overwrite; ACL and
   privacy of the created file) and a new maintainer decision; without it the export stays disabled in V0.2. The `subst`
   gap of the V0.1 outputs (`audit -ExportJson`, `clean -LogFile`) is not changed by this addendum.
+
+## Security addendum (FINAL-A, 2026-10-25): pinned file creation
+
+* **Writer.** `New-AtmPinnedTextFile` (Report.ps1) over `AtmSafeCreate` (Native.cs): the folder and every ancestor are
+  pinned by handle (no reparse point, final path checked, no `FILE_SHARE_DELETE`; the folder without write sharing), the
+  caller's destination policy runs inside the pinned window, and the file is created relative to the folder handle
+  (`NtCreateFile`, `OBJ_DONT_REPARSE`, `FILE_CREATE`, protected DACL), verified through its handle, then written.
+* **Uses.** The diagnose export (`Write-AtmNewTextFile`, still behind `AtmDiagnoseExportEnabled = $false`) and the V0.1
+  audit export (`audit -ExportJson`, enabled; same rules and refusal message). Evidence and limits:
+  release/V0.2-SECURITY-AUDIT.md (X-01, F-02). The gate is not opened by this addendum.

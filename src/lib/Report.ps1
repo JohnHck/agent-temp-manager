@@ -734,15 +734,40 @@ function Test-AtmDiagnoseExportPath {
 }
 
 function Write-AtmNewTextFile {
-    # Creates the file and writes UTF-8 without BOM. CreateNew never overwrites an existing file; it does NOT prove that
-    # the file is created in the folder that was validated (a folder replaced by a junction after the check redirects
-    # it). Defense in depth: refused while the diagnose export gate is closed, before the file system is touched. A
-    # failure is thrown to the caller (reported there by a code).
-    param([string]$Path, [string]$Text)
+    <#
+      Creates a new file and writes UTF-8 without BOM (FINAL-A). Returns $null when written, otherwise a refusal code.
+      Defense in depth: refused (thrown) while the diagnose export gate is closed, before the file system is touched.
+      Otherwise the destination folder and every ancestor are pinned by handle (AtmSafeCreate.Pin: no reparse point, no
+      redirection, not renamable or replaceable while pinned), the destination policy (Test-AtmDiagnoseExportPath) is
+      evaluated again INSIDE that pinned window, and the file is created relative to the pinned folder handle (never an
+      existing name, never through a reparse point, protected DACL), verified through its own handle, and only then
+      written. Inconclusive is a refusal; nothing is written then (an empty file of ours may remain).
+    #>
+    param([string]$Path, [string]$Text, $Inventory)
     if (-not $script:AtmDiagnoseExportEnabled) { throw [InvalidOperationException]::new('EXPORT_SECURITY_GATE_CLOSED') }
-    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($Text)
-    $fs = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-    try { $fs.Write($bytes, 0, $bytes.Length); $fs.Flush() } finally { $fs.Dispose() }
+    return New-AtmPinnedTextFile -Path $Path -Text $Text -Policy { param($P) Test-AtmDiagnoseExportPath -Path $P -Inventory $Inventory }
+}
+
+function New-AtmPinnedTextFile {
+    <#
+      FINAL-A: pins the destination folder and its ancestors (AtmSafeCreate.Pin), runs -Policy (scriptblock: path ->
+      $null or a refusal code) INSIDE the pinned window, creates the file relative to the pinned folder handle (new name
+      only, no reparse point, protected DACL), verifies it through its handle and only then writes UTF-8 without BOM.
+      Returns $null when written, otherwise a code. Not gated by itself: the diagnose export reaches it only through
+      Write-AtmNewTextFile (gate); the V0.1 audit export uses it for its existing, enabled export.
+    #>
+    param([string]$Path, [string]$Text, [scriptblock]$Policy)
+    if (Test-AtmAllowListPathSyntax $Path) { return 'EXPORT_DESTINATION_NOT_ALLOWED' }
+    $full = [IO.Path]::GetFullPath($Path)
+    $session = [AgentTempManager.AtmSafeCreate]::Pin([IO.Path]::GetDirectoryName($full))
+    try {
+        if (-not $session.IsPinned) { return ('EXPORT_PIN_' + $session.Error) }
+        $policyCode = & $Policy $full
+        if ($null -ne $policyCode) { return [string]$policyCode }
+        $code = [AgentTempManager.AtmSafeCreate]::CreateNew($session, [IO.Path]::GetFileName($full), (New-Object Text.UTF8Encoding($false)).GetBytes($Text))
+        if ($null -ne $code) { return ('EXPORT_CREATE_' + $code) }
+        return $null
+    } finally { $session.Dispose() }
 }
 
 function ConvertTo-AtmDiagnoseJson {
