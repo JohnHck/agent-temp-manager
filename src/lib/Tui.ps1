@@ -472,9 +472,12 @@ function Get-AtmTuiFrame {
             $footer = Get-AtmText 'foot.text'
         }
     }
-    if ($State.Message) { foreach ($mp in (Split-AtmWrap $State.Message ($w - 3))) { $lines.Add(@(New-AtmSeg (' ' + $mp) 'Yellow')) } }
+    # The message and the footer (keys) always stay on screen: the body gives way when the frame is taller.
+    $msg = @(if ($State.Message) { Split-AtmWrap $State.Message ($w - 3) })
+    $room = [math]::Max(1, $h - 1 - $msg.Count)
+    if ($lines.Count -gt $room) { $lines.RemoveRange($room, $lines.Count - $room) }
+    foreach ($mp in $msg) { $lines.Add(@(New-AtmSeg (' ' + $mp) 'Yellow')) }
     while ($lines.Count -lt $h - 1) { $lines.Add(@(New-AtmSeg '')) }
-    # The footer (keys) always stays on screen: the body gives way when it is taller.
     if ($lines.Count -gt [math]::Max(1, $h - 1)) { $lines.RemoveRange([math]::Max(1, $h - 1), $lines.Count - [math]::Max(1, $h - 1)) }
     $lines.Add(@(New-AtmSeg (Limit-AtmText (' ' + $footer) ($w - 1) $G.Ell) 'Black' 'Gray'))
     $clipped = New-Object System.Collections.Generic.List[object]

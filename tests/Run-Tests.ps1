@@ -7014,7 +7014,7 @@ try {
         Assert-True ($script:tdRuns -eq 1 -and (& $tdHasW $all 'EXCEPTION_UNAUTHORIZEDACCESSEXCEPTION') -and -not $all.Contains('SECRET') -and -not $all.Contains('token=')) '24: falha com codigo seguro, sem mensagem bruta, sem repeticao'
         Assert-True (($o.State.Stack | ForEach-Object { $_.Name }) -join ',' -ceq 'menu') 'falha sem resultado: permanece no menu'
         Assert-True (& $tdHasW $all (Get-AtmText 'tui.diag.failed' 'EXCEPTION_UNAUTHORIZEDACCESSEXCEPTION')) 'mensagem de falha inteira em 60 colunas (quebrada, nunca cortada)'
-        foreach ($f in $o.Frames) { $ls = @($f -split "`n"); Assert-True ($ls.Count -le 20 -and $ls[-1].Contains('Q')) 'rodape (teclas) sempre visivel em 60x20, mesmo com mensagem' }
+        foreach ($f in $o.Frames) { $ls = @($f -split "`n"); Assert-True ($ls.Count -le 20) '60x20: no maximo 20 linhas'; if ($ls.Count -eq 20) { Assert-True ($ls[-1].Contains('Q')) 'rodape (teclas) sempre visivel em 60x20, mesmo com mensagem (quadros completos; o quadro de espera nao tem teclas)' } }
         $script:tdRuns = 0
         $flaky = { param($a) $script:tdRuns++; if ($script:tdRuns -ge 2) { throw [IO.IOException]::new('SECRET-second') }; $tdRes }
         $o2 = Invoke-HeadlessTui -Keys @((New-Key 'D' 'd'), (New-Key 'U' 'u'), (New-Key 'Enter'), (New-Key 'Escape'), (New-Key 'Q' 'q')) -InvArgs (Get-InvArgs -Profiles @($p)) -DiagRunner $flaky
