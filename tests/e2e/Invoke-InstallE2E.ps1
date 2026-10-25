@@ -133,7 +133,10 @@ foreach ($exe in @((Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\p
     if (-not (Test-Path -LiteralPath $exe)) { $out.Add('absent'); continue }
     $f = Join-Path $Dir ('rm-' + [guid]::NewGuid().ToString('N') + '.txt'); [IO.File]::WriteAllText($f, 'x')
     # A 32-bit PowerShell can take long to start on a busy runner: the helper waits up to 3 minutes, the probe up to 2.
-    $c = Start-Process -FilePath $exe -ArgumentList @('-NoProfile', '-Command', "`$h = [IO.File]::Open('$f', 'Open', 'Read', 'ReadWrite'); Start-Sleep 180") -PassThru -WindowStyle Hidden
+    # Process.Start (FINAL-B-S): the object holds the creation handle, so Kill() below can only reach this helper.
+    $psi = New-Object Diagnostics.ProcessStartInfo($exe, ('-NoProfile -Command "$h = [IO.File]::Open(''{0}'', ''Open'', ''Read'', ''ReadWrite''); Start-Sleep 180"' -f $f))
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $c = [Diagnostics.Process]::Start($psi)
     try {
         $found = $false; $timeOk = $false
         for ($i = 0; $i -lt 480 -and -not $found; $i++) {

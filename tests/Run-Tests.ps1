@@ -168,6 +168,20 @@ function ConvertFrom-AtmTestJobResult {
     if ($truncated) { $text += ' [SAIDA_TRUNCADA]' }
     [pscustomobject]@{ Exit = $(if ($Result.TimedOut) { $null } else { $Result.ExitCode }); TimedOut = [bool]$Result.TimedOut; Text = $text; Ms = [long]$Result.ElapsedMs; Truncated = [bool]$truncated; JobTerminated = [bool]$Result.JobTerminated }
 }
+# FINAL-B-S: a long-running helper process a test inspects while it runs. Started by Process.Start, so the object holds
+# the handle from its creation; it is stopped only through that handle and only while it still runs (never by PID: a
+# PID looked up again later could belong to another process).
+function Start-AtmTestHelperProcess {
+    param([string]$File, [string]$Arguments, [string]$WorkingDirectory = $null)
+    $psi = New-Object Diagnostics.ProcessStartInfo($File, $Arguments)
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
+    return [Diagnostics.Process]::Start($psi)
+}
+function Stop-AtmTestHelperProcess {
+    param([Diagnostics.Process]$Process)
+    if ($null -ne $Process -and -not $Process.HasExited) { $Process.Kill(); $null = $Process.WaitForExit(10000) }
+}
 function Invoke-AtmTestChild {
     param([string]$CommandLine, [int]$TimeoutSec = 180, [hashtable]$Environment = $null, [int]$MaxOutputBytes = 4194304, [int]$ActiveProcessLimit = 64)
     $cmdExe = Join-Path $env:SystemRoot 'System32\cmd.exe'
@@ -579,14 +593,14 @@ try {
     Test-Case 'Processos reais' 'Processo real referenciando a root e detectado (CIM, passagem unica)' {
         $p = New-TestProfile 'realproc'
         $r = New-TestRoot -ProfileInfo $p
-        $sp = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList @('-NoProfile', '-Command', "Start-Sleep 60; '$r\sub'") -PassThru -WindowStyle Hidden
-        $cleanupActions.Add([scriptblock]::Create("Stop-Process -Id $($sp.Id) -ErrorAction SilentlyContinue"))
+        $sp = Start-AtmTestHelperProcess -File "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Arguments "-NoProfile -Command `"Start-Sleep 60; '$r\sub'`""
+        $cleanupActions.Add({ Stop-AtmTestHelperProcess -Process $sp }.GetNewClosure())
         Start-Sleep -Milliseconds 1500
         $a = Get-InvArgs -Profiles @($p) -Procs $null
         $a.Remove('ProcessesOverride')
         $i = Invoke-AtmInventory @a
         $x = Find-Part $i $r
-        Stop-Process -Id $sp.Id -ErrorAction SilentlyContinue
+        Stop-AtmTestHelperProcess -Process $sp
         Assert-Eq $x.Class 'ACTIVE_EVIDENCE' "classe (refs: $($x.DirectRefs -join ';'))"
         Assert-True (($x.DirectRefs -join ' ') -match "PID $($sp.Id)") 'pid correto'
     }
@@ -721,11 +735,11 @@ try {
     Test-Case 'Arquivos em uso' 'Processo com diretorio corrente dentro da root -> EM_USO' {
         $p = New-TestProfile 'cwd'
         $r = New-TestRoot -ProfileInfo $p
-        $sp = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep 60') -WorkingDirectory (Join-Path $r 'sub') -PassThru -WindowStyle Hidden
-        $cleanupActions.Add([scriptblock]::Create("Stop-Process -Id $($sp.Id) -ErrorAction SilentlyContinue"))
+        $sp = Start-AtmTestHelperProcess -File "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Arguments '-NoProfile -Command Start-Sleep 60' -WorkingDirectory (Join-Path $r 'sub')
+        $cleanupActions.Add({ Stop-AtmTestHelperProcess -Process $sp }.GetNewClosure())
         Start-Sleep -Milliseconds 1500
         $pr = [AgentTempManager.AtmLockProbe]::ProbeTree($r, 5)
-        Stop-Process -Id $sp.Id -ErrorAction SilentlyContinue
+        Stop-AtmTestHelperProcess -Process $sp
         Assert-True ($pr.InUse -ge 1) "diretorio em uso detectado ($($pr.Samples -join ';'))"
     }
 
@@ -1860,7 +1874,7 @@ function global:Get-FileHash { param([string]$LiteralPath, [string]$Algorithm)
                 $info = Join-Path $dir "grandchild-$mode.txt"
                 $gc = & $write "grandchild-$mode.ps1" @('$p = [Diagnostics.Process]::GetCurrentProcess()', ('[IO.File]::WriteAllText(''{0}'', (''{{0}}|{{1}}'' -f $p.Id, $p.StartTime.ToUniversalTime().Ticks))' -f (& $q $info)), '[Threading.Thread]::Sleep(120000)')
                 $main = & $write "main-$mode.ps1" @(
-                    ('$psi = New-Object Diagnostics.ProcessStartInfo(''{0}'', ''-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{1}"'')' -f (& $q $ps51), (& $q $gc)),
+                    ('$psi = [Diagnostics.ProcessStartInfo]::new(''{0}'', ''-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{1}"'')' -f (& $q $ps51), (& $q $gc)),
                     '$psi.UseShellExecute = $false; $null = [Diagnostics.Process]::Start($psi)',
                     ('$sw = [Diagnostics.Stopwatch]::StartNew(); while (-not [IO.File]::Exists(''{0}'') -and $sw.ElapsedMilliseconds -lt 90000) {{ [Threading.Thread]::Sleep(100) }}' -f (& $q $info)),
                     $(if ($mode -eq 'hang') { '[Threading.Thread]::Sleep(120000)' } else { 'exit 0' }))
@@ -6017,7 +6031,8 @@ try {
     # Process object (bound to their handle). No other process is opened, signalled or stopped.
     $rmHolder = { param([string]$File, [int]$Seconds = 25)
         $cmd = "`$f = [IO.File]::Open('$File', 'Open', 'Read', 'ReadWrite'); Start-Sleep -Seconds $Seconds; `$f.Dispose()"
-        $c = Start-Process -FilePath (Join-Path $PSHOME $(if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh.exe' } else { 'powershell.exe' })) -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', $cmd) -PassThru -WindowStyle Hidden
+        # Process.Start (FINAL-B-S): the object holds the creation handle, so Kill() below can only reach this helper.
+        $c = Start-AtmTestHelperProcess -File (Join-Path $PSHOME $(if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh.exe' } else { 'powershell.exe' })) -Arguments ('-NoProfile -NonInteractive -Command "' + $cmd.Replace('"', '\"') + '"')
         # Ready when Restart Manager sees the file held (bounded wait).
         for ($i = 0; $i -lt 60; $i++) { $h = $null; $null = [AgentTempManager.AtmRestartManager]::Query([string[]]@($File), 8, [ref]$h); if (@($h | Where-Object { $_.Split('|')[0] -eq [string]$c.Id }).Count -gt 0) { break }; Start-Sleep -Milliseconds 250 }
         return $c }
