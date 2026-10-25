@@ -386,6 +386,14 @@ and `procStart`, plus the leaf name of `cwd` (for project naming) - the full wor
 Reports contain paths and aggregates. `-ExportJson` output includes the machine name,
 user names, SIDs, profile paths and project slugs: review it before sharing.
 
+CI artifacts (FINAL-B): test reports, install e2e evidence, static analysis and the release package pass through
+`tools\Protect-AtmArtifact.ps1` before upload. It replaces the runner's identifiers (paths under the profile and TEMP,
+account, machine, domain, profile folder names, account SIDs) with placeholders, then runs the privacy scanner. It
+fails closed: a finding, or a scan that cannot be trusted, fails the job and skips the upload, and only file, line and
+kind are printed. Archives are scanned, never modified. The test suite's case details use the same placeholders and its
+report carries an account kind, not the account name. The jobs' public console logs are not covered beyond the suite's
+details.
+
 ## Commit identity
 
 Public Git history must not expose personal e-mail addresses. `tools/Test-AtmCommitIdentity.ps1` checks the
