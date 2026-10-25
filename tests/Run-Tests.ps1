@@ -5188,7 +5188,8 @@ try {
             $null = New-TestRoot -ProfileInfo $p
             $rows = $b4cRows
             $d0 = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $b4cLegacy) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0]) -ProcessSource ({ $rows }.GetNewClosure()) -CpuSampleMs 0 -PseudonymKey $testPseudonymKey
-            Assert-Eq @($d0.Coverage | Where-Object { $_.Collector -eq 'worktree-discovery' -or $_.Collector -eq 'git' }).Count 0 'trava fechada: diagnose sem coletores de worktree (saida inalterada)'
+            # P5-A: with the gate closed the discovery is reported as not observed (never read as "no worktrees"); Git never runs.
+            Assert-True (@($d0.Coverage | Where-Object { $_.Collector -eq 'git' }).Count -eq 0 -and (@($d0.Coverage | Where-Object { $_.Collector -eq 'worktree-discovery' } | ForEach-Object { $_.Status + ':' + (@($_.Reasons) -join ',') }) -join ';') -ceq 'NOT_OBSERVABLE:WORKTREE_DIAGNOSTICS_GATE_CLOSED') 'trava fechada: worktrees nao observadas (trava), nenhum coletor git'
             $d1 = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $b4cLegacy) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0]) -ProcessSource ({ $rows }.GetNewClosure()) -CpuSampleMs 0 -PseudonymKey $testPseudonymKey -RepositoryPaths @($R)
             Assert-True (@($d1.Coverage | Where-Object { $_.Collector -eq 'worktree-discovery' -and $_.Status -eq 'NOT_OBSERVABLE' }).Count -eq 1) 'trava fechada com lista explicita: nao observavel'
             $script:AtmWorktreeDiagnosticsEnabled = $true
@@ -6906,7 +6907,7 @@ try {
             Providers = @(); Coverage = @($Coverage); CoverageComplete = $false; Findings = @($Findings); AgentResources = $null; Graph = $Graph
             Pseudonymization = [pscustomobject]@{ Scheme = $script:AtmPseudonymScheme; KeySource = 'EPHEMERAL'; KeyId = $null }; Inventory = $null } }
     $tdBuild = { param([switch]$WithWorktree)
-        $c0 = @((& $tdCov 'identity' 'COMPLETE'), (& $tdCov 'inventory' 'COMPLETE'), (& $tdCov 'processes' 'PARTIAL' @('UNINSPECTABLE_PROCESSES') 'YES'), (& $tdCov 'process-snapshot' 'COMPLETE'),
+        $c0 = @((& $tdCov 'identity' 'COMPLETE'), (& $tdCov 'inventory' 'COMPLETE'), (& $tdCov 'processes' 'PARTIAL' @('UNINSPECTABLE_PROCESSES') 'YES'), (& $tdCov 'process-snapshot' 'COMPLETE'), (& $tdCov 'agent-processes' 'COMPLETE'),
             (& $tdCov 'services' 'DENIED' @('ACCESS_DENIED') 'YES'), (& $tdCov 'virtual-machines' 'TIMEOUT' @('DEADLINE_EXCEEDED') 'UNKNOWN'), (& $tdCov 'profile-discovery' 'PARTIAL' @('PROFILES_DIRECTORY_UNRESOLVED') 'NO'),
             $(if ($WithWorktree) { & $tdCov 'worktree-discovery' 'COMPLETE' } else { & $tdCov 'worktree-discovery' 'NOT_OBSERVABLE' @('WORKTREE_DIAGNOSTICS_GATE_CLOSED') }),
             (& $tdCov 'process-cwd' 'NOT_OBSERVABLE' @('WORKING_DIRECTORY_DEFERRED')), (& $tdCov 'handles' 'NOT_OBSERVABLE' @('HANDLE_SECURITY_GATE_CLOSED')))
@@ -6930,6 +6931,8 @@ try {
     $tdText = { param($St, [hashtable]$Screen) (@(Get-AtmTuiDiagText -State $St -Screen $Screen -Width $St.Width) | ForEach-Object { $_.Text }) -join '' }
     # Headless frames are transliterated when the console has no Unicode output (ASCII fallback): both forms count.
     $tdHas = { param([string]$Text, [string]$S) $Text.Contains($S) -or $Text.Contains((ConvertTo-AtmAscii $S)) }
+    # Whole text across wrapped lines (whitespace ignored): wrapping never drops a character.
+    $tdHasW = { param([string]$Text, [string]$S) $t = $Text -replace '\s', ''; $x = $S -replace '\s', ''; $t.Contains($x) -or $t.Contains((ConvertTo-AtmAscii $x)) }
     $tdFind = { param($St, [string]$Key) $St.Diag.Index.FindingBy[$Key] }
 
     Test-Case 'TUI' 'P5-A: menu Diagnostico - entrada (diagnose so nessa acao), categorias, retorno ao menu sem nova coleta, navegacao sem coleta, atualizacao manual explicita' {
@@ -6949,7 +6952,7 @@ try {
         $script:tdRuns = 0
         $o2 = Invoke-HeadlessTui -Keys @((New-Key 'D' 'd'), (New-Key 'DownArrow'), (New-Key 'Enter'), (New-Key 'U' 'u'), (New-Key 'Escape'), (New-Key 'Q' 'q')) -InvArgs (Get-InvArgs -Profiles @($p)) -DiagRunner $runner
         $j2 = $o2.Frames -join "`n"
-        Assert-True ($script:tdRuns -eq 2 -and (& $tdHas $j2 (Get-AtmText 'tui.diag.refreshed')) -and (& $tdHas $j2 (Limit-AtmText (Get-AtmText 'tui.diag.running') 60 '').Trim())) '23: U atualiza (nova observacao, com aviso de demora)'
+        Assert-True ($script:tdRuns -eq 2 -and (& $tdHas $j2 (Get-AtmText 'tui.diag.refreshed')) -and (& $tdHasW $j2 (Get-AtmText 'tui.diag.running'))) '23: U atualiza (nova observacao, com o aviso de demora inteiro)'
         Assert-True (@($o2.State.Stack | ForEach-Object { $_.Name }) -join ',' -ceq 'menu') 'apos U e Esc: de volta ao menu (telas do resultado anterior fechadas)'
         foreach ($f in $o.Frames) { foreach ($ln in ($f -split "`n")) { Assert-True ($ln.Length -le 120) 'largura' } }
     }
@@ -6964,7 +6967,17 @@ try {
             Assert-True ($fr.Contains($cat[1])) "4-7: categoria $($cat[0])"
         }
         $wt = (& $tdFrame $st @{ Name = 'dlist'; Filter = @{ Cat = 'worktrees' } }) -join "`n"
-        Assert-True ($wt.Contains((Get-AtmText 'common.none'))) '8: worktrees com a trava fechada: lista vazia (e o resumo diz NOT_OBSERVABLE)'
+        Assert-True ($wt.Contains((Get-AtmText 'tui.diag.emptyNotObserved')) -and -not $wt.Contains((Get-AtmText 'common.none')) -and (& $tdHasW $wt (Get-AtmText 'tui.diag.covNote' 'worktree-discovery=NOT_OBSERVABLE' 'WORKTREE_DIAGNOSTICS_GATE_CLOSED'))) '8: worktrees com a trava fechada: "nada observado", nunca "nenhum"'
+        $cats = (& $tdFrame $st @{ Name = 'diag' }) -join "`n"
+        Assert-True ($cats -match '\s0\*\s' -and $cats -match '\s12\s' -and (& $tdHasW $cats (Get-AtmText 'tui.diag.starLegend'))) 'contagens visiveis (ultima coluna inteira); * marca cobertura incompleta'
+        # Nothing observed at all: never shown as zero items.
+        $zc = @($tdRes.Coverage | ForEach-Object { if ($_.Collector -ceq 'inventory') { & $tdCov 'inventory' 'FAILED' @('INVENTORY_FAILED') 'UNKNOWN' } elseif ($_.Collector -ceq 'process-snapshot') { & $tdCov 'process-snapshot' 'NOT_OBSERVABLE' @('INVENTORY_FAILED') } else { $_ } })
+        $zs = & $tdState (& $tdWrap @() $zc $null)
+        $zt = & $tdText $zs @{ Name = 'dsum' }
+        Assert-True ($zt.Contains((Get-AtmText 'tui.diag.covNote' 'inventory=FAILED' 'INVENTORY_FAILED')) -and $zt.Contains((Get-AtmText 'tui.diag.covNote' 'process-snapshot=NOT_OBSERVABLE' 'INVENTORY_FAILED'))) 'inventario e snapshot sem observacao: contagens 0 sempre com "ausencia nao comprovada"'
+        $zcat = (& $tdFrame $zs @{ Name = 'diag' }) -join "`n"
+        Assert-True ($zcat -match '\s0\*\s') 'categorias sem observacao marcadas com *'
+        Assert-True (((& $tdFrame $zs @{ Name = 'dlist'; Filter = @{ Cat = 'parts' } }) -join "`n").Contains((Get-AtmText 'tui.diag.emptyNotObserved'))) 'particoes nao observadas: nunca "nenhum"'
         $st2 = & $tdState (& $tdBuild -WithWorktree)
         Assert-True (((& $tdFrame $st2 @{ Name = 'dlist'; Filter = @{ Cat = 'worktrees' } }) -join "`n").Contains('wt/w-1')) '8: worktree de fixture listada'
         $a = & $tdText $st @{ Name = 'dfind'; Filter = @{ F = (& $tdFind $st 'TempPartition|claude-code/p-a') } }
@@ -6996,10 +7009,12 @@ try {
         $p = New-TestProfile 'p5a-fail'
         $script:tdRuns = 0
         $fail = { param($a) $script:tdRuns++; throw [UnauthorizedAccessException]::new('SECRET-diag C:\Users\alice token=abc') }
-        $o = Invoke-HeadlessTui -Keys @((New-Key 'D' 'd'), (New-Key 'Q' 'q')) -InvArgs (Get-InvArgs -Profiles @($p)) -DiagRunner $fail
+        $o = Invoke-HeadlessTui -Keys @((New-Key 'D' 'd'), (New-Key 'Q' 'q')) -InvArgs (Get-InvArgs -Profiles @($p)) -DiagRunner $fail -W 60 -H 20
         $all = $o.Frames -join "`n"
-        Assert-True ($script:tdRuns -eq 1 -and $all.Contains('EXCEPTION_UNAUTHORIZEDACCESSEXCEPTION') -and (& $tdHas $all (Limit-AtmText (Get-AtmText 'tui.diag.failed' 'EXCEPTION_UNAUTHORIZEDACCESSEXCEPTION') 60 '').Trim()) -and -not $all.Contains('SECRET') -and -not $all.Contains('token=')) '24: falha com codigo seguro, sem mensagem bruta, sem repeticao'
+        Assert-True ($script:tdRuns -eq 1 -and (& $tdHasW $all 'EXCEPTION_UNAUTHORIZEDACCESSEXCEPTION') -and -not $all.Contains('SECRET') -and -not $all.Contains('token=')) '24: falha com codigo seguro, sem mensagem bruta, sem repeticao'
         Assert-True (($o.State.Stack | ForEach-Object { $_.Name }) -join ',' -ceq 'menu') 'falha sem resultado: permanece no menu'
+        Assert-True (& $tdHasW $all (Get-AtmText 'tui.diag.failed' 'EXCEPTION_UNAUTHORIZEDACCESSEXCEPTION')) 'mensagem de falha inteira em 60 colunas (quebrada, nunca cortada)'
+        foreach ($f in $o.Frames) { $ls = @($f -split "`n"); Assert-True ($ls.Count -le 20 -and $ls[-1].Contains('Q')) 'rodape (teclas) sempre visivel em 60x20, mesmo com mensagem' }
         $script:tdRuns = 0
         $flaky = { param($a) $script:tdRuns++; if ($script:tdRuns -ge 2) { throw [IO.IOException]::new('SECRET-second') }; $tdRes }
         $o2 = Invoke-HeadlessTui -Keys @((New-Key 'D' 'd'), (New-Key 'U' 'u'), (New-Key 'Enter'), (New-Key 'Escape'), (New-Key 'Q' 'q')) -InvArgs (Get-InvArgs -Profiles @($p)) -DiagRunner $flaky
@@ -7017,6 +7032,7 @@ try {
         $o = Invoke-HeadlessTui -Keys $keys -InvArgs (Get-InvArgs -Profiles @($p)) -DiagRunner $runner -Ascii -W 60 -H 20
         $all = $o.Frames -join "`n"
         Assert-True ($all -match '^[\x09\x0A\x20-\x7E]*$') '26: somente ASCII imprimivel com -Ascii'
+        Assert-True (& $tdHasW $all (Get-AtmText 'tui.diag.noAuth')) 'aviso exigido inteiro em 60 colunas'
         foreach ($f in $o.Frames) { $ls = @($f -split "`n"); Assert-True ($ls.Count -le 20) '27: no maximo 20 linhas'; foreach ($ln in $ls) { Assert-True ($ln.Length -le 60) "27: largura 60 ($($ln.Length))" } }
         $u = Invoke-HeadlessTui -Keys @((New-Key 'D' 'd'), (New-Key 'Enter'), (New-Key 'Q' 'q')) -InvArgs (Get-InvArgs -Profiles @($p)) -DiagRunner $runner -W 80 -H 24
         Assert-True (& $tdHas ($u.Frames -join "`n") (Limit-AtmText (Get-AtmText 'tui.diag.noAuth') 70 '').Trim()) '26: Unicode (sem -Ascii) renderiza a mesma area'
@@ -7024,6 +7040,14 @@ try {
         $diagFrames = @($o.Frames + $u.Frames | Where-Object { & $tdHas $_ (Get-AtmText 'tui.diag.title') })
         Assert-True ($diagFrames.Count -gt 3) 'quadros da area de diagnostico'
         foreach ($x in @('alice', 'S-1-5-21-9-9-9-1000', 'TESTHOST', $p.ProfilePath, (Split-Path $root -Leaf), 'node.exe', 'unresolved', 'D:\t')) { Assert-True (-not ($diagFrames -join "`n").Contains($x)) "30: diagnostico sem '$x'" }
+        # Every detail of the fixture, untruncated (no frame clipping): no identity, machine or V0.1 data.
+        $sv = & $tdState $tdRes 200 60
+        $full = New-Object System.Collections.Generic.List[string]
+        foreach ($x in @($sv.Diag.View.findings)) { $full.Add((& $tdText $sv @{ Name = 'dfind'; Filter = @{ F = $x } })) }
+        foreach ($x in @($sv.Diag.Index.Nodes)) { $full.Add((& $tdText $sv @{ Name = 'dnode'; Filter = @{ N = $x } })) }
+        foreach ($x in @($sv.Diag.Index.Coverage)) { $full.Add((& $tdText $sv @{ Name = 'dcovdet'; Filter = @{ C = $x } })) }
+        $full.Add((& $tdText $sv @{ Name = 'dsum' }))
+        foreach ($x in @('alice', 'S-1-5-21-9-9-9-1000', 'TESTHOST', 'node.exe', 'unresolved', 'D:\t', $p.ProfilePath)) { Assert-True (-not ($full -join "`n").Contains($x)) "30: texto completo do diagnostico sem '$x'" }
         $v1 = Invoke-HeadlessTui -Keys @((New-Key 'D2' '2'), (New-Key 'Q' 'q')) -InvArgs (Get-InvArgs -Profiles @($p))
         Assert-True (($v1.Frames -join "`n").Contains('p5a-view') -and -not ($diagFrames -join "`n").Contains('p5a-view')) 'V0.1 continua mostrando a conta do perfil; a area de diagnostico nao (separacao das apresentacoes)'
         $prev = Get-AtmLanguage
@@ -7051,10 +7075,11 @@ try {
         $fr = $null
         foreach ($top in @(0, 2500, 4990)) { $fr = & $tdFrame $st @{ Name = 'dlist'; Filter = @{ Cat = 'parts' }; Sel = $top; Top = $top } }
         foreach ($top in @(0, 4990)) { $null = & $tdFrame $st @{ Name = 'dnodes'; Sel = $top; Top = $top } }
+        foreach ($k in 1..3) { $null = & $tdFrame $st @{ Name = 'dsum' } }
         $render = $sw.ElapsedMilliseconds
         Assert-True ($fr.Count -le 30 -and ($fr -join "`n").Contains('p-04990') -and $fr[-1].Contains('/5000')) '21: pagina final, posicao/total no rodape, nunca milhares de linhas'
-        Assert-True ($render -lt 15000) "5 quadros de 5000 itens em $render ms"
-        $script:caseNote = "5000 achados/nos: indice+JSON $build ms, 5 quadros $render ms, memoria ~$([math]::Round(($m1 - $m0) / 1MB, 1)) MB"
+        Assert-True ($render -lt 15000) "8 quadros (listas, nos e resumo) de 5000 itens em $render ms"
+        $script:caseNote = "5000 achados/nos: indice+JSON $build ms, 8 quadros (incl. 3 do resumo) $render ms, memoria ~$([math]::Round(($m1 - $m0) / 1MB, 1)) MB"
     }
     Test-Case 'TUI' 'P5-A (estatico): a TUI so chama Invoke-AtmDiagnose (nenhum coletor, Git, Restart Manager, registro ou arquivo), nao muda estados, nao exclui; menu V0.1 preservado; travas fechadas' {
         $tui = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Tui.ps1'))

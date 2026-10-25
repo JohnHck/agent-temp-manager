@@ -4367,8 +4367,8 @@ function Invoke-AtmDiagnoseRun {
     foreach ($f in $virt.Findings) { $findings.Add($f) }
 
     $wtNodes = @()
-    # Worktrees (P3-B): only with the worktree diagnostics gate open (closed in every shipped copy). Closed, the output is
-    # unchanged, except an explicit repository list, which is reported as not observable.
+    # Worktrees (P3-B): only with the worktree diagnostics gate open (closed in every shipped copy). Closed, nothing is
+    # discovered and worktree-discovery is reported as not observable (P5-A).
     if ($script:AtmWorktreeDiagnosticsEnabled) {
         if ([datetime]::UtcNow -ge $deadline) { foreach ($c in @('worktree-discovery', 'git')) { $coverage.Add((New-AtmDeadlineCoverage $c)) } }
         else {
