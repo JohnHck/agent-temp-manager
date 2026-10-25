@@ -137,5 +137,6 @@ the machine name, the account and its SID. Decision:
   caller's destination policy runs inside the pinned window, and the file is created relative to the folder handle
   (`NtCreateFile`, `OBJ_DONT_REPARSE`, `FILE_CREATE`, protected DACL), verified through its handle, then written.
 * **Uses.** The diagnose export (`Write-AtmNewTextFile`, still behind `AtmDiagnoseExportEnabled = $false`) and the V0.1
-  audit export (`audit -ExportJson`, enabled; same rules and refusal message). Evidence and limits:
+  audit export (`audit -ExportJson`, enabled; same rules; the V0.1 refusal message, now preceded by its code; a refusal
+  after the file was created says that an empty or partial file may remain). Evidence and limits:
   release/V0.2-SECURITY-AUDIT.md (X-01, F-02). The gate is not opened by this addendum.

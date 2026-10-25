@@ -53,20 +53,27 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  # FINAL-A: the same suite on Windows 11 ARM64 (the native safe-creation code and its fixture tests run there too).
-  # A separate job, so the names of the existing checks do not change. Informative (not a required check): suites
-  # written for the AMD64 runners have environmental FAILs here (privacy scanner needles from the runner identity,
-  # P2-A Winmgmt process verification), kept as FAIL and reported. Windows PowerShell 5.1 only: with PowerShell 7 the
-  # installer tests take minutes each on this runner and the suite did not finish in 90 minutes (reported NOT TESTED).
+  # FINAL-A: the suite on Windows 11 ARM64 (the native safe-creation code and its fixture tests run there too).
+  # A separate job, so the names of the existing checks do not change. Informative: not a required check, but a FAIL
+  # here is still a FAILURE of the job and is reported as such (continue-on-error only keeps the workflow running; it
+  # is never evidence of a PASS). Windows PowerShell 5.1 runs the whole suite (about 12 minutes; 30 minutes bound a
+  # hang). PowerShell 7 runs the FINAL-A security subset (-Only): the whole suite did not finish in 90 minutes there
+  # (installer tests take minutes each), so the cases left out are NOT TESTED on ARM64 with PowerShell 7.
   test-arm64:
-    name: test ARM64 (${{ matrix.shell }})
+    name: test ARM64 (${{ matrix.label }})
     runs-on: windows-11-arm
     continue-on-error: true
-    timeout-minutes: 60
+    timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
       matrix:
-        shell: [powershell]
+        include:
+          - shell: powershell
+            label: powershell
+            timeout: 30
+          - shell: pwsh
+            label: pwsh, FINAL-A subset
+            timeout: 20
     env:
       ATM_PWSH: C:\Program Files\PowerShell\7\pwsh.exe
     steps:
@@ -84,7 +91,7 @@ jobs:
         shell: pwsh
         run: |
           $PSVersionTable.PSVersion.ToString(); $env:PROCESSOR_ARCHITECTURE
-          ./tests/Run-Tests.ps1 -SkipHeavy -ReportFile test-results-arm64-pwsh.json
+          ./tests/Run-Tests.ps1 -SkipHeavy -ReportFile test-results-arm64-pwsh.json -Only '* :: FINAL-A*', 'Servicos :: P2-A*', 'Virtualizacao :: P2-B*', 'Privacidade :: *'
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1

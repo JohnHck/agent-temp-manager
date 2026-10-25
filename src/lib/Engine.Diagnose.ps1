@@ -393,19 +393,21 @@ function Get-AtmProcessCollection {
       An empty answer is FAILED: it never means "no processes".
       Resource counters have their own coverage record ('process-resources'), so an unreadable counter never changes
       what the identity coverage says. Timestamp: Stopwatch timestamp taken when the answer was complete (for
-      CPU sampling).
+      CPU sampling). StartedTimestamp: Stopwatch timestamp taken when the collection started (ordering against a
+      query's end on the same monotonic clock, Resolve-AtmTemporalProcessLink).
     #>
     param([scriptblock]$Source, [int]$MaxRecords = $script:AtmProcessMaxRecords, [int]$TimeoutSec = $script:AtmProcessTimeoutSec, $Deadline = $null)
     if ($MaxRecords -lt 1) { throw (Get-AtmText 'err.diagProcess' "MaxRecords $MaxRecords") }
     if ($TimeoutSec -lt 1) { throw (Get-AtmText 'err.diagProcess' "TimeoutSec $TimeoutSec") }
     $collector = 'process-snapshot'
-    $empty = @{ Collector = $collector; Failed = $true; CollectedUtc = $null; Timestamp = $null; Processes = @(); ByPid = @{}; Duplicates = @{} }
+    $empty = @{ Collector = $collector; Failed = $true; CollectedUtc = $null; StartedTimestamp = $null; Timestamp = $null; Processes = @(); ByPid = @{}; Duplicates = @{} }
     if ($null -ne $Deadline -and [datetime]::UtcNow -ge $Deadline) {
         $empty.Coverage = New-AtmDeadlineCoverage $collector
         $empty.ResourceCoverage = New-AtmDeadlineCoverage 'process-resources'
         return [pscustomobject]$empty
     }
     $started = [datetime]::UtcNow
+    $startedTs = [Diagnostics.Stopwatch]::GetTimestamp()
     $budgetMs = [long]$TimeoutSec * 1000
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $raw = $null; $err = $null
@@ -471,7 +473,7 @@ function Get-AtmProcessCollection {
     if ($reasons -ccontains 'PROCESS_LIMIT_EXCEEDED' -or $malformed -gt 0) { $rr += 'PROCESS_ROWS_NOT_READ' }
     $rst = $(if ($rr.Count -gt 0) { 'PARTIAL' } else { 'COMPLETE' })
     $resCov = New-AtmCoverage -Collector 'process-resources' -Status $rst -Reasons $rr -ElevationWouldHelp $(if ($rst -eq 'COMPLETE') { 'NO' } else { 'UNKNOWN' }) -Observed $countersRead -Expected $list.Count -StartedUtc $started -ElapsedMs $sw.ElapsedMilliseconds -BudgetMs $budgetMs
-    [pscustomobject]@{ Collector = $collector; Failed = $false; CollectedUtc = $started; Timestamp = $stamp; Processes = $list.ToArray(); ByPid = $byPid; Duplicates = $dups; Coverage = $cov; ResourceCoverage = $resCov }
+    [pscustomobject]@{ Collector = $collector; Failed = $false; CollectedUtc = $started; StartedTimestamp = $startedTs; Timestamp = $stamp; Processes = $list.ToArray(); ByPid = $byPid; Duplicates = $dups; Coverage = $cov; ResourceCoverage = $resCov }
 }
 
 function Resolve-AtmProcessReference {
@@ -3169,7 +3171,7 @@ function Invoke-AtmServiceQuery {
     }
     foreach ($e in @($byName.Values)) { $e.Providers = $e.Providers.ToArray() }
     $declared = @(Get-AtmOrdinalSorted -Items @($byName.Values) -Signature { param($x) $x.Name.ToUpperInvariant() })
-    $out = [ordered]@{ Declared = $declared; Rows = @{}; QueryUtc = $null; QueryEndUtc = $null; Capped = @(); Coverage = $null }
+    $out = [ordered]@{ Declared = $declared; Rows = @{}; QueryUtc = $null; QueryEndUtc = $null; QueryEndTimestamp = $null; Capped = @(); Coverage = $null }
     # The deadline first: a run that ran out of time is TIMEOUT, never "nothing declared".
     if ($null -ne $Deadline -and [datetime]::UtcNow -ge $Deadline) { $out.Coverage = New-AtmDeadlineCoverage 'services'; return [pscustomobject]$out }
     if ($declared.Count -eq 0) {
@@ -3187,6 +3189,8 @@ function Invoke-AtmServiceQuery {
     try { $raw = @(if ($null -ne $Source) { & $Source $names } else { Get-AtmServiceRaw -Names $names -TimeoutSec $TimeoutSec }) } catch { $ex = $_.Exception }
     $sw.Stop()
     $out.QueryEndUtc = $started.AddTicks($sw.Elapsed.Ticks)
+    # The end on the monotonic clock, for ordering against the process snapshot (never with an injected time).
+    if ($null -eq $NowUtc) { $out.QueryEndTimestamp = [Diagnostics.Stopwatch]::GetTimestamp() }
     if ($null -ne $ex) {
         # Exception type only, never its message (it could carry a command line).
         $code = ConvertTo-AtmExceptionCode $ex.GetType().Name
@@ -3222,22 +3226,32 @@ function Invoke-AtmServiceQuery {
 
 function Resolve-AtmServiceProcess {
     # The services name of Resolve-AtmTemporalProcessLink (kept for its callers and tests).
-    param($Collection, $ProcessId, $QueryUtc, $QueryEndUtc = $null)
-    return (Resolve-AtmTemporalProcessLink -Collection $Collection -ProcessId $ProcessId -QueryUtc $QueryUtc -QueryEndUtc $QueryEndUtc)
+    param($Collection, $ProcessId, $QueryUtc, $QueryEndUtc = $null, $QueryEndTimestamp = $null)
+    return (Resolve-AtmTemporalProcessLink -Collection $Collection -ProcessId $ProcessId -QueryUtc $QueryUtc -QueryEndUtc $QueryEndUtc -QueryEndTimestamp $QueryEndTimestamp)
 }
 
 function Resolve-AtmTemporalProcessLink {
     # Link of a PID reported by a source without creation time (a running service, a VM's worker) to a process of a
     # snapshot taken after the query: the process must be verified and created at least 1 us before the query started,
     # and the snapshot must start after the query ended, so the process owned the PID during the whole query.
+    # Order of query end and snapshot start (FINAL-A-S): on the monotonic Stopwatch clock when both readings exist.
+    # The UTC values mix two clocks (start read from DateTime.UtcNow plus Stopwatch elapsed time, against a later
+    # UtcNow reading); where UtcNow advances in coarse ticks (Windows PowerShell 5.1) a snapshot started in the same
+    # tick looked older than the query end, and a running service or VM worker stayed unverified. The UTC order is
+    # kept only without monotonic readings (injected times, collections built by tests). The creation time is still
+    # compared with the UTC start: a coarse reading is never ahead of real time, so that check only refuses more.
     # Returns Result MATCH (with Process) or a code of AtmServiceLinkCodes.
-    param($Collection, $ProcessId, $QueryUtc, $QueryEndUtc = $null)
+    param($Collection, $ProcessId, $QueryUtc, $QueryEndUtc = $null, $QueryEndTimestamp = $null)
     $id = ConvertTo-AtmProcessId $ProcessId
     $endUtc = $(if ($null -ne $QueryEndUtc) { $QueryEndUtc } else { $QueryUtc })
     if ($null -eq $id -or $id -eq 0) { return [pscustomobject]@{ Result = 'PID_NOT_REPORTED'; Process = $null } }
     if ($null -eq $Collection -or $Collection.Failed -or $null -eq $QueryUtc) { return [pscustomobject]@{ Result = 'PROCESS_SNAPSHOT_UNAVAILABLE'; Process = $null } }
     # The snapshot must start after the query ended (and the process must have been created before it started).
-    if ($null -eq $Collection.CollectedUtc -or ([datetime]$Collection.CollectedUtc) -lt ([datetime]$endUtc)) { return [pscustomobject]@{ Result = 'SNAPSHOT_BEFORE_QUERY'; Process = $null } }
+    $snapTs = Get-AtmHintProperty -Item $Collection -Name 'StartedTimestamp'
+    if ($null -eq $Collection.CollectedUtc) { return [pscustomobject]@{ Result = 'SNAPSHOT_BEFORE_QUERY'; Process = $null } }
+    if ($null -ne $QueryEndTimestamp -and $null -ne $snapTs) {
+        if ([long]$snapTs -lt [long]$QueryEndTimestamp) { return [pscustomobject]@{ Result = 'SNAPSHOT_BEFORE_QUERY'; Process = $null } }
+    } elseif (([datetime]$Collection.CollectedUtc) -lt ([datetime]$endUtc)) { return [pscustomobject]@{ Result = 'SNAPSHOT_BEFORE_QUERY'; Process = $null } }
     if ($Collection.Duplicates.ContainsKey($id)) { return [pscustomobject]@{ Result = 'DUPLICATE_PID'; Process = $null } }
     if (-not $Collection.ByPid.ContainsKey($id)) { return [pscustomobject]@{ Result = 'PROCESS_NOT_COLLECTED'; Process = $null } }
     $p = $Collection.ByPid[$id]
@@ -3295,7 +3309,7 @@ function Get-AtmServiceFindings {
             # Process link: only for a running service, only through the snapshot taken after the query.
             $pid0 = ConvertTo-AtmProcessId $row.ProcessId
             if ($sc -ceq 'RUNNING' -and -not $row.Duplicate) {
-                $lk = Resolve-AtmServiceProcess -Collection $Collection -ProcessId $row.ProcessId -QueryUtc $Query.QueryUtc -QueryEndUtc $Query.QueryEndUtc
+                $lk = Resolve-AtmServiceProcess -Collection $Collection -ProcessId $row.ProcessId -QueryUtc $Query.QueryUtc -QueryEndUtc $Query.QueryEndUtc -QueryEndTimestamp (Get-AtmHintProperty -Item $Query -Name 'QueryEndTimestamp')
                 if ($lk.Result -ceq 'MATCH') { $list.Add((New-AtmEvidence -Code 'SERVICE_PROCESS_VERIFIED' -Source 'diagnose' -Collector 'process-snapshot' -ObservedUtc $now -Detail $lk.Process.Key)) }
                 else { $list.Add((New-AtmEvidence -Code 'SERVICE_PROCESS_UNVERIFIED' -Source 'diagnose' -Collector 'process-snapshot' -ObservedUtc $now -Detail $lk.Result)); $propReasons.Add('SERVICE_PROCESS_UNVERIFIED'); $ok = $false }
             } elseif ($null -ne $pid0 -and $pid0 -ne 0) {
@@ -3392,7 +3406,7 @@ function Invoke-AtmVirtualizationQuery {
       coverage records 'virtualization-platform' and 'virtual-machines'.
     #>
     param([scriptblock]$Source = $null, $Deadline = $null, [int]$TimeoutSec = $script:AtmVirtTimeoutSec, [int]$MaxObjects = $script:AtmVmMaxObjects, $NowUtc = $null, $Elevated = $null)
-    $out = [ordered]@{ Hypervisor = $null; Namespace = 'NOT_QUERIED'; Vmms = 'NOT_QUERIED'; VmRows = @(); VmQueryUtc = $null; VmQueryEndUtc = $null; HostRows = 0; PlatformCoverage = $null; VmCoverage = $null }
+    $out = [ordered]@{ Hypervisor = $null; Namespace = 'NOT_QUERIED'; Vmms = 'NOT_QUERIED'; VmRows = @(); VmQueryUtc = $null; VmQueryEndUtc = $null; VmQueryEndTimestamp = $null; HostRows = 0; PlatformCoverage = $null; VmCoverage = $null }
     $run = { param([string]$Op) if ($null -ne $Source) { @(& $Source $Op) } else { Get-AtmVirtualizationRaw -Op $Op -TimeoutSec $TimeoutSec } }
     if ($null -ne $Deadline -and [datetime]::UtcNow -ge $Deadline) {
         $out.PlatformCoverage = New-AtmDeadlineCoverage 'virtualization-platform'; $out.VmCoverage = New-AtmDeadlineCoverage 'virtual-machines'
@@ -3463,6 +3477,7 @@ function Invoke-AtmVirtualizationQuery {
     try { $raw = @(& $run 'Vms') } catch { $ex = $_.Exception }
     $vsw.Stop()
     $out.VmQueryEndUtc = $vStarted.AddTicks($vsw.Elapsed.Ticks)
+    if ($null -eq $NowUtc) { $out.VmQueryEndTimestamp = [Diagnostics.Stopwatch]::GetTimestamp() }
     if ($null -ne $ex) {
         $code = ConvertTo-AtmExceptionCode $ex.GetType().Name
         if (Test-AtmAccessDeniedException $ex) { $out.VmCoverage = New-AtmCoverage -Collector 'virtual-machines' -Status 'DENIED' -Reasons @('VM_QUERY_DENIED', $code) -ElevationWouldHelp $(if ($Elevated -eq $true) { 'UNKNOWN' } else { 'YES' }) -StartedUtc $vStarted -ElapsedMs $vsw.ElapsedMilliseconds -BudgetMs $budgetMs }
@@ -3584,7 +3599,7 @@ function Get-AtmVirtualizationFindings {
         $worker = $null
         $vpid = ConvertTo-AtmProcessId $vm.ProcessId
         if ($null -ne $vpid -and $vpid -ne 0) {
-            $lk = Resolve-AtmTemporalProcessLink -Collection $Collection -ProcessId $vpid -QueryUtc $Query.VmQueryUtc -QueryEndUtc $Query.VmQueryEndUtc
+            $lk = Resolve-AtmTemporalProcessLink -Collection $Collection -ProcessId $vpid -QueryUtc $Query.VmQueryUtc -QueryEndUtc $Query.VmQueryEndUtc -QueryEndTimestamp (Get-AtmHintProperty -Item $Query -Name 'VmQueryEndTimestamp')
             if ($lk.Result -ceq 'MATCH' -and (Get-AtmVirtualizationWorkerClass $lk.Process.Name) -ceq 'VMWP') { $worker = $lk.Process; $list.Add((& $ev 'VM_WORKER_VERIFIED' 'virtualization-processes' $lk.Process.Key)) }
             else { $list.Add((& $ev 'VM_WORKER_UNVERIFIED' 'virtualization-processes' $(if ($lk.Result -ceq 'MATCH') { 'NOT_A_WORKER_PROCESS' } else { $lk.Result }))); $vmGaps.Add('VM_WORKER_UNVERIFIED') }
         }

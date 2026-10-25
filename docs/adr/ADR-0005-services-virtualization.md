@@ -102,7 +102,10 @@ P2-B; the Claude Desktop hints are P2-C).
   process snapshot of the run, which must start after the query ended. A PID is linked (`SERVICE_PROCESS_VERIFIED`, with the process key) only when the service
   is running and the snapshot, taken after the query, holds that PID with a verified identity created at least 1 us
   before the query started: such a process was alive during the whole query, and a live PID belongs to one process.
-  Otherwise `SERVICE_PROCESS_UNVERIFIED` with the reason. No process is opened.
+  Otherwise `SERVICE_PROCESS_UNVERIFIED` with the reason. No process is opened. Implementation note (FINAL-A-S,
+  rule unchanged): the order of the query end and the snapshot start is compared on the monotonic Stopwatch clock; the
+  UTC readings mixed two clocks and refused proved links where `DateTime.UtcNow` is coarse. Injected test times keep
+  the UTC order.
 * **Privacy (rule 4).** `ConvertFrom-AtmServicePathName` reads the command line as untrusted text only (P2-A-S):
   nothing is opened, run, resolved or looked up on any disk (no existence or metadata check: a fixed drive letter does
   not prove that a folder on the way is not redirected, possibly to the network). It keeps only the executable: the

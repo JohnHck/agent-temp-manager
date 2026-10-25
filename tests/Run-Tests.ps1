@@ -4,8 +4,12 @@
   %TEMP%\atm-tests-<random> (outside every real <TEMP>\claude base). Real Claude Code temp files are never
   written; tests that touch the real machine are read-only.
   Usage: powershell -NoProfile -ExecutionPolicy Bypass -File tests\Run-Tests.ps1 [-SkipHeavy] [-ReportFile <path>]
+         [-Only '<Area> :: <name pattern>', ...]
+  -Only (FINAL-A-S): runs only the cases whose "<Area> :: <name>" matches one of the wildcard patterns. Every setup
+  step outside the cases still runs; a case left out is neither run nor counted (never a PASS), the summary says it is
+  a subset, and a pattern that matches no case is a FAIL.
 #>
-param([switch]$SkipHeavy, [string]$ReportFile, [int]$HeavyFiles = 200000)
+param([switch]$SkipHeavy, [string]$ReportFile, [int]$HeavyFiles = 200000, [string[]]$Only = @())
 
 $ErrorActionPreference = 'Stop'
 # Native and child-process output (Git, the CLI, which writes UTF-8) is decoded as UTF-8, like the CLI itself does:
@@ -109,8 +113,15 @@ $uni = 'Usu' + [char]0x00E1 + 'rio Teste ' + [char]0x00E7 + ' ' + [char]0x65E5 +
 function Assert-True { param($Cond, [string]$Msg) if (-not $Cond) { throw "ASSERT: $Msg" } }
 function Assert-Eq { param($A, $B, [string]$Msg) if ($A -ne $B) { throw "ASSERT: $Msg (esperado '$B', obtido '$A')" } }
 
+$script:notSelected = 0
+$script:onlyHits = @{}
 function Test-Case {
     param([string]$Area, [string]$Name, [scriptblock]$Body)
+    if ($Only.Count -gt 0) {
+        $sel = @($Only | Where-Object { ('{0} :: {1}' -f $Area, $Name) -like $_ })
+        if ($sel.Count -eq 0) { $script:notSelected++; return }
+        foreach ($o in $sel) { $script:onlyHits[$o] = $true }
+    }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $status = 'PASS'; $msg = ''
     $script:caseNote = $null; $script:caseSkipped = $false
@@ -1070,6 +1081,30 @@ try {
         Assert-Eq @($f | Where-Object { $_.File -eq 'ficticio.md' }).Count 0 'valores ficticios aceitos'
         Assert-True (@($f | Where-Object { $_.Excerpt -match 'MariaSilva|111111111|exemplo-real' }).Count -eq 0) 'achados nao reproduzem o dado'
     }
+    Test-Case 'Privacidade' 'FINAL-A-S: identificador da maquina igual a uma palavra do produto nao e procurado (com aviso); nome que apenas contem a palavra e identificador explicito continuam detectados' {
+        $scan = Join-Path (Split-Path -Parent $testsDir) 'tools\Test-AtmPrivacy.ps1'
+        $d = Join-Path $sandbox 'privacy-words'; [void][IO.Directory]::CreateDirectory($d)
+        [IO.File]::WriteAllText((Join-Path $d 'produto.md'), "The installer verifies the manifest; TrustedInstaller keeps its access.`n")
+        $joined = 'installer' + '-maria-p'
+        [IO.File]::WriteAllText((Join-Path $d 'nome.md'), "account $joined`n")
+        $savedUser = $env:USERNAME
+        try {
+            # The same filter runs for every needle taken from the machine (environment, SID, ProfileList).
+            $env:USERNAME = 'Installer'
+            $wv = $null
+            $f = @(& $scan -Path $d -WarningVariable wv -WarningAction SilentlyContinue)
+            Assert-Eq @($f | Where-Object { $_.Kind -eq 'PRIVATE_IDENTIFIER' -and $_.File -eq 'produto.md' }).Count 0 'palavra do produto vinda da maquina: texto do produto aceito'
+            Assert-True (@($wv | Where-Object { [string]$_ -match "from USERNAME equals the product word 'installer'" }).Count -eq 1) 'aviso visivel com a origem e a palavra (nunca silencioso)'
+            $env:USERNAME = $joined
+            $wv = $null
+            $f = @(& $scan -Path $d -WarningVariable wv -WarningAction SilentlyContinue)
+            Assert-True (@($f | Where-Object { $_.Kind -eq 'PRIVATE_IDENTIFIER' -and $_.File -eq 'nome.md' }).Count -ge 1 -and @($wv | Where-Object { [string]$_ -match 'product word' }).Count -eq 0) 'nome que apenas contem a palavra: detectado, sem aviso'
+        } finally { $env:USERNAME = $savedUser }
+        $f = @(& $scan -Path $d -ExtraNeedles @('installer') -WarningAction SilentlyContinue)
+        Assert-True (@($f | Where-Object { $_.Kind -eq 'PRIVATE_IDENTIFIER' -and $_.File -eq 'produto.md' }).Count -ge 1) 'identificador explicito igual a palavra: sempre procurado'
+        $src = [IO.File]::ReadAllText($scan)
+        Assert-True ($src.Contains("`$machineNeedles.Add(@('ProfileList', `$leaf))") -and $src.Contains("`$productWords = @('installer')") -and -not $src.Contains("`$needles.Add(`$leaf)")) 'ProfileList passa pelo mesmo filtro; lista com uma unica palavra'
+    }
     Test-Case 'Privacidade' 'Identidade Git: autor, committer e trailers; noreply aceito; pessoal detectado sem expor o endereco' {
         if (-not (Get-Command git -ErrorAction SilentlyContinue)) { $script:caseSkipped = $true; $script:caseNote = 'git indisponivel'; return }
         $tool = Join-Path (Split-Path -Parent $testsDir) 'tools\Test-AtmCommitIdentity.ps1'
@@ -1152,7 +1187,10 @@ try {
         foreach ($rel in @('src', 'install', 'docs', 'tests', 'tools', '.github')) { if (Test-Path (Join-Path $repo $rel)) { Copy-AtmTree -From (Join-Path $repo $rel) -To (Join-Path $copy $rel) } }
         # '.git' is a file (pointer to the main repository) in a linked worktree; it is never published.
         foreach ($f in @(Get-ChildItem -LiteralPath $repo -File -Force | Where-Object { $_.Name -ne '.git' })) { Copy-Item -LiteralPath $f.FullName -Destination $copy }
-        $hits = @(& $scan -Path $copy -NeedlesFile $env:ATM_PRIVATE_NEEDLES)
+        $pw = $null
+        $hits = @(& $scan -Path $copy -NeedlesFile $env:ATM_PRIVATE_NEEDLES -WarningVariable pw -WarningAction SilentlyContinue)
+        # A weaker scan stays visible in the result (source and product word only, never a name of this machine).
+        if (@($pw).Count -gt 0) { $script:caseNote = 'avisos do scanner: ' + ((@($pw) | ForEach-Object { [string]$_ } | Sort-Object -Unique) -join ' | ') }
         Assert-Eq $hits.Count 0 (($hits | ForEach-Object { "$($_.File):$($_.Line) $($_.Kind)" }) -join '; ')
         if ((Get-Command git -ErrorAction SilentlyContinue) -and (Test-Path (Join-Path $repo '.git'))) {
             $idx = Join-Path $sandbox 'git-index'
@@ -5956,6 +5994,48 @@ try {
         Assert-True ($f['ReusedSvc'].State -ceq 'RUNNING' -and (& $svcEv $f['ReusedSvc'] 'SERVICE_PROCESS_UNVERIFIED')[0] -ceq 'CREATED_AFTER_QUERY' -and (& $svcEv $f['ReusedSvc'] 'SERVICE_PROCESS_VERIFIED').Count -eq 0) 'PID reutilizado: nunca vinculado'
         Assert-True ((& $svcCov $r 'service-properties').Status -ceq 'PARTIAL' -and @((& $svcCov $r 'service-properties').Reasons) -ccontains 'SERVICE_PROCESS_UNVERIFIED') 'vinculo nao verificado declarado'
     }
+    Test-Case 'Servicos' 'FINAL-A-S: ordem entre o fim da consulta e o inicio do snapshot no relogio monotonico; relogio UTC grosso nao recusa um vinculo provado; snapshot anterior continua recusado; precisao de 1 us' {
+        $tq = $svcT0
+        $c = & $svcProcs @((& $svcPRow 4 $tq.AddHours(-1)), (& $svcPRow 100 $tq.AddMinutes(-1)), (& $svcPRow 600 $tq.AddTicks(-10)))
+        Assert-True ($null -ne $c.StartedTimestamp -and $c.StartedTimestamp -is [long]) 'snapshot leva o instante monotonico do seu inicio'
+        # Coarse UtcNow (Windows PowerShell 5.1): the snapshot's UTC start reads the same tick as the query start, while
+        # the query end (start + Stopwatch elapsed) is later. Monotonic order: the snapshot started after the query ended.
+        $coarseStart = [datetime]$c.CollectedUtc
+        $coarseEnd = $coarseStart.AddMilliseconds(3)
+        $before = [long]$c.StartedTimestamp - 1
+        Assert-Eq (Resolve-AtmServiceProcess -Collection $c -ProcessId 100 -QueryUtc $coarseStart -QueryEndUtc $coarseEnd).Result 'SNAPSHOT_BEFORE_QUERY' 'ordem UTC mista (regra antiga): recusa falsa reproduzida'
+        Assert-Eq (Resolve-AtmServiceProcess -Collection $c -ProcessId 100 -QueryUtc $coarseStart -QueryEndUtc $coarseEnd -QueryEndTimestamp $before).Result 'MATCH' 'ordem monotonica: vinculo provado aceito com relogio UTC grosso'
+        Assert-Eq (Resolve-AtmServiceProcess -Collection $c -ProcessId 100 -QueryUtc $coarseStart -QueryEndUtc $coarseEnd -QueryEndTimestamp ([long]$c.StartedTimestamp)).Result 'MATCH' 'mesmo instante monotonico: aceito (o snapshot vem depois no programa)'
+        # A UTC clock stepped forward never hides a snapshot taken before the query ended.
+        Assert-Eq (Resolve-AtmServiceProcess -Collection $c -ProcessId 100 -QueryUtc $tq -QueryEndUtc $tq -QueryEndTimestamp ([long]$c.StartedTimestamp + 1)).Result 'SNAPSHOT_BEFORE_QUERY' 'snapshot iniciado antes do fim da consulta (monotonico), mesmo com UTC posterior'
+        # Without a monotonic reading on either side the UTC order still applies (injected times, collections built by hand).
+        $hand = [pscustomobject]@{ Failed = $false; CollectedUtc = $tq.AddMinutes(-5); ByPid = $c.ByPid; Duplicates = @{} }
+        Assert-Eq (Resolve-AtmServiceProcess -Collection $hand -ProcessId 100 -QueryUtc $tq -QueryEndTimestamp $before).Result 'SNAPSHOT_BEFORE_QUERY' 'snapshot sem instante monotonico: ordem UTC'
+        Assert-Eq (Resolve-AtmServiceProcess -Collection $c -ProcessId 100 -QueryUtc $tq -QueryEndUtc ([datetime]::UtcNow.AddHours(1))).Result 'SNAPSHOT_BEFORE_QUERY' 'consulta sem instante monotonico: ordem UTC'
+        $q0 = Invoke-AtmServiceQuery -ProviderHints @((& $svcHints 'fake' @((& $svcHint 'ClockSvc')))) -Source { param($Names) @() } -NowUtc $tq
+        Assert-True ($null -eq $q0.QueryEndTimestamp) 'tempo injetado: nenhum instante monotonico (os testes de ordem UTC seguem validos)'
+        # Creation time: still compared with the UTC start (1 us resolution); a coarse start only refuses more.
+        Assert-Eq (Resolve-AtmServiceProcess -Collection $c -ProcessId 600 -QueryUtc $tq -QueryEndTimestamp $before).Result 'MATCH' 'criado 1 us antes do inicio: aceito'
+        Assert-Eq (Resolve-AtmServiceProcess -Collection $c -ProcessId 600 -QueryUtc $tq.AddTicks(-1) -QueryEndTimestamp $before).Result 'CREATED_AFTER_QUERY' 'criado a menos de 1 us do inicio: recusado'
+        Assert-Eq (Resolve-AtmServiceProcess -Collection $c -ProcessId 100 -QueryUtc $tq.AddMinutes(-2) -QueryEndTimestamp $before).Result 'CREATED_AFTER_QUERY' 'criado depois do inicio, ordem monotonica correta: recusado'
+        # The real sequence (query, then snapshot; injected rows, real clocks): every link proved by the monotonic order.
+        # Recorded, never asserted: how many the old UTC order would have refused on this machine and shell.
+        $rows = @((& $svcRow 'ClockSvc' 'Running' 'Auto' $false 'LocalSystem' 100))
+        $prs = @((& $svcPRow 4 $tq.AddHours(-1)), (& $svcPRow 100 $tq.AddMinutes(-1)))
+        $old = 0; $new = @{}
+        for ($i = 0; $i -lt 100; $i++) {
+            $q = Invoke-AtmServiceQuery -ProviderHints @((& $svcHints 'fake' @((& $svcHint 'ClockSvc')))) -Source ({ param($Names) $rows }.GetNewClosure())
+            $cc = & $svcProcs $prs
+            $n = (Resolve-AtmServiceProcess -Collection $cc -ProcessId 100 -QueryUtc $q.QueryUtc -QueryEndUtc $q.QueryEndUtc -QueryEndTimestamp $q.QueryEndTimestamp).Result
+            $new[$n] = 1 + $(if ($new.ContainsKey($n)) { $new[$n] } else { 0 })
+            if ((Resolve-AtmServiceProcess -Collection $cc -ProcessId 100 -QueryUtc $q.QueryUtc -QueryEndUtc $q.QueryEndUtc).Result -cne 'MATCH') { $old++ }
+        }
+        Assert-Eq (@($new.Keys) -join ',') 'MATCH' "sequencia real: todo vinculo provado ($(@($new.Keys | ForEach-Object { $_ + '=' + $new[$_] }) -join ','))"
+        $g = New-Object System.Collections.Generic.List[long]; $a = [datetime]::UtcNow.Ticks; $sw = [Diagnostics.Stopwatch]::StartNew()
+        while ($g.Count -lt 20 -and $sw.ElapsedMilliseconds -lt 2000) { $b = [datetime]::UtcNow.Ticks; if ($b -ne $a) { $g.Add($b - $a); $a = $b } }
+        $gran = $(if ($g.Count -gt 0) { [math]::Round((($g | Measure-Object -Average).Average) / 10) } else { 'n/d' })
+        $script:caseNote = "UtcNow: passo medio $gran us; ordem UTC antiga recusaria $old/100; ordem monotonica 0/100"
+    }
     Test-Case 'Servicos' 'P2-A: dois providers com o mesmo servico, nenhum servico declarado, dicas incompletas, nomes semelhantes, limite de nomes, nome com aspas recusado' {
         $a = & $svcHints 'prov-a' @((& $svcHint 'SharedSvc'))
         $b = & $svcHints 'prov-b' @((& $svcHint 'sharedsvc' 'vm-host'))
@@ -6140,9 +6220,11 @@ try {
         $f = & $svcByKey $r
         Assert-Eq $after $before 'estado e tipo de inicio identicos antes e depois'
         Assert-True ($q.Coverage.Status -ceq 'PARTIAL' -and (@($q.Coverage.Reasons) -join ',') -ceq 'SERVICE_NOT_LISTED_FOR_ACCOUNT' -and $f['EventLog'].State -ceq 'RUNNING' -and $f['Winmgmt'].State -ceq 'RUNNING' -and $f['AtmNoSuchServiceP2A'].State -ceq 'UNKNOWN') "consulta real: $($q.Coverage.Status), $(@($r.Findings | ForEach-Object { $_.Key + '=' + $_.State }) -join ',')"
-        Assert-Eq (& $svcEv $f['Winmgmt'] 'SERVICE_PROCESS_VERIFIED').Count 1 "Winmgmt: processo verificado ($(@(& $svcEv $f['Winmgmt'] 'SERVICE_PROCESS_UNVERIFIED') -join ','))"
+        # Sanitized: link codes only (never a PID, a key or a time). The old UTC order (FINAL-A-S) is recorded for comparison.
+        $wmOld = (Resolve-AtmServiceProcess -Collection $coll -ProcessId $q.Rows['Winmgmt'].ProcessId -QueryUtc $q.QueryUtc -QueryEndUtc $q.QueryEndUtc).Result
+        Assert-Eq (& $svcEv $f['Winmgmt'] 'SERVICE_PROCESS_VERIFIED').Count 1 "Winmgmt: processo verificado (nao verificado: $((& $svcEv $f['Winmgmt'] 'SERVICE_PROCESS_UNVERIFIED') -join ','); ordem UTC antiga: $wmOld)"
         Assert-True ((& $svcEv $f['Winmgmt'] 'SERVICE_EXECUTABLE')[0] -like '*\svchost.exe' -and (& $svcEv $f['Winmgmt'] 'SERVICE_ACCOUNT_KIND')[0] -ceq 'LOCAL_SYSTEM') 'Winmgmt: svchost.exe em local conhecido, LocalSystem'
-        $script:caseNote = "services $($q.Coverage.Status) em $($q.Coverage.ElapsedMs) ms; propriedades $((& $svcCov $r 'service-properties').Status) $(@((& $svcCov $r 'service-properties').Reasons) -join ',')"
+        $script:caseNote = "services $($q.Coverage.Status) em $($q.Coverage.ElapsedMs) ms; propriedades $((& $svcCov $r 'service-properties').Status) $(@((& $svcCov $r 'service-properties').Reasons) -join ','); Winmgmt pela ordem UTC antiga: $wmOld"
     }
     # ------------------------------------------------------------------ P2-B (virtualization, ADR-0005 rules 7-9)
     # CIM rows and process rows are injected; no VM is created, started or changed and no service is touched. Only the
@@ -6323,7 +6405,12 @@ try {
         $cols = @($d.Coverage | ForEach-Object { $_.Collector })
         Assert-True ($cols.IndexOf('virtualization-platform') -eq $cols.IndexOf('service-properties') + 1 -and $cols.IndexOf('virtual-machines') -eq $cols.IndexOf('virtualization-platform') + 1 -and $cols.IndexOf('virtualization-processes') -eq $cols.IndexOf('virtual-machines') + 1) "coberturas por camada ($($cols -join ','))"
         $vm = @($d.Findings | Where-Object { $_.Kind -ceq 'VirtualMachine' })
-        Assert-True ($vm.Count -eq 1 -and $vm[0].State -ceq 'RUNNING' -and $vm[0].Provider -ceq 'fake-virt' -and (& $vEv $vm[0] 'VM_WORKER_VERIFIED').Count -eq 1 -and @($d.Findings | Where-Object { $_.Kind -ceq 'VirtualizationPlatform' -and $_.State -ceq 'PRESENT' }).Count -eq 1) 'VM no diagnose: em execucao, atribuida pelo nome, vmwp verificado (consulta antes do snapshot)'
+        # One assertion per property, each with a sanitized value (codes and states only; never a PID, key or name).
+        Assert-Eq $vm.Count 1 'VM no diagnose: uma'
+        Assert-Eq $vm[0].State 'RUNNING' 'VM no diagnose: em execucao'
+        Assert-Eq ([string]$vm[0].Provider) 'fake-virt' 'VM no diagnose: atribuida pelo nome'
+        Assert-Eq (& $vEv $vm[0] 'VM_WORKER_VERIFIED').Count 1 "VM no diagnose: vmwp verificado, consulta antes do snapshot (nao verificado: $((& $vEv $vm[0] 'VM_WORKER_UNVERIFIED') -join ','))"
+        Assert-Eq @($d.Findings | Where-Object { $_.Kind -ceq 'VirtualizationPlatform' -and $_.State -ceq 'PRESENT' }).Count 1 "plataforma PRESENT ($(@($d.Findings | Where-Object { $_.Kind -ceq 'VirtualizationPlatform' } | ForEach-Object { $_.State }) -join ','))"
         Assert-True (@($d.Findings | Where-Object { $_.Kind -ceq 'TempPartition' -and ($_.State -ceq 'NO_DEPENDENCY_OBSERVED' -or $_.State -ceq 'RUNTIME_NOT_DIAGNOSED' -or ($_.State -ceq 'IN_USE' -and @($_.Evidence | Where-Object { $_.Code -ceq 'GRAPH_SOURCE_DIRECT' }).Count -eq 0)) }).Count -eq 0) 'virtualizacao nao torna particao livre (P4-B: estado so pelo grafo, IN_USE so com fonte direta)'
         $json = ConvertTo-AtmDiagnoseJson -Result $d
         $txt = (Show-AtmDiagnose -Result $d 6>&1 | ForEach-Object { [string]$_ }) -join "`n"
@@ -7662,14 +7749,22 @@ public static class AtmTestReparse {
     cmd /c rd /s /q "`"$sandbox`"" 2>&1 | Out-Null
 }
 
+# A selection pattern that matched nothing would make an empty subset look green.
+foreach ($o in $Only) {
+    if (-not $script:onlyHits.ContainsKey($o)) {
+        $results.Add([pscustomobject]@{ Area = 'Harness'; Test = "-Only sem caso correspondente: $o"; Result = 'FAIL'; Ms = 0; Detail = 'padrao nao corresponde a nenhum caso' })
+        Write-Host ("[FAIL] Harness :: -Only sem caso correspondente: {0}" -f $o) -ForegroundColor Red
+    }
+}
 $pass = @($results | Where-Object Result -eq 'PASS').Count
 $fail = @($results | Where-Object Result -eq 'FAIL').Count
 $skipped = @($results | Where-Object Result -eq 'NAO_TESTADO').Count
 Write-Host ''
-Write-Host ("RESULTADO: {0} PASS / {1} FAIL / {5} NAO_TESTADO / {2} total | PowerShell {3} {4}" -f $pass, $fail, $results.Count, $PSVersionTable.PSVersion, $PSVersionTable.PSEdition, $skipped) -ForegroundColor $(if ($fail -eq 0) { 'Green' } else { 'Red' })
+if ($Only.Count -gt 0) { Write-Host ("SUBCONJUNTO (-Only {0}): {1} casos nao selecionados, nao executados e nao contados" -f ($Only -join ' | '), $script:notSelected) -ForegroundColor Yellow }
+Write-Host ("RESULTADO{6}: {0} PASS / {1} FAIL / {5} NAO_TESTADO / {2} total | PowerShell {3} {4}" -f $pass, $fail, $results.Count, $PSVersionTable.PSVersion, $PSVersionTable.PSEdition, $skipped, $(if ($Only.Count -gt 0) { ' (SUBCONJUNTO)' } else { '' })) -ForegroundColor $(if ($fail -eq 0) { 'Green' } else { 'Red' })
 Write-Host ("Sandbox removido: {0}" -f (-not [IO.Directory]::Exists($sandbox)))
 if ($ReportFile) {
-    $rep = [ordered]@{ psVersion = $PSVersionTable.PSVersion.ToString(); psEdition = $PSVersionTable.PSEdition; user = $me.Name; isAdmin = $me.IsAdmin; utc = [datetime]::UtcNow.ToString('o'); pass = $pass; fail = $fail; notTested = $skipped; sandboxRemoved = (-not [IO.Directory]::Exists($sandbox)); results = $results }
+    $rep = [ordered]@{ psVersion = $PSVersionTable.PSVersion.ToString(); psEdition = $PSVersionTable.PSEdition; user = $me.Name; isAdmin = $me.IsAdmin; utc = [datetime]::UtcNow.ToString('o'); pass = $pass; fail = $fail; notTested = $skipped; subset = @($Only); notSelected = $script:notSelected; sandboxRemoved = (-not [IO.Directory]::Exists($sandbox)); results = $results }
     [IO.File]::WriteAllText($ReportFile, ($rep | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding($false)))
 }
 exit $fail

@@ -21,26 +21,39 @@ $allowedUserDirs = @('alice', 'x', 'EXAMPL~1', 'Public', 'Default', '<name>', '<
 $allowedSids = @('S-1-5-21-1-2-3-777', 'S-1-5-21-1-2-3-4444', 'S-1-5-21-9-9-9-1000')
 $allowedEmails = @('noreply@anthropic.com')
 $binaryExt = @('.zip', '.dll', '.exe', '.png', '.jpg', '.ico', '.pdb')
+# Words of the product's own text that a machine may also use as an account or profile folder name. Evidence
+# (FINAL-A-S): on the Windows 11 ARM64 runner a profile folder of the image is named like the first word; the 91
+# lines it flagged were exactly the 91 published lines holding it (installer scripts, docs, 'TrustedInstaller').
+# Only a needle taken from this machine and EQUAL to a listed word (ignoring case) is skipped, with a warning;
+# a needle given by -ExtraNeedles or -NeedlesFile is always searched, and so is any longer name holding the word.
+$productWords = @('installer')
 
 $needles = New-Object System.Collections.Generic.List[string]
 foreach ($n in $ExtraNeedles) { if ($n -and $n.Length -ge 3) { $needles.Add($n) } }
 if ($NeedlesFile -and (Test-Path -LiteralPath $NeedlesFile)) {
     foreach ($l in (Get-Content -LiteralPath $NeedlesFile -Encoding UTF8)) { $t = $l.Trim(); if ($t -and -not $t.StartsWith('#') -and $t.Length -ge 3) { $needles.Add($t) } }
 }
-# The machine running the scan must not leak into what it scans.
-foreach ($n in @($env:USERNAME, $env:COMPUTERNAME, $env:USERDOMAIN)) { if ($n -and $n.Length -ge 3 -and $n -notin @('WORKGROUP')) { $needles.Add($n) } }
+# The machine running the scan must not leak into what it scans (each needle keeps its source for the warning).
+$machineNeedles = New-Object System.Collections.Generic.List[object]
+foreach ($e in @(@('USERNAME', $env:USERNAME), @('COMPUTERNAME', $env:COMPUTERNAME), @('USERDOMAIN', $env:USERDOMAIN))) { if ($e[1] -and $e[1].Length -ge 3 -and $e[1] -notin @('WORKGROUP')) { $machineNeedles.Add(@($e[0], $e[1])) } }
 # Accounts without a machine or domain SID (e.g. SYSTEM): nothing to add.
-try { $needles.Add(([Security.Principal.WindowsIdentity]::GetCurrent().User.AccountDomainSid.Value)) } catch { $null = $_ }
+try { $machineNeedles.Add(@('AccountDomainSid', ([Security.Principal.WindowsIdentity]::GetCurrent().User.AccountDomainSid.Value))) } catch { $null = $_ }
 try {
     $pl = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList')
     foreach ($s in $pl.GetSubKeyNames()) {
         if ($s -notlike 'S-1-5-21-*') { continue }
         $img = [string]$pl.OpenSubKey($s).GetValue('ProfileImagePath')
-        if ($img) { $leaf = Split-Path -Leaf $img; if ($leaf.Length -ge 3) { $needles.Add($leaf) } }
+        if ($img) { $leaf = Split-Path -Leaf $img; if ($leaf.Length -ge 3) { $machineNeedles.Add(@('ProfileList', $leaf)) } }
     }
     $pl.Close()
 # Never silent: a weaker scan must be visible.
 } catch { Write-Warning "ProfileList unreadable: this machine's profile names are not added as private identifiers ($($_.Exception.Message))" }
+foreach ($m in $machineNeedles) {
+    $w = @($productWords | Where-Object { $_ -eq $m[1] })
+    # Never silent: the skipped needle is named only by its source and the listed product word.
+    if ($w.Count -gt 0) { Write-Warning "private identifier from $($m[0]) equals the product word '$($w[0])': not searched (it cannot be told apart from the product's own text)"; continue }
+    $needles.Add([string]$m[1])
+}
 $needles = @($needles | Select-Object -Unique)
 
 $patterns = @(

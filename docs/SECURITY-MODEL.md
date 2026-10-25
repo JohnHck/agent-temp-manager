@@ -127,7 +127,9 @@ called by `Invoke-AtmGitCommand`):
   Account names are never exported: only the kind, and a standard identifier for the three built-in service accounts
   (ADR-0012). A service PID is linked to a process only
   when the snapshot taken after the query holds it with a verified identity created before the query; no process is
-  opened for it.
+  opened for it. The order of the query end and the snapshot start is compared on the monotonic clock (FINAL-A-S,
+  F-11: the UTC readings mixed two clocks, so Windows PowerShell 5.1 refused proved links where its clock is coarse;
+  an unproved link was never accepted).
 * **Virtualization (P2-B, ADR-0005):** local read-only CIM queries only: the hypervisor flag, the `__NAMESPACE`
   instances that list `root\virtualization\v2`, the `vmms` service state, and `Msvm_ComputerSystem` only when the
   namespace is listed and `vmms` is running (its provider runs in `vmms.exe`; a stopped service is never started by
@@ -166,15 +168,24 @@ called by `Invoke-AtmGitCommand`):
   `FILE_CREATE`) with a protected DACL, verifies it through its handle and only then writes (release/V0.2-SECURITY-AUDIT,
   X-01, with fixture evidence and limits). Opening the gate remains a maintainer decision; the fixtures also run on
   Windows 11 ARM64 with Windows PowerShell 5.1; ARM64 with PowerShell 7 is NOT TESTED.
-* **Diagnose export, when its gate is open (tests only, P5-B):** written only with `-ExportJson`, to a new file (`CreateNew`: never overwrites; a junction
-  planted at the destination was refused on fixtures; a file symbolic link there is refused by the documented
-  `CREATE_NEW` semantics but was not tested, since creating one needs a privilege), at an absolute local path whose
-  parent chain has no reparse point, not on a `subst` drive, outside every audited base and not inside a Git repository
-  or worktree (an ancestor holding `.git`, or a bare repository; existence checks only, no Git; an ancestor that cannot
-  be checked refuses). FINAL-A: `audit -ExportJson` keeps its V0.1 rules and now creates its file through the same pinned
-  writer (F-02: a race or a `subst` alias is refused; the refusal message is unchanged). `clean -LogFile` still appends
-  by name (F-04, latent while the deletion gate is closed; proposal recorded). Refusals and write failures are reported by code, never by exception message; nothing is
-  created after a refusal. The ancestor TOCTOU above applies; that is why the gate is closed.
+* **Diagnose export, when its gate is open (tests only, P5-B; disabled in every copy):** written only with
+  `-ExportJson`, to a new file (never overwrites) at an absolute local path whose parent chain has no reparse point,
+  not on a `subst` drive, outside every audited base and not inside a Git repository or worktree (an ancestor holding
+  `.git`, or a bare repository; existence checks only, no Git; an ancestor that cannot be checked refuses), through the
+  pinned writer above. A junction planted at the destination is refused; so is a file symbolic link there (tested on
+  the CI runners; NOT TESTED locally, where creating one needs a privilege or Developer Mode).
+* **Audit export (`audit -ExportJson`, V0.1, enabled):** keeps its V0.1 rules and, since FINAL-A, creates its file
+  through the same pinned writer (F-02: a race or a `subst` alias is refused; the stricter creation is listed in USAGE).
+  The V0.1 refusal message stays (`cli.exportRefused`, exit code 10), now preceded by the refusal code.
+* **Export outcomes (both writers, FINAL-A-S reconciliation):** (1) refused before any file is created: nothing is
+  created and the refusal code is printed (never an exception message); (2) refused after the file was created (codes
+  `EXPORT_CREATE_CREATED_*`: the folder changed after the creation, or verifying or writing failed): an empty or partial
+  file may remain at the destination; the CLI says so and never claims that no file was created; nothing more is
+  written to it and nothing is deleted automatically (files are removed only inside test fixtures); (3) success: the
+  file was created, verified through its handle and written. Every refusal fails closed. Residuals: the X-01 limits
+  (volume root not pinned; a refusal after the creation can leave a file) and the reads by textual path after earlier
+  checks (F-01 residual) are listed in release/V0.2-SECURITY-AUDIT. `clean -LogFile` still appends by name (F-04,
+  latent while the deletion gate is closed; proposal recorded).
 * **TUI diagnostics area (P5-A, ADR-0009):** presentation only. It runs `Invoke-AtmDiagnose` on an explicit action
   (entering the area without a result, or `U`) and renders the diagnose JSON export of that result: no collector,
   Git, Restart Manager, registry or file access of its own, no state change, no gate opened (static test); the
