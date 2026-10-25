@@ -146,52 +146,40 @@ function Test-Case {
     Write-Host ("[{0}] {1} :: {2} ({3} ms) {4}" -f $status, $Area, $Name, $sw.ElapsedMilliseconds, $msg) -ForegroundColor $color
 }
 
-# FINAL-B: a child process of the suite with a bounded wait. stdin is closed and stdout/stderr are read asynchronously
-# (a full pipe never blocks the child). On timeout only processes this call started are stopped: the child (its handle
-# is held) and descendants whose parent is one of them and whose creation time is not before the child's, checked
-# again on the process object right before it is stopped. Never a process that existed before the call.
-function Stop-AtmTestChildTree {
-    param([Diagnostics.Process]$Process)
-    $start = $Process.StartTime.ToUniversalTime()
-    $ids = @{ ([long]$Process.Id) = $start }
-    $rows = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, CreationDate -ErrorAction SilentlyContinue)
-    $grew = $true
-    while ($grew) {
-        $grew = $false
-        foreach ($r in $rows) {
-            if ($null -eq $r.CreationDate) { continue }
-            $cu = ([datetime]$r.CreationDate).ToUniversalTime()
-            if ($ids.ContainsKey([long]$r.ParentProcessId) -and -not $ids.ContainsKey([long]$r.ProcessId) -and $cu -ge $start) { $ids[[long]$r.ProcessId] = $cu; $grew = $true }
-        }
+# FINAL-B-S: a child process of the suite runs inside its own Job Object (AgentTempManager.AtmJobRunner, the Git
+# runner's executor): the job is created and its limits set and read back before the process exists, the process is
+# created inside it (never started outside and associated later), cmd.exe by its absolute path, the environment given
+# explicitly. On the deadline, or when a member still holds the output pipes after the child ended, only the job's
+# members are terminated (TerminateJobObject; KILL_ON_JOB_CLOSE when the job closes). No PID is ever looked up and no
+# process outside the job can be signalled. Bound: the deadline plus the runner's fixed waits (at most about 22.5 s:
+# 10 s for the child after termination, 2.5 s for the pipes, 10 s for the readers after the job is terminated); bytes
+# kept per stream are capped (truncation declared). A runner failure is a sanitized CHILD_RUNNER_<code>, raised
+# before anything runs when the job or the process could not be set up.
+function ConvertFrom-AtmTestJobResult {
+    param($Result)
+    if (-not $Result.Started) { throw ('CHILD_RUNNER_' + $(if ($Result.Error -cmatch '^[A-Z_]+$') { $Result.Error } else { 'NOT_STARTED' })) }
+    if ($Result.TimedOut -and -not $Result.JobTerminated) { throw 'CHILD_RUNNER_JOB_TERMINATE_FAILED' }
+    $truncated = ($Result.OutputTruncated -or $Result.ErrorTruncated)
+    if ($Result.TimedOut) { $text = 'CHILD_TIMEOUT' }
+    else {
+        $raw = [Text.Encoding]::UTF8.GetString($Result.Output) + "`n" + [Text.Encoding]::UTF8.GetString($Result.ErrorOutput)
+        $text = (@($raw -split "`r?`n" | Where-Object { $_ -ne '' }) -join ' ')
     }
-    foreach ($id in @($ids.Keys | Where-Object { $_ -ne [long]$Process.Id })) {
-        try { $q = [Diagnostics.Process]::GetProcessById([int]$id); if ([math]::Abs(($q.StartTime.ToUniversalTime() - $ids[$id]).TotalSeconds) -lt 1) { $q.Kill() }; $q.Dispose() } catch { $null = $_ }
-    }
-    try { if (-not $Process.HasExited) { $Process.Kill() } } catch { $null = $_ }
+    if ($truncated) { $text += ' [SAIDA_TRUNCADA]' }
+    [pscustomobject]@{ Exit = $(if ($Result.TimedOut) { $null } else { $Result.ExitCode }); TimedOut = [bool]$Result.TimedOut; Text = $text; Ms = [long]$Result.ElapsedMs; Truncated = [bool]$truncated; JobTerminated = [bool]$Result.JobTerminated }
 }
 function Invoke-AtmTestChild {
-    param([string]$CommandLine, [int]$TimeoutSec = 180, [hashtable]$Environment = $null)
-    $psi = New-Object Diagnostics.ProcessStartInfo
-    $psi.FileName = Join-Path $env:SystemRoot 'System32\cmd.exe'
-    $psi.Arguments = '/s /c "' + $CommandLine + '"'
-    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
-    $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
-    $psi.StandardOutputEncoding = [Text.Encoding]::UTF8; $psi.StandardErrorEncoding = [Text.Encoding]::UTF8
-    # -Environment: the child gets exactly these variables (nothing inherited).
-    if ($null -ne $Environment) { $psi.EnvironmentVariables.Clear(); foreach ($k in $Environment.Keys) { if ($null -ne $Environment[$k]) { $psi.EnvironmentVariables[$k] = [string]$Environment[$k] } } }
-    $sw = [Diagnostics.Stopwatch]::StartNew()
-    $p = [Diagnostics.Process]::Start($psi)
-    try {
-        $p.StandardInput.Close()
-        $out = $p.StandardOutput.ReadToEndAsync(); $err = $p.StandardError.ReadToEndAsync()
-        if (-not $p.WaitForExit($TimeoutSec * 1000)) {
-            Stop-AtmTestChildTree -Process $p
-            return [pscustomobject]@{ Exit = $null; TimedOut = $true; Text = 'CHILD_TIMEOUT'; Ms = $sw.ElapsedMilliseconds }
-        }
-        $p.WaitForExit()
-        $lines = @(($out.Result + "`n" + $err.Result) -split "`r?`n" | Where-Object { $_ -ne '' })
-        return [pscustomobject]@{ Exit = $p.ExitCode; TimedOut = $false; Text = ($lines -join ' '); Ms = $sw.ElapsedMilliseconds }
-    } finally { $p.Dispose() }
+    param([string]$CommandLine, [int]$TimeoutSec = 180, [hashtable]$Environment = $null, [int]$MaxOutputBytes = 4194304, [int]$ActiveProcessLimit = 64)
+    $cmdExe = Join-Path $env:SystemRoot 'System32\cmd.exe'
+    # -Environment: the child gets exactly these variables; otherwise this process's environment.
+    $map = $Environment
+    if ($null -eq $map) { $map = @{}; foreach ($k in [Environment]::GetEnvironmentVariables().Keys) { $map[[string]$k] = [Environment]::GetEnvironmentVariable([string]$k) } }
+    $pairs = [string[]]@($map.Keys | Where-Object { $null -ne $map[$_] -and -not ([string]$_).StartsWith('=') } | Sort-Object | ForEach-Object { '{0}={1}' -f $_, $map[$_] })
+    # The working directory the previous Process.Start children inherited (an empty string is refused by CreateProcess).
+    $wd = [Environment]::CurrentDirectory
+    try { $r = [AgentTempManager.AtmJobRunner]::Run($cmdExe, ('cmd.exe /s /c "' + $CommandLine + '"'), $wd, $pairs, [int]($TimeoutSec * 1000), $MaxOutputBytes, [long]2147483648, $ActiveProcessLimit) }
+    catch { throw ('CHILD_RUNNER_' + $(if ($_.Exception.GetBaseException() -is [ArgumentOutOfRangeException]) { 'INVALID_LIMITS' } else { 'EXCEPTION' })) }
+    return (ConvertFrom-AtmTestJobResult -Result $r)
 }
 
 # Test-only FSCTL helper (FINAL-A M-1, FINAL-B F-10): turns an existing empty folder into a junction through another
@@ -1834,6 +1822,79 @@ function global:Get-FileHash { param([string]$LiteralPath, [string]$Algorithm)
             } finally { [IO.File]::Move($f, "$f.aside") }
         }
         $script:caseNote = 'codigos de saida: ' + ($seen -join '; ')
+    }
+    Test-Case 'Executor' 'FINAL-B-S: processos de teste dentro de Job Object - saida normal e extensa (truncamento declarado), prazo, descendente que segura o pipe ou excede o prazo encerrado so como membro do job; sentinela externa criada pelo harness intacta; falhas do executor com codigo seguro; nenhum PID usado para encerrar' {
+        $ps51 = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $dir = Join-Path $sandbox 'executor'; [void][IO.Directory]::CreateDirectory($dir)
+        # Child scripts use .NET calls only (no cmdlet), so a Windows PowerShell 5.1 child starts fast on every runner.
+        $write = { param([string]$Name, [string[]]$Lines) $f = Join-Path $dir $Name; [IO.File]::WriteAllLines($f, $Lines, (New-Object Text.UTF8Encoding($true))); $f }
+        $q = { param([string]$P) $P.Replace("'", "''") }
+        $ps = { param([string]$Script) "`"$ps51`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Script`"" }
+        # 1. Normal end.
+        $r = Invoke-AtmTestChild -CommandLine 'exit 7' -TimeoutSec 60
+        Assert-True ($r.Exit -eq 7 -and -not $r.TimedOut -and -not $r.Truncated -and -not $r.JobTerminated) "saida normal: exit 7 ($($r.Text))"
+        # 2-3. Long stdout and stderr: everything is read (the child never blocks), only the cap is kept, truncation declared.
+        $big = & $write 'big.ps1' @('[Console]::Out.Write((''o'' * 300000)); [Console]::Error.Write((''e'' * 300000)); exit 0')
+        $r = Invoke-AtmTestChild -CommandLine (& $ps $big) -TimeoutSec 120 -MaxOutputBytes 65536
+        Assert-True ($r.Exit -eq 0 -and $r.Truncated -and $r.Text.EndsWith('[SAIDA_TRUNCADA]') -and $r.Text.Length -lt (2 * 65536 + 100)) "saidas extensas: truncamento declarado, no maximo o limite por fluxo (tamanho $($r.Text.Length))"
+        # 4. A child past the deadline: CHILD_TIMEOUT, the job terminated, within the deadline plus the runner's fixed waits.
+        $slp = & $write 'sleep.ps1' @('[Threading.Thread]::Sleep(120000)')
+        $r = Invoke-AtmTestChild -CommandLine (& $ps $slp) -TimeoutSec 3
+        Assert-True ($r.TimedOut -and $r.JobTerminated -and $null -eq $r.Exit -and $r.Text -ceq 'CHILD_TIMEOUT' -and $r.Ms -ge 2900 -and $r.Ms -lt 28000) "prazo: CHILD_TIMEOUT, job encerrado em $($r.Ms) ms"
+        # 5-9. Descendants. A sentinel OUTSIDE any job of this suite, created by the harness a moment before, must stay alive.
+        $flag = Join-Path $dir 'sentinel-stop.txt'
+        $sentScript = & $write 'sentinel.ps1' @(('$sw = [Diagnostics.Stopwatch]::StartNew(); while (-not [IO.File]::Exists(''{0}'') -and $sw.ElapsedMilliseconds -lt 180000) {{ [Threading.Thread]::Sleep(200) }}' -f (& $q $flag)))
+        $psi = New-Object Diagnostics.ProcessStartInfo($ps51, ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $sentScript))
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+        $sentinel = [Diagnostics.Process]::Start($psi)
+        try {
+            $gone = {
+                param([string]$Info)
+                if (-not [IO.File]::Exists($Info)) { return 'sem registro' }
+                $parts = [IO.File]::ReadAllText($Info).Split('|')
+                # Read-only check of the descendant's own record (PID and creation time written by itself): never used to signal anything.
+                try { $p = [Diagnostics.Process]::GetProcessById([int]$parts[0]); $alive = (-not $p.HasExited -and $p.StartTime.ToUniversalTime().Ticks -eq [long]$parts[1]); $p.Dispose() } catch { $alive = $false }
+                $(if ($alive) { 'VIVO' } else { 'encerrado' })
+            }
+            foreach ($mode in @('pipe', 'hang')) {
+                $info = Join-Path $dir "grandchild-$mode.txt"
+                $gc = & $write "grandchild-$mode.ps1" @('$p = [Diagnostics.Process]::GetCurrentProcess()', ('[IO.File]::WriteAllText(''{0}'', (''{{0}}|{{1}}'' -f $p.Id, $p.StartTime.ToUniversalTime().Ticks))' -f (& $q $info)), '[Threading.Thread]::Sleep(120000)')
+                $main = & $write "main-$mode.ps1" @(
+                    ('$psi = New-Object Diagnostics.ProcessStartInfo(''{0}'', ''-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{1}"'')' -f (& $q $ps51), (& $q $gc)),
+                    '$psi.UseShellExecute = $false; $null = [Diagnostics.Process]::Start($psi)',
+                    ('$sw = [Diagnostics.Stopwatch]::StartNew(); while (-not [IO.File]::Exists(''{0}'') -and $sw.ElapsedMilliseconds -lt 90000) {{ [Threading.Thread]::Sleep(100) }}' -f (& $q $info)),
+                    $(if ($mode -eq 'hang') { '[Threading.Thread]::Sleep(120000)' } else { 'exit 0' }))
+                $r = Invoke-AtmTestChild -CommandLine (& $ps $main) -TimeoutSec $(if ($mode -eq 'hang') { 15 } else { 120 })
+                if ($mode -eq 'pipe') { Assert-True ($r.Exit -eq 0 -and -not $r.TimedOut -and $r.JobTerminated) "descendente segurando o pipe depois da saida do filho: membros do job encerrados (exit $($r.Exit), $($r.Ms) ms)" }
+                else { Assert-True ($r.TimedOut -and $r.JobTerminated) "filho e descendente alem do prazo: job encerrado ($($r.Ms) ms)" }
+                Assert-Eq (& $gone $info) 'encerrado' "descendente ($mode) encerrado como membro do job"
+            }
+            Assert-True (-not $sentinel.HasExited) 'sentinela externa ao job, criada logo antes: intacta'
+        } finally {
+            [IO.File]::WriteAllText($flag, 'stop')
+            # The sentinel ends by itself on the flag; it is never signalled.
+            $null = $sentinel.WaitForExit(60000)
+        }
+        Assert-True $sentinel.HasExited 'sentinela terminou sozinha ao ver o marcador'
+        $sentinel.Dispose()
+        # 10-13, 16. Runner failures: a sanitized code, raised before anything runs; never a PID search.
+        $threw = $null; try { $null = Invoke-AtmTestChild -CommandLine 'exit 0' -ActiveProcessLimit 0 } catch { $threw = [string]$_.Exception.Message }
+        Assert-Eq $threw 'CHILD_RUNNER_INVALID_LIMITS' 'limites invalidos: recusado antes de executar'
+        $threw = $null; try { $null = ConvertFrom-AtmTestJobResult -Result ([AgentTempManager.AtmJobRunner]::Run((Join-Path $dir 'nao-existe.exe'), 'nao-existe.exe', $dir, [string[]]@("SystemRoot=$env:SystemRoot"), 5000, 4096, [long]67108864, 4)) } catch { $threw = [string]$_.Exception.Message }
+        Assert-Eq $threw 'CHILD_RUNNER_CREATE_PROCESS_FAILED' 'processo que nao inicia dentro do job: codigo seguro'
+        foreach ($c in @('JOB_CREATE_FAILED', 'JOB_LIMITS_FAILED', 'JOB_LIMITS_MISMATCH', 'ATTRIBUTES_FAILED', 'PIPE_FAILED')) {
+            $threw = $null; try { $null = ConvertFrom-AtmTestJobResult -Result ([pscustomobject]@{ Started = $false; Error = $c }) } catch { $threw = [string]$_.Exception.Message }
+            Assert-Eq $threw "CHILD_RUNNER_$c" "falha do executor ($c): codigo seguro, nada executado"
+        }
+        $threw = $null; try { $null = ConvertFrom-AtmTestJobResult -Result ([pscustomobject]@{ Started = $false; Error = 'C:\caminho com detalhes' }) } catch { $threw = [string]$_.Exception.Message }
+        Assert-Eq $threw 'CHILD_RUNNER_NOT_STARTED' 'motivo fora do padrao nunca vira mensagem (sanitizado)'
+        $threw = $null; try { $null = ConvertFrom-AtmTestJobResult -Result ([pscustomobject]@{ Started = $true; TimedOut = $true; JobTerminated = $false; OutputTruncated = $false; ErrorTruncated = $false }) } catch { $threw = [string]$_.Exception.Message }
+        Assert-Eq $threw 'CHILD_RUNNER_JOB_TERMINATE_FAILED' 'encerramento do job que falha: FAIL com codigo, sem busca de PID'
+        # 10, 17. No process identity is ever used to stop anything: the executor has no PID lookup, enumeration or kill.
+        $exec = (Get-Command Invoke-AtmTestChild).ScriptBlock.ToString() + (Get-Command ConvertFrom-AtmTestJobResult).ScriptBlock.ToString()
+        foreach ($pat in @('Kill(', 'Stop-Process', 'taskkill', 'Win32_Process', 'Get-CimInstance', 'GetProcessById', 'ProcessId', 'TerminateProcess', '.Terminate(')) { Assert-True (-not $exec.Contains($pat)) "executor sem '$pat'" }
+        Assert-True (-not (Test-Path Function:\Stop-AtmTestChildTree)) 'encerramento por PID heuristico removido'
+        $script:caseNote = 'prazo 3 s encerrado; descendentes encerrados como membros do job; sentinela externa intacta'
     }
     Test-Case 'Ambiente' 'FINAL-B: custo de processos filhos por camada - cmd, Windows PowerShell 5.1, lancador instalado (fixture) e o mesmo com ambiente minimo; somente medicao, tempos e nomes de variaveis' {
         # Diagnostic for the ARM64 PowerShell 7 slowness (R-B5 verify: about 20 s per CLI call there, 0.5 s with Windows
