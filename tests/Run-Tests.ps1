@@ -1098,7 +1098,7 @@ try {
             $env:USERNAME = $joined
             $wv = $null
             $f = @(& $scan -Path $d -WarningVariable wv -WarningAction SilentlyContinue)
-            Assert-True (@($f | Where-Object { $_.Kind -eq 'PRIVATE_IDENTIFIER' -and $_.File -eq 'nome.md' }).Count -ge 1 -and @($wv | Where-Object { [string]$_ -match 'product word' }).Count -eq 0) 'nome que apenas contem a palavra: detectado, sem aviso'
+            Assert-True (@($f | Where-Object { $_.Kind -eq 'PRIVATE_IDENTIFIER' -and $_.File -eq 'nome.md' }).Count -ge 1 -and @($wv | Where-Object { [string]$_ -match 'from USERNAME equals the product word' }).Count -eq 0) 'nome que apenas contem a palavra: detectado, sem aviso dessa origem (outra origem desta maquina pode avisar)'
         } finally { $env:USERNAME = $savedUser }
         $f = @(& $scan -Path $d -ExtraNeedles @('installer') -WarningAction SilentlyContinue)
         Assert-True (@($f | Where-Object { $_.Kind -eq 'PRIVATE_IDENTIFIER' -and $_.File -eq 'produto.md' }).Count -ge 1) 'identificador explicito igual a palavra: sempre procurado'
