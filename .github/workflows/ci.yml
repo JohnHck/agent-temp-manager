@@ -53,6 +53,43 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  # FINAL-A: the same suite on Windows 11 ARM64 (the native safe-creation code and its fixture tests run there too).
+  # A separate job, so the names of the existing checks do not change.
+  test-arm64:
+    name: test ARM64 (${{ matrix.shell }})
+    runs-on: windows-11-arm
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    env:
+      ATM_PWSH: C:\Program Files\PowerShell\7\pwsh.exe
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Tests (Windows PowerShell 5.1, ARM64)
+        if: matrix.shell == 'powershell'
+        shell: powershell
+        run: |
+          $PSVersionTable.PSVersion.ToString(); $env:PROCESSOR_ARCHITECTURE
+          ./tests/Run-Tests.ps1 -SkipHeavy -ReportFile test-results-arm64-powershell.json
+      - name: Tests (PowerShell 7, ARM64)
+        if: matrix.shell == 'pwsh'
+        shell: pwsh
+        run: |
+          $PSVersionTable.PSVersion.ToString(); $env:PROCESSOR_ARCHITECTURE
+          ./tests/Run-Tests.ps1 -SkipHeavy -ReportFile test-results-arm64-pwsh.json
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: test-results-arm64-${{ matrix.shell }}
+          path: test-results-arm64-${{ matrix.shell }}.json
+          if-no-files-found: warn
+          retention-days: 14
+
   # Informative (not a required check): reports personal e-mail addresses in commit metadata. On a pull request it
   # checks base..head; on a push to main it checks before..after, which also covers commits GitHub creates when it
   # merges. A push check only detects: the commit is already public (see docs/SECURITY-MODEL.md, "Commit identity").

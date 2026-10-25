@@ -7431,6 +7431,9 @@ public static class AtmTestReparse {
         } finally { $null = cmd /c subst "$($sl):" /d 2>&1 }
         $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
         Assert-True ($cli.Contains('$exported = New-AtmPinnedTextFile -Path $ExportJson') -and -not $cli.Contains("[IO.File]::WriteAllText(`$ExportJson, (ConvertTo-AtmExportJson") -and ([IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Clean.ps1'))).Contains('Add-Content -LiteralPath $LogFile')) 'F-02: audit -ExportJson pelo escritor pinado (mesmas regras, mesma mensagem); F-04: clean -LogFile por nome (latente, registrado)'
+        # A refusal after the file exists (CREATED_ codes) never claims that no file was created (review of FINAL-A).
+        $ncs = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Native.cs'))
+        Assert-True ($ncs.Contains('return "CREATED_PARENT_CHANGED";') -and ([regex]::Matches($cli, [regex]::Escape("-like 'EXPORT_CREATE_CREATED_*') { 'cli.exportRefusedAfterCreate' }"))).Count -eq 2 -and (Get-AtmText 'cli.exportRefusedAfterCreate' 'X') -notmatch 'nenhum arquivo foi criado|no file was created') 'recusa depois da criacao: codigo CREATED_ e mensagem que nao nega o arquivo (diagnose e auditoria)'
         # F-02 on a fixture: the audit export path keeps its V0.1 rules and gains the pinned creation.
         $ax = Join-Path $sandbox 'finala-auditexp'; $axt = Join-Path $sandbox 'finala-auditexp-target'; foreach ($d in @($ax, $axt)) { [void][IO.Directory]::CreateDirectory($d) }
         $pol = { param($P) if (Test-AtmOutputPathOutsideBases -Path $P -Inventory $inv -MustNotExist) { $null } else { 'EXPORT_DESTINATION_NOT_ALLOWED' } }

@@ -777,7 +777,7 @@ namespace AgentTempManager
                 string fp = AtmDeleter.FinalPath(fh);
                 string expected = s.ParentPath + "\\" + fileName;
                 if (fp == null || !string.Equals(fp, expected, StringComparison.OrdinalIgnoreCase)) return "CREATED_ELSEWHERE";
-                if (!AtmDeleter.StillPlainDirectory(s.Parent)) return "PARENT_CHANGED";
+                if (!AtmDeleter.StillPlainDirectory(s.Parent)) return "CREATED_PARENT_CHANGED";
                 using (FileStream fs = new FileStream(fh, FileAccess.Write))
                 {
                     if (content != null && content.Length > 0) fs.Write(content, 0, content.Length);
@@ -786,7 +786,8 @@ namespace AgentTempManager
                 fh = null;
                 return null;
             }
-            catch (Exception ex) { return "CREATE_" + ex.GetType().Name; }
+            // Every refusal once the file exists starts with CREATED_ (an empty or partial file may remain; never written to again).
+            catch (Exception ex) { return (fh != null ? "CREATED_" : "CREATE_") + ex.GetType().Name; }
             finally
             {
                 if (fh != null) fh.Dispose();

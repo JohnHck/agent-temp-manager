@@ -209,7 +209,7 @@ try {
                 # FINAL-A (F-02): the same rules, checked again with the folder and its ancestors pinned; the file is created
                 # relative to the pinned folder (new file only, no reparse point, protected DACL), never by name.
                 $exported = New-AtmPinnedTextFile -Path $ExportJson -Text (ConvertTo-AtmExportJson -Inventory $inv) -Policy { param($P) if (Test-AtmOutputPathOutsideBases -Path $P -Inventory $inv -MustNotExist) { $null } else { 'EXPORT_DESTINATION_NOT_ALLOWED' } }
-                if ($null -ne $exported) { Write-Host (Get-AtmText 'cli.diagExportRefusedCode' $exported) -ForegroundColor Red; throw (Get-AtmText 'cli.exportRefused') }
+                if ($null -ne $exported) { Write-Host (Get-AtmText $(if ($exported -like 'EXPORT_CREATE_CREATED_*') { 'cli.exportRefusedAfterCreate' } else { 'cli.diagExportRefusedCode' }) $exported) -ForegroundColor Red; throw (Get-AtmText 'cli.exportRefused') }
                 Write-Host (Get-AtmText 'cli.exportWritten' $ExportJson)
                 Write-Host (Get-AtmText 'cli.exportPrivacy') -ForegroundColor Yellow
             }
@@ -263,7 +263,7 @@ try {
                 $written = $null
                 try { $written = Write-AtmNewTextFile -Path $ExportJson -Text (ConvertTo-AtmDiagnoseJson -Result $res) -Inventory $res.Inventory }
                 catch { Write-Host (Get-AtmText 'cli.diagExportFailed' (ConvertTo-AtmExceptionCode $_.Exception.GetBaseException().GetType().Name)) -ForegroundColor Red; Write-Host (Get-AtmText 'cli.errorNoDeletion') -ForegroundColor Yellow; exit 10 }
-                if ($null -ne $written) { Write-Host (Get-AtmText 'cli.diagExportRefusedCode' $written) -ForegroundColor Red; Write-Host (Get-AtmText 'cli.errorNoDeletion') -ForegroundColor Yellow; exit 10 }
+                if ($null -ne $written) { Write-Host (Get-AtmText $(if ($written -like 'EXPORT_CREATE_CREATED_*') { 'cli.exportRefusedAfterCreate' } else { 'cli.diagExportRefusedCode' }) $written) -ForegroundColor Red; Write-Host (Get-AtmText 'cli.errorNoDeletion') -ForegroundColor Yellow; exit 10 }
                 Write-Host (Get-AtmText 'cli.exportWritten' $ExportJson)
                 Write-Host (Get-AtmText 'cli.diagExportPrivacy') -ForegroundColor Yellow
             }
