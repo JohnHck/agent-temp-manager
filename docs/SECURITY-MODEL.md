@@ -1,4 +1,4 @@
-# Security model
+﻿# Security model
 
 ## Principles
 
@@ -146,10 +146,13 @@ called by `Invoke-AtmGitCommand`):
   graph of the same run (`IN_USE` only with a `DIRECT` edge from a verified process; `UNKNOWN` otherwise;
   `NO_DEPENDENCY_OBSERVED` only with conclusive coverage, which a V0.2 run never has). Nothing is collected for it,
   and no diagnose state is read by the audit, the preview or `clean`.
-* **Diagnose export (P5-B):** written only with `-ExportJson`, to a new file (`CreateNew`: never overwrites, never
-  follows a file or link that appears at the destination), at an absolute local path whose parent chain has no reparse
-  point, outside every audited base and not inside a Git repository or worktree (an ancestor holding `.git`; existence
-  checks only, no Git). Refusals and write failures are reported by code, never by exception message; nothing is
+* **Diagnose export (P5-B):** written only with `-ExportJson`, to a new file (`CreateNew`: never overwrites; a junction
+  planted at the destination was refused on fixtures; a file symbolic link there is refused by the documented
+  `CREATE_NEW` semantics but was not tested, since creating one needs a privilege), at an absolute local path whose
+  parent chain has no reparse point, not on a `subst` drive, outside every audited base and not inside a Git repository
+  or worktree (an ancestor holding `.git`, or a bare repository; existence checks only, no Git; an ancestor that cannot
+  be checked refuses). The V0.1 outputs (`audit -ExportJson`, `clean -LogFile`) keep their V0.1 rules: a `subst` drive
+  over an audited folder is not detected there (V0.1 unchanged; proposed for FINAL). Refusals and write failures are reported by code, never by exception message; nothing is
   created after a refusal. **NOT RESOLVED - export TOCTOU:** a folder of the destination could be replaced by a junction
   between the check and the creation; the new file would then be created through it (never over an existing file).
   Proposed for FINAL: create the file relative to a handle on the verified parent directory (as the deleter and the

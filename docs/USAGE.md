@@ -1,4 +1,4 @@
-# Usage
+﻿# Usage
 
 ## Language
 
@@ -140,10 +140,12 @@ process identity.
 written. The destination must be a **new** file (an existing file is never overwritten), given as an absolute local
 path (no network, device or relative path, no wildcard, stream or `..`), whose folders contain no junction or other
 reparse point, outside every audited temporary directory, and not inside a Git repository or worktree (no folder above
-it holds a `.git` entry; Git itself is not run). The export is also refused when the inventory did not run, because the
-audited directories are then unknown. A refusal prints a code (`EXPORT_INVENTORY_NOT_RUN`,
-`EXPORT_DESTINATION_NOT_ALLOWED`, `EXPORT_INSIDE_REPOSITORY`), creates no file and exits with `10`; a write failure
-prints the exception type only and exits with `10`. A folder swapped for a junction after the check is a remaining
+it holds a `.git` entry, and no folder above it is a bare repository; Git itself is not run), and not on a drive letter
+made with `subst`. The export is also refused when the inventory did not run, because the audited directories are then
+unknown. A refusal prints a code (`EXPORT_INVENTORY_NOT_RUN`, `EXPORT_DESTINATION_NOT_ALLOWED`,
+`EXPORT_SUBSTITUTED_DRIVE`, `EXPORT_INSIDE_REPOSITORY`, `EXPORT_ANCESTOR_UNREADABLE`), creates no file and exits with
+`10`; a write failure prints the exception type only and exits with `10` (a file it already created may then be
+incomplete; it is not deleted). A folder swapped for a junction after the check is a remaining
 window (SECURITY-MODEL, *Export*).
 
 The export contains the machine name, the user name and SID and the token elevation state; temporary partitions and
@@ -193,11 +195,12 @@ Administrator-only switch: `-IncludeOtherUsers`. Incomplete process coverage can
 
 ## Exit codes
 
-`0` ok · `1` unknown command · `2` invalid clean invocation · `3` clean aborted (nothing deleted) ·
+`0` ok (for `diagnose`, partial coverage included) · `1` unknown command · `2` invalid clean invocation, or a refused
+`-PseudonymKeyFile` · `3` clean aborted (nothing deleted) ·
 `4` no manifest (source checkout, `verify` only) · `5` integrity mismatch (a listed file missing, altered or
 unreadable, a missing or unreadable `providers` directory, an unlisted library or provider, an unreadable or
-invalid manifest, or an installed copy without one; nothing is loaded) · `6` TUI needs an interactive console · `10` unexpected error
-(nothing deleted because of it).
+invalid manifest, or an installed copy without one; nothing is loaded) · `6` TUI needs an interactive console · `10` unexpected error,
+or a `diagnose` export refused or not written (nothing deleted because of it).
 
 ## Project names
 

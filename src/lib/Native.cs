@@ -1,4 +1,4 @@
-// AgentTempManager native helpers.
+﻿// AgentTempManager native helpers.
 // Written in C# 5 so it compiles under Windows PowerShell 5.1 (CodeDom/csc v4)
 // and PowerShell 7 (Roslyn). No external dependencies.
 //
@@ -642,6 +642,21 @@ namespace AgentTempManager
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
         private static extern uint GetDriveTypeW(string rootPath);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint QueryDosDeviceW(string deviceName, StringBuilder targetPath, uint max);
+
+        // True when the drive letter of 'path' is a substitution of a folder (subst, DefineDosDevice): its DOS device
+        // target names a path ("\??\C:\...") instead of a volume device. Unknown (the query fails) counts as true, so a
+        // caller that refuses substituted drives fails closed. Reads the device namespace only.
+        public static bool IsSubstitutedDrive(string path)
+        {
+            if (string.IsNullOrEmpty(path) || path.Length < 2 || path[1] != ':') return true;
+            StringBuilder sb = new StringBuilder(1024);
+            uint n = QueryDosDeviceW(path.Substring(0, 2), sb, (uint)sb.Capacity);
+            if (n == 0) return true;
+            return sb.ToString().StartsWith(@"\??\", StringComparison.Ordinal);
+        }
 
         public static string Chain(string path, out string at)
         {

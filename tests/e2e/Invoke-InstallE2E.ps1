@@ -298,7 +298,8 @@ Step 'diagnose-export-and-tui-area' {
     $text = [IO.File]::ReadAllText($target)
     $j = $text | ConvertFrom-Json
     Assert ($j.schemaVersion -eq 'atm.diagnose/2' -and $null -ne $j.graph -and @($j.coverage | Where-Object { $_.collector -eq 'dependency-graph' }).Count -eq 1) 'exportacao instalada invalida ou sem grafo'
-    Assert (-not ($text -match '[A-Za-z]:\\Users\\')) 'exportacao instalada contem caminho de perfil'
+    # JSON escapes backslashes: the profile path appears as C:\\Users\\... in the raw text.
+    Assert (-not ($text -match '[A-Za-z]:\\\\Users\\\\') -and -not $text.Contains($env:USERPROFILE.Replace('\', '\\'))) 'exportacao instalada contem caminho de perfil'
     $len = (Get-Item -LiteralPath $target).Length
     $r2 = Invoke-Agent ('diagnose -NoProgress -Lang en-US -DeadlineSeconds 300 -ExportJson "' + $target + '"') 'diagnose-export-refused'
     Assert ($r2.Code -eq 10 -and $r2.Text.Contains('ExportJson refused') -and (Get-Item -LiteralPath $target).Length -eq $len) 'exportacao sobre arquivo existente nao foi recusada ou alterou o arquivo'

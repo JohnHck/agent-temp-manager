@@ -1,4 +1,4 @@
-# Testing
+﻿# Testing
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1                 # Windows PowerShell 5.1
@@ -82,7 +82,9 @@ Results are `PASS`, `FAIL` or `NAO_TESTADO` (a prerequisite was unavailable, e.g
 
 The suite decodes native and child-process output (Git, the CLI) as UTF-8, like the CLI itself; with a redirected
 console Windows uses the OEM code page (850 on pt-BR systems), and a profile path or text with non-ASCII characters
-was misread, which failed tests on such machines without any product defect. A local run can still fail for
+was misread, which failed tests on such machines without any product defect. Side effect: with a UTF-8 console the
+headless TUI defaults to Unicode on Windows PowerShell 5.1 too; the ASCII fallback stays covered by the tests that pass
+`-Ascii`. The previous encoding is restored when the suite ends, also after an abort. A local run can still fail for
 environmental reasons that the product reports correctly (for example a TEMP folder that other local accounts can
 write: the sandbox then inherits that ACL and the gates block it, as they should). Those failures stay failures; the
 record of a local run and its causes is in [release/V0.2-LOCAL-TEST-ENVIRONMENT.md](release/V0.2-LOCAL-TEST-ENVIRONMENT.md).

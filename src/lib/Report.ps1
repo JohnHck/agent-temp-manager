@@ -699,14 +699,25 @@ function Test-AtmDiagnoseExportPath {
       Test-AtmOutputPathOutsideBases checks (an absolute local path with no wildcard, stream or traversal, a parent chain
       without reparse points, outside every audited base, not existing yet), and not inside a Git repository or
       worktree: no ancestor of the destination holds a '.git' entry (the directory of a repository or the file of a
-      linked worktree). Existence checks only: Git is never run and nothing is read or expanded.
+      linked worktree, or a bare repository: HEAD, objects and refs). A substituted drive letter (subst) is refused: a
+      lexical check cannot see which folder it stands for. Existence checks only: Git is never run and nothing is read
+      or expanded; a check that cannot be answered refuses (fail closed).
     #>
     param([string]$Path, $Inventory)
     if ($null -eq $Inventory) { return 'EXPORT_INVENTORY_NOT_RUN' }
     if (-not (Test-AtmOutputPathOutsideBases -Path $Path -Inventory $Inventory -MustNotExist)) { return 'EXPORT_DESTINATION_NOT_ALLOWED' }
-    $dir = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Path))
+    $full = [IO.Path]::GetFullPath($Path)
+    if ([AgentTempManager.AtmPathCheck]::IsSubstitutedDrive($full)) { return 'EXPORT_SUBSTITUTED_DRIVE' }
+    # $true present, $false absent, $null unknown (refused).
+    $exists = { param([string]$P) try { $null = [IO.File]::GetAttributes($P); $true } catch [IO.FileNotFoundException] { $false } catch [IO.DirectoryNotFoundException] { $false } catch { $null } }
+    $dir = [IO.Path]::GetDirectoryName($full)
     while ($dir) {
-        if (Test-Path -LiteralPath (Join-Path $dir '.git')) { return 'EXPORT_INSIDE_REPOSITORY' }
+        $g = & $exists (Join-Path $dir '.git')
+        if ($null -eq $g) { return 'EXPORT_ANCESTOR_UNREADABLE' }
+        if ($g) { return 'EXPORT_INSIDE_REPOSITORY' }
+        $h = & $exists (Join-Path $dir 'HEAD'); $o = & $exists (Join-Path $dir 'objects'); $r = & $exists (Join-Path $dir 'refs')
+        if ($null -eq $h -or $null -eq $o -or $null -eq $r) { return 'EXPORT_ANCESTOR_UNREADABLE' }
+        if ($h -and $o -and $r) { return 'EXPORT_INSIDE_REPOSITORY' }
         $up = [IO.Path]::GetDirectoryName($dir)
         if (-not $up -or $up -eq $dir) { break }
         $dir = $up

@@ -7117,7 +7117,8 @@ try {
     # types (string, number, integer, boolean, array, object, "... or null").
     $sdSec = @{}; $sdCur = $null
     foreach ($l in [IO.File]::ReadAllLines((Join-Path (Split-Path -Parent $testsDir) 'docs\DIAGNOSE-SCHEMA.md'))) {
-        if ($l -match '^## (.+)$') { $sdCur = $Matches[1].Trim(); $sdSec[$sdCur] = [ordered]@{}; continue }
+        # Field names are case-sensitive in JSON: an ordinal dictionary.
+        if ($l -match '^## (.+)$') { $sdCur = $Matches[1].Trim(); $sdSec[$sdCur] = New-Object System.Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal); continue }
         if ($sdCur -and $l -match '^\| `([A-Za-z][A-Za-z0-9]*)` \| ([^|]+) \|') { $sdSec[$sdCur][$Matches[1]] = $Matches[2].Trim() }
     }
     $sdType = { param($v)
@@ -7129,13 +7130,15 @@ try {
         if ($v -is [array] -or $v -is [Collections.IList]) { return 'array' }
         if ($v -is [pscustomobject] -or $v -is [Collections.IDictionary]) { return 'object' }
         return $v.GetType().Name }
+    $script:sdHits = @{}
     $sdCheck = { param($Obj, [string]$Sec, $Errs)
         if (-not $sdSec.ContainsKey($Sec)) { $Errs.Add("secao ausente no documento: $Sec"); return }
+        $script:sdHits[$Sec] = 1 + $(if ($script:sdHits.ContainsKey($Sec)) { $script:sdHits[$Sec] } else { 0 })
         $doc = $sdSec[$Sec]
         $names = @($Obj.PSObject.Properties | ForEach-Object { $_.Name })
         foreach ($n in $names) { if (-not $doc.Contains($n)) { $Errs.Add("${Sec}: campo exportado e nao documentado: $n") } }
         foreach ($n in @($doc.Keys)) {
-            if ($names -notcontains $n) { $Errs.Add("${Sec}: campo documentado ausente: $n"); continue }
+            if ($names -cnotcontains $n) { $Errs.Add("${Sec}: campo documentado ausente: $n"); continue }
             $t = & $sdType $Obj.$n; $allowed = @($doc[$n] -split ' or ' | ForEach-Object { $_.Trim() })
             if (-not ($allowed -contains $t -or ($t -ceq 'integer' -and $allowed -contains 'number') -or ($t -ceq 'number' -and $allowed -contains 'integer' -and [math]::Floor([double]$Obj.$n) -eq [double]$Obj.$n))) { $Errs.Add("${Sec}.${n}: tipo $t, documentado $($doc[$n])") }
         } }
@@ -7185,6 +7188,7 @@ try {
             # 3/4: raw text keeps empty lists as arrays and absent values as null.
             Assert-True (-not ($raw -match '"(providers|coverage|findings|reasons|evidence|capabilities|incompleteCoverage|roots|nodes|edges|summaries)":\s*(\{\}|null)')) "3 ($($case[0])): listas nunca como {} ou null"
         }
+        foreach ($sec in @($sdSec.Keys)) { Assert-True ($script:sdHits.ContainsKey($sec)) "15: secao '$sec' do documento exercitada por algum dos casos" }
         Assert-True ((ConvertTo-AtmDiagnoseJson -Result $tdRes) -match '"keyId":\s*null') '4: null preservado (keyId de chave efemera)'
         Assert-True ((ConvertTo-AtmDiagnoseJson -Result $none) -match '"providers":\s*\[\s*\]') '3: sem providers: lista vazia'
         $nc = @($none.Coverage | Where-Object { $_.Collector -ceq 'profile-discovery' })[0]
@@ -7213,6 +7217,16 @@ try {
             Assert-True ($null -ne $code -and $code -cmatch '^EXPORT_[A-Z_]+$') "12: $k recusado ($code)"
         }
         Assert-Eq (Test-AtmDiagnoseExportPath -Path (Join-Path $repo 'sub\x.json') -Inventory $inv) 'EXPORT_INSIDE_REPOSITORY' 'repositorio: codigo proprio'
+        $bare = Join-Path $root 'bare.git'; foreach ($d in @((Join-Path $bare 'objects'), (Join-Path $bare 'refs'), (Join-Path $bare 'x'))) { [void][IO.Directory]::CreateDirectory($d) }; [IO.File]::WriteAllText((Join-Path $bare 'HEAD'), 'ref: refs/heads/main')
+        Assert-Eq (Test-AtmDiagnoseExportPath -Path (Join-Path $bare 'x\y.json') -Inventory $inv) 'EXPORT_INSIDE_REPOSITORY' 'repositorio bare (HEAD, objects, refs): recusado'
+        Assert-True (-not [AgentTempManager.AtmPathCheck]::IsSubstitutedDrive($out)) 'unidade comum nao e substituida'
+        # A substituted drive letter, when one is free (subst of a sandbox folder; removed at the end, as the portability test does).
+        $sl = $null; foreach ($l in [char[]]'QRSTUVWXYZ') { if (-not (Test-Path "$($l):\")) { $sl = $l; break } }
+        if ($sl) {
+            $null = cmd /c subst "$($sl):" "`"$base`"" 2>&1
+            try { if (Test-Path "$($sl):\") { Assert-True ([AgentTempManager.AtmPathCheck]::IsSubstitutedDrive("$($sl):\x.json") -and (Test-AtmDiagnoseExportPath -Path "$($sl):\x.json" -Inventory $inv) -ceq 'EXPORT_SUBSTITUTED_DRIVE' -and -not (Test-Path -LiteralPath (Join-Path $base 'x.json'))) 'subst de uma base: recusado (EXPORT_SUBSTITUTED_DRIVE), nada criado' } }
+            finally { $null = cmd /c subst "$($sl):" /d 2>&1 }
+        }
         Assert-Eq (Test-AtmDiagnoseExportPath -Path (Join-Path $out 'ok.json') -Inventory $null) 'EXPORT_INVENTORY_NOT_RUN' 'sem inventario: recusado'
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $real 'x.json')) -and -not (Test-Path -LiteralPath (Join-Path $repo 'sub\x.json'))) 'nenhum arquivo criado por uma recusa'
         $ok = Join-Path $out 'ok.json'
@@ -7226,6 +7240,8 @@ try {
         $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
         $blk = $cli.Substring($cli.IndexOf("'diagnose' {"), $cli.IndexOf("'clean' {") - $cli.IndexOf("'diagnose' {"))
         Assert-True ($blk.Contains('Test-AtmDiagnoseExportPath') -and $blk.Contains('Write-AtmNewTextFile') -and -not $blk.Contains('Exception.Message') -and -not $blk.Contains('WriteAllText')) '14: CLI diagnose usa o caminho verificado e nunca mostra a mensagem da excecao'
+        # Everything of the branch that touches collected data runs inside a type-only catch (never the global catch).
+        Assert-True ($blk -match 'try \{ \$res = Invoke-AtmDiagnose' -and $blk -match 'try \{ Show-AtmDiagnose -Result \$res \}' -and $blk -match 'try \{ \$refusal = Test-AtmDiagnoseExportPath' -and $blk -match 'try \{ Write-AtmNewTextFile' -and ([regex]::Matches($blk, 'GetBaseException\(\)\.GetType\(\)\.Name').Count -ge 4)) '2: diagnose, relatorio, verificacao e gravacao com captura so pelo tipo'
     }
     Test-Case 'Diagnose' 'P5-B: CLI - version, help, comando desconhecido, diagnose parcial com codigo 0, nenhuma gravacao sem -ExportJson, nenhuma opcao abre travas, sem elevacao nem limpeza no diagnose' {
         $cmd = Join-Path $srcDir 'bin\agent-temp.cmd'
@@ -7339,14 +7355,14 @@ try {
         }
     }
 } finally {
+    # The console encoding of this process is restored, even when the suite aborts (a redirected console may refuse it).
+    if ($null -ne $prevOutputEncoding) { try { [Console]::OutputEncoding = $prevOutputEncoding } catch { $null = $_ } }
     # Best-effort cleanup: one failing action must not skip the others or the sandbox removal.
     foreach ($a in $cleanupActions) { try { & $a } catch { $null = $_ } }
     # Sandbox removal: rd does not follow junctions (they were already unlinked above).
     cmd /c rd /s /q "`"$sandbox`"" 2>&1 | Out-Null
 }
 
-# The console encoding of this process is restored (cosmetic; a redirected console may refuse it).
-if ($null -ne $prevOutputEncoding) { try { [Console]::OutputEncoding = $prevOutputEncoding } catch { $null = $_ } }
 $pass = @($results | Where-Object Result -eq 'PASS').Count
 $fail = @($results | Where-Object Result -eq 'FAIL').Count
 $skipped = @($results | Where-Object Result -eq 'NAO_TESTADO').Count
