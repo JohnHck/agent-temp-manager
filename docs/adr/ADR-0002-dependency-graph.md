@@ -132,3 +132,23 @@ Implementation record (P4-A):
 * **Privacy.** Only finding keys (pseudonyms and process keys), provider ids, relation, strength and evidence codes
   leave the function; no path, command line, VM name or GUID, account, token or session id. The graph lives in
   memory for the run and is not persisted.
+
+## Maintainer decisions (P4-A gate, 2026-10-25)
+
+The maintainer's gate after PR #45 ("MACRO-P4-A FINAL") decided the points of the P4-A amendment. The amendment text
+above is kept as written for the review (with its alternatives); these decisions are binding:
+
+* **D1 — `Provider` as a graph node: ACCEPTED** (amendment point 1). `ATTRIBUTED_TO` targets a `Provider` node keyed
+  by the provider id. `Provider` is a graph-only kind: it is **not** added to the finding kinds of ADR-0001, and the
+  node has `finding = false`. Its presence does not prove that the software is installed, running or active. An
+  ambiguous attribution gives only `AMBIGUOUS` edges, one per candidate provider, and transitivity never turns an
+  ambiguous attribution into an exclusive link.
+* **D2 — endpoints without a finding: ACCEPTED** (amendment point 2). An entity named by evidence may be a node
+  without a finding (`finding = false`). Such a node is a correlation reference, not an independent observation that
+  the entity exists. A verified process identity keeps the proofs of its source; `pid:<n>` is an unverified identity
+  and never supports a `DIRECT` edge. The absence of a finding proves neither absence nor activity of the process.
+  The graph never creates findings to complete edges.
+* **D3 — `VirtualizationPlatform`: ACCEPTED as context** (amendment point 3). The node stays; its presence creates no
+  dependency edge. `vmms`, `vmmem` or the platform alone never link anything to Claude Desktop.
+* **D4 — VM and worker: `RUNS_VM` stays PROPOSED, not implemented** (amendment point 4). It is not added without a
+  later decision.
