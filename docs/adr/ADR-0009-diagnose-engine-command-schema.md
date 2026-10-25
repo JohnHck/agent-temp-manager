@@ -132,7 +132,8 @@ the machine name, the account and its SID. Decision:
 ## Security addendum (FINAL-A, 2026-10-25): pinned file creation
 
 * **Writer.** `New-AtmPinnedTextFile` (Report.ps1) over `AtmSafeCreate` (Native.cs): the folder and every ancestor are
-  pinned by handle (no reparse point, final path checked, no `FILE_SHARE_DELETE`; the folder without write sharing), the
+  pinned by handle (no reparse point, final path checked, no `FILE_SHARE_DELETE`; the folder re-checked before and after
+  creating, since share modes do not stop its in-place conversion into a junction), the
   caller's destination policy runs inside the pinned window, and the file is created relative to the folder handle
   (`NtCreateFile`, `OBJ_DONT_REPARSE`, `FILE_CREATE`, protected DACL), verified through its handle, then written.
 * **Uses.** The diagnose export (`Write-AtmNewTextFile`, still behind `AtmDiagnoseExportEnabled = $false`) and the V0.1

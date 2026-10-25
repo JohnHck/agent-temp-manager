@@ -56,7 +56,10 @@ LIVENESS_UNKNOWN older than 72 h, errors/ambiguities/coverage, final summary.
 **Export safety (V0.2 FINAL-A).** The audit export keeps its rules (a new file outside the audited directories, no
 reparse point in its folders) and is now created with the folder and its ancestors pinned, relative to the folder, with
 access limited to its owner, SYSTEM and Administrators; a folder swapped during the export, or a `subst` drive letter, is
-refused with the same message.
+refused with the same message, now preceded by a refusal code. Also refused now (accepted by V0.1): a file directly in
+a volume root (`C:\x.json`), a folder path of 240 characters or more, a network or non-fixed drive, and a folder that
+cannot be opened (reported as a refusal, not as an error). A file exported from an elevated window may not be readable
+from a non-elevated one (its owner is then usually Administrators).
 
 ## Preview (no deletion)
 

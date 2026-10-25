@@ -389,8 +389,10 @@ namespace AgentTempManager
 
     // Deletes one directory tree WITHOUT force and WITHOUT trusting names between checks:
     //  1. Every ancestor (volume root excluded) and every directory of the tree is opened top-down and kept
-    //     open WITHOUT FILE_SHARE_DELETE (tree directories also WITHOUT FILE_SHARE_WRITE, so an emptied
-    //     directory cannot be opened for writing and converted into a reparse point in place). While pinned, no other process can rename, delete or replace any of
+    //     open WITHOUT FILE_SHARE_DELETE (tree directories also WITHOUT FILE_SHARE_WRITE). Share modes do NOT stop
+    //     another handle with FILE_WRITE_ATTRIBUTES from converting an emptied directory into a reparse point in
+    //     place (FINAL-A review M-1): the re-checks of step 2 and the final-path check of every opened file are what
+    //     refuse it. While pinned, no other process can rename, delete or replace any of
     //     them (e.g. swap a directory for a junction), so path resolution below cannot be redirected.
     //  2. Each pinned handle is checked: directory, not a reparse point, final path == expected path.
     //  3. Files are opened with share mode 0 (fails if anyone has them open), checked the same way, and
@@ -639,8 +641,10 @@ namespace AgentTempManager
     // Safe creation of a new file (FINAL-A, export ancestor TOCTOU). Pin(): every ancestor below the volume root is opened
     // top-down without following reparse points (FILE_FLAG_OPEN_REPARSE_POINT), refused when it is a reparse point, not a
     // directory or reached through a redirection (final path through the handle), and kept open without FILE_SHARE_DELETE
-    // so it cannot be renamed, deleted or replaced while pinned; the parent is pinned without write sharing too, so it
-    // cannot be turned into a junction in place. CreateNew(): re-checks the pinned parent, creates the file RELATIVE TO
+    // so it cannot be renamed, deleted or replaced while pinned. The parent (often empty) can still be turned into a
+    // junction in place through another handle with FILE_WRITE_ATTRIBUTES (share modes do not govern that right):
+    // CreateNew() therefore re-checks it before and after creating and refuses (PARENT_CHANGED), and the creation is
+    // relative to the handle with OBJ_DONT_REPARSE, so no reparse point is followed. CreateNew(): creates the file RELATIVE TO
     // THE PARENT HANDLE (NtCreateFile, RootDirectory, OBJ_DONT_REPARSE, FILE_OPEN_REPARSE_POINT, FILE_CREATE: never an
     // existing name, never through a reparse point) with a protected DACL (its owner, SYSTEM, Administrators),
     // verifies the created file through its handle (not a reparse point, same volume, final path as expected) and only
@@ -803,7 +807,7 @@ namespace AgentTempManager
             foreach (char c in n) { if (c < 32 || "\\/:*?\"<>|".IndexOf(c) >= 0) return false; }
             string b = n.Split('.')[0].ToUpperInvariant();
             if (b == "CON" || b == "NUL" || b == "AUX" || b == "PRN" || b == "CONIN$" || b == "CONOUT$") return false;
-            if (b.Length == 4 && (b.StartsWith("COM") || b.StartsWith("LPT")) && b[3] >= '0' && b[3] <= '9') return false;
+            if (b.Length == 4 && (b.StartsWith("COM") || b.StartsWith("LPT")) && ((b[3] >= '0' && b[3] <= '9') || b[3] == '\u00B9' || b[3] == '\u00B2' || b[3] == '\u00B3')) return false;
             return true;
         }
 

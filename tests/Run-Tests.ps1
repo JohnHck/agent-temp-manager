@@ -476,12 +476,16 @@ try {
         Assert-True ($x.Flags -contains 'AMBIGUOUS_REFERENCE') 'ambigua'
     }
     Test-Case 'Referencias' 'Exclusao da propria cadeia de execucao (shim) do indice de referencias' {
+        $ct = [datetime]::UtcNow.AddHours(-1)
         $snap = [pscustomobject]@{ Failed = $false; Processes = @(
-                [pscustomobject]@{ Pid = 100; ParentPid = 50; CommandLine = 'powershell -File C:\PF\CTM\agent-temp.ps1 clean -Path X'; Name = 'powershell.exe' }
-                [pscustomobject]@{ Pid = 50; ParentPid = 10; CommandLine = 'cmd /c "C:\PF\CTM\bin\agent-temp.cmd" clean -Path X'; Name = 'cmd.exe' }
-                [pscustomobject]@{ Pid = 10; ParentPid = 1; CommandLine = 'pwsh.exe'; Name = 'pwsh.exe' }) }
+                [pscustomobject]@{ Pid = 100; ParentPid = 50; CommandLine = 'powershell -File C:\PF\CTM\agent-temp.ps1 clean -Path X'; Name = 'powershell.exe'; CreationUtc = $ct.AddSeconds(2) }
+                [pscustomobject]@{ Pid = 50; ParentPid = 10; CommandLine = 'cmd /c "C:\PF\CTM\bin\agent-temp.cmd" clean -Path X'; Name = 'cmd.exe'; CreationUtc = $ct.AddSeconds(1) }
+                [pscustomobject]@{ Pid = 10; ParentPid = 1; CommandLine = 'pwsh.exe'; Name = 'pwsh.exe'; CreationUtc = $ct }) }
         $s = @(Get-AtmSelfChainPids -Snapshot $snap -SelfPid 100 -Markers @('C:\PF\CTM\agent-temp.ps1', 'C:\PF\CTM\bin\agent-temp.cmd'))
         Assert-Eq ($s -join ',') '100,50' 'cadeia'
+        # FINAL-A review (L-3): an unknown creation time stops the chain (the launcher stays a reference: the safe side).
+        $snap.Processes[1].CreationUtc = $null
+        Assert-Eq (@(Get-AtmSelfChainPids -Snapshot $snap -SelfPid 100 -Markers @('C:\PF\CTM\agent-temp.ps1', 'C:\PF\CTM\bin\agent-temp.cmd')) -join ',') '100' 'horario de criacao desconhecido: cadeia interrompida'
     }
     Test-Case 'Processos reais' 'Processo real referenciando a root e detectado (CIM, passagem unica)' {
         $p = New-TestProfile 'realproc'
@@ -7296,7 +7300,7 @@ try {
         } finally { $script:AtmDiagnoseExportEnabled = $false }
         Assert-Eq $script:AtmDiagnoseExportEnabled $false '10: trava false depois do teste'
     }
-    Test-Case 'Diagnose' 'FINAL-A: criacao segura de arquivo (fixtures) - ancestrais e pasta pinados por handle sem compartilhamento de exclusao, criacao relativa ao handle (OBJ_DONT_REPARSE, nunca nome existente), DACL protegida, verificacao antes de escrever; corrida adversarial; politica reavaliada dentro da janela' {
+    Test-Case 'Diagnose' 'FINAL-A: criacao segura de arquivo (fixtures) - ancestrais e pasta pinados por handle sem compartilhamento de exclusao, criacao relativa ao handle (OBJ_DONT_REPARSE, nunca nome existente), DACL protegida, verificacao antes de escrever; corrida adversarial antes do pin (estocastica) e conversao da pasta em juncao DENTRO da janela pinada (deterministica, FSCTL); politica reavaliada dentro da janela' {
         $fa = Join-Path $sandbox 'finala'; $anc = Join-Path $fa 'anc'; $par = Join-Path $anc 'par'; $else = Join-Path $fa 'else'
         foreach ($d in @($par, $else)) { [void][IO.Directory]::CreateDirectory($d) }
         $none = [pscustomobject]@{ Bases = @() }
@@ -7307,7 +7311,7 @@ try {
             foreach ($victim in @($par, $anc)) { $moved = $false; try { [IO.Directory]::Move($victim, $victim + '-x'); $moved = $true } catch { $null = $_ }; Assert-True (-not $moved) "renomear $(Split-Path $victim -Leaf) com a pasta pinada: recusado (compartilhamento)" }
             Assert-Eq ([AgentTempManager.AtmSafeCreate]::CreateNew($s, 'd.json', [Text.Encoding]::UTF8.GetBytes('{"a":1}'))) $null 'arquivo criado relativo ao handle'
             Assert-Eq ([AgentTempManager.AtmSafeCreate]::CreateNew($s, 'd.json', [byte[]]@(1))) 'EXISTS' 'nome existente: nunca sobrescreve'
-            foreach ($bad in @('NUL.json', 'CON', 'a:b', 'x\y', '..', 'a.', 'COM1.txt', 'z*')) { Assert-Eq ([AgentTempManager.AtmSafeCreate]::CreateNew($s, $bad, [byte[]]@(1))) 'FILE_NAME_INVALID' "nome invalido '$bad'" }
+            foreach ($bad in @('NUL.json', 'CON', 'a:b', 'x\y', '..', 'a.', 'COM1.txt', 'z*', ('COM' + [char]0xB9), ('LPT' + [char]0xB2 + '.txt'))) { Assert-Eq ([AgentTempManager.AtmSafeCreate]::CreateNew($s, $bad, [byte[]]@(1))) 'FILE_NAME_INVALID' "nome invalido '$bad'" }
             $null = cmd /c "mklink /J `"$par\j`" `"$else`" >nul 2>nul"
             Assert-True ((Test-Path -LiteralPath "$par\j") -and [AgentTempManager.AtmSafeCreate]::CreateNew($s, 'j', [byte[]]@(1)) -ceq 'EXISTS' -and @(Get-ChildItem -LiteralPath $else -Force).Count -eq 0) 'juncao no nome do arquivo: recusada, nada no alvo'
             # Without the privilege mklink fails on stderr: redirected inside cmd (a native stderr line is terminating here).
@@ -7325,8 +7329,50 @@ try {
         $s3 = [AgentTempManager.AtmSafeCreate]::Pin((Join-Path $par 'sub')); $e3 = $s3.Error; $s3.Dispose()
         Assert-True ($e2 -ceq 'PARENT_REPARSE_POINT' -and $e3 -ceq 'ANCESTOR_REPARSE_POINT' -and @(Get-ChildItem -LiteralPath $else -Force | Where-Object { $_.Name -ne 'j' }).Count -eq 0) "pasta ou ancestral trocados antes do pin: recusados ($e2, $e3)"
         foreach ($bp in @('relative\dir', '\\server\share\dir', 'C:\', ($fa + '\anc\..\anc'))) { $sb = [AgentTempManager.AtmSafeCreate]::Pin($bp); Assert-True (-not $sb.IsPinned) "pin recusado: $bp ($($sb.Error))"; $sb.Dispose() }
-        # Adversarial race (stochastic): another runspace swaps the folder with a junction in a loop while files are created;
-        # a file may be created or refused, but never in the junction target.
+        # FINAL-A review (M-1), deterministic, INSIDE the pinned window: share modes do not stop another handle with
+        # FILE_WRITE_ATTRIBUTES from turning the pinned (empty) folder into a junction in place (FSCTL_SET_REPARSE_POINT).
+        # CreateNew must refuse (the folder is re-checked; the creation never follows a reparse point), nothing in the target.
+        if (-not ('AtmTestReparse' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices; using Microsoft.Win32.SafeHandles; using System.Text;
+public static class AtmTestReparse {
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  static extern SafeFileHandle CreateFileW(string n, uint a, uint s, IntPtr sa, uint c, uint f, IntPtr t);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  static extern bool DeviceIoControl(SafeFileHandle h, uint code, byte[] inb, int inl, IntPtr outb, int outl, out int ret, IntPtr ov);
+  // Test-only: sets a mount-point (junction) reparse point on an existing empty folder, opened with FILE_WRITE_ATTRIBUTES.
+  public static string SetJunction(string dir, string target) {
+    using (SafeFileHandle h = CreateFileW(dir, 0x100, 7, IntPtr.Zero, 3, 0x02000000 | 0x00200000, IntPtr.Zero)) {
+      if (h.IsInvalid) return "OPEN_FAIL " + Marshal.GetLastWin32Error();
+      byte[] s = Encoding.Unicode.GetBytes("\\??\\" + target); byte[] p = Encoding.Unicode.GetBytes(target);
+      int dataLen = 8 + s.Length + 2 + p.Length + 2; byte[] b = new byte[8 + dataLen];
+      BitConverter.GetBytes(0xA0000003u).CopyTo(b, 0); BitConverter.GetBytes((ushort)dataLen).CopyTo(b, 4);
+      BitConverter.GetBytes((ushort)0).CopyTo(b, 8); BitConverter.GetBytes((ushort)s.Length).CopyTo(b, 10);
+      BitConverter.GetBytes((ushort)(s.Length + 2)).CopyTo(b, 12); BitConverter.GetBytes((ushort)p.Length).CopyTo(b, 14);
+      s.CopyTo(b, 16); p.CopyTo(b, 16 + s.Length + 2);
+      int r; bool ok = DeviceIoControl(h, 0x000900A4, b, b.Length, IntPtr.Zero, 0, out r, IntPtr.Zero);
+      return ok ? "SET_OK" : "SET_FAIL " + Marshal.GetLastWin32Error();
+    }
+  }
+}
+'@
+        }
+        $ip = Join-Path $fa 'inplace'; $ipt = Join-Path $fa 'inplace-target'; foreach ($d in @($ip, $ipt)) { [void][IO.Directory]::CreateDirectory($d) }
+        $ip = [AgentTempManager.AtmNative]::GetLongPath($ip); $ipt = [AgentTempManager.AtmNative]::GetLongPath($ipt)
+        $si = [AgentTempManager.AtmSafeCreate]::Pin($ip)
+        try {
+            Assert-True $si.IsPinned "pasta vazia pinada ($($si.Error))"
+            $set = [AtmTestReparse]::SetJunction($ip, $ipt)
+            Assert-Eq $set 'SET_OK' 'juncao gravada na pasta pinada por outro handle (o pin nao impede: limite documentado)'
+            $ci = [AgentTempManager.AtmSafeCreate]::CreateNew($si, 'in.json', [byte[]]@(123, 125))
+            Assert-True ($null -ne $ci -and @(Get-ChildItem -LiteralPath $ipt -Force).Count -eq 0) "conversao em juncao dentro da janela: recusada ($ci), nada no alvo"
+            $script:caseNote = "$script:caseNote; FSCTL na janela: $ci"
+        } finally { $si.Dispose() }
+        # The fixture folder is now a junction link (removing it removes only the link).
+        if (([IO.File]::GetAttributes($ip) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { [IO.Directory]::Delete($ip, $false) }
+        # Adversarial race (stochastic, BEFORE the pin): another runspace swaps the folder with a junction in a loop between
+        # iterations, so Pin meets the folder, the junction or nothing; it does not attack inside the pinned window (that is
+        # the deterministic FSCTL case above). A file may be created or refused, but never in the junction target.
         $rd = Join-Path $fa 'race'; $rt = Join-Path $fa 'race-target'; foreach ($d in @($rd, $rt)) { [void][IO.Directory]::CreateDirectory($d) }
         $flag = [hashtable]::Synchronized(@{ Stop = $false; Swaps = 0; Errors = 0 })
         $ps = [PowerShell]::Create()
@@ -7354,7 +7400,7 @@ try {
             if ((Test-Path -LiteralPath $rd) -and ((Get-Item -LiteralPath $rd -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { [IO.Directory]::Delete($rd, $false) }
             if (-not (Test-Path -LiteralPath $rd)) { [IO.Directory]::Move($rd + '-real', $rd) }
         }
-        Assert-True (@(Get-ChildItem -LiteralPath $rt -Force).Count -eq 0) "corrida: nenhum arquivo no alvo da juncao ($made criados, $refused recusados, $($flag.Swaps) trocas)"
+        Assert-True (@(Get-ChildItem -LiteralPath $rt -Force).Count -eq 0) "corrida antes do pin: nenhum arquivo no alvo da juncao ($made criados, $refused recusados, $($flag.Swaps) trocas)"
         Assert-True ($made + $refused -eq 150 -and $flag.Swaps -gt 0) 'corrida exercitada (trocas reais durante as criacoes)'
         $script:caseNote = "$script:caseNote; corrida: $made criados, $refused recusados, $($flag.Swaps) trocas"
         # The policy runs again inside the pinned window: a .git created after a by-name pre-check still refuses.
@@ -7395,8 +7441,8 @@ try {
         [IO.Directory]::Move($ax, $ax + '-moved'); New-Junction $ax $axt
         Assert-True ((New-AtmPinnedTextFile -Path (Join-Path $ax 'b.json') -Text '{}' -Policy $pol) -like 'EXPORT_PIN_*' -and @(Get-ChildItem -LiteralPath $axt -Force).Count -eq 0) 'pasta trocada por juncao: recusada, nada no alvo'
     }
-    Test-Case 'Camadas' 'FINAL-A F-01: caminhos de rede ou dispositivo vindos do registro ou ambiente de outros usuarios (TEMP, CLAUDE_CONFIG_DIR, CLAUDE_CODE_TMPDIR) nunca chegam a uma API de arquivos; lacuna registrada' {
-        foreach ($bad in @('\\127.0.0.1\share', '//127.0.0.1/share', '\\?\C:\x', '\\?\UNC\127.0.0.1\x', '\\.\pipe\x', '\\127.0.0.1@80\x', 'C:x', 'C:\a:b', 'relative\x', '', ("C:\a" + [char]27 + "b"))) {
+    Test-Case 'Camadas' 'FINAL-A F-01: caminhos de rede ou dispositivo vindos do registro ou ambiente de outros usuarios (TEMP, CLAUDE_CONFIG_DIR, CLAUDE_CODE_TMPDIR): formas de rede ou dispositivo recusadas antes de qualquer API de arquivos (verificacao lexica); pontos de reparse nao atravessados pela normalizacao; pasta de configuracao de outro usuario atraves de ponto de reparse nao lida; lacuna registrada' {
+        foreach ($bad in @('\\127.0.0.1\share', '//127.0.0.1/share', '\\?\C:\x', '\\?\UNC\127.0.0.1\x', '\\.\pipe\x', '\\127.0.0.1@80\x', 'C:x', 'C:\a:b', 'relative\x', '', ("C:\a" + [char]27 + "b"), ("C:\a" + [char]0x85 + "b"), ("C:\a" + [char]0x7F + "b"))) {
             Assert-True (-not (Test-AtmLocalPathForm $bad)) "forma recusada: '$bad'"
         }
         Assert-True (Test-AtmLocalPathForm $env:SystemRoot) 'caminho local de unidade fixa aceito'
@@ -7415,6 +7461,29 @@ try {
         $i = Invoke-AtmInventory @ia
         $st = @($i.ProfileBaseStatus[$p.Sid + '|' + $p.ProfilePath] | Where-Object { $_.Source -eq 'CLAUDE_CODE_TMPDIR' })
         Assert-True ($st.Count -ge 1 -and @($st | Where-Object { $_.Status -ne 'INVALID' }).Count -eq 0 -and $sw.ElapsedMilliseconds -lt 60000) "CLAUDE_CODE_TMPDIR de rede: base INVALID, nada lido ($($sw.ElapsedMilliseconds) ms)"
+        # FINAL-A review (L-1): the raw value of an invalid base is shown with its control characters replaced.
+        $pe = New-TestProfile 'finala-ctl'
+        $pe.EnvValues = @{ CLAUDE_CODE_TMPDIR = @("C:\a" + [char]27 + "[2J" + [char]0x9B + "b") }
+        $ia = Get-InvArgs -Profiles @($pe)
+        $ie = Invoke-AtmInventory @ia
+        $se2 = @($ie.ProfileBaseStatus[$pe.Sid + '|' + $pe.ProfilePath] | Where-Object { $_.Source -eq 'CLAUDE_CODE_TMPDIR' })
+        Assert-True ($se2.Count -ge 1 -and @($se2 | Where-Object { $_.Status -ne 'INVALID' -or [string]$_.BasePath -match '[\x00-\x1f\x7f-\x9f]' }).Count -eq 0) "base invalida exibida sem caracteres de controle ($(@($se2 | ForEach-Object { $_.BasePath }) -join ';'))"
+        # FINAL-A review (M-3): a component that is a reparse point is never traversed by the normalization (a directory
+        # symbolic link may point to a network share; a junction stands in for it here: creating one needs no privilege).
+        $mt = Join-Path $sandbox 'finala-m3-target'; $mj = Join-Path $sandbox 'finala-m3-link'
+        [void][IO.Directory]::CreateDirectory((Join-Path $mt 'inner')); New-Junction $mj $mt
+        $mlong = [AgentTempManager.AtmNative]::GetLongPath($sandbox).TrimEnd('\')
+        Assert-Eq (Get-AtmNormalizedPath (Join-Path $mj 'inner')) ($mlong + '\finala-m3-link\inner') 'normalizacao: prefixo expandido, link e restante mantidos lexicamente (nunca resolvidos)'
+        # Another user's CLAUDE_CONFIG_DIR through a reparse point is not read; one's own is read as before.
+        $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $po = New-TestProfile 'finala-m3-other' -Sid 'S-1-5-21-1-2-3-1001'
+        $po.EnvValues = @{ CLAUDE_CONFIG_DIR = @((Join-Path $mj 'inner')) }
+        $co = Get-AtmClaudeConfigDirs $po
+        Assert-True (@($co.Dirs).Count -eq 0 -and $co.Refused -eq 1) 'pasta de configuracao de outro usuario atraves de um ponto de reparse: nao lida, recusa contada'
+        $pm = New-TestProfile 'finala-m3-me' -Sid $me
+        $pm.EnvValues = @{ CLAUDE_CONFIG_DIR = @((Join-Path $mj 'inner')) }
+        $cm = Get-AtmClaudeConfigDirs $pm
+        Assert-True (@($cm.Dirs).Count -eq 1 -and $cm.Refused -eq 0) 'a propria pasta de configuracao segue lida como antes'
     }
     Test-Case 'Camadas' 'FINAL-A F-03/F-06/F-07/F-08: caracteres de controle de arquivos de sessao nunca chegam ao console; PID de pai reutilizado nao entra na cadeia propria; copia preparada comparada ao manifesto verificado; release confere as quatro travas' {
         $p = New-TestProfile 'finala-esc'
@@ -7431,8 +7500,29 @@ try {
         Assert-Eq (@(Get-AtmSelfChainPids -Snapshot $snap -SelfPid 100 -Markers @('C:\PF\CTM\agent-temp.ps1', 'C:\PF\CTM\bin\agent-temp.cmd')) -join ',') '100' 'F-06: pai criado depois do filho (PID reutilizado) nunca e excluido como lancador'
         $snap.Processes[1].CreationUtc = $t0.AddMinutes(-1)
         Assert-Eq (@(Get-AtmSelfChainPids -Snapshot $snap -SelfPid 100 -Markers @('C:\PF\CTM\agent-temp.ps1', 'C:\PF\CTM\bin\agent-temp.cmd')) -join ',') '100,50' 'lancador legitimo continua excluido'
+        # F-07 (behavioural): the release source is verified, its manifest kept in memory; the staged copy is checked against
+        # it (the staged copy has no manifest.json: it is regenerated). A file changed between verification and copy is refused.
+        $rel7 = Join-Path $sandbox 'finala-f07-src'; [void][IO.Directory]::CreateDirectory($rel7)
+        Copy-AtmTree -From $srcDir -To $rel7
+        Write-AtmManifest -Root $rel7 -Version (Get-AtmSourceVersion -SourceDir $rel7)
+        $null = Assert-AtmInstallSource -SourceDir $rel7
+        Assert-True ($null -ne $script:AtmVerifiedManifest -and $script:AtmVerifiedManifest.Count -gt 10) 'F-07: manifesto verificado guardado em memoria'
+        $stg = Join-Path $sandbox 'finala-f07-stage1'; [void][IO.Directory]::CreateDirectory($stg)
+        Copy-AtmTree -From $rel7 -To $stg
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $stg 'manifest.json'))) 'copia preparada sem manifest.json (regenerado depois)'
+        $ok7 = $true; try { Assert-AtmStagedCopy -Staging $stg } catch { $ok7 = $false; $script:caseNote = $_.Exception.Message }
+        Assert-True $ok7 'F-07: copia preparada integra aceita (regressao B-1: toda instalacao era recusada)'
+        Add-Content -LiteralPath (Join-Path $rel7 'lib\Report.ps1') -Value '#swapped'
+        $stg2 = Join-Path $sandbox 'finala-f07-stage2'; [void][IO.Directory]::CreateDirectory($stg2)
+        Copy-AtmTree -From $rel7 -To $stg2
+        $msg7 = $null; try { Assert-AtmStagedCopy -Staging $stg2 } catch { $msg7 = $_.Exception.Message }
+        Assert-True ($null -ne $msg7 -and $msg7 -match 'Report\.ps1') "F-07: arquivo trocado entre verificacao e copia recusado ($msg7)"
+        [IO.File]::WriteAllText((Join-Path $stg 'providers\Plantado.ps1'), 'x')
+        $msg8 = $null; try { Assert-AtmStagedCopy -Staging $stg } catch { $msg8 = $_.Exception.Message }
+        Assert-True ($null -ne $msg8 -and $msg8 -match 'Plantado') "F-07: arquivo extra na copia preparada recusado ($msg8)"
+        $script:AtmVerifiedManifest = $null
         $ic = [IO.File]::ReadAllText((Join-Path (Split-Path -Parent $testsDir) 'install\InstallCommon.ps1'))
-        Assert-True ($ic.Contains('$script:AtmVerifiedManifestHash = $null') -and $ic.Contains('Test-AtmSourceIntegrity -SourceDir $staging') -and $ic.IndexOf('$script:AtmVerifiedManifestHash = $(if') -lt $ic.IndexOf('Test-AtmSourceIntegrity -SourceDir $SourceDir')) 'F-07: hash do manifesto antes da verificacao e copia preparada comparada a ele'
+        Assert-True ($ic.IndexOf('Copy-AtmTree -From $SourceDir -To $staging') -lt $ic.IndexOf('Assert-AtmStagedCopy -Staging $staging') -and $ic.IndexOf('Assert-AtmStagedCopy -Staging $staging') -lt $ic.IndexOf("Copy-Item -LiteralPath `$ProjectsFile")) 'F-07: verificacao logo apos a copia, antes de qualquer arquivo local'
         $br = [IO.File]::ReadAllText((Join-Path (Split-Path -Parent $testsDir) 'tools\Build-Release.ps1'))
         foreach ($g in @('AtmRealDeletionEnabled', 'AtmWorktreeDiagnosticsEnabled', 'AtmHandleDiagnosticsEnabled', 'AtmDiagnoseExportEnabled')) { Assert-True ($br.Contains($g)) "F-08: release confere $g no arquivo" }
     }

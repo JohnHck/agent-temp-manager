@@ -34,7 +34,16 @@ function Get-AtmClaudeConfigDirs {
     $refused = 0
     foreach ($v in $vals) { if ($v) { if (Test-AtmLocalPathForm $v) { $dirs.Add($v) } else { $refused++ } } }
     if ($dirs.Count -eq 0 -and $refused -eq 0 -and $ProfileInfo.ProfilePath) { $dirs.Add((Join-AtmPath $ProfileInfo.ProfilePath '.claude')) }
-    return [pscustomobject]@{ Dirs = @($dirs | Select-Object -Unique); Known = [bool]$ProfileInfo.EnvKnown; Refused = $refused }
+    # FINAL-A review (M-3): ANOTHER user's folder reached through a reparse point (a symbolic link may point to a network
+    # share) is not read; the components are checked without following them. One's own folder is read as before.
+    $me = $null; try { $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch { $me = $null }
+    $kept = New-Object System.Collections.Generic.List[string]
+    foreach ($d in @($dirs | Select-Object -Unique)) {
+        if ($null -ne $me -and [string]$ProfileInfo.Sid -ceq $me) { $kept.Add($d); continue }
+        $atr = $null
+        if ([AgentTempManager.AtmPathCheck]::Chain($d, [ref]$atr) -ceq 'REPARSE_IN_PATH') { $refused++ } else { $kept.Add($d) }
+    }
+    return [pscustomobject]@{ Dirs = $kept.ToArray(); Known = [bool]$ProfileInfo.EnvKnown; Refused = $refused }
 }
 
 function Get-AtmClaudeSessionEvidence {

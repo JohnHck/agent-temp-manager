@@ -141,7 +141,7 @@ function Test-AtmLocalPathForm {
       that user (NTLM). Only the drive type is queried (no network access).
     #>
     param([string]$Path)
-    if ([string]::IsNullOrWhiteSpace($Path) -or $Path -notmatch '^[A-Za-z]:\\' -or $Path -match '[\x00-\x1f]' -or $Path.Substring(2).Contains(':')) { return $false }
+    if ([string]::IsNullOrWhiteSpace($Path) -or $Path -notmatch '^[A-Za-z]:\\' -or $Path -match '[\x00-\x1f\x7f-\x9f]' -or $Path.Substring(2).Contains(':')) { return $false }
     try { $dt = ([IO.DriveInfo]::new($Path.Substring(0, 1))).DriveType } catch { return $false }
     return ($dt -ne [IO.DriveType]::Network -and $dt -ne [IO.DriveType]::NoRootDirectory -and $dt -ne [IO.DriveType]::Unknown)
 }
@@ -151,6 +151,19 @@ function Get-AtmNormalizedPath {
     if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
     # F-01: no network or device form ever reaches GetLongPathName or GetFullPath (refused as not normalizable).
     if (-not (Test-AtmLocalPathForm $Path)) { return $null }
+    # FINAL-A review (M-3): a component that is a reparse point (a symbolic link may point to a network share) is never
+    # traversed here: only the part before it is expanded (8.3 to long names), the rest is kept lexically, and the
+    # callers' chain checks refuse it as before. Chain reads attributes component by component and stops at the link.
+    try {
+        $lex = [IO.Path]::GetFullPath($Path); if ($lex.Length -gt 3) { $lex = $lex.TrimEnd('\') }
+        $atr = $null
+        if ([AgentTempManager.AtmPathCheck]::Chain($lex, [ref]$atr) -ceq 'REPARSE_IN_PATH') {
+            $pre = [IO.Path]::GetDirectoryName($atr)
+            $lp = $(if ($pre) { [AgentTempManager.AtmNative]::GetLongPath($pre) } else { $null })
+            if (-not $lp -or -not $lex.StartsWith($pre, [StringComparison]::OrdinalIgnoreCase)) { return $lex }
+            return ($lp.TrimEnd('\') + '\' + $lex.Substring($pre.Length).TrimStart('\'))
+        }
+    } catch { return $null }
     try {
         $long = [AgentTempManager.AtmNative]::GetLongPath($Path)
         if (-not $long) {
@@ -527,9 +540,10 @@ function Get-AtmSelfChainPids {
         $parent = $byPid[$cur.ParentPid]
         if (-not $parent -or -not $parent.CommandLine) { break }
         # FINAL-A (F-06): a reused parent PID (created after its "child") is not the launcher: stop, never exclude it.
+        # Unknown creation times (L-3) stop the chain too: not excluding is the safe side (a reference stays a reference).
         $pc = $(if ($parent.PSObject.Properties['CreationUtc']) { $parent.CreationUtc } else { $null })
         $cc = $(if ($cur.PSObject.Properties['CreationUtc']) { $cur.CreationUtc } else { $null })
-        if ($pc -and $cc -and $pc -gt $cc) { break }
+        if (-not $pc -or -not $cc -or $pc -gt $cc) { break }
         $cl = $parent.CommandLine.ToLowerInvariant()
         $hit = $false
         foreach ($m in $Markers) { if ($m -and $cl.Contains($m.ToLowerInvariant())) { $hit = $true; break } }
@@ -660,7 +674,8 @@ function Invoke-AtmInventory {
                 $tempNorm = Get-AtmNormalizedPath $tc.TempPath
                 $basePath = $null
                 if ($tempNorm) { $basePath = Get-AtmNormalizedPath (Join-AtmPath $tempNorm $prov.TempSubdir) }
-                if (-not $basePath) { $st.Add([pscustomobject]@{ Provider = $prov.Id; BasePath = $tc.TempPath; Source = $tc.Source; Status = 'INVALID'; At = $null }); continue }
+                # FINAL-A review (L-1): the raw value is shown in the report: control characters replaced.
+                if (-not $basePath) { $st.Add([pscustomobject]@{ Provider = $prov.Id; BasePath = [regex]::Replace([string]$tc.TempPath, '[\x00-\x1f\x7f-\x9f]', '?'); Source = $tc.Source; Status = 'INVALID'; At = $null }); continue }
                 $key = $basePath.ToLowerInvariant()
                 if ($baseByPath.ContainsKey($key)) {
                     $existing = $baseByPath[$key]

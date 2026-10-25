@@ -209,7 +209,7 @@ try {
                 # FINAL-A (F-02): the same rules, checked again with the folder and its ancestors pinned; the file is created
                 # relative to the pinned folder (new file only, no reparse point, protected DACL), never by name.
                 $exported = New-AtmPinnedTextFile -Path $ExportJson -Text (ConvertTo-AtmExportJson -Inventory $inv) -Policy { param($P) if (Test-AtmOutputPathOutsideBases -Path $P -Inventory $inv -MustNotExist) { $null } else { 'EXPORT_DESTINATION_NOT_ALLOWED' } }
-                if ($null -ne $exported) { throw (Get-AtmText 'cli.exportRefused') }
+                if ($null -ne $exported) { Write-Host (Get-AtmText 'cli.diagExportRefusedCode' $exported) -ForegroundColor Red; throw (Get-AtmText 'cli.exportRefused') }
                 Write-Host (Get-AtmText 'cli.exportWritten' $ExportJson)
                 Write-Host (Get-AtmText 'cli.exportPrivacy') -ForegroundColor Yellow
             }

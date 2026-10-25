@@ -434,9 +434,33 @@ function Install-AtmProduct {
     try { return (Invoke-AtmInstallUnlocked @PSBoundParameters -Version $version) } finally { Exit-AtmOperationLock }
 }
 
-# FINAL-A (F-07): SHA-256 of the source manifest taken when the source was verified (Assert-AtmInstallSource); the staged
-# copy must carry exactly that manifest (Invoke-AtmInstallUnlocked). $null: no manifest (explicit -SourceWithoutManifest).
-$script:AtmVerifiedManifestHash = $null
+# FINAL-A (F-07): the source manifest is read ONCE into memory when the source is verified (Assert-AtmInstallSource); the
+# source and then the staged copy (Invoke-AtmInstallUnlocked, right after the copy) are both verified against that
+# in-memory copy, so a file swapped between verification and copy is refused. $null: no manifest (-SourceWithoutManifest).
+$script:AtmVerifiedManifest = $null
+
+function Test-AtmTreeAgainstManifest {
+    # Every file of -Root except manifest.json must be listed in -Expected (relative path, lower case -> SHA-256) with the
+    # same hash, and every listed file must be present.
+    param([string]$Root, [hashtable]$Expected)
+    $actual = @(Get-AtmTreeEntries -Root $Root | Where-Object { -not $_.IsDir -and $_.Rel -ne 'manifest.json' } | ForEach-Object { $_.Rel })
+    foreach ($rel in $actual) {
+        $k = $rel.ToLowerInvariant()
+        if (-not $Expected.ContainsKey($k)) { throw (Get-AtmText 'inst.extraFile' $rel) }
+        if ((Get-FileHash -LiteralPath (Join-Path $Root $rel) -Algorithm SHA256).Hash -ne $Expected[$k]) { throw (Get-AtmText 'inst.hashMismatch' $rel) }
+    }
+    if ($actual.Count -ne $Expected.Count) { throw (Get-AtmText 'inst.incomplete') }
+}
+
+function Assert-AtmStagedCopy {
+    # FINAL-A (F-07): the staged copy, right after Copy-AtmTree (before any local file is added), against the manifest
+    # verified in memory. manifest.json is not copied (it is regenerated), nor are the files Copy-AtmTree always skips.
+    param([string]$Staging)
+    if ($null -eq $script:AtmVerifiedManifest) { return }
+    $exp = @{}
+    foreach ($k in $script:AtmVerifiedManifest.Keys) { if ($k -ne 'config\projects.local.json' -and $k -ne 'install-state.json') { $exp[$k] = $script:AtmVerifiedManifest[$k] } }
+    Test-AtmTreeAgainstManifest -Root $Staging -Expected $exp
+}
 
 function Assert-AtmInstallSource {
     # Required files, PowerShell syntax, manifest; returns the source version.
@@ -448,11 +472,16 @@ function Assert-AtmInstallSource {
         if ($e.Count -gt 0) { throw (Get-AtmText 'inst.syntax' $f.FullName $e[0].Message) }
     }
     $version = Get-AtmSourceVersion -SourceDir $SourceDir
-    # FINAL-A (F-07): the manifest's own hash is taken before the source is verified, so the staged copy can be compared
-    # with exactly what was verified (a file or manifest swapped between verification and copy is refused).
-    $srcManifest = Join-Path $SourceDir 'manifest.json'
-    $script:AtmVerifiedManifestHash = $(if (Test-Path -LiteralPath $srcManifest -PathType Leaf) { (Get-FileHash -LiteralPath $srcManifest -Algorithm SHA256).Hash } else { $null })
     Test-AtmSourceIntegrity -SourceDir $SourceDir -AllowNoManifest:$SourceWithoutManifest
+    # FINAL-A (F-07): the manifest bytes are read once and parsed in memory; the source is verified against that copy too.
+    $script:AtmVerifiedManifest = $null
+    $srcManifest = Join-Path $SourceDir 'manifest.json'
+    if (Test-Path -LiteralPath $srcManifest -PathType Leaf) {
+        $m = ([Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($srcManifest))).TrimStart([char]0xFEFF) | ConvertFrom-Json
+        $exp = @{}; foreach ($e in $m.files) { $exp[([string]$e.path).ToLowerInvariant()] = [string]$e.sha256 }
+        Test-AtmTreeAgainstManifest -Root $SourceDir -Expected $exp
+        $script:AtmVerifiedManifest = $exp
+    }
     return $version
 }
 
@@ -491,11 +520,7 @@ function Invoke-AtmInstallUnlocked {
     [void][IO.Directory]::CreateDirectory($staging)
     try {
         Copy-AtmTree -From $SourceDir -To $staging
-        if ($null -ne $script:AtmVerifiedManifestHash) {
-            $stagedManifest = Join-Path $staging 'manifest.json'
-            if (-not (Test-Path -LiteralPath $stagedManifest -PathType Leaf) -or (Get-FileHash -LiteralPath $stagedManifest -Algorithm SHA256).Hash -ne $script:AtmVerifiedManifestHash) { throw (Get-AtmText 'inst.hashMismatch' 'manifest.json') }
-            Test-AtmSourceIntegrity -SourceDir $staging
-        }
+        Assert-AtmStagedCopy -Staging $staging
         if ($ProjectsFile) {
             $null = Get-Content -LiteralPath $ProjectsFile -Raw -Encoding UTF8 | ConvertFrom-Json
             Copy-Item -LiteralPath $ProjectsFile -Destination (Join-Path $staging 'config\projects.local.json')

@@ -79,9 +79,10 @@ Deletion itself (`AtmDeleter`) never trusts names between checks:
 
 * every ancestor of the root (volume root excluded) and every directory of the tree is opened top-down and
   **kept open without `FILE_SHARE_DELETE`** for the whole operation, so no process can rename or delete any of
-  them; tree directories are additionally pinned **without `FILE_SHARE_WRITE`**, so an emptied directory
-  cannot be opened for writing and converted into a junction in place (share modes are enforced by the kernel
-  regardless of the other process's privileges);
+  them; tree directories are additionally pinned **without `FILE_SHARE_WRITE`**. Share modes do **not** stop
+  another handle with `FILE_WRITE_ATTRIBUTES` from converting an emptied directory into a junction in place
+  (`FSCTL_SET_REPARSE_POINT`; corrected in FINAL-A, review M-1, finding F-10): that conversion is refused by the
+  re-checks below (still a directory, not a reparse point) and by the final-path check of every opened file;
 * each pinned directory is re-checked through its handle (still a directory, not a reparse point) before it
   is enumerated and before it is deleted;
 * each handle is verified (directory, not a reparse point, `GetFinalPathNameByHandle` equals the expected
@@ -159,10 +160,12 @@ called by `Invoke-AtmGitCommand`):
   replaced by a junction in between redirected the new file (a harness counter-proof still shows it for a by-name
   creation); the document holds the machine name, the account and its SID. **FINAL-A: mitigated in code, export still
   disabled.** The writer now pins the folder and every ancestor by handle (no reparse point, no redirection, not
-  renamable or replaceable while pinned; the folder without write sharing), evaluates the destination policy inside that
+  renamable or replaceable while pinned; a folder turned into a junction in place through another handle is refused by
+  the re-checks), evaluates the destination policy inside that
   window, creates the file relative to the folder handle (`NtCreateFile`, `RootDirectory`, `OBJ_DONT_REPARSE`,
   `FILE_CREATE`) with a protected DACL, verifies it through its handle and only then writes (release/V0.2-SECURITY-AUDIT,
-  X-01, with fixture evidence and limits). Opening the gate remains a maintainer decision; Windows 10 is NOT TESTED.
+  X-01, with fixture evidence and limits). Opening the gate remains a maintainer decision; ARM64 fixture execution is
+  NOT TESTED.
 * **Diagnose export, when its gate is open (tests only, P5-B):** written only with `-ExportJson`, to a new file (`CreateNew`: never overwrites; a junction
   planted at the destination was refused on fixtures; a file symbolic link there is refused by the documented
   `CREATE_NEW` semantics but was not tested, since creating one needs a privilege), at an absolute local path whose
