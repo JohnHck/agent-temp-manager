@@ -60,6 +60,7 @@ absent, stopped or unused.
 | `coverage` | array | One record per collector. |
 | `findings` | array | Findings with their evidence. |
 | `agentResources` | object | Resource totals of the agent processes, each process counted once. |
+| `graph` | object | Dependency graph of the run (P4-A, ADR-0002): a correlation of the findings' evidence, computed in memory and never persisted; it changes no state and authorizes nothing. |
 | `pseudonymization` | object | How the keys of partitions and sessions were pseudonymized. |
 | `inventory` | object | Summary of the V0.1 temporary-directory inventory the run was built on. |
 
@@ -159,6 +160,73 @@ never `0`.
 | `sum` | number or null | Sum of the values read; a lower bound when `complete` is `false`; `null` when none was read. |
 | `known` | number | Processes whose value was read. |
 | `complete` | boolean | Every counted process was read (and, for `cpuPercent`, the CPU was sampled). |
+
+## graph
+
+The dependency graph (P4-A). Nodes are findings by kind and key; an endpoint named by verified evidence without a
+finding (the verified process of a service, the holder of a file, a process referenced by a path) is a node with
+`finding` false; `ATTRIBUTED_TO` points to a provider id (kind `Provider`, ADR-0002 addendum). Every list is sorted
+ordinally. No path, command line, VM name, GUID, account or session id is in it.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `nodes` | array | Nodes. |
+| `edges` | array | Edges, one per relation and pair of nodes (their evidence merged). |
+| `summaries` | array | One per `TempPartition` and `Worktree` finding. |
+| `coverage` | object | The graph's own coverage (not part of `coverage[]` nor of `coverageComplete`). |
+
+## graph.nodes[]
+
+| Field | Type | Meaning |
+|---|---|---|
+| `kind` | string | A finding kind, or `Provider` (target of `ATTRIBUTED_TO`). |
+| `key` | string | The finding key, a process key (`<pid>@<ticks>` or `pid:<pid>`) or a provider id. |
+| `finding` | boolean | `true` when a finding of this kind and key exists. |
+
+## graph.edges[]
+
+| Field | Type | Meaning |
+|---|---|---|
+| `relation` | string | `PARENT_OF` (verified parent link), `HOSTS_SERVICE` (`SERVICE_PROCESS_VERIFIED`), `RUNS_SESSION` (`SESSION_PROCESS_KEY` of a `LIVE` session), `WORKING_DIRECTORY_IN` (no collector in V0.2: D-1 deferred), `HOLDS_HANDLE_IN` (`FILE_HELD_OPEN`; the collector is behind its closed gate), `REFERENCES_PATH` (V0.1 references resolved to verified identities), `WORKTREE_OF` (`IN_REPOSITORY`), `MAPS_PATH` (no source exposes it), `ATTRIBUTED_TO` (the finding's provider; one `AMBIGUOUS` edge per provider of `PROVIDER_ATTRIBUTION_AMBIGUOUS`). |
+| `fromKind` | string | Kind of the source node. |
+| `from` | string | Key of the source node. |
+| `toKind` | string | Kind of the target node. |
+| `to` | string | Key of the target node. |
+| `strength` | string | `DIRECT`, `ANCESTOR` (a reference to a parent path) or `AMBIGUOUS` (unresolved reference, unverified identity, ambiguous attribution); no numeric weight. |
+| `evidence` | array | The evidence codes that created the edge. |
+
+## graph.edges[].evidence[]
+
+| Field | Type | Meaning |
+|---|---|---|
+| `code` | string | `PATH_REFERENCE_DIRECT`, `PATH_REFERENCE_ANCESTOR`, `PATH_REFERENCE_AMBIGUOUS`, `PARENT_LINK_VERIFIED`, `SERVICE_PROCESS_VERIFIED`, `SESSION_PROCESS_KEY`, `FILE_HELD_OPEN`, `FILE_HELD_OPEN_UNVERIFIED`, `WORKING_DIRECTORY_IN`, `IN_REPOSITORY`, `WORKTREE_REGISTERED`, `WORKTREE_MAIN`, `PROVIDER_ATTRIBUTION`, `PROVIDER_ATTRIBUTION_AMBIGUOUS`. |
+| `collector` | string | The collector whose evidence it is. |
+| `detail` | string or null | A process key, or null. |
+
+## graph.summaries[]
+
+| Field | Type | Meaning |
+|---|---|---|
+| `kind` | string | `TempPartition` or `Worktree`. |
+| `key` | string | The finding key. |
+| `dependency` | string | `DEPENDENCY_OBSERVED` (a `DIRECT` edge from a verified process, through any chain of verified links), `ANCESTOR_REFERENCE` (only references to a parent path: not proof that this item is used), `DEPENDENCY_AMBIGUOUS` (only ambiguous evidence), `NONE_OBSERVED` (no edge and every relevant collector conclusive: never in a V0.2 run, since `process-cwd` and `handles` are not observable), `UNKNOWN`. Not a finding state; P4-B decides how states use it. |
+| `strength` | string or null | The strongest edge into the item (a source without a verified identity counts as `AMBIGUOUS`). |
+| `incoming` | integer | Edges into the item (`REFERENCES_PATH`, `HOLDS_HANDLE_IN`, `WORKING_DIRECTORY_IN`). |
+| `roots` | array | Keys of `AGENT_PROCESS` processes reached upward through verified `PARENT_OF` edges from the verified sources. |
+| `incompleteCoverage` | array | Relevant collectors that were not conclusive. |
+| `reasons` | array | `KEY_COLLISION`, `HOLDERS_CAPPED`, `COVERAGE_INCOMPLETE`. |
+
+## graph.coverage
+
+| Field | Type | Meaning |
+|---|---|---|
+| `status` | string | `COMPLETE` or `PARTIAL`. |
+| `reasons` | array | `GRAPH_NODE_LIMIT`, `GRAPH_EDGE_LIMIT`, `GRAPH_DEPTH_LIMIT`, `GRAPH_TIME_LIMIT`, `GRAPH_PROCESS_SNAPSHOT_UNAVAILABLE`, `GRAPH_LEGACY_SNAPSHOT_UNAVAILABLE`, `REFERENCE_IDENTITY_UNVERIFIED`. A limit that is hit keeps the positive edges found and turns every `NONE_OBSERVED` into `UNKNOWN`. |
+| `nodes` | integer | Nodes in the graph. |
+| `edges` | integer | Edges in the graph. |
+| `droppedEdges` | integer | Edges not added because of a limit (never silent). |
+| `startedUtc` | string | Start of the graph computation. |
+| `elapsedMs` | integer | Time spent. |
 
 ## pseudonymization
 

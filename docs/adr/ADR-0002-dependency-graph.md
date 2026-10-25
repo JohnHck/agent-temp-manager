@@ -60,3 +60,69 @@ needs the same idea across more node kinds and more evidence sources, without le
   the root agent process.
 * With any contributing collector not complete, a node without edges is `UNKNOWN`, never `NO_DEPENDENCY_OBSERVED`.
 * Performance test: thousands of nodes and processes, bounded time and memory.
+
+## Amendment (P4-A, 2026-10-24)
+
+The decisions above are kept. Implementing them on the evidence that P1 to P3 actually produce raised four structural
+points. Each one is recorded with its alternatives; points 1 and 2 are **proposed** and implemented in P4-A for the
+maintainer's review of the P4-A pull request, and the implementation changes if the maintainer chooses an
+alternative. Points 3 and 4 add nothing to the graph.
+
+1. **`ATTRIBUTED_TO` targets a provider node (kind `Provider`, key = provider id) — proposed.** Rule 2 names the
+   relation but no target kind: a provider is not a finding of ADR-0001.
+   *Alternatives:* (a) no edge, the attribution stays a property of the finding (`provider`) — loses "why" chains
+   for ambiguous attribution, because an ambiguous finding has `provider = null`; (b) a new finding kind `Provider`
+   — a finding needs a state and coverage that a provider id does not have. *Chosen:* a graph-only node kind with
+   `finding = false`. A finding with a provider gives one `DIRECT` edge; an ambiguous attribution
+   (`PROVIDER_ATTRIBUTION_AMBIGUOUS`) gives one `AMBIGUOUS` edge per candidate provider and never a `DIRECT` one
+   (P2-C, D2).
+2. **Endpoints without a finding are nodes (`finding = false`) — proposed.** Rule 1 says nodes are the findings, but
+   verified evidence names endpoints that have no finding: the verified process of a service (`HOSTS_SERVICE`), the
+   holder of a file, a process whose identity could not be verified (`pid:<n>`, always `AMBIGUOUS`).
+   *Alternatives:* (a) drop the edge — loses positive evidence; (b) create findings for them — the graph would
+   change the findings, which P4-A must not do. *Chosen:* such endpoints are graph nodes marked `finding = false`;
+   they carry only their key (a process key or `pid:<n>`, both already exported by the findings).
+3. **`VirtualizationPlatform` (ADR-0001, P2-B amendment) is a node and host context, not a dependency.** It has no
+   relation in rule 2 and no edge is created to or from it; its presence never makes anything depend on a VM.
+4. **VM and worker process — not implemented, proposal only.** `VM_WORKER_VERIFIED` (P2-B) links a VM to its
+   verified `vmwp.exe`, but no relation of rule 2 means "runs the VM" (`HOSTS_SERVICE` is for services). It stays
+   evidence on the VM finding. *Alternatives for a later phase:* a new relation `RUNS_VM` (Process -> VirtualMachine),
+   or reusing `HOSTS_SERVICE` (rejected: a different meaning under the same name). No chain through a VM is possible
+   in P4-A: `vmmem` is never attributed, `CoworkVMService` never proves a VM, and compute-system (HCS) VMs stay
+   unattributed.
+
+Implementation record (P4-A):
+
+* **Layer.** `Get-AtmDependencyGraph` (Engine.Diagnose) runs after every collector, over the findings, the process
+  snapshot, the V0.1 inventory and the coverage records of the same run. It runs no query, opens no file and calls no
+  collector (static test). The result is `graph` in the JSON (`docs/DIAGNOSE-SCHEMA.md`) and a section of the report.
+* **Relations by source.** `PARENT_OF`: verified parent link (ADR-0003) between two process findings, `DIRECT`.
+  `HOSTS_SERVICE`: `SERVICE_PROCESS_VERIFIED` (temporal proof of P2-A), `DIRECT`. `RUNS_SESSION`: a `LIVE`,
+  reconciled session record names its process key (`SESSION_PROCESS_KEY`); stale or conflicting sessions give none.
+  `REFERENCES_PATH`: the V0.1 direct, ancestor and ambiguous references of each temporary partition, resolved in
+  memory to a verified process identity (`DIRECT`, `ANCESTOR`, `AMBIGUOUS`); an identity that cannot be verified
+  gives an `AMBIGUOUS` edge from `pid:<n>` and `REFERENCE_IDENTITY_UNVERIFIED`; the reference text never leaves the
+  function. `HOLDS_HANDLE_IN`: `FILE_HELD_OPEN` (`DIRECT`) or `FILE_HELD_OPEN_UNVERIFIED` (`AMBIGUOUS`); the
+  collector is behind the closed open-file gate, so only fixtures produce it. `WORKING_DIRECTORY_IN`: no collector
+  produces it (D-1 DEFERRED); fixtures only. `WORKTREE_OF`: `IN_REPOSITORY` with `WORKTREE_REGISTERED` or
+  `WORKTREE_MAIN` (`DIRECT`), otherwise `AMBIGUOUS`; worktree findings exist only with the worktree gate open, so
+  only fixtures produce it. `MAPS_PATH`: no source exposes it; never produced. `ATTRIBUTED_TO`: point 1.
+* **Transitivity (rule 3).** A summary per `TempPartition` and `Worktree` collects the incoming `REFERENCES_PATH`,
+  `HOLDS_HANDLE_IN` and `WORKING_DIRECTORY_IN` edges and walks `PARENT_OF` upward from every verified source to its
+  agent roots (`AGENT_PROCESS`), with a visited set and a depth limit. The summary strength is the best source
+  strength; a source without a verified identity is `AMBIGUOUS` whatever the edge says. Nothing is inferred from
+  names, locations, age or probability.
+* **Summary vocabulary (not finding states).** `DEPENDENCY_OBSERVED` (a `DIRECT` source), `ANCESTOR_REFERENCE`,
+  `DEPENDENCY_AMBIGUOUS`, `NONE_OBSERVED` (no source, every relevant collector conclusive and no limit hit),
+  `UNKNOWN` (default; `COVERAGE_INCOMPLETE` or `KEY_COLLISION`). Relevant collectors: `inventory`, `processes`,
+  `process-snapshot`, `handles`, `process-cwd` for partitions; `worktree-discovery`, `process-snapshot`, `handles`,
+  `process-cwd` for worktrees. In a shipped run `handles` and `process-cwd` are `NOT_OBSERVABLE`, so
+  `NONE_OBSERVED` never appears (test). P4-A changes no finding state; promoting partition states is P4-B, and no
+  summary authorizes deleting anything.
+* **Limits.** Nodes 100000, edges 400000, upward depth 256, 30 s. A limit hit is a graph coverage reason
+  (`GRAPH_NODE_LIMIT`, `GRAPH_EDGE_LIMIT`, `GRAPH_DEPTH_LIMIT`, `GRAPH_TIME_LIMIT`), dropped edges are counted, the
+  edges already found are kept and no summary says `NONE_OBSERVED`. Everything is indexed (by kind, by edge target,
+  by PID); no step compares every item with every other.
+* **Privacy.** Only finding keys (pseudonyms and process keys), provider ids, relation, strength and evidence codes
+  leave the function; no path, command line, VM name or GUID, account, token or session id. The graph lives in
+  memory for the run and is not persisted.

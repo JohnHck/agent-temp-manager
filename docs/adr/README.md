@@ -10,7 +10,7 @@ open decisions are listed in [V0.2-PLAN.md](../release/V0.2-PLAN.md#open-decisio
 | Id | Title | Status | Phase |
 |---|---|---|---|
 | [ADR-0001](ADR-0001-evidence-coverage-findings.md) | Evidence, coverage and findings | ACCEPTED (amendments: P2-A-S conclusive coverage without reasons; P2-B `VirtualizationPlatform` kind) | P1 |
-| [ADR-0002](ADR-0002-dependency-graph.md) | Dependency graph and correlation | ACCEPTED | P4 |
+| [ADR-0002](ADR-0002-dependency-graph.md) | Dependency graph and correlation | ACCEPTED (P4-A amendment: `Provider` target of `ATTRIBUTED_TO` and nodes without a finding PROPOSED for the P4-A gate; `VirtualizationPlatform` host context; VM-worker relation proposal only) | P4 |
 | [ADR-0003](ADR-0003-process-identity-resources-elevation.md) | Process identity, resources and elevation state | ACCEPTED | P1 |
 | [ADR-0004](ADR-0004-working-directory-handle-evidence.md) | Working-directory and open-handle evidence | ACCEPTED IN PRINCIPLE (D-1, D-2: prototype first, P1-C); amendments: D-1 DEFERRED, D-2 behind the closed open-file diagnostics gate (P1-C-S) | P1 |
 | [ADR-0005](ADR-0005-services-virtualization.md) | Services and virtualization | ACCEPTED (rule 6 replaced by ADR-0012; P2-A-S: a name not listed is UNKNOWN; P2-B implementation record) | P2 |

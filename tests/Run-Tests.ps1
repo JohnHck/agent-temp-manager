@@ -4495,7 +4495,8 @@ try {
             if ($cur -and $l -match '^\| `([A-Za-z][A-Za-z0-9]*)` \|') { $sections[$cur].Add($Matches[1]) }
         }
         $objects = [ordered]@{ 'Top level' = $j; 'identity' = $j.identity; 'providers[]' = $j.providers[0]; 'coverage[]' = $j.coverage[0]; 'findings[]' = $j.findings[0]; 'findings[].evidence[]' = $j.findings[0].evidence[0]; 'inventory' = $j.inventory
-            'agentResources' = $j.agentResources; 'agentResources.counters' = $j.agentResources.counters; 'agentResources.counters.*' = $j.agentResources.counters.cpuTime100ns; 'pseudonymization' = $j.pseudonymization }
+            'agentResources' = $j.agentResources; 'agentResources.counters' = $j.agentResources.counters; 'agentResources.counters.*' = $j.agentResources.counters.cpuTime100ns; 'pseudonymization' = $j.pseudonymization
+            'graph' = $j.graph; 'graph.nodes[]' = $j.graph.nodes[0]; 'graph.summaries[]' = $j.graph.summaries[0]; 'graph.coverage' = $j.graph.coverage }
         foreach ($k in $objects.Keys) {
             Assert-True $sections.ContainsKey($k) "secao '$k' no documento do schema"
             Assert-Eq (@($objects[$k].PSObject.Properties.Name | Sort-Object) -join ',') (@($sections[$k] | Sort-Object) -join ',') "campos de '$k'"
@@ -4506,7 +4507,7 @@ try {
             Assert-True ($ms.Count -ge 1) "$name presente"
             foreach ($m in $ms) { Assert-True ($m.Groups[1].Value -match '^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+Z$') "$name ISO UTC: $($m.Groups[1].Value)" }
         }
-        Assert-Eq ([regex]::Matches($en, '"reasons":\s*\[').Count) (@($j.coverage).Count + 1) 'reasons sempre array (inclusive vazio): coverage[] e agentResources'
+        Assert-Eq ([regex]::Matches($en, '"reasons":\s*\[').Count) (@($j.coverage).Count + 1 + 1 + @($j.graph.summaries).Count) 'reasons sempre array (inclusive vazio): coverage[], agentResources, graph.coverage e graph.summaries[]'
         Assert-Eq ([regex]::Matches($en, '"capabilities":\s*\[').Count) @($j.providers).Count 'capabilities sempre array'
         $d0 = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -DeadlineSeconds 0
         $j0 = (ConvertTo-AtmDiagnoseJson -Result $d0) | ConvertFrom-Json
@@ -6460,6 +6461,170 @@ try {
         Assert-True ($f.State -cne 'NOT_PRESENT' -and $f.RequestedState -cne 'NOT_PRESENT') 'nunca NOT_PRESENT'
         if (@($f.Evidence | Where-Object { $_.Code -ceq 'SERVICE_STATE' }).Count -eq 0) { $script:caseSkipped = $true; $script:caseNote = "Claude Desktop nao instalado no runner: CoworkVMService $($f.State) ($($q.Coverage.Status)); instalacao real NAO_TESTADA"; return }
         $script:caseNote = "CoworkVMService $($f.State)"
+    }
+    # ------------------------------------------------------------------ P4-A (dependency graph, ADR-0002)
+    # Synthetic findings and process rows only; no gate is opened and no collector runs inside the graph.
+    $gRows = { param([object[]]$R) $rr = @($R); Get-AtmProcessCollection -Source ({ $rr }.GetNewClosure()) }
+    $gCov = New-AtmCoverage -Collector 'inventory' -Status 'COMPLETE'
+    $gF = { param([string]$Kind, [string]$Key, [string]$State, $Ev = @(), $Prov = $null) New-AtmFinding -Kind $Kind -Key $Key -State $State -Evidence @($Ev) -Coverage @($gCov) -Provider $Prov }
+    $gE = { param([string]$Code, $Detail = $null, [string]$Collector = 'diagnose') New-AtmEvidence -Code $Code -Source 'diagnose' -Collector $Collector -Detail $Detail }
+    $gEdges = { param($G) return , @($G.Edges | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Relation, $_.From, $_.To, $_.Strength }) }
+    $gSum = { param($G, [string]$Key) @($G.Summaries | Where-Object { $_.Key -ceq $Key })[0] }
+    $gCovAll = @(@('inventory', 'processes', 'process-snapshot', 'handles', 'process-cwd', 'worktree-discovery') | ForEach-Object { New-AtmCoverage -Collector $_ -Status 'COMPLETE' })
+    $gKf = { param($Provider, $Path) 'claude-code/p-' + ([string]$Path).Substring(([string]$Path).LastIndexOf('\') + 1) }
+    $gPart = { param([string]$Leaf, [string[]]$Direct = @(), [string[]]$Ancestor = @(), [string[]]$Ambiguous = @()) [pscustomobject]@{ Provider = 'claude-code'; Path = "D:\t\$Leaf"; Kind = 'SessionRoot'; DirectRefs = @($Direct); AncestorRefs = @($Ancestor); AmbiguousRefs = @($Ambiguous) } }
+    $gLegacy = { param([object[]]$Rows) [pscustomobject]@{ Failed = $false; Processes = @($Rows | ForEach-Object { [pscustomobject]@{ Pid = $_.ProcessId; Name = $_.Name; ParentPid = $_.ParentProcessId; CommandLine = 'x'; CreationUtc = $_.CreationDate } }) } }
+    $gK = { param([long]$P, $C) ConvertTo-AtmProcessKey -ProcessId $P -CreationUtc $C }
+    $gBase = @((& $b4Row 4 0 'System' $b4T0.AddHours(-1)), (& $b4Row 100 4 'claude.exe' $b4T0), (& $b4Row 101 100 'bash.exe' $b4T0.AddMinutes(1)), (& $b4Row 102 101 'node.exe' $b4T0.AddMinutes(2)))
+    $gProcF = @((& $gF 'Process' (& $gK 100 $b4T0) 'AGENT_PROCESS' @() 'claude-code'), (& $gF 'Process' (& $gK 101 $b4T0.AddMinutes(1)) 'AGENT_DESCENDANT'), (& $gF 'Process' (& $gK 102 $b4T0.AddMinutes(2)) 'AGENT_DESCENDANT'))
+    Test-Case 'Grafo' 'P4-A: processos - pai e filho verificados, PID reutilizado, identidade inconclusiva, SELF excluido, ciclo protegido' {
+        $rows = @($gBase) + @((& $b4Row 300 100 'late.exe' $b4T0.AddMinutes(-30)), (& $b4Row 400 100 'atm.exe' $b4T0.AddMinutes(3)), (& $b4Row 500 501 'a.exe' $b4T0.AddMinutes(5)), (& $b4Row 501 500 'b.exe' $b4T0.AddMinutes(5)), (& $b4Row 600 100 'nodate.exe' $null))
+        $c = & $gRows $rows
+        $f = @($gProcF) + @((& $gF 'Process' (& $gK 300 $b4T0.AddMinutes(-30)) 'AGENT_DESCENDANT'), (& $gF 'Process' (& $gK 400 $b4T0.AddMinutes(3)) 'SELF' @() 'claude-code'), (& $gF 'Process' (& $gK 500 $b4T0.AddMinutes(5)) 'AGENT_DESCENDANT'), (& $gF 'Process' (& $gK 501 $b4T0.AddMinutes(5)) 'AGENT_DESCENDANT'), (& $gF 'TempPartition' 'claude-code/p-cyc' 'RUNTIME_NOT_DIAGNOSED'), (& $gF 'TempPartition' 'claude-code/p-nd' 'RUNTIME_NOT_DIAGNOSED'))
+        $parts = @((& $gPart 'cyc' @('PID 500 (a.exe)')), (& $gPart 'nd' @('PID 600 (nodate.exe)')))
+        $g = Get-AtmDependencyGraph -Findings $f -Collection $c -LegacySnapshot (& $gLegacy $rows) -Partitions $parts -PartitionKeyFunction $gKf -Coverage @($gCov)
+        $e = & $gEdges $g
+        Assert-True ($e -contains ('PARENT_OF|' + (& $gK 100 $b4T0) + '|' + (& $gK 101 $b4T0.AddMinutes(1)) + '|DIRECT') -and $e -contains ('PARENT_OF|' + (& $gK 101 $b4T0.AddMinutes(1)) + '|' + (& $gK 102 $b4T0.AddMinutes(2)) + '|DIRECT')) 'pai e filho verificados: PARENT_OF DIRECT'
+        Assert-True (@($e | Where-Object { $_ -like ('PARENT_OF|*|' + (& $gK 300 $b4T0.AddMinutes(-30)) + '|*') }).Count -eq 0) 'pai criado depois do filho (PID reutilizado): nenhuma aresta'
+        Assert-True (@($e | Where-Object { $_.Contains((& $gK 400 $b4T0.AddMinutes(3))) }).Count -eq 0) 'SELF: nenhuma aresta (nem atribuicao)'
+        Assert-True ((& $gSum $g 'claude-code/p-nd').Dependency -ceq 'DEPENDENCY_AMBIGUOUS' -and $e -contains 'REFERENCES_PATH|pid:600|claude-code/p-nd|AMBIGUOUS' -and @($g.Coverage.Reasons) -ccontains 'REFERENCE_IDENTITY_UNVERIFIED') 'identidade inconclusiva: so aresta AMBIGUOUS de pid:N, nunca DIRECT'
+        Assert-True ((& $gSum $g 'claude-code/p-cyc').Dependency -ceq 'DEPENDENCY_OBSERVED' -and @($e | Where-Object { $_ -like 'PARENT_OF|500@*|501@*' -or $_ -like 'PARENT_OF|501@*|500@*' }).Count -eq 2) 'ciclo de vinculos verificados: percorrido com protecao, termina'
+        Assert-True ($e -contains ('ATTRIBUTED_TO|' + (& $gK 100 $b4T0) + '|claude-code|DIRECT')) 'atribuicao do processo ao provider'
+    }
+    Test-Case 'Grafo' 'P4-A: caminhos e transitividade - referencia direta, ancestral, ambigua, caminhos convergentes, colisao de chave, cobertura incompleta e conclusiva' {
+        $c = & $gRows $gBase
+        $f = @($gProcF) + @(@('a', 'b', 'c', 'd') | ForEach-Object { & $gF 'TempPartition' "claude-code/p-$_" 'RUNTIME_NOT_DIAGNOSED' }) + @((& $gF 'TempPartition' 'claude-code/p-e' 'UNKNOWN' @((& $gE 'PARTITION_KEY_COLLISION' '2' 'inventory'))))
+        $parts = @((& $gPart 'a' @('PID 102 (node.exe)', 'PID 101 (bash.exe)')), (& $gPart 'b' @() @('PID 102 (node.exe) -> base')), (& $gPart 'c' @() @() @('PID 102 (node.exe) -> unresolved path under the base')), (& $gPart 'd'), (& $gPart 'e' @('PID 102 (node.exe)')))
+        $g = Get-AtmDependencyGraph -Findings $f -Collection $c -LegacySnapshot (& $gLegacy $gBase) -Partitions $parts -PartitionKeyFunction $gKf -Coverage @($gCov)
+        $a = & $gSum $g 'claude-code/p-a'
+        Assert-True ($a.Dependency -ceq 'DEPENDENCY_OBSERVED' -and $a.Strength -ceq 'DIRECT' -and $a.Incoming -eq 2 -and (@($a.Roots) -join ',') -ceq (& $gK 100 $b4T0)) 'referencia direta de um descendente verificado: dependencia observada, raiz do agente pela cadeia; dois caminhos convergentes, uma raiz'
+        Assert-True ((& $gSum $g 'claude-code/p-b').Dependency -ceq 'ANCESTOR_REFERENCE' -and (& $gSum $g 'claude-code/p-b').Strength -ceq 'ANCESTOR') 'referencia ancestral: nunca prova uso deste item'
+        Assert-True ((& $gSum $g 'claude-code/p-c').Dependency -ceq 'DEPENDENCY_AMBIGUOUS') 'referencia ambigua (texto localizado): AMBIGUOUS'
+        Assert-True ((& $gSum $g 'claude-code/p-d').Dependency -ceq 'UNKNOWN' -and @((& $gSum $g 'claude-code/p-d').Reasons) -ccontains 'COVERAGE_INCOMPLETE' -and @((& $gSum $g 'claude-code/p-d').IncompleteCoverage) -ccontains 'process-cwd') 'sem aresta e cobertura incompleta: UNKNOWN, nunca ausencia'
+        Assert-True ((& $gSum $g 'claude-code/p-e').Dependency -ceq 'UNKNOWN' -and @((& $gSum $g 'claude-code/p-e').Reasons) -ccontains 'KEY_COLLISION' -and $null -eq (& $gSum $g 'claude-code/p-e').Strength) 'colisao de chave: nenhuma dependencia concluida'
+        $full = Get-AtmDependencyGraph -Findings $f -Collection $c -LegacySnapshot (& $gLegacy $gBase) -Partitions $parts -PartitionKeyFunction $gKf -Coverage $gCovAll
+        Assert-True ((& $gSum $full 'claude-code/p-d').Dependency -ceq 'NONE_OBSERVED' -and (& $gSum $full 'claude-code/p-a').Dependency -ceq 'DEPENDENCY_OBSERVED') 'cobertura conclusiva em fixture: so entao NONE_OBSERVED; evidencia positiva mantida com cobertura parcial ou completa'
+        $pt = Get-AtmDependencyGraph -Findings $f -Collection $c -LegacySnapshot (& $gLegacy $gBase) -Partitions @((& $gPart 'c' @() @() @('PID 102 (node.exe) -> caminho nao resolvido sob a base'))) -PartitionKeyFunction $gKf -Coverage @($gCov)
+        Assert-Eq (& $gSum $pt 'claude-code/p-c').Dependency 'DEPENDENCY_AMBIGUOUS' 'referencia ambigua em pt-BR: mesma leitura (so o PID e lido)'
+        Assert-True (-not ((ConvertTo-Json -InputObject (ConvertTo-AtmGraphJson -Graph $g) -Depth 8) -match 'node\.exe|bash\.exe|unresolved|D:\\\\t')) 'nenhum texto de referencia, imagem ou caminho no grafo'
+    }
+    Test-Case 'Grafo' 'P4-A: servicos, sessoes, arquivos abertos e diretorios de trabalho (so fixtures), worktrees e preflight recusado; coletores bloqueados nao produzem arestas' {
+        $c = & $gRows $gBase
+        $pk = & $gK 100 $b4T0
+        $f = @($gProcF) + @(
+            (& $gF 'Service' 'AgentSvc' 'RUNNING' @((& $gE 'SERVICE_PROCESS_VERIFIED' '7000@639000000000000000' 'process-snapshot')) 'fake'),
+            (& $gF 'Service' 'OtherSvc' 'RUNNING' @((& $gE 'SERVICE_PROCESS_UNVERIFIED' 'CREATED_AFTER_QUERY' 'process-snapshot'))),
+            (& $gF 'AgentSession' 'claude-code/s-live' 'LIVE' @((& $gE 'SESSION_PROCESS_KEY' $pk 'sessions-claude-code')) 'claude-code'),
+            (& $gF 'AgentSession' 'claude-code/s-old' 'PID_REUSED' @((& $gE 'SESSION_PROCESS_KEY' $pk 'sessions-claude-code')) 'claude-code'),
+            (& $gF 'TempPartition' 'claude-code/p-h' 'RUNTIME_NOT_DIAGNOSED' @((& $gE 'FILE_HELD_OPEN' (& $gK 102 $b4T0.AddMinutes(2)) 'handles'))),
+            (& $gF 'TempPartition' 'claude-code/p-u' 'RUNTIME_NOT_DIAGNOSED' @((& $gE 'FILE_HELD_OPEN_UNVERIFIED' 'pid:7' 'handles'))),
+            (& $gF 'TempPartition' 'claude-code/p-cap' 'RUNTIME_NOT_DIAGNOSED' @((& $gE 'FILE_HELD_OPEN_UNVERIFIED' 'HOLDERS_CAPPED' 'handles'))),
+            (& $gF 'TempPartition' 'claude-code/p-w' 'RUNTIME_NOT_DIAGNOSED' @((& $gE 'WORKING_DIRECTORY_IN' (& $gK 101 $b4T0.AddMinutes(1)) 'process-cwd'))),
+            (& $gF 'Worktree' 'git/w-1' 'UNKNOWN' @((& $gE 'WORKTREE_REGISTERED' $null 'worktree-discovery'), (& $gE 'IN_REPOSITORY' 'git/r-1' 'worktree-discovery'))),
+            (& $gF 'Worktree' 'git/w-2' 'UNKNOWN' @((& $gE 'IN_REPOSITORY' 'git/r-1' 'worktree-discovery'))),
+            (& $gF 'Repository' 'git/r-1' 'UNKNOWN'),
+            (& $gF 'Repository' 'git/t-1' 'UNKNOWN' @((& $gE 'REPOSITORY_PREFLIGHT_REFUSED' 'CONFIG_INCLUDE' 'worktree-discovery'))))
+        $g = Get-AtmDependencyGraph -Findings $f -Collection $c -Coverage @($gCov)
+        $e = & $gEdges $g
+        Assert-True ($e -contains 'HOSTS_SERVICE|7000@639000000000000000|AgentSvc|DIRECT' -and @($g.Nodes | Where-Object { $_.Key -ceq '7000@639000000000000000' -and -not $_.Finding }).Count -eq 1) 'servico com processo verificado: HOSTS_SERVICE (processo observado, sem achado proprio)'
+        Assert-True (@($e | Where-Object { $_ -like 'HOSTS_SERVICE|*|OtherSvc|*' }).Count -eq 0) 'vinculo nao verificado: nenhuma aresta'
+        Assert-True ($e -contains ('RUNS_SESSION|' + $pk + '|claude-code/s-live|DIRECT') -and @($e | Where-Object { $_ -like 'RUNS_SESSION|*|claude-code/s-old|*' }).Count -eq 0) 'sessao viva: RUNS_SESSION; sessao antiga ou PID reutilizado: nenhuma'
+        Assert-True ((& $gSum $g 'claude-code/p-h').Dependency -ceq 'DEPENDENCY_OBSERVED' -and $e -contains ('HOLDS_HANDLE_IN|' + (& $gK 102 $b4T0.AddMinutes(2)) + '|claude-code/p-h|DIRECT')) 'arquivo aberto (fixture): HOLDS_HANDLE_IN e dependencia observada'
+        Assert-True ((& $gSum $g 'claude-code/p-u').Dependency -ceq 'DEPENDENCY_AMBIGUOUS' -and (& $gSum $g 'claude-code/p-cap').Dependency -ceq 'DEPENDENCY_AMBIGUOUS' -and @((& $gSum $g 'claude-code/p-cap').Reasons) -ccontains 'HOLDERS_CAPPED') 'detentor nao verificado ou acima do limite: AMBIGUOUS, nunca livre'
+        Assert-True ($e -contains ('WORKING_DIRECTORY_IN|' + (& $gK 101 $b4T0.AddMinutes(1)) + '|claude-code/p-w|DIRECT') -and @((& $gSum $g 'claude-code/p-w').Roots) -ccontains $pk) 'diretorio de trabalho (so fixture): aresta e raiz do agente'
+        Assert-True ($e -contains 'WORKTREE_OF|git/w-1|git/r-1|DIRECT' -and $e -contains 'WORKTREE_OF|git/w-2|git/r-1|AMBIGUOUS' -and @($e | Where-Object { $_.Contains('git/t-1') }).Count -eq 0) 'worktree registrada: DIRECT; sem registro: AMBIGUOUS; repositorio recusado: nenhuma aresta'
+        Assert-True ($script:AtmHandleDiagnosticsEnabled -eq $false -and $script:AtmWorktreeDiagnosticsEnabled -eq $false) 'travas seguem fechadas'
+        $rt = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection (& $gRows $gBase) -ProviderHints @((& $b4Hints 'claude-code' @([pscustomobject]@{ ImageName = 'claude.exe'; CommandLineMarker = $null }))) -SessionRegistries @([pscustomobject]@{ ProviderId = 'claude-code'; Registry = [pscustomobject]@{ Readable = $true; Unparseable = 0; Entries = @([pscustomobject]@{ SessionId = 's1'; Pid = 100; StartUtc = $b4T0 }) }; Error = $null })
+        $ses = @($rt.Findings | Where-Object { $_.Kind -ceq 'AgentSession' })[0]
+        Assert-True ($ses.State -ceq 'LIVE' -and @($ses.Evidence | Where-Object { $_.Code -ceq 'SESSION_PROCESS_KEY' -and $_.Detail -ceq $pk }).Count -eq 1) 'sessao viva produz SESSION_PROCESS_KEY com a chave do processo'
+    }
+    Test-Case 'Grafo' 'P4-A: virtualizacao e providers - VM com worker verificado sem aresta inventada, vmmem sem atribuicao, CoworkVMService sem VM, atribuicao ambigua Claude Code/Desktop nunca exclusiva' {
+        $c = & $gRows $gBase
+        $amb = & $gF 'Process' (& $gK 100 $b4T0) 'AGENT_PROCESS' @((& $gE 'PROVIDER_ATTRIBUTION_AMBIGUOUS' 'claude-code,claude-desktop' 'agent-processes'))
+        $f = @($amb, (& $gF 'Process' (& $gK 101 $b4T0.AddMinutes(1)) 'AGENT_DESCENDANT'), (& $gF 'Process' (& $gK 102 $b4T0.AddMinutes(2)) 'AGENT_DESCENDANT'),
+            (& $gF 'VirtualMachine' 'vm/v-1' 'RUNNING' @((& $gE 'VM_WORKER_VERIFIED' '7100@639000000000000000' 'virtualization-processes')) 'fake-virt'),
+            (& $gF 'VirtualMachine' 'vm/v-2' 'RUNNING' @((& $gE 'VM_UNATTRIBUTED' $null 'virtual-machines'))),
+            (& $gF 'VirtualizationPlatform' 'host' 'PRESENT' @((& $gE 'VIRTUALIZATION_WORKER' 'VMMEM|7200@639000000000000000' 'virtualization-processes'))),
+            (& $gF 'Service' 'CoworkVMService' 'RUNNING' @((& $gE 'SERVICE_PROCESS_VERIFIED' '7300@639000000000000000' 'process-snapshot')) 'claude-desktop'),
+            (& $gF 'TempPartition' 'claude-code/p-a' 'RUNTIME_NOT_DIAGNOSED'))
+        $g = Get-AtmDependencyGraph -Findings $f -Collection $c -LegacySnapshot (& $gLegacy $gBase) -Partitions @((& $gPart 'a' @('PID 102 (node.exe)'))) -PartitionKeyFunction $gKf -Coverage @($gCov)
+        $e = & $gEdges $g
+        Assert-True (@($e | Where-Object { $_.Contains('7100@') }).Count -eq 0 -and $e -contains 'ATTRIBUTED_TO|vm/v-1|fake-virt|DIRECT') 'VM com worker verificado: nenhuma relacao VM-worker inventada (proposta na ADR-0002); atribuicao da VM mantida'
+        Assert-True (@($e | Where-Object { $_.Contains('7200@') -or $_.Contains('|host|') -or $_.Contains('vm/v-2|') -and $_ -like 'ATTRIBUTED_TO*' }).Count -eq 0) 'vmmem e plataforma: contexto, nunca aresta nem atribuicao'
+        Assert-True ($e -contains 'HOSTS_SERVICE|7300@639000000000000000|CoworkVMService|DIRECT' -and $e -contains 'ATTRIBUTED_TO|CoworkVMService|claude-desktop|DIRECT' -and @($e | Where-Object { $_.Contains('CoworkVMService') -and ($_.Contains('vm/') -or $_.Contains('p-a')) }).Count -eq 0) 'CoworkVMService: servico e provider, nenhuma VM nem particao ligada'
+        Assert-True ($e -contains ('ATTRIBUTED_TO|' + (& $gK 100 $b4T0) + '|claude-code|AMBIGUOUS') -and $e -contains ('ATTRIBUTED_TO|' + (& $gK 100 $b4T0) + '|claude-desktop|AMBIGUOUS') -and @($e | Where-Object { $_ -like ('ATTRIBUTED_TO|' + (& $gK 100 $b4T0) + '|*|DIRECT') }).Count -eq 0) 'atribuicao ambigua: uma aresta AMBIGUOUS por provider, nenhuma exclusiva'
+        $sa = & $gSum $g 'claude-code/p-a'
+        Assert-True ($sa.Dependency -ceq 'DEPENDENCY_OBSERVED' -and @($sa.PSObject.Properties.Name) -notcontains 'Provider') 'dependencia observada pela cadeia de processos; o resumo nunca nomeia um provider'
+    }
+    Test-Case 'Grafo' 'P4-A: limites de nos, arestas, profundidade e tempo declarados (evidencia positiva mantida, nunca NONE_OBSERVED); saida deterministica' {
+        $c = & $gRows $gBase
+        $f = @($gProcF) + @(@('a', 'd') | ForEach-Object { & $gF 'TempPartition' "claude-code/p-$_" 'RUNTIME_NOT_DIAGNOSED' })
+        $parts = @((& $gPart 'a' @('PID 102 (node.exe)')), (& $gPart 'd'))
+        $args0 = @{ Findings = $f; Collection = $c; LegacySnapshot = (& $gLegacy $gBase); Partitions = $parts; PartitionKeyFunction = $gKf; Coverage = $gCovAll }
+        $el = Get-AtmDependencyGraph @args0 -MaxEdges 1
+        Assert-True ($el.Coverage.Status -ceq 'PARTIAL' -and @($el.Coverage.Reasons) -ccontains 'GRAPH_EDGE_LIMIT' -and $el.Coverage.DroppedEdges -gt 0 -and @($el.Edges).Count -eq 1 -and (& $gSum $el 'claude-code/p-d').Dependency -ceq 'UNKNOWN') "limite de arestas: declarado, contado, nada NONE_OBSERVED ($($el.Coverage.DroppedEdges) descartadas)"
+        $nl = Get-AtmDependencyGraph @args0 -MaxNodes 3
+        Assert-True (@($nl.Coverage.Reasons) -ccontains 'GRAPH_NODE_LIMIT' -and (& $gSum $nl 'claude-code/p-d').Dependency -ceq 'UNKNOWN') 'limite de nos: declarado'
+        $dl = Get-AtmDependencyGraph @args0 -MaxDepth 1
+        Assert-True (@($dl.Coverage.Reasons) -ccontains 'GRAPH_DEPTH_LIMIT' -and (& $gSum $dl 'claude-code/p-a').Dependency -ceq 'DEPENDENCY_OBSERVED' -and (& $gSum $dl 'claude-code/p-d').Dependency -ceq 'UNKNOWN') 'limite de profundidade: positiva mantida, ausencia nao concluida'
+        $tl = Get-AtmDependencyGraph @args0 -MaxMs -1
+        Assert-True (@($tl.Coverage.Reasons) -ccontains 'GRAPH_TIME_LIMIT' -and @($tl.Summaries | Where-Object { $_.Dependency -ceq 'NONE_OBSERVED' }).Count -eq 0) 'limite de tempo: declarado'
+        $j1 = ConvertTo-Json -InputObject (ConvertTo-AtmGraphJson -Graph (Get-AtmDependencyGraph @args0)) -Depth 8
+        $args1 = @{} + $args0; $args1.Findings = @($f[($f.Count - 1)..0]); $args1.Partitions = @($parts[($parts.Count - 1)..0])
+        $j2 = ConvertTo-Json -InputObject (ConvertTo-AtmGraphJson -Graph (Get-AtmDependencyGraph @args1)) -Depth 8
+        Assert-Eq ($j2 -replace '"(startedUtc|elapsedMs)":\s*("[^"]*"|\d+)', '') ($j1 -replace '"(startedUtc|elapsedMs)":\s*("[^"]*"|\d+)', '') 'ordem das entradas invertida: grafo identico'
+    }
+    Test-Case 'Grafo' 'P4-A: escala - milhares de processos, particoes e arestas em tempo e memoria limitados (sem O(N^2))' {
+        $rows = New-Object System.Collections.Generic.List[object]; $f = New-Object System.Collections.Generic.List[object]; $parts = New-Object System.Collections.Generic.List[object]
+        $rows.Add((& $b4Row 4 0 'System' $b4T0.AddHours(-1)))
+        for ($i = 0; $i -lt 1000; $i++) {
+            $root = 10000 + $i * 5
+            for ($j = 0; $j -lt 5; $j++) {
+                $pidv = $root + $j; $parent = $(if ($j -eq 0) { 4 } else { $pidv - 1 }); $cr = $b4T0.AddSeconds($i * 10 + $j)
+                $rows.Add((& $b4Row $pidv $parent 'w.exe' $cr))
+                $f.Add((& $gF 'Process' (& $gK $pidv $cr) $(if ($j -eq 0) { 'AGENT_PROCESS' } else { 'AGENT_DESCENDANT' }) @() $(if ($j -eq 0) { 'claude-code' } else { $null })))
+            }
+            for ($q = 0; $q -lt 2; $q++) { $f.Add((& $gF 'TempPartition' ("claude-code/p-$i-$q") 'RUNTIME_NOT_DIAGNOSED')); $parts.Add((& $gPart "$i-$q" @("PID $($root + 4) (w.exe)"))) }
+        }
+        $c = & $gRows $rows.ToArray()
+        [GC]::Collect(); $m0 = [GC]::GetTotalMemory($true)
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $g = Get-AtmDependencyGraph -Findings $f.ToArray() -Collection $c -LegacySnapshot (& $gLegacy $rows.ToArray()) -Partitions $parts.ToArray() -PartitionKeyFunction $gKf -Coverage @($gCov)
+        $sw.Stop(); $m1 = [GC]::GetTotalMemory($false)
+        Assert-True ($g.Coverage.Status -ceq 'COMPLETE' -and $g.Coverage.Edges -eq (4000 + 2000 + 1000) -and @($g.Summaries | Where-Object { $_.Dependency -ceq 'DEPENDENCY_OBSERVED' -and @($_.Roots).Count -eq 1 }).Count -eq 2000) "5000 processos, 2000 particoes: $($g.Coverage.Edges) arestas, todas as particoes com raiz"
+        Assert-True ($sw.ElapsedMilliseconds -lt 120000) "tempo limitado ($($sw.ElapsedMilliseconds) ms)"
+        $script:caseNote = "5000 processos/2000 particoes/$($g.Coverage.Edges) arestas: $($sw.ElapsedMilliseconds) ms, delta de memoria gerenciada ~$([math]::Round(($m1 - $m0) / 1MB, 1)) MB"
+    }
+    Test-Case 'Grafo' 'P4-A: integracao ao diagnose - grafo no resultado, JSON (campos do schema) e relatorio sem caminhos; nenhum estado alterado; nunca NONE_OBSERVED numa execucao V0.2' {
+        $p = New-TestProfile 'p4a-int'
+        $root = New-TestRoot -ProfileInfo $p
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -PseudonymKey $testPseudonymKey -ServiceSource { param($Names) @() } -VirtualizationSource (& $vSrc (& $vBase @($vHostRow)))
+        Assert-True ($null -ne $d.Graph -and @($d.Graph.Summaries | Where-Object { $_.Kind -ceq 'TempPartition' }).Count -ge 1) 'grafo no resultado, resumo por particao'
+        Assert-True (@($d.Graph.Summaries | Where-Object { $_.Dependency -ceq 'NONE_OBSERVED' }).Count -eq 0 -and @($d.Graph.Summaries | Where-Object { @($_.IncompleteCoverage) -contains 'process-cwd' -and @($_.IncompleteCoverage) -contains 'handles' }).Count -eq @($d.Graph.Summaries).Count) 'diretorios de trabalho e arquivos abertos nao observaveis: nunca NONE_OBSERVED'
+        Assert-True (@($d.Findings | Where-Object { $_.Kind -ceq 'TempPartition' -and $_.State -cne 'RUNTIME_NOT_DIAGNOSED' -and $_.State -cne 'UNKNOWN' }).Count -eq 0) 'nenhum estado de particao alterado (P4-B)'
+        $json = ConvertTo-AtmDiagnoseJson -Result $d
+        $txt = (Show-AtmDiagnose -Result $d 6>&1 | ForEach-Object { [string]$_ }) -join "`n"
+        foreach ($x in @($root, $root.Replace('\', '\\'), $p.ProfilePath.Replace('\', '\\'))) { Assert-True (-not $json.Contains($x) -and -not $txt.Contains($x)) 'JSON e relatorio sem caminhos' }
+        Assert-True ($txt.Contains((Get-AtmText 'diag.graphTitle')) -and $txt.Contains((Get-AtmText 'diag.graphNoDelete'))) 'relatorio: secao do grafo'
+        # The edge fields equal the schema document (a synthetic graph with an edge).
+        $doc = [IO.File]::ReadAllLines((Join-Path (Split-Path -Parent $testsDir) 'docs\DIAGNOSE-SCHEMA.md'))
+        $sec = @{}; $cur = $null
+        foreach ($l in $doc) { if ($l -match '^## (.+)$') { $cur = $Matches[1].Trim(); $sec[$cur] = New-Object System.Collections.Generic.List[string]; continue }; if ($cur -and $l -match '^\| `([A-Za-z][A-Za-z0-9]*)` \|') { $sec[$cur].Add($Matches[1]) } }
+        $sg = Get-AtmDependencyGraph -Findings @($gProcF) -Collection (& $gRows $gBase)
+        $sj = (ConvertTo-Json -InputObject (ConvertTo-AtmGraphJson -Graph $sg) -Depth 8) | ConvertFrom-Json
+        Assert-Eq (@($sj.edges[0].PSObject.Properties.Name | Sort-Object) -join ',') (@($sec['graph.edges[]'] | Sort-Object) -join ',') 'campos de graph.edges[]'
+        Assert-Eq (@($sj.edges[0].evidence[0].PSObject.Properties.Name | Sort-Object) -join ',') (@($sec['graph.edges[].evidence[]'] | Sort-Object) -join ',') 'campos de graph.edges[].evidence[]'
+    }
+    Test-Case 'Grafo' 'P4-A (estatico): o grafo nao chama coletor nem le nada; textos nos dois idiomas; travas fechadas' {
+        $diag = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Diagnose.ps1'))
+        $fn = $diag.Substring($diag.IndexOf('function Get-AtmDependencyGraph'), $diag.IndexOf('# Open-file evidence (D-2') - $diag.IndexOf('function Get-AtmDependencyGraph'))
+        foreach ($pat in @('Get-CimInstance', 'Invoke-AtmServiceQuery', 'Invoke-AtmVirtualizationQuery', 'Get-AtmProcessCollection', 'Get-AtmWorktreeDiscovery', 'Get-AtmHandleEvidence', 'Get-AtmHandleSampleFiles', 'Invoke-AtmGitCommand', 'Resolve-AtmGitExecutable', 'AtmRestartManager', '[IO.', 'Get-ChildItem', 'Get-Item', 'Invoke-AtmInventory')) { Assert-True (-not $fn.Contains($pat)) "grafo sem '$pat'" }
+        foreach ($l in @('en-US', 'pt-BR')) {
+            foreach ($x in $script:AtmGraphReasonCodes) { Assert-True $script:AtmMessages[$l].ContainsKey("reason.$x") "reason.$x ($l)" }
+            foreach ($x in $script:AtmGraphDependencies) { Assert-True $script:AtmMessages[$l].ContainsKey("graph.dep.$x") "graph.dep.$x ($l)" }
+            Assert-True $script:AtmMessages[$l].ContainsKey('evidence.SESSION_PROCESS_KEY') "evidence.SESSION_PROCESS_KEY ($l)"
+        }
+        Assert-True ($script:AtmRealDeletionEnabled -eq $true -and $shippedDeletionGate -eq $false -and $script:AtmHandleDiagnosticsEnabled -eq $false -and $script:AtmWorktreeDiagnosticsEnabled -eq $false) 'travas distribuidas fechadas (a suite so abre a de exclusao no proprio processo)'
     }
     Test-Case 'I18n' 'P1-C: todo motivo e evidencia de arquivos abertos tem texto nos dois idiomas' {
         foreach ($l in @('en-US', 'pt-BR')) {

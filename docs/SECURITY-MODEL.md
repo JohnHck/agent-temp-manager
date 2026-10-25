@@ -138,6 +138,10 @@ called by `Invoke-AtmGitCommand`):
   `CoworkVMService` name) and reads nothing of the installation: no file, log, registry key, configuration or package
   database. Its service and processes are observed through the read-only collectors; nothing is started, stopped,
   reconfigured or terminated, and no command line, account name, profile path or VM name is exported.
+* **Dependency graph (P4-A, ADR-0002):** a correlation layer over the evidence already collected in the run: no
+  query, file read, process access or collector call of its own (static test). It lives in memory for the run and is
+  not persisted; it exports only keys, provider ids, relations, strengths, codes and coverage. Its summaries are not
+  finding states and authorize nothing: no deletion, termination or state change follows from them.
 * **Open-file diagnostics gate (P1-C-S):** the Restart Manager collector (`handles`, D-2) is behind
   `$script:AtmHandleDiagnosticsEnabled`, `$false` in every shipped copy (single assignment; no option, environment
   variable or configuration file; checked by the test suite and the install e2e). It is checked by the diagnose and
