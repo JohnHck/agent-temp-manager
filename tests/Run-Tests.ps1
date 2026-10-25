@@ -187,6 +187,36 @@ function Invoke-AtmTestChild {
     } finally { $p.Dispose() }
 }
 
+# Test-only FSCTL helper (FINAL-A M-1, FINAL-B F-10): turns an existing empty folder into a junction through another
+# handle opened with FILE_WRITE_ATTRIBUTES. Used on sandbox fixtures only.
+function Initialize-AtmTestReparse {
+    if (-not ('AtmTestReparse' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices; using Microsoft.Win32.SafeHandles; using System.Text;
+public static class AtmTestReparse {
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  static extern SafeFileHandle CreateFileW(string n, uint a, uint s, IntPtr sa, uint c, uint f, IntPtr t);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  static extern bool DeviceIoControl(SafeFileHandle h, uint code, byte[] inb, int inl, IntPtr outb, int outl, out int ret, IntPtr ov);
+  // Test-only: sets a mount-point (junction) reparse point on an existing empty folder, opened with FILE_WRITE_ATTRIBUTES.
+  public static string SetJunction(string dir, string target) {
+using (SafeFileHandle h = CreateFileW(dir, 0x100, 7, IntPtr.Zero, 3, 0x02000000 | 0x00200000, IntPtr.Zero)) {
+  if (h.IsInvalid) return "OPEN_FAIL " + Marshal.GetLastWin32Error();
+  byte[] s = Encoding.Unicode.GetBytes("\\??\\" + target); byte[] p = Encoding.Unicode.GetBytes(target);
+  int dataLen = 8 + s.Length + 2 + p.Length + 2; byte[] b = new byte[8 + dataLen];
+  BitConverter.GetBytes(0xA0000003u).CopyTo(b, 0); BitConverter.GetBytes((ushort)dataLen).CopyTo(b, 4);
+  BitConverter.GetBytes((ushort)0).CopyTo(b, 8); BitConverter.GetBytes((ushort)s.Length).CopyTo(b, 10);
+  BitConverter.GetBytes((ushort)(s.Length + 2)).CopyTo(b, 12); BitConverter.GetBytes((ushort)p.Length).CopyTo(b, 14);
+  s.CopyTo(b, 16); p.CopyTo(b, 16 + s.Length + 2);
+  int r; bool ok = DeviceIoControl(h, 0x000900A4, b, b.Length, IntPtr.Zero, 0, out r, IntPtr.Zero);
+  return ok ? "SET_OK" : "SET_FAIL " + Marshal.GetLastWin32Error();
+}
+  }
+}
+'@
+    }
+}
+
 $script:profileCounter = 0
 function New-TestProfile {
     param([string]$Name, [string]$Sid = $testOwnerSid, [switch]$NoConfig)
@@ -1119,6 +1149,60 @@ try {
         foreach ($pat in @('Write-Host', 'Read-Host', 'Remove-Item', '-Force')) { Assert-True (-not $clean.Contains($pat)) "Engine.Clean contem '$pat'" }
         Assert-Eq ([regex]::Matches($clean, 'AtmDeleter\]::DeleteTree').Count) 1 'um unico ponto de exclusao, apos revalidacao'
     }
+    Test-Case 'Gate V0.1' 'FINAL-B F-10: motor de exclusao contra arvore descartavel do harness - pasta vazia pinada convertida em juncao dentro da janela (FSCTL) recusada, alvo sentinela intacto; juncao presente antes do inicio, ancestral juncao e renomeacao de pasta pinada recusados sem nada apagado fora da arvore; trava distribuida fechada' {
+        # Native engine only (AtmDeleter), on a tree the harness creates; every junction points to a sentinel folder INSIDE
+        # the sandbox, so even a defect could only touch sandbox content. The distributed gate is never opened here.
+        # The harness opens the gate in memory for its sandbox (top of this file); the distributed copy keeps it closed.
+        $gateSrc = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Clean.ps1'))
+        $gateClosed = { [regex]::Matches($gateSrc, '\$script:AtmRealDeletionEnabled\s*=').Count -eq 1 -and $gateSrc -match '(?m)^\$script:AtmRealDeletionEnabled = \$false\r?$' }
+        Assert-True (& $gateClosed) 'trava distribuida fechada (atribuicao unica $false em Engine.Clean.ps1)'
+        Initialize-AtmTestReparse
+        $f10 = [AgentTempManager.AtmNative]::GetLongPath((New-Item -ItemType Directory -Path (Join-Path $sandbox 'f10')).FullName)
+        $sent = Join-Path $f10 'sentinel'
+        foreach ($d in @($sent, (Join-Path $sent 'deep'))) { [void][IO.Directory]::CreateDirectory($d) }
+        [IO.File]::WriteAllText((Join-Path $sent 'keep.txt'), 'keep'); [IO.File]::WriteAllText((Join-Path $sent 'deep\deep.txt'), 'deep')
+        $snap = { @(Get-ChildItem -LiteralPath $sent -Recurse -Force | ForEach-Object { $_.FullName.Substring($sent.Length) + '|' + $(if ($_.PSIsContainer) { 'd' } else { [IO.File]::ReadAllText($_.FullName) }) } | Sort-Object) -join ';' }
+        $before = & $snap
+        $newTree = { param([string]$Name) $t = Join-Path $f10 $Name; foreach ($d in @($t, (Join-Path $t 'empty'), (Join-Path $t 'sub'))) { [void][IO.Directory]::CreateDirectory($d) }; [IO.File]::WriteAllText((Join-Path $t 'top.txt'), 't'); [IO.File]::WriteAllText((Join-Path $t 'sub\file.txt'), 'f'); $t }
+        # 1. Inside the window: everything pinned and planned, then another handle turns the empty pinned folder into a
+        #    junction (share modes do not stop it: M-1). The bottom-up re-check must refuse it; the target is never traversed.
+        $t1 = & $newTree 'tree1'
+        $st = @{ Set = $null }
+        $hook = [Action[string]]({ param($root) $st.Set = [AtmTestReparse]::SetJunction((Join-Path $root 'empty'), $sent) }.GetNewClosure())
+        $r1 = [AgentTempManager.AtmDeleter]::DeleteTree($t1, $hook)
+        Assert-Eq $st.Set 'SET_OK' 'juncao gravada na pasta pinada por outro handle (limite documentado)'
+        Assert-True (-not $r1.Completed -and [string]$r1.AbortReason -like 'PINNED_DIR_CHANGED*') "exclusao recusada na reverificacao ($($r1.AbortReason))"
+        Assert-Eq (& $snap) $before 'alvo sentinela intacto (nada apagado nem atravessado)'
+        $lnk = Join-Path $t1 'empty'
+        if ((Test-Path -LiteralPath $lnk) -and (([IO.File]::GetAttributes($lnk) -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { [IO.Directory]::Delete($lnk, $false) }
+        # 2. A junction already in the tree when the deletion starts: refused while planning, nothing deleted.
+        $t2 = & $newTree 'tree2'
+        [IO.Directory]::Delete((Join-Path $t2 'empty'), $false)
+        $o = & cmd.exe /c "mklink /J `"$(Join-Path $t2 'empty')`" `"$sent`"" 2>&1; Assert-Eq $LASTEXITCODE 0 "juncao de fixture criada ($o)"
+        $r2 = [AgentTempManager.AtmDeleter]::DeleteTree($t2)
+        Assert-True (-not $r2.Attempted -and $r2.FilesDeleted -eq 0 -and [string]$r2.AbortReason -like 'REPARSE_POINT_FOUND*') "juncao antes do inicio: recusada sem apagar ($($r2.AbortReason))"
+        Assert-True ((Test-Path -LiteralPath (Join-Path $t2 'top.txt')) -and (& $snap) -eq $before) 'arvore e sentinela intactas'
+        [IO.Directory]::Delete((Join-Path $t2 'empty'), $false)
+        # 3. An ancestor that is a junction: refused before anything is pinned.
+        $t3 = & $newTree 'tree3'
+        $via = Join-Path $f10 'via'
+        $o = & cmd.exe /c "mklink /J `"$via`" `"$t3`"" 2>&1; Assert-Eq $LASTEXITCODE 0 "juncao ancestral de fixture criada ($o)"
+        $r3 = [AgentTempManager.AtmDeleter]::DeleteTree((Join-Path $via 'sub'))
+        Assert-True (-not $r3.Attempted -and [string]$r3.AbortReason -like 'ANCESTOR_REPARSE_POINT*') "ancestral juncao: recusado ($($r3.AbortReason))"
+        Assert-True (Test-Path -LiteralPath (Join-Path $t3 'sub\file.txt')) 'nada apagado pelo caminho com juncao'
+        [IO.Directory]::Delete($via, $false)
+        # 4. A pinned folder cannot be renamed during the window (its identity cannot change under the engine).
+        $t4 = & $newTree 'tree4'
+        $mv = @{ Threw = $false }
+        $hook4 = [Action[string]]({ param($root) try { [IO.Directory]::Move((Join-Path $root 'sub'), (Join-Path $root 'sub-moved')) } catch { $mv.Threw = $true } }.GetNewClosure())
+        $r4 = [AgentTempManager.AtmDeleter]::DeleteTree($t4, $hook4)
+        Assert-True ($mv.Threw -and -not (Test-Path -LiteralPath (Join-Path $t4 'sub-moved'))) 'renomear pasta pinada durante a janela: recusado pelo sistema'
+        Assert-True ($r4.Completed -and -not (Test-Path -LiteralPath $t4)) "arvore descartavel inteira apagada pelo motor depois da tentativa ($($r4.AbortReason))"
+        Assert-Eq (& $snap) $before 'sentinela intacta ao final'
+        $gateSrc = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Clean.ps1'))
+        Assert-True (& $gateClosed) 'trava distribuida fechada ao final'
+        $script:caseNote = "janela: $($r1.AbortReason -replace ':.*$', ''); antes do inicio: $($r2.AbortReason -replace ':.*$', ''); ancestral: $($r3.AbortReason -replace ':.*$', '')"
+    }
     Test-Case 'Privacidade' 'Scanner detecta dados pessoais plantados e aceita apenas os valores ficticios do projeto' {
         $scan = Join-Path (Split-Path -Parent $testsDir) 'tools\Test-AtmPrivacy.ps1'
         $d = Join-Path $sandbox 'privacy-probe'; [void][IO.Directory]::CreateDirectory($d)
@@ -1737,9 +1821,43 @@ function global:Get-FileHash { param([string]$LiteralPath, [string]$Algorithm)
             Assert-True (-not $r.TimedOut -and $r.Text -match 'LOAD\[([^\]]*)\]') "carga passo a passo ($($e[0])): concluida ($($r.Text))"
             $notes.Add(('carga {0} (ms acumulados): {1}' -f $e[0], $Matches[1]))
         }
-        # Inherited variable NAMES (never values) that the minimal environment leaves out.
-        $inh = @([Environment]::GetEnvironmentVariables().Keys | ForEach-Object { [string]$_ } | Where-Object { -not $minimal.ContainsKey($_) -and $_ -ne 'PATH' -and $_ -ne 'Path' } | Sort-Object)
-        $notes.Add('variaveis herdadas fora do ambiente minimo: ' + $(if ($inh.Count) { $inh -join ',' } else { 'nenhuma' }))
+        # Second round (CI showed the whole cost in the first step, the file hashes): the hash step split in parts, and
+        # which inherited variables, added to the minimal environment, make it fast (bisection; names only, never values).
+        $hp = Join-Path $sandbox 'probe-hash.ps1'
+        $hb = @('$t = [Diagnostics.Stopwatch]::StartNew(); $o = New-Object System.Collections.Generic.List[string]; $o.Add(''inicio '' + $t.ElapsedMilliseconds)',
+            '$sha = [Security.Cryptography.SHA256]::Create(); $o.Add(''sha256 '' + $t.ElapsedMilliseconds)',
+            ('$f = [IO.Directory]::GetFiles(''{0}'', ''*'', ''AllDirectories''); $o.Add(''lista '' + $t.ElapsedMilliseconds)' -f $inst.Replace("'", "''")),
+            '$s = [IO.File]::OpenRead($f[0]); try { $null = $sha.ComputeHash($s) } finally { $s.Dispose() }; $o.Add(''primeiro '' + $t.ElapsedMilliseconds)',
+            'foreach ($x in $f) { $s = [IO.File]::OpenRead($x); try { $null = $sha.ComputeHash($s) } finally { $s.Dispose() } }; $o.Add(''todos '' + $t.ElapsedMilliseconds)',
+            '[Console]::Out.Write(''HASH['' + ($o -join '','') + '']'')')
+        [IO.File]::WriteAllLines($hp, $hb, (New-Object Text.UTF8Encoding($true)))
+        $hashRun = {
+            param([hashtable]$Env)
+            $r = Invoke-AtmTestChild -CommandLine ("`"$ps51`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$hp`"") -Environment $Env -TimeoutSec 120
+            if ($r.TimedOut -or $r.Text -notmatch 'HASH\[([^\]]*)\]') { return [pscustomobject]@{ Ms = 999999; Parts = 'sem resultado' } }
+            $parts = $Matches[1]
+            [pscustomobject]@{ Ms = [long](($parts -split ',')[-1] -split ' ')[-1]; Parts = $parts }
+        }
+        $withVars = { param([string[]]$Names) $e = $min2.Clone(); foreach ($n in $Names) { $e[$n] = $inherit[$n] }; $e }
+        $hm = & $hashRun $min2; $hi = & $hashRun $inherit
+        $notes.Add(('hash em partes (ms acumulados) minimo: {0}; herdado: {1}' -f $hm.Parts, $hi.Parts))
+        $slow = 5000
+        if ($hm.Ms -ge $slow -and $hi.Ms -lt $slow) {
+            $cand = @($inherit.Keys | Where-Object { $_ -ne 'PSModulePath' -and (-not $min2.ContainsKey($_) -or [string]$min2[$_] -cne [string]$inherit[$_]) } | Sort-Object)
+            $rounds = 0
+            while ($cand.Count -gt 1 -and $rounds -lt 12) {
+                $rounds++
+                $half = [int][math]::Ceiling($cand.Count / 2)
+                $a = @($cand[0..($half - 1)]); $b = @($cand[$half..($cand.Count - 1)])
+                if ((& $hashRun (& $withVars $a)).Ms -lt $slow) { $cand = $a }
+                elseif ((& $hashRun (& $withVars $b)).Ms -lt $slow) { $cand = $b }
+                else { break }
+            }
+            $notes.Add(('variaveis que tornam o hash rapido (bisseccao, {0} rodadas): {1}' -f $rounds, ($cand -join ',')))
+        } else {
+            $notes.Add('bisseccao nao aplicavel: minimo e herdado ' + $(if ($hm.Ms -ge $slow -and $hi.Ms -ge $slow) { 'ambos lentos' } else { 'rapidos' }))
+        }
+        foreach ($n in @('ALLUSERSPROFILE', 'ProgramData', 'PUBLIC', 'ProgramW6432', 'CommonProgramW6432', 'PROCESSOR_IDENTIFIER', 'LOGONSERVER', 'PSModuleAnalysisCachePath', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA')) { $notes.Add(('{0}: {1}' -f $n, $(if ($inherit.ContainsKey($n) -and $inherit[$n]) { 'presente' } else { 'AUSENTE' }))) }
         $script:caseNote = 'mediana de 3: ' + ($notes -join '; ')
     }
     Test-Case 'Instalacao' 'R-B5 verify: nenhum codigo carregado antes da verificacao; biblioteca removida, adulterada ou que sombreia Get-FileHash e provider plantado nunca executam nem forjam sucesso; manifesto invalido ou ausente recusado' {
@@ -7581,31 +7699,7 @@ try {
         # FINAL-A review (M-1), deterministic, INSIDE the pinned window: share modes do not stop another handle with
         # FILE_WRITE_ATTRIBUTES from turning the pinned (empty) folder into a junction in place (FSCTL_SET_REPARSE_POINT).
         # CreateNew must refuse (the folder is re-checked; the creation never follows a reparse point), nothing in the target.
-        if (-not ('AtmTestReparse' -as [type])) {
-            Add-Type -TypeDefinition @'
-using System; using System.Runtime.InteropServices; using Microsoft.Win32.SafeHandles; using System.Text;
-public static class AtmTestReparse {
-  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
-  static extern SafeFileHandle CreateFileW(string n, uint a, uint s, IntPtr sa, uint c, uint f, IntPtr t);
-  [DllImport("kernel32.dll", SetLastError=true)]
-  static extern bool DeviceIoControl(SafeFileHandle h, uint code, byte[] inb, int inl, IntPtr outb, int outl, out int ret, IntPtr ov);
-  // Test-only: sets a mount-point (junction) reparse point on an existing empty folder, opened with FILE_WRITE_ATTRIBUTES.
-  public static string SetJunction(string dir, string target) {
-    using (SafeFileHandle h = CreateFileW(dir, 0x100, 7, IntPtr.Zero, 3, 0x02000000 | 0x00200000, IntPtr.Zero)) {
-      if (h.IsInvalid) return "OPEN_FAIL " + Marshal.GetLastWin32Error();
-      byte[] s = Encoding.Unicode.GetBytes("\\??\\" + target); byte[] p = Encoding.Unicode.GetBytes(target);
-      int dataLen = 8 + s.Length + 2 + p.Length + 2; byte[] b = new byte[8 + dataLen];
-      BitConverter.GetBytes(0xA0000003u).CopyTo(b, 0); BitConverter.GetBytes((ushort)dataLen).CopyTo(b, 4);
-      BitConverter.GetBytes((ushort)0).CopyTo(b, 8); BitConverter.GetBytes((ushort)s.Length).CopyTo(b, 10);
-      BitConverter.GetBytes((ushort)(s.Length + 2)).CopyTo(b, 12); BitConverter.GetBytes((ushort)p.Length).CopyTo(b, 14);
-      s.CopyTo(b, 16); p.CopyTo(b, 16 + s.Length + 2);
-      int r; bool ok = DeviceIoControl(h, 0x000900A4, b, b.Length, IntPtr.Zero, 0, out r, IntPtr.Zero);
-      return ok ? "SET_OK" : "SET_FAIL " + Marshal.GetLastWin32Error();
-    }
-  }
-}
-'@
-        }
+        Initialize-AtmTestReparse
         $ip = Join-Path $fa 'inplace'; $ipt = Join-Path $fa 'inplace-target'; foreach ($d in @($ip, $ipt)) { [void][IO.Directory]::CreateDirectory($d) }
         $ip = [AgentTempManager.AtmNative]::GetLongPath($ip); $ipt = [AgentTempManager.AtmNative]::GetLongPath($ipt)
         $si = [AgentTempManager.AtmSafeCreate]::Pin($ip)
