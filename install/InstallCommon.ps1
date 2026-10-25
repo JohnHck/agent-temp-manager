@@ -434,6 +434,10 @@ function Install-AtmProduct {
     try { return (Invoke-AtmInstallUnlocked @PSBoundParameters -Version $version) } finally { Exit-AtmOperationLock }
 }
 
+# FINAL-A (F-07): SHA-256 of the source manifest taken when the source was verified (Assert-AtmInstallSource); the staged
+# copy must carry exactly that manifest (Invoke-AtmInstallUnlocked). $null: no manifest (explicit -SourceWithoutManifest).
+$script:AtmVerifiedManifestHash = $null
+
 function Assert-AtmInstallSource {
     # Required files, PowerShell syntax, manifest; returns the source version.
     param([string]$SourceDir, [switch]$SourceWithoutManifest)
@@ -447,7 +451,7 @@ function Assert-AtmInstallSource {
     # FINAL-A (F-07): the manifest's own hash is taken before the source is verified, so the staged copy can be compared
     # with exactly what was verified (a file or manifest swapped between verification and copy is refused).
     $srcManifest = Join-Path $SourceDir 'manifest.json'
-    $srcManifestHash = $(if (Test-Path -LiteralPath $srcManifest -PathType Leaf) { (Get-FileHash -LiteralPath $srcManifest -Algorithm SHA256).Hash } else { $null })
+    $script:AtmVerifiedManifestHash = $(if (Test-Path -LiteralPath $srcManifest -PathType Leaf) { (Get-FileHash -LiteralPath $srcManifest -Algorithm SHA256).Hash } else { $null })
     Test-AtmSourceIntegrity -SourceDir $SourceDir -AllowNoManifest:$SourceWithoutManifest
     return $version
 }
@@ -487,9 +491,9 @@ function Invoke-AtmInstallUnlocked {
     [void][IO.Directory]::CreateDirectory($staging)
     try {
         Copy-AtmTree -From $SourceDir -To $staging
-        if ($null -ne $srcManifestHash) {
+        if ($null -ne $script:AtmVerifiedManifestHash) {
             $stagedManifest = Join-Path $staging 'manifest.json'
-            if (-not (Test-Path -LiteralPath $stagedManifest -PathType Leaf) -or (Get-FileHash -LiteralPath $stagedManifest -Algorithm SHA256).Hash -ne $srcManifestHash) { throw (Get-AtmText 'inst.hashMismatch' 'manifest.json') }
+            if (-not (Test-Path -LiteralPath $stagedManifest -PathType Leaf) -or (Get-FileHash -LiteralPath $stagedManifest -Algorithm SHA256).Hash -ne $script:AtmVerifiedManifestHash) { throw (Get-AtmText 'inst.hashMismatch' 'manifest.json') }
             Test-AtmSourceIntegrity -SourceDir $staging
         }
         if ($ProjectsFile) {

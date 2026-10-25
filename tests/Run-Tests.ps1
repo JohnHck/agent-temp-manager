@@ -7432,7 +7432,7 @@ try {
         $snap.Processes[1].CreationUtc = $t0.AddMinutes(-1)
         Assert-Eq (@(Get-AtmSelfChainPids -Snapshot $snap -SelfPid 100 -Markers @('C:\PF\CTM\agent-temp.ps1', 'C:\PF\CTM\bin\agent-temp.cmd')) -join ',') '100,50' 'lancador legitimo continua excluido'
         $ic = [IO.File]::ReadAllText((Join-Path (Split-Path -Parent $testsDir) 'install\InstallCommon.ps1'))
-        Assert-True ($ic.Contains('$srcManifestHash') -and $ic.Contains('Test-AtmSourceIntegrity -SourceDir $staging') -and $ic.IndexOf('$srcManifestHash = ') -lt $ic.IndexOf('Test-AtmSourceIntegrity -SourceDir $SourceDir')) 'F-07: hash do manifesto antes da verificacao e copia preparada comparada a ele'
+        Assert-True ($ic.Contains('$script:AtmVerifiedManifestHash = $null') -and $ic.Contains('Test-AtmSourceIntegrity -SourceDir $staging') -and $ic.IndexOf('$script:AtmVerifiedManifestHash = $(if') -lt $ic.IndexOf('Test-AtmSourceIntegrity -SourceDir $SourceDir')) 'F-07: hash do manifesto antes da verificacao e copia preparada comparada a ele'
         $br = [IO.File]::ReadAllText((Join-Path (Split-Path -Parent $testsDir) 'tools\Build-Release.ps1'))
         foreach ($g in @('AtmRealDeletionEnabled', 'AtmWorktreeDiagnosticsEnabled', 'AtmHandleDiagnosticsEnabled', 'AtmDiagnoseExportEnabled')) { Assert-True ($br.Contains($g)) "F-08: release confere $g no arquivo" }
     }
