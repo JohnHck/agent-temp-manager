@@ -7199,7 +7199,7 @@ try {
         Assert-Eq ($je -replace '"language":\s*"[^"]*"', '') ($jp -replace '"language":\s*"[^"]*"', '') '11: pt-BR e en-US identicos salvo language'
         foreach ($x in @($p.ProfilePath.Replace('\', '\\'), 'C:\\Users\\', 'node.exe', 'CommandLine')) { Assert-True (-not $jp.Contains($x)) "6/7: JSON sem '$x'" }
     }
-    Test-Case 'Diagnose' 'P5-B: exportacao - destinos proibidos recusados (relativo, rede, dispositivo, fluxo, travessia, dentro de base, repositorio, worktree, juncao no caminho, existente, sem inventario) sem criar arquivo; destino valido criado sem sobrescrever; falha de escrita sem mensagem' {
+    Test-Case 'Diagnose' 'P5-B: exportacao (trava aberta so no harness, em fixtures) - destinos proibidos recusados (relativo, rede, dispositivo, fluxo, travessia, dentro de base, repositorio, worktree, juncao no caminho, existente, sem inventario) sem criar arquivo; destino valido criado sem sobrescrever; falha de escrita sem mensagem' {
         $root = Join-Path $sandbox 'p5b-export'
         $base = Join-Path $root 'base'; $repo = Join-Path $root 'repo'; $wt = Join-Path $root 'wt'; $out = Join-Path $root 'out'; $real = Join-Path $root 'real'
         foreach ($d in @($base, (Join-Path $repo '.git'), $wt, $out, $real, (Join-Path $repo 'sub'))) { [void][IO.Directory]::CreateDirectory($d) }
@@ -7207,6 +7207,9 @@ try {
         $junc = Join-Path $root 'junc'; New-Junction $junc $real
         [IO.File]::WriteAllText((Join-Path $out 'exists.json'), 'x')
         $inv = [pscustomobject]@{ Bases = @([pscustomobject]@{ Path = $base }) }
+        # P5-B-S: the export gate is opened only around these disposable fixtures and closed again in finally.
+        $script:AtmDiagnoseExportEnabled = $true
+        try {
         $cases = [ordered]@{
             'relativo' = 'out\x.json'; 'rede' = '\\server\share\x.json'; 'dispositivo' = '\\?\C:\x.json'; 'fluxo' = ($out + '\x.json:ads'); 'travessia' = ($out + '\..\out\x.json')
             'dentro da base' = (Join-Path $base 'x.json'); 'repositorio' = (Join-Path $repo 'sub\x.json'); 'worktree' = (Join-Path $wt 'x.json'); 'juncao' = (Join-Path $junc 'x.json'); 'existente' = (Join-Path $out 'exists.json')
@@ -7237,11 +7240,63 @@ try {
         Assert-True ($null -ne $threw -and ([IO.File]::ReadAllText($ok)).StartsWith('{')) "14: nunca sobrescreve (CreateNew: $threw)"
         $threw = $null; try { Write-AtmNewTextFile -Path (Join-Path $out 'nope\y.json') -Text 'x' } catch { $threw = $_.Exception.GetType().Name }
         Assert-True ($null -ne $threw) "14: falha de escrita lancada ao chamador ($threw)"
+        } finally { $script:AtmDiagnoseExportEnabled = $false }
+        Assert-Eq $script:AtmDiagnoseExportEnabled $false 'trava fechada de novo'
         $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
         $blk = $cli.Substring($cli.IndexOf("'diagnose' {"), $cli.IndexOf("'clean' {") - $cli.IndexOf("'diagnose' {"))
         Assert-True ($blk.Contains('Test-AtmDiagnoseExportPath') -and $blk.Contains('Write-AtmNewTextFile') -and -not $blk.Contains('Exception.Message') -and -not $blk.Contains('WriteAllText')) '14: CLI diagnose usa o caminho verificado e nunca mostra a mensagem da excecao'
         # Everything of the branch that touches collected data runs inside a type-only catch (never the global catch).
         Assert-True ($blk -match 'try \{ \$res = Invoke-AtmDiagnose' -and $blk -match 'try \{ Show-AtmDiagnose -Result \$res \}' -and $blk -match 'try \{ \$refusal = Test-AtmDiagnoseExportPath' -and $blk -match 'try \{ Write-AtmNewTextFile' -and ([regex]::Matches($blk, 'GetBaseException\(\)\.GetType\(\)\.Name').Count -ge 4)) '2: diagnose, relatorio, verificacao e gravacao com captura so pelo tipo'
+    }
+    Test-Case 'Diagnose' 'P5-B-S: trava da exportacao fechada - CLI recusa com EXPORT_SECURITY_GATE_CLOSED (codigo 10) antes de coletar ou verificar o destino; nenhum arquivo; escritor e verificacao tambem recusam; contraprova do TOCTOU (nao resolvido) so com a trava aberta no harness' {
+        Assert-Eq $script:AtmDiagnoseExportEnabled $false 'trava fechada fora dos testes'
+        $rep = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Report.ps1'))
+        Assert-Eq ([regex]::Matches($rep, '\$script:AtmDiagnoseExportEnabled\s*=').Count) 1 'uma unica atribuicao da trava'
+        Assert-True ($rep -match '(?m)^\$script:AtmDiagnoseExportEnabled = \$false\r?$') 'a trava distribuida e $false (linha inteira)'
+        $srcAll = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1', '.psd1', '.cs', '.json', '.cmd', '.bat') } | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Text = [IO.File]::ReadAllText($_.FullName) } })
+        Assert-Eq (@($srcAll | ForEach-Object { [regex]::Matches($_.Text, '\$script:AtmDiagnoseExportEnabled\s*=').Count } | Measure-Object -Sum).Sum) 1 'nenhuma outra atribuicao em src (CLI, TUI, configuracao)'
+        Assert-True (@($srcAll | Where-Object { $_.Name -notin @('Report.ps1', 'agent-temp.ps1') -and $_.Text.Contains('AtmDiagnoseExportEnabled') }).Count -eq 0 -and -not (@($srcAll | ForEach-Object { $_.Text }) -join "`n").Contains('$env:ATM_DIAGNOSE_EXPORT')) 'nenhuma opcao, variavel de ambiente ou configuracao abre a trava'
+        $cli = ($srcAll | Where-Object { $_.Name -eq 'agent-temp.ps1' }).Text
+        $blk = $cli.Substring($cli.IndexOf("'diagnose' {"), $cli.IndexOf("'clean' {") - $cli.IndexOf("'diagnose' {"))
+        $gateAt = $blk.IndexOf('-not $script:AtmDiagnoseExportEnabled')
+        Assert-True ($gateAt -gt 0 -and $gateAt -lt $blk.IndexOf('Invoke-AtmDiagnose') -and $gateAt -lt $blk.IndexOf('Test-AtmDiagnoseExportPath') -and $gateAt -lt $blk.IndexOf('Write-AtmNewTextFile')) '5: o fluxo do diagnose recusa antes de coletar, verificar o destino ou gravar'
+        # 1-5: through the launcher, with a destination whose folder does not exist (a check would answer with another code) and a valid one.
+        $cmd = Join-Path $srcDir 'bin\agent-temp.cmd'
+        $okDir = Join-Path $sandbox 'p5bs-ok'; [void][IO.Directory]::CreateDirectory($okDir)
+        foreach ($t in @((Join-Path $sandbox 'p5bs-missing\x.json'), (Join-Path $okDir 'd.json'))) {
+            $o = (& cmd.exe /c "`"$cmd`" diagnose -NoProgress -Lang en-US -ExportJson `"$t`"" 2>&1) -join "`n"
+            $code = $LASTEXITCODE
+            Assert-True ($code -eq 10 -and $o.Contains('EXPORT_SECURITY_GATE_CLOSED') -and -not $o.Contains('EXPORT_DESTINATION') -and -not $o.Contains('COVERAGE BY COLLECTOR') -and -not (Test-Path -LiteralPath $t)) "1-5: recusado com codigo 10, sem verificacao, sem coleta, sem arquivo ($code)"
+        }
+        Assert-True (@(Get-ChildItem -LiteralPath $okDir -Force).Count -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $sandbox 'p5bs-missing'))) '3/4: nenhuma gravacao nem pasta criada'
+        # 6: the writer and the check refuse by themselves too.
+        $w = Join-Path $okDir 'w.json'
+        $msg = $null; try { Write-AtmNewTextFile -Path $w -Text '{}' } catch { $msg = $_.Exception.GetBaseException().Message }
+        Assert-True ($msg -ceq 'EXPORT_SECURITY_GATE_CLOSED' -and -not (Test-Path -LiteralPath $w)) '6: escritor chamado diretamente recusa, nada criado'
+        Assert-Eq (Test-AtmDiagnoseExportPath -Path $w -Inventory ([pscustomobject]@{ Bases = @() })) 'EXPORT_SECURITY_GATE_CLOSED' 'verificacao recusa com a trava fechada'
+        # 9: counter-proof with the gate open in the harness only: a folder validated as safe and then replaced by a junction
+        # redirects the new file. This is the NOT RESOLVED ancestor TOCTOU; CreateNew does not prevent it.
+        $tt = Join-Path $sandbox 'p5bs-toctou'; $a = Join-Path $tt 'a'; $elsewhere = Join-Path $tt 'elsewhere'
+        foreach ($d in @($a, $elsewhere)) { [void][IO.Directory]::CreateDirectory($d) }
+        $dest = Join-Path $a 'r.json'
+        $script:AtmDiagnoseExportEnabled = $true
+        try {
+            Assert-True ($null -eq (Test-AtmDiagnoseExportPath -Path $dest -Inventory ([pscustomobject]@{ Bases = @() }))) 'contraprova: destino validado'
+            [IO.Directory]::Move($a, (Join-Path $tt 'a-moved'))
+            New-Junction $a $elsewhere
+            Write-AtmNewTextFile -Path $dest -Text '{}'
+            Assert-True ((Test-Path -LiteralPath (Join-Path $elsewhere 'r.json')) -and -not (Test-Path -LiteralPath (Join-Path $tt 'a-moved\r.json'))) '9: contraprova - um ancestral validado e trocado por juncao redireciona o arquivo novo (TOCTOU NAO RESOLVIDO; por isso a trava fica fechada)'
+            Assert-True ($null -ne (Test-AtmDiagnoseExportPath -Path (Join-Path $a 'r2.json') -Inventory ([pscustomobject]@{ Bases = @() }))) 'uma nova verificacao ve a juncao (a janela e entre verificar e criar)'
+        } finally { $script:AtmDiagnoseExportEnabled = $false }
+        Assert-Eq $script:AtmDiagnoseExportEnabled $false '10: trava false depois do teste'
+    }
+    Test-Case 'Camadas' 'P5-B-S: todo script em src com texto nao ASCII comeca com BOM UTF-8 (o Windows PowerShell 5.1 leria o arquivo como ANSI e corromperia o texto)' {
+        foreach ($f in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File -Include '*.ps1', '*.psm1', '*.psd1')) {
+            $b = [IO.File]::ReadAllBytes($f.FullName)
+            $hasBom = ($b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF)
+            $nonAscii = $false; foreach ($x in $b) { if ($x -gt 0x7F) { $nonAscii = $true; break } }
+            Assert-True ($hasBom -or -not $nonAscii) "$($f.Name): texto nao ASCII sem BOM UTF-8"
+        }
     }
     Test-Case 'Diagnose' 'P5-B: CLI - version, help, comando desconhecido, diagnose parcial com codigo 0, nenhuma gravacao sem -ExportJson, nenhuma opcao abre travas, sem elevacao nem limpeza no diagnose' {
         $cmd = Join-Path $srcDir 'bin\agent-temp.cmd'

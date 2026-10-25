@@ -23,7 +23,7 @@ across **every local user profile**, with a safety engine built for a future hum
 | `agent-temp audit` | Full audit. **Strictly read-only.** Writes no file unless `-ExportJson` is given. |
 | `agent-temp preview` | Splits every path into *blocked*, *needs investigation* and *technically eligible*. Deletes nothing. |
 | `agent-temp clean -AllowListFile <file>` | **V0.1: plan only.** Validates an allowlist of exact paths against every gate and prints the exact plan. |
-| `agent-temp diagnose` | **V0.2, in development (not released).** Read-only runtime diagnostics with coverage per collector; writes no file unless `-ExportJson` is given. |
+| `agent-temp diagnose` | **V0.2, in development (not released).** Read-only runtime diagnostics with coverage per collector; writes no file (its JSON export is implemented but disabled by a closed security gate). |
 | `agent-temp verify` | Checks the installed files against their SHA-256 manifest. |
 | `agent-temp version` | Version, native mode, deletion state and language. |
 
@@ -42,7 +42,9 @@ virtualization platform and its VMs, and a dependency graph that explains why a 
   terminating processes.**
 * What it cannot observe yet: process working directories (deferred), open files and Git worktrees (both behind
   closed security gates in every copy), remote Cowork sessions and the Cowork VM itself.
-* Reports show pseudonyms and codes, not paths. Details: [docs/USAGE.md](docs/USAGE.md#diagnose-read-only-v02-in-development).
+* Reports show pseudonyms and codes, not paths. The JSON export (`-ExportJson`) is implemented but disabled in every
+  copy until a file-creation race is closed: it is refused with `EXPORT_SECURITY_GATE_CLOSED`.
+  Details: [docs/USAGE.md](docs/USAGE.md#diagnose-read-only-v02-in-development).
 
 ## Works on any Windows machine
 

@@ -181,7 +181,7 @@ function Show-Help {
             'help.drill', 'help.export', 'help.diagOpts', 'help.cleanOpts', 'help.cleanOpts2', 'help.cleanOpts3', 'help.tuiOpts', 'help.lang', 'help.blank', 'help.examples')) { Write-Host (Get-AtmText $k) }
     Write-Host '  agent-temp'
     Write-Host '  agent-temp audit'
-    Write-Host '  agent-temp diagnose -ExportJson D:\reports\diagnose.json'
+    Write-Host '  agent-temp diagnose -Lang en-US'
     Write-Host '  agent-temp audit -User alice'
     Write-Host '  agent-temp audit -Project MyProject'
     Write-Host '  agent-temp audit -Path "C:\Users\alice\AppData\Local\Temp\claude\<slug>\<uuid>"'
@@ -220,6 +220,15 @@ try {
         }
         'diagnose' {
             # Read-only (docs/adr/ADR-0009). Partial coverage is a result, not an error: exit code 0.
+            # Diagnose export gate (P5-B-S): closed in every shipped copy (the ancestor TOCTOU of the export is NOT
+            # RESOLVED). With -ExportJson the command refuses first: nothing is collected or printed, no destination is
+            # checked and no file is created; exit code 10.
+            if ($PSBoundParameters.ContainsKey('ExportJson') -and -not $script:AtmDiagnoseExportEnabled) {
+                Write-Host (Get-AtmText 'cli.diagExportRefusedCode' 'EXPORT_SECURITY_GATE_CLOSED') -ForegroundColor Red
+                Write-Host (Get-AtmText 'cli.diagExportGateClosed') -ForegroundColor Yellow
+                Write-Host (Get-AtmText 'cli.errorNoDeletion') -ForegroundColor Yellow
+                exit 10
+            }
             # Progress never shows a path during diagnose (ADR-0010): the inventory's own messages name temporary bases.
             $diagInvArgs = @{} + $cliInvArgs
             $diagInvArgs['ProgressCallback'] = { param($pct, $msg) $act = Get-AtmText 'cli.progressActivity'; if ($pct -ge 100) { Write-Progress -Activity $act -Completed } else { Write-Progress -Activity $act -Status (Get-AtmText 'cli.diagProgressStatus') -PercentComplete $pct } }

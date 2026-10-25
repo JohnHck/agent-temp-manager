@@ -1,4 +1,4 @@
-﻿# Security model
+# Security model
 
 ## Principles
 
@@ -146,17 +146,25 @@ called by `Invoke-AtmGitCommand`):
   graph of the same run (`IN_USE` only with a `DIRECT` edge from a verified process; `UNKNOWN` otherwise;
   `NO_DEPENDENCY_OBSERVED` only with conclusive coverage, which a V0.2 run never has). Nothing is collected for it,
   and no diagnose state is read by the audit, the preview or `clean`.
-* **Diagnose export (P5-B):** written only with `-ExportJson`, to a new file (`CreateNew`: never overwrites; a junction
+* **Diagnose export gate (P5-B-S):** `$script:AtmDiagnoseExportEnabled`, `$false` in every shipped copy (single
+  assignment in `Report.ps1`; no option, environment variable or configuration file; checked by the suite and the
+  install e2e). Closed, `diagnose -ExportJson` is refused before anything is collected or checked
+  (`EXPORT_SECURITY_GATE_CLOSED`, exit code 10) and no file is created; the destination check and the writer refuse
+  on their own too. Reason: **NOT RESOLVED - export ancestor TOCTOU.** The destination folders are checked by name and
+  the file is then created by name: a folder replaced by a junction in between redirects the new file. `CreateNew`
+  only prevents overwriting an existing file; it does not prove that the file is created in the checked folder (a
+  harness counter-proof on fixtures shows the redirection). The document holds the machine name, the account and its
+  SID. The gate opens only with a demonstrated mitigation and a maintainer decision (FINAL-A: create the file relative
+  to a handle on the validated parent, for example `NtCreateFile` with `OBJ_DONT_REPARSE`, with adversarial tests on
+  every supported Windows and architecture; otherwise the export stays disabled in V0.2).
+* **Diagnose export, when its gate is open (tests only, P5-B):** written only with `-ExportJson`, to a new file (`CreateNew`: never overwrites; a junction
   planted at the destination was refused on fixtures; a file symbolic link there is refused by the documented
   `CREATE_NEW` semantics but was not tested, since creating one needs a privilege), at an absolute local path whose
   parent chain has no reparse point, not on a `subst` drive, outside every audited base and not inside a Git repository
   or worktree (an ancestor holding `.git`, or a bare repository; existence checks only, no Git; an ancestor that cannot
   be checked refuses). The V0.1 outputs (`audit -ExportJson`, `clean -LogFile`) keep their V0.1 rules: a `subst` drive
   over an audited folder is not detected there (V0.1 unchanged; proposed for FINAL). Refusals and write failures are reported by code, never by exception message; nothing is
-  created after a refusal. **NOT RESOLVED - export TOCTOU:** a folder of the destination could be replaced by a junction
-  between the check and the creation; the new file would then be created through it (never over an existing file).
-  Proposed for FINAL: create the file relative to a handle on the verified parent directory (as the deleter and the
-  direct reads pin their ancestors), or keep exports behind a specific gate; until then the window is documented.
+  created after a refusal. The ancestor TOCTOU above applies; that is why the gate is closed.
 * **TUI diagnostics area (P5-A, ADR-0009):** presentation only. It runs `Invoke-AtmDiagnose` on an explicit action
   (entering the area without a result, or `U`) and renders the diagnose JSON export of that result: no collector,
   Git, Restart Manager, registry or file access of its own, no state change, no gate opened (static test); the

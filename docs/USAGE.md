@@ -1,4 +1,4 @@
-﻿# Usage
+# Usage
 
 ## Language
 
@@ -70,12 +70,11 @@ V0.2 is **not released**: `diagnose` exists in the development version only, and
 agent-temp diagnose
 agent-temp diagnose -Lang en-US -NoProgress
 agent-temp diagnose -DeadlineSeconds 60                     # global deadline (default 300 s), see below
-agent-temp diagnose -ExportJson D:\reports\diagnose.json   # schema atm.diagnose/2, a NEW file (see "Export")
-agent-temp diagnose -PseudonymKeyFile D:\private\atm-pseudonym.key -ExportJson D:\reports\diagnose.json
+agent-temp diagnose -PseudonymKeyFile D:\private\atm-pseudonym.key   # comparable pseudonyms between runs
 ```
 
-Options of `diagnose`: `-ExportJson <new file>`, `-DeadlineSeconds <seconds>`, `-PseudonymKeyFile <file>`,
-`-NoProgress`, `-Lang en-US|pt-BR`. There is no option to give repository paths, to open a security gate or to request
+Options of `diagnose`: `-DeadlineSeconds <seconds>`, `-PseudonymKeyFile <file>`, `-NoProgress`, `-Lang en-US|pt-BR`;
+`-ExportJson <new file>` exists but is refused in every copy (see *Export*). There is no option to give repository paths, to open a security gate or to request
 elevation. In the TUI, the same diagnostics are under **D** (see *Interactive dashboard*).
 
 ### What it adds to V0.1
@@ -136,8 +135,16 @@ process identity.
 
 ### Export
 
-`-ExportJson` writes the JSON (schema [DIAGNOSE-SCHEMA.md](DIAGNOSE-SCHEMA.md)) only when asked; without it, no file is
-written. The destination must be a **new** file (an existing file is never overwritten), given as an absolute local
+**Disabled in every copy (security gate closed).** `agent-temp diagnose -ExportJson <file>` is refused at once with
+`EXPORT_SECURITY_GATE_CLOSED` and exit code `10`: nothing is collected, no destination is checked and no file is
+created. Reason: the export checks the destination folders by name and then creates the file by name, so a folder
+replaced by a junction in between could redirect the new file (an ancestor race, not resolved), and the document holds
+the machine name, the account and its SID. Creating a *new* file does not prevent that redirection. The export is
+implemented and tested on disposable fixtures only; enabling it needs a demonstrated mitigation and a maintainer
+decision. This concerns the export only: `diagnose` itself and the TUI area (D) are read-only and unaffected. Without
+`-ExportJson`, no file is written.
+
+The rules below are those the export applies when its gate is open (tests only). The destination must be a **new** file (an existing file is never overwritten), given as an absolute local
 path (no network, device or relative path, no wildcard, stream or `..`), whose folders contain no junction or other
 reparse point, outside every audited temporary directory, and not inside a Git repository or worktree (no folder above
 it holds a `.git` entry, and no folder above it is a bare repository; Git itself is not run), and not on a drive letter
@@ -168,7 +175,8 @@ or change it. While `diagnose` runs, the progress line shows no path. Exports ma
 Process keys, counts and coverage are not pseudonymized.
 
 Exit codes of `diagnose`: `0` when it ran (partial coverage is a result, not an error), `2` key file refused, `10`
-export refused or not written, or an unexpected failure (reported by its exception type only; nothing is deleted).
+export refused (`EXPORT_SECURITY_GATE_CLOSED` in every copy) or not written, or an unexpected failure (reported by its
+exception type only; nothing is deleted).
 
 ## Clean (assisted, fail-closed)
 

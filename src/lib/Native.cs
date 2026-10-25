@@ -1,4 +1,4 @@
-﻿// AgentTempManager native helpers.
+// AgentTempManager native helpers.
 // Written in C# 5 so it compiles under Windows PowerShell 5.1 (CodeDom/csc v4)
 // and PowerShell 7 (Roslyn). No external dependencies.
 //

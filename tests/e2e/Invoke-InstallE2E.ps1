@@ -286,24 +286,20 @@ foreach ($c in @(@('verify', 'verify', 0), @('version -Lang en-US', 'version', 0
 }
 
 Step 'diagnose-export-and-tui-area' {
-    # P5-B: the installed TUI has the diagnostics area (menu D); the installed diagnose writes a requested export to a new
-    # file outside the audited directories (valid JSON, schema atm.diagnose/2, no profile path) and refuses an existing one.
+    # P5-B/P5-B-S: the installed TUI has the diagnostics area (menu D); the diagnose export gate is closed in the
+    # installed copy (single assignment, $false), and an installed export is refused (EXPORT_SECURITY_GATE_CLOSED, exit
+    # 10) before anything is collected or checked: no file is created. The export itself is tested on fixtures only.
     $tui = [IO.File]::ReadAllText((Join-Path $installDir 'lib\Tui.ps1'))
     Assert ($tui.Contains("Key = 'D'") -and $tui.Contains('Invoke-AtmTuiDiagnose')) 'TUI instalada sem a area de diagnostico (D)'
+    $rep = [IO.File]::ReadAllText((Join-Path $installDir 'lib\Report.ps1'))
+    Assert ([regex]::Matches($rep, '\$script:AtmDiagnoseExportEnabled\s*=').Count -eq 1 -and $rep -match '(?m)^\$script:AtmDiagnoseExportEnabled = \$false\r?$') 'trava da exportacao instalada nao e uma unica atribuicao $false'
     $dir = Join-Path ([IO.Path]::GetTempPath()) ('atm-e2e-export-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
     [void][IO.Directory]::CreateDirectory($dir)
     $target = Join-Path (Get-Item -LiteralPath $dir).FullName 'diagnose.json'
-    $r = Invoke-Agent ('diagnose -NoProgress -Lang en-US -DeadlineSeconds 300 -ExportJson "' + $target + '"') 'diagnose-export'
-    Assert ($r.Code -eq 0) "diagnose com exportacao: exit $($r.Code)"
-    $text = [IO.File]::ReadAllText($target)
-    $j = $text | ConvertFrom-Json
-    Assert ($j.schemaVersion -eq 'atm.diagnose/2' -and $null -ne $j.graph -and @($j.coverage | Where-Object { $_.collector -eq 'dependency-graph' }).Count -eq 1) 'exportacao instalada invalida ou sem grafo'
-    # JSON escapes backslashes: the profile path appears as C:\\Users\\... in the raw text.
-    Assert (-not ($text -match '[A-Za-z]:\\\\Users\\\\') -and -not $text.Contains($env:USERPROFILE.Replace('\', '\\'))) 'exportacao instalada contem caminho de perfil'
-    $len = (Get-Item -LiteralPath $target).Length
-    $r2 = Invoke-Agent ('diagnose -NoProgress -Lang en-US -DeadlineSeconds 300 -ExportJson "' + $target + '"') 'diagnose-export-refused'
-    Assert ($r2.Code -eq 10 -and $r2.Text.Contains('ExportJson refused') -and (Get-Item -LiteralPath $target).Length -eq $len) 'exportacao sobre arquivo existente nao foi recusada ou alterou o arquivo'
-    "installed TUI has menu D; installed export written ($len bytes, schema atm.diagnose/2) and an existing file refused (exit 10, unchanged)"
+    $r = Invoke-Agent ('diagnose -NoProgress -Lang en-US -ExportJson "' + $target + '"') 'diagnose-export-gate'
+    Assert ($r.Code -eq 10 -and $r.Text.Contains('EXPORT_SECURITY_GATE_CLOSED') -and -not $r.Text.Contains('COVERAGE BY COLLECTOR')) "exportacao instalada nao recusada pela trava: exit $($r.Code)"
+    Assert (-not (Test-Path -LiteralPath $target) -and @(Get-ChildItem -LiteralPath $dir -Force).Count -eq 0) 'arquivo criado com a trava fechada'
+    "installed TUI has menu D; installed export gate = `$false (single assignment); installed export refused (EXPORT_SECURITY_GATE_CLOSED, exit 10, no file, nothing collected)"
 }
 Step 'clean-never-deletes' {
     # A real-looking, old session root of the current user. V0.1 must stop without deleting it.

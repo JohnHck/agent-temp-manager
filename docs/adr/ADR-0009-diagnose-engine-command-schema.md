@@ -108,3 +108,23 @@ The presentation layer gains a diagnostics area in the existing TUI (menu `D`); 
 * **CLI.** No option gives repository paths, opens a gate or requests elevation (static test); `diagnose` never calls
   the clean engine and writes nothing without `-ExportJson`; version, help and exit codes are checked through the
   launcher.
+
+## Security addendum (P5-B-S, 2026-10-25): diagnose export gate
+
+The maintainer's review of PR #48 accepted P5-B and blocked the export: the destination is checked by name and the
+file is created by name, so a folder replaced by a junction in between can redirect the new file, and the document holds
+the machine name, the account and its SID. Decision:
+
+* **Gate.** `$script:AtmDiagnoseExportEnabled = $false` (single assignment, `Report.ps1`; no option, environment
+  variable or configuration). `diagnose -ExportJson` is refused first (`EXPORT_SECURITY_GATE_CLOSED`, exit code 10):
+  nothing collected, no destination checked, no file. `Test-AtmDiagnoseExportPath` and `Write-AtmNewTextFile` refuse
+  on their own while it is closed (defense in depth).
+* **Kept, not rewritten.** The destination rules (substituted drives, repositories, worktrees, reparse points) and
+  `CreateNew` stay, tested on fixtures with the gate opened by the harness only and closed again in `finally`. A harness
+  counter-proof shows the redirection the gate guards against; fixture tests are not proof against the real race.
+* **Unchanged.** `diagnose` without `-ExportJson`, the report and the TUI area (rendered from the in-memory document).
+* **Opening the gate** needs a demonstrated mitigation (FINAL-A: creation relative to a handle on the validated parent,
+  for example `NtCreateFile` with `OBJ_DONT_REPARSE`; adversarial concurrency in a sandbox; AMD64 and ARM64; Windows
+  PowerShell 5.1 and PowerShell 7; the supported Windows 10, 11 and Server versions; fail closed; no overwrite; ACL and
+  privacy of the created file) and a new maintainer decision; without it the export stays disabled in V0.2. The `subst`
+  gap of the V0.1 outputs (`audit -ExportJson`, `clean -LogFile`) is not changed by this addendum.

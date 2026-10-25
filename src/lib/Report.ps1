@@ -693,6 +693,12 @@ function Show-AtmDiagnosePartitions {
     Write-Host ('  ' + (Get-AtmText 'diag.partitionNotes'))
 }
 
+# Diagnose export gate (P5-B-S, ADR-0009 security addendum). $false in every shipped copy: the export validates the
+# destination by name and then creates the file by name, so a folder replaced by a junction in between could redirect
+# the new file (ancestor TOCTOU, NOT RESOLVED), and the document holds the machine name, the account and its SID. No
+# option, environment variable or configuration file opens it; only the test harness does, around disposable fixtures.
+$script:AtmDiagnoseExportEnabled = $false
+
 function Test-AtmDiagnoseExportPath {
     <#
       Destination of a diagnose export (P5-B). $null when allowed, otherwise a refusal code. Everything
@@ -704,6 +710,8 @@ function Test-AtmDiagnoseExportPath {
       or expanded; a check that cannot be answered refuses (fail closed).
     #>
     param([string]$Path, $Inventory)
+    # Closed gate: refused before anything about the destination is looked at.
+    if (-not $script:AtmDiagnoseExportEnabled) { return 'EXPORT_SECURITY_GATE_CLOSED' }
     if ($null -eq $Inventory) { return 'EXPORT_INVENTORY_NOT_RUN' }
     if (-not (Test-AtmOutputPathOutsideBases -Path $Path -Inventory $Inventory -MustNotExist)) { return 'EXPORT_DESTINATION_NOT_ALLOWED' }
     $full = [IO.Path]::GetFullPath($Path)
@@ -726,9 +734,12 @@ function Test-AtmDiagnoseExportPath {
 }
 
 function Write-AtmNewTextFile {
-    # Creates the file and writes UTF-8 without BOM. CreateNew never overwrites and never follows a file or link that
-    # appears at the destination after the check; a failure is thrown to the caller (reported there by a code).
+    # Creates the file and writes UTF-8 without BOM. CreateNew never overwrites an existing file; it does NOT prove that
+    # the file is created in the folder that was validated (a folder replaced by a junction after the check redirects
+    # it). Defense in depth: refused while the diagnose export gate is closed, before the file system is touched. A
+    # failure is thrown to the caller (reported there by a code).
     param([string]$Path, [string]$Text)
+    if (-not $script:AtmDiagnoseExportEnabled) { throw [InvalidOperationException]::new('EXPORT_SECURITY_GATE_CLOSED') }
     $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($Text)
     $fs = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
     try { $fs.Write($bytes, 0, $bytes.Length); $fs.Flush() } finally { $fs.Dispose() }

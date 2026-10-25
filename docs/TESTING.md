@@ -1,4 +1,4 @@
-﻿# Testing
+# Testing
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1                 # Windows PowerShell 5.1
