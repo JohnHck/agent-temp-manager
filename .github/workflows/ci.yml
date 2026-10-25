@@ -54,11 +54,14 @@ jobs:
           retention-days: 14
 
   # FINAL-A: the same suite on Windows 11 ARM64 (the native safe-creation code and its fixture tests run there too).
-  # A separate job, so the names of the existing checks do not change.
+  # A separate job, so the names of the existing checks do not change. Informative (not a required check): suites
+  # written for the AMD64 runners have environmental FAILs here (privacy scanner needles from the runner identity,
+  # P2-A Winmgmt process verification), kept as FAIL and reported; the installer tests are slow on this runner.
   test-arm64:
     name: test ARM64 (${{ matrix.shell }})
     runs-on: windows-11-arm
-    timeout-minutes: 40
+    continue-on-error: true
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
