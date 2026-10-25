@@ -4033,8 +4033,13 @@ function Set-AtmGraphFindingStates {
         foreach ($c in @($f.Coverage)) { $cov.Add($c); $have[[string]$c.Collector] = $true }
         if ($null -ne $GraphCoverage) { $cov.Add($GraphCoverage) }
         foreach ($rc in @($script:AtmGraphRelevantCollectors[$kind])) {
-            if ($have.ContainsKey($rc)) { continue }
-            if ($covBy.ContainsKey($rc)) { $cov.Add($covBy[$rc]) } else { $cov.Add((New-AtmCoverage -Collector $rc -Status 'NOT_OBSERVABLE' -Reasons @('COLLECTOR_NOT_RUN') -ElevationWouldHelp 'NO')) }
+            # Defense in depth (P5-A): the run's worst record of a relevant collector is attached even when the finding
+            # already carries a conclusive record of it, so no rebuild can read an absence past a worse record.
+            if ($covBy.ContainsKey($rc)) {
+                $worst = $covBy[$rc]
+                $dup = $false; foreach ($c in $cov) { if ([object]::ReferenceEquals($c, $worst)) { $dup = $true; break } }
+                if (-not $dup -and (-not $have.ContainsKey($rc) -or $script:AtmConclusiveCoverage -cnotcontains [string]$worst.Status)) { $cov.Add($worst) }
+            } elseif (-not $have.ContainsKey($rc)) { $cov.Add((New-AtmCoverage -Collector $rc -Status 'NOT_OBSERVABLE' -Reasons @('COLLECTOR_NOT_RUN') -ElevationWouldHelp 'NO')) }
         }
         $requested = [string]$f.RequestedState
         $collided = @($f.Evidence | Where-Object { $_.Code -ceq 'PARTITION_KEY_COLLISION' }).Count -gt 0
@@ -4372,7 +4377,10 @@ function Invoke-AtmDiagnoseRun {
             foreach ($f in $wd.Findings) { $findings.Add($f) }
             $wtNodes = @($wd.HandleNodes)
         }
-    } elseif (@($RepositoryPaths).Count -gt 0) { $coverage.Add((New-AtmCoverage -Collector 'worktree-discovery' -Status 'NOT_OBSERVABLE' -Reasons @('WORKTREE_DIAGNOSTICS_GATE_CLOSED') -ElevationWouldHelp 'NO')) }
+    } else {
+        # Closed gate (every shipped copy): worktrees are not observed, which is reported (P5-A: never read as "none").
+        $coverage.Add((New-AtmCoverage -Collector 'worktree-discovery' -Status 'NOT_OBSERVABLE' -Reasons @('WORKTREE_DIAGNOSTICS_GATE_CLOSED') -ElevationWouldHelp 'NO'))
+    }
 
     # Working directories (D-1): deferred (ADR-0004 amendment); never observed, so never an absence.
     $coverage.Add((New-AtmCoverage -Collector 'process-cwd' -Status 'NOT_OBSERVABLE' -Reasons @('WORKING_DIRECTORY_DEFERRED') -ElevationWouldHelp 'NO'))

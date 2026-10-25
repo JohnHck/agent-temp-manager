@@ -979,14 +979,16 @@ try {
     # ------------------------------------------------------------------ TUI (headless) and layering
     function New-Key { param([string]$Key, [char]$Char = [char]0) return New-Object ConsoleKeyInfo($Char, [ConsoleKey]$Key, $false, $false, $false) }
     function Invoke-HeadlessTui {
-        param([object[]]$Keys, [hashtable]$InvArgs, [string[]]$Lines = @(), [switch]$Ascii, [int]$W = 120, [int]$H = 30)
+        param([object[]]$Keys, [hashtable]$InvArgs, [string[]]$Lines = @(), [switch]$Ascii, [int]$W = 120, [int]$H = 30, [scriptblock]$DiagRunner = $null)
         $script:tuiKeys = New-Object System.Collections.Generic.Queue[object]; foreach ($k in $Keys) { $script:tuiKeys.Enqueue($k) }
         $script:tuiLines = New-Object System.Collections.Generic.Queue[string]; foreach ($l in $Lines) { $script:tuiLines.Enqueue($l) }
         $script:tuiFrames = New-Object System.Collections.Generic.List[string]
         $ks = { if ($script:tuiKeys.Count -gt 0) { $script:tuiKeys.Dequeue() } else { $null } }
         $lr = { param($p) if ($script:tuiLines.Count -gt 0) { $script:tuiLines.Dequeue() } else { '' } }
         $rd = { param($frame) $script:tuiFrames.Add((($frame | ForEach-Object { ($_ | ForEach-Object { $_.Text }) -join '' }) -join "`n")) }
-        $st = Start-AtmTui -InventoryArgs $InvArgs -KeySource $ks -Renderer $rd -LineReader $lr -Ascii:$Ascii -Width $W -Height $H
+        $tuiArgs = @{ InventoryArgs = $InvArgs; KeySource = $ks; Renderer = $rd; LineReader = $lr; Ascii = $Ascii; Width = $W; Height = $H }
+        if ($null -ne $DiagRunner) { $tuiArgs['DiagnoseRunner'] = $DiagRunner; $tuiArgs['DiagnoseArgs'] = @{} }
+        $st = Start-AtmTui @tuiArgs
         return [pscustomobject]@{ State = $st; Frames = $script:tuiFrames.ToArray() }
     }
     Test-Case 'TUI' 'Navegacao headless: dashboard, usuarios, roots, detalhe, classes, erros, preview, ajuda' {
@@ -3823,7 +3825,7 @@ try {
         foreach ($c in @('process-snapshot', 'sessions-claude-code', 'agent-processes', 'agent-resources')) { Assert-Eq $cs[$c].Status 'COMPLETE' "$c completo: $(@($cs[$c].Reasons) -join ',')" }
         Assert-Eq @($d.Coverage | Where-Object { $_.Collector -like 'sessions-*' }).Count 1 'um registro de sessoes por provider (dois perfis)'
         # P1-C: working directories are not observed and open files are a sample, so a diagnose is never complete.
-        Assert-True (-not $d.CoverageComplete -and (@($d.Coverage | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status } | Where-Object { $_.Collector -notlike 'virtual*' } | ForEach-Object { $_.Collector } | Sort-Object) -join ',') -eq 'handles,process-cwd,service-properties,services') 'cobertura incompleta so por diretorios de trabalho, arquivos abertos (trava) e servicos (nenhum declarado); virtualizacao depende da maquina'
+        Assert-True (-not $d.CoverageComplete -and (@($d.Coverage | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status } | Where-Object { $_.Collector -notlike 'virtual*' } | ForEach-Object { $_.Collector } | Sort-Object) -join ',') -eq 'handles,process-cwd,service-properties,services,worktree-discovery') 'cobertura incompleta so por diretorios de trabalho, arquivos abertos (trava), servicos (nenhum declarado) e worktrees (trava); virtualizacao depende da maquina'
         $expect = @{ 200 = 'AGENT_PROCESS'; 202 = 'AGENT_PROCESS'; 201 = 'AGENT_DESCENDANT'; 203 = 'AGENT_DESCENDANT'; 3000 = 'SELF'; 3001 = 'SELF'; 1000 = '(none)'; 4 = '(none)' }
         foreach ($e in $expect.GetEnumerator()) { Assert-Eq (& $b4State $d $k[[int]$e.Key]) $e.Value "processo $($e.Key)" }
         # Sessions: one key per profile for the same session id; LIVE (exact identity) and absent from a complete collection.
@@ -4364,8 +4366,8 @@ try {
         $r1 = New-TestRoot -ProfileInfo $p
         $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -PseudonymKey $testPseudonymKey
         Assert-Eq $d.SchemaVersion 'atm.diagnose/2' 'schema'
-        Assert-Eq (@($d.Coverage | ForEach-Object { $_.Collector }) -join ',') 'identity,provider-claude-code,inventory,processes,temp-profiles,profile-discovery,process-snapshot,sessions-claude-code,agent-processes,agent-resources,services,service-properties,virtualization-platform,virtual-machines,virtualization-processes,process-cwd,handles,dependency-graph' 'coletores (Claude Code v2: dicas de runtime lidas; runtime de agentes da P1-B4-c; P2-A; P2-B; P1-C; P4-B: descoberta de perfis e grafo)'
-        foreach ($c in @($d.Coverage | Where-Object { $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' -and $_.Collector -notlike 'service*' -and $_.Collector -notlike 'virtual*' })) { Assert-Eq $c.Status 'COMPLETE' "$($c.Collector) completo" }
+        Assert-Eq (@($d.Coverage | ForEach-Object { $_.Collector }) -join ',') 'identity,provider-claude-code,inventory,processes,temp-profiles,profile-discovery,process-snapshot,sessions-claude-code,agent-processes,agent-resources,services,service-properties,virtualization-platform,virtual-machines,virtualization-processes,worktree-discovery,process-cwd,handles,dependency-graph' 'coletores (Claude Code v2: dicas de runtime lidas; runtime de agentes da P1-B4-c; P2-A; P2-B; P1-C; P4-B: descoberta de perfis e grafo; P5-A: worktrees nao observadas com a trava fechada)'
+        foreach ($c in @($d.Coverage | Where-Object { $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' -and $_.Collector -ne 'worktree-discovery' -and $_.Collector -notlike 'service*' -and $_.Collector -notlike 'virtual*' })) { Assert-Eq $c.Status 'COMPLETE' "$($c.Collector) completo" }
         $hc = @($d.Coverage | Where-Object { $_.Collector -eq 'handles' })[0]; $wc = @($d.Coverage | Where-Object { $_.Collector -eq 'process-cwd' })[0]
         $sv = @($d.Coverage | Where-Object { $_.Collector -like 'service*' })
         Assert-True ($sv.Count -eq 2 -and @($sv | Where-Object { $_.Status -ceq 'NOT_OBSERVABLE' -and @($_.Reasons) -ccontains 'SERVICE_HINTS_NONE' }).Count -eq 2) 'P2-A: nenhum servico declarado pelo Claude Code: servicos NOT_OBSERVABLE, nunca ausencia'
@@ -4409,7 +4411,8 @@ try {
             $control = ($n -eq 'controle')
             Assert-Eq ([bool]$d.Inventory.CoverageComplete) $control ("$n`: Inventory.CoverageComplete (bases $(@($d.Inventory.Bases | ForEach-Object { $_.Status }) -join ','); registros legiveis $(@($d.Inventory.Registries.Values | ForEach-Object { $_.Readable }) -join ','))")
             # P1-C: process-cwd (deferred) and handles (a sample) are never complete; apart from them the control is complete.
-            $incomplete = @($d.Coverage | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status -and $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' -and $_.Collector -notlike 'service*' -and $_.Collector -notlike 'virtual*' })
+            # P5-A: worktree-discovery (closed gate) is always NOT_OBSERVABLE too.
+            $incomplete = @($d.Coverage | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status -and $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' -and $_.Collector -ne 'worktree-discovery' -and $_.Collector -notlike 'service*' -and $_.Collector -notlike 'virtual*' })
             Assert-True (-not $d.CoverageComplete -and (($incomplete.Count -eq 0) -eq $control)) "$n`: diagnose incompleto; fora de process-cwd/handles, completo so no controle ($(@($incomplete | ForEach-Object { $_.Collector }) -join ','))"
             if (-not $control) {
                 $c = @($d.Coverage | Where-Object { $_.Collector -eq $row.Collector })[0]
@@ -4420,7 +4423,7 @@ try {
                 if ($n -eq 'inaccessible') { Assert-Eq @($d.Inventory.InaccessibleProfiles).Count 1 'perfil inacessivel no inventario' }
                 if ($n -eq 'unverified') { Assert-Eq @($d.Inventory.UnverifiedTempProfiles).Count 1 'TEMP nao verificavel no inventario' }
             } else {
-                foreach ($c in @($d.Coverage | Where-Object { $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' -and $_.Collector -notlike 'service*' -and $_.Collector -notlike 'virtual*' })) { Assert-Eq $c.Status 'COMPLETE' "controle: $($c.Collector) completo" }
+                foreach ($c in @($d.Coverage | Where-Object { $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' -and $_.Collector -ne 'worktree-discovery' -and $_.Collector -notlike 'service*' -and $_.Collector -notlike 'virtual*' })) { Assert-Eq $c.Status 'COMPLETE' "controle: $($c.Collector) completo" }
             }
             $j = (ConvertTo-AtmDiagnoseJson -Result $d) | ConvertFrom-Json
             Assert-Eq ([bool]$j.coverageComplete) $false "$n`: JSON coverageComplete (P1-C: nunca completo)"
@@ -6892,6 +6895,193 @@ try {
         }
         Assert-True ($script:AtmRealDeletionEnabled -eq $true -and $shippedDeletionGate -eq $false -and $script:AtmHandleDiagnosticsEnabled -eq $false -and $script:AtmWorktreeDiagnosticsEnabled -eq $false) '30: travas distribuidas fechadas (a suite so abre a de exclusao no sandbox)'
     }
+    # ------------------------------------------------------------------ P5-A (TUI diagnostics view)
+    # A synthetic diagnose result (the P4-A/P4-B helpers above: findings, graph and states as the engine builds them);
+    # the TUI receives it from an injected runner, so no collector runs and every count of runs is observable.
+    $tdT0 = New-Object DateTime(2026, 10, 25, 3, 0, 0, [DateTimeKind]::Utc)
+    $tdCov = { param([string]$C, [string]$S, [string[]]$R = @(), [string]$E = 'NO') New-AtmCoverage -Collector $C -Status $S -Reasons $R -ElevationWouldHelp $E }
+    $tdWrap = { param($Findings, $Coverage, $Graph)
+        [pscustomobject]@{ SchemaVersion = $script:AtmDiagnoseSchema; ToolVersion = $script:AtmVersion; Machine = 'TESTHOST'; StartedUtc = $tdT0; FinishedUtc = $tdT0.AddSeconds(5); DeadlineUtc = $tdT0.AddSeconds(300); DeadlineSeconds = 300
+            Identity = [pscustomobject]@{ Name = 'TEST\alice'; Sid = 'S-1-5-21-9-9-9-1000'; IsElevatedAdministrator = $false; ElevationType = 'LIMITED'; IntegrityLevel = 'MEDIUM'; SessionId = 1 }
+            Providers = @(); Coverage = @($Coverage); CoverageComplete = $false; Findings = @($Findings); AgentResources = $null; Graph = $Graph
+            Pseudonymization = [pscustomobject]@{ Scheme = $script:AtmPseudonymScheme; KeySource = 'EPHEMERAL'; KeyId = $null }; Inventory = $null } }
+    $tdBuild = { param([switch]$WithWorktree)
+        $c0 = @((& $tdCov 'identity' 'COMPLETE'), (& $tdCov 'inventory' 'COMPLETE'), (& $tdCov 'processes' 'PARTIAL' @('UNINSPECTABLE_PROCESSES') 'YES'), (& $tdCov 'process-snapshot' 'COMPLETE'),
+            (& $tdCov 'services' 'DENIED' @('ACCESS_DENIED') 'YES'), (& $tdCov 'virtual-machines' 'TIMEOUT' @('DEADLINE_EXCEEDED') 'UNKNOWN'), (& $tdCov 'profile-discovery' 'PARTIAL' @('PROFILES_DIRECTORY_UNRESOLVED') 'NO'),
+            $(if ($WithWorktree) { & $tdCov 'worktree-discovery' 'COMPLETE' } else { & $tdCov 'worktree-discovery' 'NOT_OBSERVABLE' @('WORKTREE_DIAGNOSTICS_GATE_CLOSED') }),
+            (& $tdCov 'process-cwd' 'NOT_OBSERVABLE' @('WORKING_DIRECTORY_DEFERRED')), (& $tdCov 'handles' 'NOT_OBSERVABLE' @('HANDLE_SECURITY_GATE_CLOSED')))
+        $k101 = & $gK 101 $b4T0.AddMinutes(1)
+        $f = @($gProcF) + @((& $gF 'Process' 'pid:777' 'IDENTITY_UNVERIFIED' @() 'claude-code'), (& $gF 'AgentSession' 'claude-code/s-1' 'LIVE'),
+            (& $gF 'Service' 'claude-desktop/CoworkVMService' 'RUNNING' @((& $gE 'SERVICE_PROCESS_VERIFIED' $k101 'services')) 'claude-desktop'),
+            (& $gF 'VirtualizationPlatform' 'host' 'PRESENT'), (& $gF 'VirtualMachine' 'vm/v-1' 'RUNNING' @((& $gE 'PROVIDER_ATTRIBUTION_AMBIGUOUS' 'claude-code,claude-desktop' 'virtual-machines'))),
+            (& $bTp 'a'), (& $bTp 'b'), (& $bTp 'c'), (& $bTp 'd'))
+        if ($WithWorktree) { $f += @(& $gF 'Worktree' 'wt/w-1' 'LOCAL_WORK' @((& $gE 'IN_REPOSITORY' 'repo/r-1' 'worktree-discovery'))) }
+        $parts = @((& $gPart 'a' @('PID 102 (node.exe)')), (& $gPart 'b' @() @('PID 102 (node.exe) -> base')), (& $gPart 'c' @() @() @('PID 102 (node.exe) -> unresolved')), (& $gPart 'd'))
+        $g = Get-AtmDependencyGraph -Findings $f -Collection (& $gRows $gBase) -LegacySnapshot (& $gLegacy $gBase) -Partitions $parts -PartitionKeyFunction $gKf -Coverage $c0
+        $gc = ConvertTo-AtmGraphCoverage -Graph $g
+        & $tdWrap (Set-AtmGraphFindingStates -Findings $f -Graph $g -Coverage $c0 -GraphCoverage $gc) (@($c0) + @($gc)) $g }
+    $tdRes = & $tdBuild
+    $tdState = { param($Res, [int]$W = 100, [int]$H = 30)
+        $v = (ConvertTo-AtmDiagnoseJson -Result $Res) | ConvertFrom-Json
+        $st = @{ Diag = @{ View = $v; Index = (New-AtmTuiDiagIndex -View $v); Stale = $false; Error = $null }; Width = $W; Height = $H; G = (Get-AtmTuiGlyphs $true); Inventory = $null; Message = $null; Stack = New-Object System.Collections.Generic.List[object] }
+        $st }
+    $tdFrame = { param($St, [hashtable]$Screen) $s0 = @{ Sel = 0; Top = 0; Count = 0; Filter = $null; Title = 'T' }; foreach ($k in $Screen.Keys) { $s0[$k] = $Screen[$k] }; $St.Stack.Clear(); $St.Stack.Add($s0)
+        return , @(Get-AtmTuiFrame -State $St | ForEach-Object { ($_ | ForEach-Object { $_.Text }) -join '' }) }
+    $tdText = { param($St, [hashtable]$Screen) (@(Get-AtmTuiDiagText -State $St -Screen $Screen -Width $St.Width) | ForEach-Object { $_.Text }) -join '' }
+    # Headless frames are transliterated when the console has no Unicode output (ASCII fallback): both forms count.
+    $tdHas = { param([string]$Text, [string]$S) $Text.Contains($S) -or $Text.Contains((ConvertTo-AtmAscii $S)) }
+    $tdFind = { param($St, [string]$Key) $St.Diag.Index.FindingBy[$Key] }
+
+    Test-Case 'TUI' 'P5-A: menu Diagnostico - entrada (diagnose so nessa acao), categorias, retorno ao menu sem nova coleta, navegacao sem coleta, atualizacao manual explicita' {
+        $p = New-TestProfile 'p5a-nav'
+        $null = New-TestRoot -ProfileInfo $p
+        $script:tdRuns = 0; $script:tdObj = $tdRes
+        $runner = { param($a) $script:tdRuns++; $script:tdObj }
+        $keys = @((New-Key 'D' 'd'), (New-Key 'Enter'), (New-Key 'Escape'), (New-Key 'DownArrow'), (New-Key 'Enter'), (New-Key 'Enter'), (New-Key 'Escape'), (New-Key 'Escape'),
+            (New-Key 'DownArrow'), (New-Key 'Enter'), (New-Key 'PageDown'), (New-Key 'Enter'), (New-Key 'Escape'), (New-Key 'Escape'), (New-Key 'Escape'), (New-Key 'D' 'd'), (New-Key 'Escape'), (New-Key 'Q' 'q'))
+        $o = Invoke-HeadlessTui -Keys $keys -InvArgs (Get-InvArgs -Profiles @($p)) -DiagRunner $runner -H 30
+        $all = $o.Frames -join "`n=====`n"
+        Assert-Eq $script:tdRuns 1 '1/22: um unico diagnose (entrada); voltar, detalhes, paginacao e reentrar nao coletam de novo'
+        foreach ($k in @('tui.diag.cat.summary', 'tui.diag.cat.coverage', 'tui.diag.cat.procs', 'tui.diag.cat.services', 'tui.diag.cat.virt', 'tui.diag.cat.worktrees', 'tui.diag.cat.parts', 'tui.diag.cat.graph', 'tui.diag.cat.issues', 'tui.diag.noAuth')) { Assert-True (& $tdHas $all (Get-AtmText $k)) "categoria/aviso: $k" }
+        Assert-True ((& $tdHas $o.Frames[-1] (Get-AtmText 'menu.title')) -or (& $tdHas $o.Frames[-2] (Get-AtmText 'menu.title'))) '2: retorno ao menu principal'
+        Assert-True (& $tdHas $all (Get-AtmText 'tui.diag.lastRun' (Format-AtmTuiUtc $tdT0.AddSeconds(5)))) 'horario da ultima observacao'
+        # 23: U refreshes on request only; the screens above the area are closed.
+        $script:tdRuns = 0
+        $o2 = Invoke-HeadlessTui -Keys @((New-Key 'D' 'd'), (New-Key 'DownArrow'), (New-Key 'Enter'), (New-Key 'U' 'u'), (New-Key 'Escape'), (New-Key 'Q' 'q')) -InvArgs (Get-InvArgs -Profiles @($p)) -DiagRunner $runner
+        $j2 = $o2.Frames -join "`n"
+        Assert-True ($script:tdRuns -eq 2 -and (& $tdHas $j2 (Get-AtmText 'tui.diag.refreshed')) -and (& $tdHas $j2 (Limit-AtmText (Get-AtmText 'tui.diag.running') 60 '').Trim())) '23: U atualiza (nova observacao, com aviso de demora)'
+        Assert-True (@($o2.State.Stack | ForEach-Object { $_.Name }) -join ',' -ceq 'menu') 'apos U e Esc: de volta ao menu (telas do resultado anterior fechadas)'
+        foreach ($f in $o.Frames) { foreach ($ln in ($f -split "`n")) { Assert-True ($ln.Length -le 120) 'largura' } }
+    }
+    Test-Case 'TUI' 'P5-A: resumo, categorias, detalhes de achado e no, arestas DIRECT/ANCESTOR/AMBIGUOUS, evidencia positiva, UNKNOWN por cobertura incompleta' {
+        $st = & $tdState $tdRes
+        $sum = & $tdText $st @{ Name = 'dsum' }
+        Assert-True ($sum.Contains((Get-AtmText 'tui.diag.sumParts' 1 3 0)) -and $sum.Contains((Get-AtmText 'tui.diag.noAuth')) -and $sum.Contains((Get-AtmText 'tui.diag.sumProcs' 3 1 1))) "3: resumo (particoes IN_USE/UNKNOWN, processos verificados/nao verificados, sessoes): $sum"
+        Assert-True ($sum.Contains((Get-AtmText 'tui.diag.sumCountPartial' (Get-AtmText 'tui.diag.lblServices') 1 'services=DENIED' 'ACCESS_DENIED')) -and $sum.Contains((Get-AtmText 'tui.diag.sumCountPartial' (Get-AtmText 'tui.diag.lblWorktrees') 0 'worktree-discovery=NOT_OBSERVABLE' 'WORKTREE_DIAGNOSTICS_GATE_CLOSED'))) 'NOT_OBSERVABLE e DENIED nunca como zero entidades: ausencia nao comprovada'
+        Assert-True ($sum.Contains((Get-AtmText 'tui.diag.sumCoverage' (Get-AtmText 'common.incomplete'))) -and $sum.Contains((Get-AtmText 'tui.diag.sumLimits'))) 'cobertura parcial nunca como completa; limitacoes listadas'
+        foreach ($cat in @(@('procs', 'Process'), @('services', 'Service'), @('virt', 'VirtualMachine'), @('parts', 'TempPartition'))) {
+            $fr = (& $tdFrame $st @{ Name = 'dlist'; Filter = @{ Cat = $cat[0] } }) -join "`n"
+            Assert-True ($fr.Contains($cat[1])) "4-7: categoria $($cat[0])"
+        }
+        $wt = (& $tdFrame $st @{ Name = 'dlist'; Filter = @{ Cat = 'worktrees' } }) -join "`n"
+        Assert-True ($wt.Contains((Get-AtmText 'common.none'))) '8: worktrees com a trava fechada: lista vazia (e o resumo diz NOT_OBSERVABLE)'
+        $st2 = & $tdState (& $tdBuild -WithWorktree)
+        Assert-True (((& $tdFrame $st2 @{ Name = 'dlist'; Filter = @{ Cat = 'worktrees' } }) -join "`n").Contains('wt/w-1')) '8: worktree de fixture listada'
+        $a = & $tdText $st @{ Name = 'dfind'; Filter = @{ F = (& $tdFind $st 'TempPartition|claude-code/p-a') } }
+        Assert-True ($a.Contains('IN_USE') -and $a.Contains('GRAPH_SOURCE_DIRECT') -and $a.Contains('[D] REFERENCES_PATH <- Process')) '11/14: evidencia positiva de uso e aresta DIRECT'
+        Assert-True ((& $tdText $st @{ Name = 'dfind'; Filter = @{ F = (& $tdFind $st 'TempPartition|claude-code/p-b') } }).Contains('[A] REFERENCES_PATH')) '12: aresta ANCESTOR'
+        $c = & $tdText $st @{ Name = 'dfind'; Filter = @{ F = (& $tdFind $st 'TempPartition|claude-code/p-c') } }
+        Assert-True ($c.Contains('[?] REFERENCES_PATH') -and $c.Contains((Get-AtmText 'tui.diag.ambEdge'))) '13: aresta AMBIGUOUS diferenciada (marcador e texto)'
+        $d = & $tdText $st @{ Name = 'dfind'; Filter = @{ F = (& $tdFind $st 'TempPartition|claude-code/p-d') } }
+        Assert-True ($d.Contains('UNKNOWN') -and $d.Contains((Get-AtmText 'tui.diag.unknownNote')) -and $d.Contains('COVERAGE_INCOMPLETE') -and $d.Contains('handles')) '15: UNKNOWN por cobertura incompleta, nunca livre'
+        $vm = & $tdText $st @{ Name = 'dfind'; Filter = @{ F = (& $tdFind $st 'VirtualMachine|vm/v-1') } }
+        Assert-True ($vm.Contains((Get-AtmText 'tui.diag.det.providerAmbiguous' 'claude-code,claude-desktop')) -and $vm.Contains('[?] ATTRIBUTED_TO -> Provider claude-code')) 'ATTRIBUTED_TO ambigua nunca exclusiva'
+        $nodeT = @($st.Diag.Index.Nodes | Where-Object { $_.finding })[0]; $nodeF = @($st.Diag.Index.Nodes | Where-Object { -not $_.finding })[0]
+        Assert-True ((& $tdText $st @{ Name = 'dnode'; Filter = @{ N = $nodeT } }).Contains((Get-AtmText 'tui.diag.finding.yes'))) '9: no com achado proprio'
+        Assert-True ((& $tdText $st @{ Name = 'dnode'; Filter = @{ N = $nodeF } }).Contains((Get-AtmText 'tui.diag.finding.no'))) '10: finding=false como referencia sem achado proprio'
+        Assert-True (((& $tdFrame $st @{ Name = 'dnodes' }) -join "`n").Contains((Get-AtmText 'tui.diag.findingShortNo'))) 'lista de nos marca referencias'
+    }
+    Test-Case 'TUI' 'P5-A: cobertura - handles e worktrees bloqueados, D-1 adiado, descoberta parcial, DENIED e TIMEOUT; elevacao so quando YES; pendencias' {
+        $st = & $tdState $tdRes
+        $cov = (& $tdFrame $st @{ Name = 'dcov' }) -join "`n"
+        foreach ($x in @('handles', 'HANDLE_SECURITY_GATE_CLOSED', 'worktree-discovery', 'WORKTREE_DIAGNOSTICS_GATE_CLOSED', 'process-cwd', 'WORKING_DIRECTORY_DEFERRED', 'profile-discovery', 'PROFILES_DIRECTORY_UNRESOLVED', 'DENIED', 'TIMEOUT', 'dependency-graph')) { Assert-True ($cov.Contains($x)) "16-20: cobertura mostra $x" }
+        $to = & $tdText $st @{ Name = 'dcovdet'; Filter = @{ C = $st.Diag.Index.CovBy['virtual-machines'] } }
+        Assert-True ($to.Contains((Get-AtmText 'tui.diag.elevUnknown')) -and -not $to.Contains((Get-AtmText 'tui.diag.elevYes'))) '20: ElevationWouldHelp UNKNOWN nunca prometido como solucao'
+        Assert-True ((& $tdText $st @{ Name = 'dcovdet'; Filter = @{ C = $st.Diag.Index.CovBy['services'] } }).Contains((Get-AtmText 'tui.diag.elevYes'))) 'YES: elevacao ajudaria'
+        $iss = (& $tdFrame $st @{ Name = 'dissues' } ) -join "`n"
+        Assert-True ($iss.Contains((Get-AtmText 'tui.diag.typeCov')) -and $iss.Contains((Get-AtmText 'tui.diag.typeFind'))) '9 (A): pendencias com coberturas e achados UNKNOWN'
+        Assert-Eq @($st.Diag.Index.Issues | Where-Object { $_.T -ceq 'cov' }).Count @($st.Diag.Index.Coverage | Where-Object { $script:AtmConclusiveCoverage -cnotcontains [string]$_.status }).Count 'nenhum coletor incompleto ocultado'
+    }
+    Test-Case 'TUI' 'P5-A: falha do diagnose com mensagem segura, resultado anterior preservado como desatualizado, nenhuma repeticao automatica' {
+        $p = New-TestProfile 'p5a-fail'
+        $script:tdRuns = 0
+        $fail = { param($a) $script:tdRuns++; throw [UnauthorizedAccessException]::new('SECRET-diag C:\Users\alice token=abc') }
+        $o = Invoke-HeadlessTui -Keys @((New-Key 'D' 'd'), (New-Key 'Q' 'q')) -InvArgs (Get-InvArgs -Profiles @($p)) -DiagRunner $fail
+        $all = $o.Frames -join "`n"
+        Assert-True ($script:tdRuns -eq 1 -and $all.Contains('EXCEPTION_UNAUTHORIZEDACCESSEXCEPTION') -and (& $tdHas $all (Limit-AtmText (Get-AtmText 'tui.diag.failed' 'EXCEPTION_UNAUTHORIZEDACCESSEXCEPTION') 60 '').Trim()) -and -not $all.Contains('SECRET') -and -not $all.Contains('token=')) '24: falha com codigo seguro, sem mensagem bruta, sem repeticao'
+        Assert-True (($o.State.Stack | ForEach-Object { $_.Name }) -join ',' -ceq 'menu') 'falha sem resultado: permanece no menu'
+        $script:tdRuns = 0
+        $flaky = { param($a) $script:tdRuns++; if ($script:tdRuns -ge 2) { throw [IO.IOException]::new('SECRET-second') }; $tdRes }
+        $o2 = Invoke-HeadlessTui -Keys @((New-Key 'D' 'd'), (New-Key 'U' 'u'), (New-Key 'Enter'), (New-Key 'Escape'), (New-Key 'Q' 'q')) -InvArgs (Get-InvArgs -Profiles @($p)) -DiagRunner $flaky
+        $a2 = $o2.Frames -join "`n"
+        Assert-True ($script:tdRuns -eq 2 -and $null -ne $o2.State.Diag.View -and $o2.State.Diag.Stale -and $a2.Contains('EXCEPTION_IOEXCEPTION') -and (& $tdHas $a2 (Get-AtmText 'tui.diag.staleShort')) -and -not $a2.Contains('SECRET')) '25: resultado anterior mantido e marcado DESATUALIZADO'
+    }
+    Test-Case 'TUI' 'P5-A: ASCII e Unicode, terminal 60x20, pt-BR e en-US, privacidade do conteudo renderizado (separado da V0.1)' {
+        $p = New-TestProfile 'p5a-view'
+        $root = New-TestRoot -ProfileInfo $p
+        $script:tdObj = $tdRes
+        $runner = { param($a) $script:tdObj }
+        $keys = @((New-Key 'D' 'd'), (New-Key 'Enter'), (New-Key 'PageDown'), (New-Key 'Escape'), (New-Key 'DownArrow'), (New-Key 'Enter'), (New-Key 'Enter'), (New-Key 'Escape'), (New-Key 'Escape'),
+            (New-Key 'DownArrow'), (New-Key 'DownArrow'), (New-Key 'DownArrow'), (New-Key 'DownArrow'), (New-Key 'DownArrow'), (New-Key 'Enter'), (New-Key 'Enter'), (New-Key 'End'), (New-Key 'Escape'), (New-Key 'Escape'),
+            (New-Key 'DownArrow'), (New-Key 'Enter'), (New-Key 'End'), (New-Key 'Enter'), (New-Key 'Escape'), (New-Key 'Escape'), (New-Key 'Escape'), (New-Key 'Q' 'q'))
+        $o = Invoke-HeadlessTui -Keys $keys -InvArgs (Get-InvArgs -Profiles @($p)) -DiagRunner $runner -Ascii -W 60 -H 20
+        $all = $o.Frames -join "`n"
+        Assert-True ($all -match '^[\x09\x0A\x20-\x7E]*$') '26: somente ASCII imprimivel com -Ascii'
+        foreach ($f in $o.Frames) { $ls = @($f -split "`n"); Assert-True ($ls.Count -le 20) '27: no maximo 20 linhas'; foreach ($ln in $ls) { Assert-True ($ln.Length -le 60) "27: largura 60 ($($ln.Length))" } }
+        $u = Invoke-HeadlessTui -Keys @((New-Key 'D' 'd'), (New-Key 'Enter'), (New-Key 'Q' 'q')) -InvArgs (Get-InvArgs -Profiles @($p)) -DiagRunner $runner -W 80 -H 24
+        Assert-True (& $tdHas ($u.Frames -join "`n") (Limit-AtmText (Get-AtmText 'tui.diag.noAuth') 70 '').Trim()) '26: Unicode (sem -Ascii) renderiza a mesma area'
+        # Privacy: nothing of the identity, the machine or the V0.1 inventory in a diagnostics frame (the V0.1 screens keep their own content).
+        $diagFrames = @($o.Frames + $u.Frames | Where-Object { & $tdHas $_ (Get-AtmText 'tui.diag.title') })
+        Assert-True ($diagFrames.Count -gt 3) 'quadros da area de diagnostico'
+        foreach ($x in @('alice', 'S-1-5-21-9-9-9-1000', 'TESTHOST', $p.ProfilePath, (Split-Path $root -Leaf), 'node.exe', 'unresolved', 'D:\t')) { Assert-True (-not ($diagFrames -join "`n").Contains($x)) "30: diagnostico sem '$x'" }
+        $v1 = Invoke-HeadlessTui -Keys @((New-Key 'D2' '2'), (New-Key 'Q' 'q')) -InvArgs (Get-InvArgs -Profiles @($p))
+        Assert-True (($v1.Frames -join "`n").Contains('p5a-view') -and -not ($diagFrames -join "`n").Contains('p5a-view')) 'V0.1 continua mostrando a conta do perfil; a area de diagnostico nao (separacao das apresentacoes)'
+        $prev = Get-AtmLanguage
+        try {
+            foreach ($lang in @('pt-BR', 'en-US')) {
+                Set-AtmLanguage -Requested $lang
+                $st = & $tdState $tdRes
+                $t = & $tdText $st @{ Name = 'dsum' }
+                Assert-True ($t.Contains((Get-AtmText 'tui.diag.noAuth')) -and $t.Contains((Get-AtmText 'tui.diag.unknownNote'))) "29: textos em $lang"
+            }
+            Assert-True ($script:AtmMessages['pt-BR']['tui.diag.noAuth'] -ceq 'Os resultados não autorizam exclusão de arquivos ou encerramento de processos.') 'aviso exigido, literal em pt-BR'
+        } finally { Set-AtmLanguage -Requested $prev }
+        Assert-True ([IO.Directory]::Exists($root)) '32: nada alterado'
+    }
+    Test-Case 'TUI' 'P5-A: escala - milhares de achados e nos paginados (so a pagina visivel e formatada), indices construidos uma vez; memoria e tempo medidos' {
+        $f = New-Object System.Collections.Generic.List[object]
+        for ($i = 0; $i -lt 5000; $i++) { $f.Add((& $gF 'TempPartition' ('claude-code/p-' + $i.ToString('D5')) 'UNKNOWN')) }
+        $nodes = @(foreach ($x in $f) { [pscustomobject]@{ Kind = 'TempPartition'; Key = $x.Key; Finding = $true } })
+        $graph = [pscustomobject]@{ Nodes = $nodes; Edges = @(); Summaries = @(); Coverage = [pscustomobject]@{ Status = 'COMPLETE'; Reasons = @(); Nodes = $nodes.Count; Edges = 0; DroppedEdges = 0; StartedUtc = $tdT0; ElapsedMs = 1 } }
+        $res = & $tdWrap $f.ToArray() @((& $tdCov 'inventory' 'COMPLETE')) $graph
+        [GC]::Collect(); $m0 = [GC]::GetTotalMemory($true)
+        $sw = [Diagnostics.Stopwatch]::StartNew(); $st = & $tdState $res 100 30; $build = $sw.ElapsedMilliseconds
+        $m1 = [GC]::GetTotalMemory($true)
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $fr = $null
+        foreach ($top in @(0, 2500, 4990)) { $fr = & $tdFrame $st @{ Name = 'dlist'; Filter = @{ Cat = 'parts' }; Sel = $top; Top = $top } }
+        foreach ($top in @(0, 4990)) { $null = & $tdFrame $st @{ Name = 'dnodes'; Sel = $top; Top = $top } }
+        $render = $sw.ElapsedMilliseconds
+        Assert-True ($fr.Count -le 30 -and ($fr -join "`n").Contains('p-04990') -and $fr[-1].Contains('/5000')) '21: pagina final, posicao/total no rodape, nunca milhares de linhas'
+        Assert-True ($render -lt 15000) "5 quadros de 5000 itens em $render ms"
+        $script:caseNote = "5000 achados/nos: indice+JSON $build ms, 5 quadros $render ms, memoria ~$([math]::Round(($m1 - $m0) / 1MB, 1)) MB"
+    }
+    Test-Case 'TUI' 'P5-A (estatico): a TUI so chama Invoke-AtmDiagnose (nenhum coletor, Git, Restart Manager, registro ou arquivo), nao muda estados, nao exclui; menu V0.1 preservado; travas fechadas' {
+        $tui = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Tui.ps1'))
+        foreach ($pat in @('Get-CimInstance', 'Get-WmiObject', 'Get-Process', 'Get-Service', 'Get-AtmProcessCollection', 'Invoke-AtmServiceQuery', 'Invoke-AtmVirtualizationQuery', 'Get-AtmWorktreeDiscovery', 'Get-AtmHandleEvidence', 'Get-AtmHandleSampleFiles',
+                'Invoke-AtmGitCommand', 'git.exe', 'RmStartSession', 'Registry', 'Get-ChildItem', '[IO.File]::Read', 'Get-AtmDependencyGraph', 'Set-AtmGraphFindingStates', 'New-AtmFinding', 'Get-AtmProfiles', 'AtmHandleDiagnosticsEnabled =', 'AtmWorktreeDiagnosticsEnabled =', 'Stop-Process', 'Stop-Service')) {
+            Assert-True (-not $tui.Contains($pat)) "31/32: Tui.ps1 sem '$pat'"
+        }
+        Assert-Eq ([regex]::Matches($tui, 'Invoke-AtmDiagnose @').Count) 1 'um unico ponto que executa o diagnose'
+        $keysV01 = @(Get-AtmTuiMenuItems | ForEach-Object { $_.Key }) -join ''
+        Assert-Eq $keysV01 '123456789PDLRHQ' '33: menu V0.1 preservado (D acrescentado)'
+        Assert-True ($script:AtmRealDeletionEnabled -eq $true -and $shippedDeletionGate -eq $false -and $script:AtmHandleDiagnosticsEnabled -eq $false -and $script:AtmWorktreeDiagnosticsEnabled -eq $false) '34: travas distribuidas fechadas (a suite so abre a de exclusao no sandbox)'
+        foreach ($l in @('en-US', 'pt-BR')) { foreach ($k in @('menu.diagnose', 'tui.diag.noAuth', 'tui.diag.failed', 'tui.diag.stale', 'foot.diagList', 'foot.diagText', 'tui.diag.finding.no', 'tui.diag.elevUnknown')) { Assert-True $script:AtmMessages[$l].ContainsKey($k) "$k ($l)" } }
+    }
+    Test-Case 'Particoes' 'P5-A: defesa em profundidade - achado com registro conclusivo de um coletor e a execucao com um registro pior do mesmo coletor: nenhuma reconstrucao conclui ausencia; positivos inalterados' {
+        $own = & $gF 'TempPartition' 'claude-code/p-x' 'RUNTIME_NOT_DIAGNOSED'
+        $own = New-AtmFinding -Kind 'TempPartition' -Key 'claude-code/p-x' -State 'RUNTIME_NOT_DIAGNOSED' -Coverage @((& $tdCov 'handles' 'COMPLETE'), (& $tdCov 'process-cwd' 'COMPLETE'))
+        $global = @($gCovAll | Where-Object { $_.Collector -cne 'handles' }) + @((& $tdCov 'handles' 'COMPLETE'), (& $tdCov 'handles' 'NOT_OBSERVABLE' @('HANDLE_SECURITY_GATE_CLOSED')))
+        $fake = [pscustomobject]@{ Summaries = @([pscustomobject]@{ Kind = 'TempPartition'; Key = 'claude-code/p-x'; Dependency = 'NONE_OBSERVED'; Strength = $null; Incoming = 0; Roots = [string[]]@(); IncompleteCoverage = [string[]]@(); Reasons = [string[]]@() }); Edges = @()
+            Coverage = [pscustomobject]@{ Status = 'COMPLETE'; Reasons = @(); Nodes = 1; Edges = 0; DroppedEdges = 0; StartedUtc = $tdT0; ElapsedMs = 1 } }
+        $r = @(Set-AtmGraphFindingStates -Findings @($own) -Graph $fake -Coverage $global -GraphCoverage (ConvertTo-AtmGraphCoverage -Graph $fake))[0]
+        Assert-True ($r.State -ceq 'UNKNOWN' -and $r.RequestedState -ceq 'NO_DEPENDENCY_OBSERVED' -and @($r.Coverage | Where-Object { $_.Collector -ceq 'handles' -and $_.Status -ceq 'NOT_OBSERVABLE' }).Count -eq 1) '35: o pior registro da execucao e anexado e a ausencia e recusada'
+        $okCov = @($gCovAll)
+        $r2 = @(Set-AtmGraphFindingStates -Findings @($own) -Graph $fake -Coverage $okCov -GraphCoverage (ConvertTo-AtmGraphCoverage -Graph $fake))[0]
+        Assert-Eq $r2.State 'NO_DEPENDENCY_OBSERVED' 'cobertura toda conclusiva (fixture): sem regressao'
+        $pos = & $bState (@($gProcF) + @(& $bTp 'a')) $global @((& $gPart 'a' @('PID 102 (node.exe)')))
+        Assert-Eq (& $bFind $pos 'claude-code/p-a').State 'IN_USE' 'positivo DIRECT inalterado com registro pior de outro coletor'
+    }
     Test-Case 'I18n' 'P1-C: todo motivo e evidencia de arquivos abertos tem texto nos dois idiomas' {
         foreach ($l in @('en-US', 'pt-BR')) {
             foreach ($x in $script:AtmHandleReasonCodes) { Assert-True $script:AtmMessages[$l].ContainsKey("reason.$x") "reason.$x ($l)" }
@@ -6937,7 +7127,7 @@ try {
         $inv = $diag.Substring($diag.IndexOf('function Invoke-AtmDiagnoseRun'))
         # P3-B: the diagnose reaches Git only through the discovery, and only inside the worktree diagnostics gate.
         $gateAt = $inv.IndexOf('if ($script:AtmWorktreeDiagnosticsEnabled) {')
-        Assert-True (-not $inv.Contains('Invoke-AtmGitCommand') -and [regex]::Matches($inv, 'Resolve-AtmGitExecutable').Count -eq 1 -and $gateAt -gt 0 -and $inv.IndexOf('Resolve-AtmGitExecutable') -gt $gateAt -and $inv.IndexOf('Resolve-AtmGitExecutable') -lt $inv.IndexOf('} elseif (@($RepositoryPaths).Count -gt 0)')) 'P3-B: Git no diagnose so pela descoberta, atras da trava'
+        Assert-True (-not $inv.Contains('Invoke-AtmGitCommand') -and [regex]::Matches($inv, 'Resolve-AtmGitExecutable').Count -eq 1 -and $gateAt -gt 0 -and $inv.IndexOf('Resolve-AtmGitExecutable') -gt $gateAt -and $inv.IndexOf('Resolve-AtmGitExecutable') -lt $inv.IndexOf('# Closed gate (every shipped copy): worktrees are not observed')) 'P3-B: Git no diagnose so pela descoberta, atras da trava'
         foreach ($f in @('Tui.ps1', 'Report.ps1')) {
             $txt = [IO.File]::ReadAllText((Join-Path $lib $f))
             foreach ($pat in @('Get-AtmIdentityRaw', 'Get-AtmIdentityState', 'Get-AtmProviderRuntimeHints', 'Get-AtmInventoryCoverage', 'AtmToken]', 'Get-AtmProcessRaw', 'Get-AtmProcessCollection', 'Resolve-AtmProcessReference', 'Get-AtmProcessParentLink', 'Get-AtmProcessTree', 'Compare-AtmProcessCollections', 'Get-AtmSelfProcessKeys', 'Measure-AtmProcessCpu', 'Invoke-AtmProcessCpuSampling', 'Get-AtmProcessTreeResources', 'Invoke-AtmGitCommand', 'Resolve-AtmGitExecutable', 'Invoke-AtmBoundedProcess', 'AtmJobRunner')) { Assert-True (-not $txt.Contains($pat)) "$f chama coletor diretamente: $pat" }

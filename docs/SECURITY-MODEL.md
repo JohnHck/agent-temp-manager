@@ -146,6 +146,11 @@ called by `Invoke-AtmGitCommand`):
   graph of the same run (`IN_USE` only with a `DIRECT` edge from a verified process; `UNKNOWN` otherwise;
   `NO_DEPENDENCY_OBSERVED` only with conclusive coverage, which a V0.2 run never has). Nothing is collected for it,
   and no diagnose state is read by the audit, the preview or `clean`.
+* **TUI diagnostics area (P5-A, ADR-0009):** presentation only. It runs `Invoke-AtmDiagnose` on an explicit action
+  (entering the area without a result, or `U`) and renders the diagnose JSON export of that result: no collector,
+  Git, Restart Manager, registry or file access of its own, no state change, no gate opened (static test); the
+  identity block, the machine name and the V0.1 inventory are not shown there. A failure shows the exception type
+  only and keeps the previous result marked as outdated; nothing is retried by itself.
 * **Open-file diagnostics gate (P1-C-S):** the Restart Manager collector (`handles`, D-2) is behind
   `$script:AtmHandleDiagnosticsEnabled`, `$false` in every shipped copy (single assignment; no option, environment
   variable or configuration file; checked by the test suite and the install e2e). It is checked by the diagnose and

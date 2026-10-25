@@ -269,6 +269,8 @@ Step 'shipped-handle-diagnostics-gate' {
     Assert ($r.Code -eq 0) "diagnose exit $($r.Code)"
     Assert ($r.Text -match 'handles\W+NOT_OBSERVABLE\W+HANDLE_SECURITY_GATE_CLOSED') 'diagnose instalado sem handles NOT_OBSERVABLE / HANDLE_SECURITY_GATE_CLOSED'
     Assert ($r.Text.Contains('Open files are not observed') -and -not $r.Text.Contains('Items with a file held open')) 'relatorio instalado sem a linha da trava ou com contagem de itens'
+    # P4-B/P5-A: the installed diagnose reports the graph and discovery coverage and the partition section; worktrees as not observed.
+    Assert ($r.Text -match 'dependency-graph\W+(COMPLETE|PARTIAL)' -and $r.Text -match 'profile-discovery\W+(COMPLETE|PARTIAL|FAILED|NOT_OBSERVABLE)' -and $r.Text -match 'worktree-discovery\W+NOT_OBSERVABLE\W+WORKTREE_DIAGNOSTICS_GATE_CLOSED' -and $r.Text.Contains('TEMPORARY PARTITIONS AND WORKTREES')) 'diagnose instalado sem coberturas do grafo/descoberta ou sem a secao de particoes'
     'installed handle diagnostics gate = $false (single assignment); installed diagnose: handles NOT_OBSERVABLE (HANDLE_SECURITY_GATE_CLOSED)'
 }
 foreach ($c in @(@('verify', 'verify', 0), @('version -Lang en-US', 'version', 0), @('audit -NoProgress -Lang en-US', 'audit', 0),

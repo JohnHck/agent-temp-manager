@@ -23,7 +23,17 @@ agent-temp -Ascii     # ASCII frames for fonts/terminals without box-drawing gly
 Keys: arrows / PgUp / PgDn / Home / End to move, **Enter** to open, **Esc** or Backspace to go back,
 **R** to re-audit, **Q** to quit. Menu shortcuts: `1` Dashboard, `2` Users/SIDs, `3` Projects, `4` Roots,
 `5` ACTIVE_EVIDENCE, `6` RECENT, `7` LIVENESS_UNKNOWN, `8` Blocked paths, `9` Errors & coverage,
-`P` Preview, `L` Assisted cleanup, `H` Help.
+`P` Preview, `D` Diagnostics V0.2, `L` Assisted cleanup, `H` Help.
+
+**Diagnostics V0.2 (`D`, read-only).** Entering the area runs `diagnose` once (it can take a while: the V0.1
+inventory cannot be interrupted); navigating, paging and opening details reuse that result and run nothing.
+**U** collects a new observation on request. The area shows a summary, the coverage of every collector (with
+`NOT_OBSERVABLE`, `DENIED`, `TIMEOUT` and their reasons), agent processes and sessions, services, the virtualization
+platform and VMs, repositories and worktrees, temporary partitions, the graph nodes and their edges (`[D]` direct,
+`[A]` reference to a parent path, `[?]` ambiguous), and why items are `UNKNOWN`. It shows only what the
+`diagnose` JSON export contains (pseudonyms and codes: no path, account, machine name or command line). A node
+marked "reference" has no finding of its own. If a refresh fails, the previous result stays, marked as outdated,
+with the exception type only. The results do not authorize deleting files or terminating processes.
 
 The TUI uses console colors (no ANSI escape sequences), so it works on Windows PowerShell 5.1 conhost,
 PowerShell 7 and Windows Terminal. Set `ATM_ASCII=1` (or `-Ascii`) to force ASCII: frames and text are

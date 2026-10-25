@@ -69,3 +69,26 @@ only in the presentation phase.
   configuration values never appear.
 * CLI tests: exit code `0` with partial coverage, `-ExportJson` refused inside bases, repositories and worktrees.
 * The existing V0.1 tests (audit export, gate, layering) stay green unchanged.
+
+## Implementation (P5-A, 2026-10-25): TUI diagnostics area
+
+The presentation layer gains a diagnostics area in the existing TUI (menu `D`); the layering rules above are unchanged.
+
+* **One entry point.** The TUI calls only `Invoke-AtmDiagnose` (through an injectable runner for tests), on an explicit
+  action: entering the area when there is no result, or `U`. Navigation, paging, filters and details reuse the result
+  and run nothing (headless test counts the runs).
+* **Schema-only view.** The result is converted with `ConvertTo-AtmDiagnoseJson` and parsed back; the area renders that
+  view, so it shows exactly what the export may show. The identity block, the machine name and the V0.1 inventory
+  are not rendered (the V0.1 screens keep their own content; tests check the separation).
+* **Indexes.** Built once per result (findings by category and key, worst coverage per collector, nodes, incoming and
+  outgoing edges, pending items); a list frame formats only its visible page.
+* **Meaning.** `UNKNOWN` is never shown as free; `NOT_OBSERVABLE`, `DENIED` or `TIMEOUT` are never shown as zero
+  items; strengths have text markers (`[D]`, `[A]`, `[?]`), not only colors; an ambiguous `ATTRIBUTED_TO` is marked
+  "ambiguous, not exclusive"; a node without a finding is "a reference without its own finding"; elevation is
+  promised only when `ElevationWouldHelp` is `YES`.
+* **Failures.** A failed run shows the exception type only; a previous result is kept and marked as outdated in the
+  header and the summary; nothing is retried automatically.
+* **Engine change for the view.** `worktree-discovery` is now always reported (`NOT_OBSERVABLE`,
+  `WORKTREE_DIAGNOSTICS_GATE_CLOSED`) when the worktree gate is closed, so the area never has to invent a coverage
+  record; and the run's worst record of a relevant collector is attached to a rebuilt partition or worktree finding
+  even when the finding already carries a conclusive record of it (defense in depth, P4-B).
