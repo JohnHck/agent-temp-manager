@@ -1079,7 +1079,6 @@ try {
     Test-Case 'Exportacao' 'V0.1.1 F-02: criacao segura de arquivo (fixtures) - ancestrais e pasta pinados por handle sem compartilhamento de exclusao, criacao relativa ao handle (OBJ_DONT_REPARSE, nunca nome existente), DACL protegida, verificacao antes de escrever; conversao da pasta em juncao DENTRO da janela pinada (deterministica, FSCTL); politica reavaliada dentro da janela; falha de ACL com codigo seguro' {
         $fa = Join-Path $sandbox 'finala'; $anc = Join-Path $fa 'anc'; $par = Join-Path $anc 'par'; $else = Join-Path $fa 'else'
         foreach ($d in @($par, $else)) { [void][IO.Directory]::CreateDirectory($d) }
-        $none = [pscustomobject]@{ Bases = @() }
         # Deterministic: while pinned, neither the folder nor an ancestor can be renamed (and so not replaced by a junction).
         $s = [AgentTempManager.AtmSafeCreate]::Pin($par)
         try {
