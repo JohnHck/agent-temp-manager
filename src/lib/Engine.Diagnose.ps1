@@ -1462,8 +1462,17 @@ function ConvertFrom-AtmGitJobResult {
         reader still running when the result was built)  PARTIAL  GIT_OUTPUT_INCOMPLETE
         members terminated after Git exited (a
         descendant still held the output)                 PARTIAL  GIT_JOB_TERMINATED_AFTER_EXIT
+        members still active at the end (after the
+        runner's bounded settle; the job's closing ends
+        them)                                             PARTIAL  GIT_JOB_ACTIVE_AT_END
+        active count unknown (the job accounting could
+        not be read): never taken for 0                   PARTIAL  GIT_JOB_STATE_UNKNOWN
         bytes beyond the cap                              PARTIAL  GIT_OUTPUT_TRUNCATED
-      COMPLETE only when none holds: a partial run is never complete evidence, whatever Git's exit code.
+      COMPLETE only when Git exited with 0 and none of these holds. Exit codes: 0 is the only success for every allowed
+      operation; any other code is FAILED, classified only by the error text (no operation in this contract accepts
+      another code: the callers run --version, status and rev-parse; cat-file -e and config, allowed but not called,
+      exit 1 for "not found" and would be GIT_COMMAND_FAILED, never COMPLETE). An unknown active count always gives
+      PARTIAL: no other evidence of the job's end is taken instead.
     #>
     param($Result)
     if (-not $Result.Started) {
@@ -1479,9 +1488,14 @@ function ConvertFrom-AtmGitJobResult {
     }
     if (-not $Result.ReadersCompleted -or $Result.ReaderFaulted) { $c.Add('GIT_OUTPUT_INCOMPLETE') }
     if ($Result.TerminationRequested -and -not $Result.TimedOut) { $c.Add('GIT_JOB_TERMINATED_AFTER_EXIT') }
+    if ($Result.ActiveProcessesAtEnd -gt 0) { $c.Add('GIT_JOB_ACTIVE_AT_END') }
+    elseif ($Result.ActiveProcessesAtEnd -lt 0) { $c.Add('GIT_JOB_STATE_UNKNOWN') }
     if ($Result.OutputTruncated) { $c.Add('GIT_OUTPUT_TRUNCATED') }
     if ($c.Count -eq 0) { return [pscustomobject]@{ Status = 'COMPLETE'; Reason = $null; Conditions = [string[]]@() } }
-    $status = $(switch -CaseSensitive ($c[0]) { 'GIT_TIMEOUT' { 'TIMEOUT' } 'GIT_OUTPUT_INCOMPLETE' { 'PARTIAL' } 'GIT_JOB_TERMINATED_AFTER_EXIT' { 'PARTIAL' } 'GIT_OUTPUT_TRUNCATED' { 'PARTIAL' } default { 'FAILED' } })
+    $status = $(switch -CaseSensitive ($c[0]) {
+            'GIT_TIMEOUT' { 'TIMEOUT' }
+            { $_ -cin @('GIT_OUTPUT_INCOMPLETE', 'GIT_JOB_TERMINATED_AFTER_EXIT', 'GIT_JOB_ACTIVE_AT_END', 'GIT_JOB_STATE_UNKNOWN', 'GIT_OUTPUT_TRUNCATED') } { 'PARTIAL' }
+            default { 'FAILED' } })
     return [pscustomobject]@{ Status = $status; Reason = $c[0]; Conditions = [string[]]$c.ToArray() }
 }
 

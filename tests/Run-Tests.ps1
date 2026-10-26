@@ -151,13 +151,16 @@ function Test-Case {
 # created inside it (never started outside and associated later), cmd.exe by its absolute path, the environment given
 # explicitly. On the deadline, or when a member still holds the output pipes after the child ended, only the job's
 # members are terminated (TerminateJobObject; KILL_ON_JOB_CLOSE when the job closes). No PID is ever looked up and no
-# process outside the job can be signalled. Bound: the deadline plus the runner's fixed waits (at most about 22.5 s:
-# 10 s for the child after termination, 2.5 s for the pipes, 10 s for the readers after the job is terminated); bytes
+# process outside the job can be signalled. Bound: the deadline plus the runner's fixed waits (at most about 24.5 s:
+# 10 s for the child after termination, 2.5 s for the pipes, 10 s for the readers after the job is terminated, 2 s for
+# members still active at the end, V0.2 stage 1B); bytes
 # kept per stream are capped (truncation declared). A runner failure is a sanitized CHILD_RUNNER_<code>, raised
 # before anything runs when the job or the process could not be set up.
 # V0.2 stage 1: a termination that was requested and refused (CHILD_RUNNER_JOB_TERMINATE_FAILED) and output not read to
 # its end (a reader error or a reader still running: CHILD_RUNNER_OUTPUT_INCOMPLETE) are failures in that order of
-# precedence, whatever the child's exit code; neither is ever a pass.
+# precedence, whatever the child's exit code; neither is ever a pass. Members still active at the end, or an unknown
+# count, are not failures here (the harness needs complete output and a confirmed termination; the job's closing ends
+# them); the Git mapping reports both as PARTIAL.
 function ConvertFrom-AtmTestJobResult {
     param($Result)
     if (-not $Result.Started) { throw ('CHILD_RUNNER_' + $(if ($Result.Error -cmatch '^[A-Z_]+$') { $Result.Error } else { 'NOT_STARTED' })) }
@@ -1978,6 +1981,28 @@ function global:Get-FileHash { param([string]$LiteralPath, [string]$Algorithm)
         $threw = $null; try { $h = ConvertFrom-AtmTestJobResult -Result $r } catch { $threw = $_.Exception.Message }
         Assert-True ($null -eq $threw -and $h.Exit -eq 0 -and $h.JobTerminated) 'real: no harness, o encerramento confirmado com saida completa nao e falha (evidencia JobTerminated mantida)'
         $tested.Add('descendente-pipe')
+        # Exit code 0 with a descendant (inside the job) that does NOT hold the output: started through ShellExecute,
+        # which inherits no handle; the job is inherited all the same (no breakaway). The readers end, no termination
+        # is requested, members are still active after the bounded settle: never COMPLETE; the job's closing ends them.
+        $info2 = Join-Path $dir 'detached.txt'
+        $gc2 = & $write 'detached.ps1' @('$p = [Diagnostics.Process]::GetCurrentProcess()', ('[IO.File]::WriteAllText(''{0}'', (''{{0}}|{{1}}'' -f $p.Id, $p.StartTime.ToUniversalTime().Ticks))' -f (& $q $info2)), '[Threading.Thread]::Sleep(120000)')
+        $main2 = & $write 'main-detached.ps1' @(
+            ('$psi = New-Object Diagnostics.ProcessStartInfo(''{0}'', ''-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{1}"'')' -f (& $q $ps51), (& $q $gc2)),
+            '$psi.UseShellExecute = $true; $psi.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden; $null = [Diagnostics.Process]::Start($psi)',
+            ('$sw = [Diagnostics.Stopwatch]::StartNew(); while (-not [IO.File]::Exists(''{0}'') -and $sw.ElapsedMilliseconds -lt 90000) {{ [Threading.Thread]::Sleep(100) }}' -f (& $q $info2)),
+            '[Console]::Out.WriteLine(''main-done''); exit 0')
+        $r = & $run $ps51 ("`"$ps51`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$main2`"") 120000
+        $m = ConvertFrom-AtmGitJobResult -Result $r
+        Assert-True ($r.ExitCode -eq 0 -and -not $r.TimedOut -and -not $r.TerminationRequested -and -not $r.JobTerminated -and $r.ReadersCompleted -and -not $r.ReaderFaulted -and $r.ActiveProcessesAtEnd -ge 1 -and $r.TotalProcesses -ge 2) "real: exit 0, saida completa, descendente ativo no fim sem segurar o pipe (ativos $($r.ActiveProcessesAtEnd), total $($r.TotalProcesses), $($r.ElapsedMs) ms)"
+        Assert-True ($m.Status -ceq 'PARTIAL' -and $m.Reason -ceq 'GIT_JOB_ACTIVE_AT_END' -and ($m.Conditions -join ',') -ceq 'GIT_JOB_ACTIVE_AT_END') "real: processos ativos no fim -> PARTIAL/GIT_JOB_ACTIVE_AT_END, nunca COMPLETE ($($m.Status)/$($m.Reason))"
+        $alive2 = $false
+        if ([IO.File]::Exists($info2)) {
+            $parts2 = [IO.File]::ReadAllText($info2).Split('|')
+            # Read-only check of the descendant's own record: never used to signal anything.
+            try { $p2 = [Diagnostics.Process]::GetProcessById([int]$parts2[0]); $alive2 = (-not $p2.HasExited -and $p2.StartTime.ToUniversalTime().Ticks -eq [long]$parts2[1]); $p2.Dispose() } catch { $alive2 = $false }
+        }
+        Assert-True ([IO.File]::Exists($info2) -and -not $alive2) 'real: descendente sem o pipe estava no job e terminou com o fechamento do job (nada fora do confinamento)'
+        $tested.Add('ativo-no-fim')
         # --- REAL (reader, test-only reflection on the private class; no switch exists in the product).
         $rt = [AgentTempManager.AtmJobRunner].GetNestedType('Reader', [Reflection.BindingFlags]'NonPublic')
         $ctor = $rt.GetConstructor([Reflection.BindingFlags]'Instance,Public', $null, [type[]]@([IntPtr], [int]), $null)
@@ -2004,7 +2029,9 @@ function global:Get-FileHash { param([string]$LiteralPath, [string]$Algorithm)
         Assert-True ($bad -eq 0 -and $mid -gt 0) "real: instantaneos durante a producao concorrente coerentes ($mid tomados com o leitor ativo, $bad incoerentes)"
         Assert-True ($joined -and $s.Ended -and -not $s.Faulted -and $s.Truncated -and $s.Bytes.Length -eq $cap -and [Convert]::ToBase64String($s.Bytes) -ceq [Convert]::ToBase64String($e)) 'real: fim da saida (pipe fechado) = EOF, sem falha; limite mantido e truncamento declarado'
         $tested.Add('instantaneo-concorrente')
-        # A read error (a handle without read access, on a sandbox file) is a fault, never the end of output.
+        # A read error is a fault, never the end of output. (1) A handle without read access on a sandbox file: the read
+        # raises UnauthorizedAccessException (checked below on a separate handle). The earlier reader caught only
+        # IOException and ObjectDisposedException, so this exception could escape its thread.
         $wf = Join-Path $dir 'somente-escrita.bin'
         $fs = [IO.File]::Open($wf, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
         $reader = $ctor.Invoke(@([IntPtr]$fs.SafeFileHandle.DangerousGetHandle(), [int]4096))
@@ -2012,8 +2039,30 @@ function global:Get-FileHash { param([string]$LiteralPath, [string]$Algorithm)
         try { $fs.Dispose() } catch { $null = $_ }
         $joined = $reader.Thread.Join(10000)
         $s = $reader.Snapshot()
-        Assert-True ($joined -and $s.Ended -and $s.Faulted -and $s.Bytes.Length -eq 0) 'real: erro de leitura registrado como falha do leitor (antes: tratado como fim da saida)'
-        $tested.Add('erro-de-leitura')
+        $wf2 = Join-Path $dir 'somente-escrita-2.bin'
+        $probeType = $null; $fsw = [IO.File]::Open($wf2, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try { $fsr = New-Object IO.FileStream($fsw.SafeFileHandle, [IO.FileAccess]::Read, 4096, $false); $null = $fsr.Read((New-Object byte[] 16), 0, 16) } catch { $probeType = $_.Exception.GetBaseException().GetType().FullName } finally { $fsw.Dispose() }
+        Assert-True ($joined -and $s.Ended -and $s.Faulted -and $s.Bytes.Length -eq 0 -and $probeType -ceq 'System.UnauthorizedAccessException') "real: leitura sem direito de leitura ($probeType) registrada como falha do leitor (o leitor anterior nao a capturava: podia escapar da thread)"
+        $tested.Add('erro-de-leitura-acesso')
+        # (2) IOException, deterministic and confined to a sandbox file: a byte range locked by another handle of this
+        # process (ERROR_LOCK_VIOLATION). The exception class is checked on a separate handle under the same lock.
+        $lf = Join-Path $dir 'bloqueado.bin'
+        [IO.File]::WriteAllBytes($lf, (New-Object byte[] 4096))
+        $locker = [IO.File]::Open($lf, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::ReadWrite)
+        $ioType = $null; $joinedIo = $false; $sIo = $null
+        try {
+            $locker.Lock(0, 4096)
+            $fp = [IO.File]::Open($lf, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+            try { $null = $fp.Read((New-Object byte[] 16), 0, 16) } catch { $ioType = $_.Exception.GetBaseException().GetType().FullName } finally { $fp.Dispose() }
+            $fr = [IO.File]::Open($lf, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+            $reader = $ctor.Invoke(@([IntPtr]$fr.SafeFileHandle.DangerousGetHandle(), [int]4096))
+            $fr.SafeFileHandle.SetHandleAsInvalid()
+            try { $fr.Dispose() } catch { $null = $_ }
+            $joinedIo = $reader.Thread.Join(10000)
+            $sIo = $reader.Snapshot()
+        } finally { try { $locker.Unlock(0, 4096) } catch { $null = $_ }; $locker.Dispose() }
+        Assert-True ($ioType -ceq 'System.IO.IOException' -and $joinedIo -and $sIo.Ended -and $sIo.Faulted -and $sIo.Bytes.Length -eq 0) "real: IOException na leitura ($ioType; faixa bloqueada no sandbox) registrada como falha do leitor, nunca fim da saida"
+        $tested.Add('erro-de-leitura-io')
         # --- SYNTHETIC (mapping only; these do NOT show that the operating system failure was exercised).
         $tf = @{ TimedOut = $true; TerminationRequested = $true; TerminationFailed = $true; TerminationWin32Error = 5; ExitCode = 1 }
         $cases = @(
@@ -2030,7 +2079,15 @@ function global:Get-FileHash { param([string]$LiteralPath, [string]$Algorithm)
             @{ N = 'exit 128 + saida incompleta'; S = @{ ExitCode = 128; ErrorOutput = [Text.Encoding]::UTF8.GetBytes('fatal: not a git repository'); ReadersCompleted = $false }; St = 'FAILED'; Rs = 'GIT_NOT_A_REPOSITORY'; C = 'GIT_NOT_A_REPOSITORY,GIT_OUTPUT_INCOMPLETE' },
             @{ N = 'truncada + encerrada apos a saida'; S = @{ OutputTruncated = $true; TerminationRequested = $true; JobTerminated = $true }; St = 'PARTIAL'; Rs = 'GIT_JOB_TERMINATED_AFTER_EXIT'; C = 'GIT_JOB_TERMINATED_AFTER_EXIT,GIT_OUTPUT_TRUNCATED' },
             @{ N = 'truncada'; S = @{ OutputTruncated = $true }; St = 'PARTIAL'; Rs = 'GIT_OUTPUT_TRUNCATED'; C = 'GIT_OUTPUT_TRUNCATED' },
-            @{ N = 'contagem de processos desconhecida'; S = @{ ActiveProcessesAtEnd = -1 }; St = 'COMPLETE'; Rs = $null; C = '' })
+            @{ N = 'contagem de processos desconhecida'; S = @{ ActiveProcessesAtEnd = -1 }; St = 'PARTIAL'; Rs = 'GIT_JOB_STATE_UNKNOWN'; C = 'GIT_JOB_STATE_UNKNOWN' },
+            @{ N = 'processos ativos no fim'; S = @{ ActiveProcessesAtEnd = 1 }; St = 'PARTIAL'; Rs = 'GIT_JOB_ACTIVE_AT_END'; C = 'GIT_JOB_ACTIVE_AT_END' },
+            @{ N = 'ativos no fim + truncada'; S = @{ ActiveProcessesAtEnd = 2; OutputTruncated = $true }; St = 'PARTIAL'; Rs = 'GIT_JOB_ACTIVE_AT_END'; C = 'GIT_JOB_ACTIVE_AT_END,GIT_OUTPUT_TRUNCATED' },
+            @{ N = 'encerrada apos a saida + ainda ativos'; S = @{ TerminationRequested = $true; JobTerminated = $true; ActiveProcessesAtEnd = 1 }; St = 'PARTIAL'; Rs = 'GIT_JOB_TERMINATED_AFTER_EXIT'; C = 'GIT_JOB_TERMINATED_AFTER_EXIT,GIT_JOB_ACTIVE_AT_END' },
+            @{ N = 'encerramento recusado + ativos no fim'; S = @{ TerminationRequested = $true; TerminationFailed = $true; TerminationWin32Error = 5; ReadersCompleted = $false; ActiveProcessesAtEnd = 3 }; St = 'FAILED'; Rs = 'GIT_JOB_TERMINATE_FAILED'; C = 'GIT_JOB_TERMINATE_FAILED,GIT_OUTPUT_INCOMPLETE,GIT_JOB_TERMINATED_AFTER_EXIT,GIT_JOB_ACTIVE_AT_END' },
+            @{ N = 'prazo + contagem desconhecida'; S = @{ TimedOut = $true; TerminationRequested = $true; JobTerminated = $true; ExitCode = 1; ActiveProcessesAtEnd = -1 }; St = 'TIMEOUT'; Rs = 'GIT_TIMEOUT'; C = 'GIT_TIMEOUT,GIT_JOB_STATE_UNKNOWN' },
+            @{ N = 'exit 1 sem condicao do job'; S = @{ ExitCode = 1 }; St = 'FAILED'; Rs = 'GIT_COMMAND_FAILED'; C = 'GIT_COMMAND_FAILED' },
+            @{ N = 'exit 1 (dubious ownership)'; S = @{ ExitCode = 128; ErrorOutput = [Text.Encoding]::UTF8.GetBytes('fatal: detected dubious ownership') }; St = 'FAILED'; Rs = 'GIT_OWNERSHIP_REFUSED'; C = 'GIT_OWNERSHIP_REFUSED' },
+            @{ N = 'recusa seguida de sucesso apos a saida'; S = @{ TerminationRequested = $true; TerminationWin32Error = 5; JobTerminated = $true }; St = 'PARTIAL'; Rs = 'GIT_JOB_TERMINATED_AFTER_EXIT'; C = 'GIT_JOB_TERMINATED_AFTER_EXIT' })
         foreach ($c in $cases) {
             $m = ConvertFrom-AtmGitJobResult -Result (New-AtmTestJobResult $c.S)
             Assert-True ($m.Status -ceq $c.St -and [string]$m.Reason -ceq [string]$c.Rs -and ($m.Conditions -join ',') -ceq $c.C) "sintetico Git ($($c.N)): $($m.Status)/$($m.Reason) [$($m.Conditions -join ',')]"
@@ -2040,25 +2097,35 @@ function global:Get-FileHash { param([string]$LiteralPath, [string]$Algorithm)
             @{ N = 'exit 0, leitores incompletos'; S = @{ ReadersCompleted = $false }; E = 'CHILD_RUNNER_OUTPUT_INCOMPLETE' },
             @{ N = 'exit 0, leitor com falha'; S = @{ ReaderFaulted = $true }; E = 'CHILD_RUNNER_OUTPUT_INCOMPLETE' },
             @{ N = 'encerramento recusado + leitor com falha'; S = @{ TerminationRequested = $true; TerminationFailed = $true; ReaderFaulted = $true }; E = 'CHILD_RUNNER_JOB_TERMINATE_FAILED' },
-            @{ N = 'prazo + leitores incompletos'; S = @{ TimedOut = $true; TerminationRequested = $true; JobTerminated = $true; ReadersCompleted = $false }; E = 'CHILD_RUNNER_OUTPUT_INCOMPLETE' })
+            @{ N = 'prazo + leitores incompletos'; S = @{ TimedOut = $true; TerminationRequested = $true; JobTerminated = $true; ReadersCompleted = $false }; E = 'CHILD_RUNNER_OUTPUT_INCOMPLETE' },
+            @{ N = 'prazo, encerramento recusado'; S = @{ TimedOut = $true; TerminationRequested = $true; TerminationFailed = $true; TerminationWin32Error = -1 }; E = 'CHILD_RUNNER_JOB_TERMINATE_FAILED' })
         foreach ($c in $hcases) {
             $threw = $null; try { $null = ConvertFrom-AtmTestJobResult -Result (New-AtmTestJobResult $c.S) } catch { $threw = [string]$_.Exception.Message }
             Assert-Eq $threw $c.E "sintetico harness ($($c.N)): falha com codigo, nunca PASS por exit 0"
         }
         $h = ConvertFrom-AtmTestJobResult -Result (New-AtmTestJobResult @{ TimedOut = $true; TerminationRequested = $true; JobTerminated = $true; ExitCode = 1 })
         Assert-True ($h.TimedOut -and $null -eq $h.Exit -and $h.Text -ceq 'CHILD_TIMEOUT') 'sintetico harness: prazo confirmado com saida completa = CHILD_TIMEOUT'
+        foreach ($ok in @(@{ ActiveProcessesAtEnd = 2 }, @{ ActiveProcessesAtEnd = -1 }, @{ TerminationRequested = $true; TerminationWin32Error = 5; JobTerminated = $true })) {
+            $threw = $null; try { $h = ConvertFrom-AtmTestJobResult -Result (New-AtmTestJobResult $ok) } catch { $threw = $_.Exception.Message }
+            Assert-True ($null -eq $threw -and $h.Exit -eq 0) "sintetico harness: $(@($ok.Keys | Sort-Object) -join '+') com saida completa e encerramento confirmado ou nao pedido nao e falha (diferenca deliberada do Git)"
+        }
         # --- STATIC: no injection path in the product; the mapping has one caller; the runner's waits stay bounded.
         $native = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Native.cs'))
         $runnerSrc = $native.Substring($native.IndexOf('public static class AtmJobRunner'))
         $publicMembers = @([AgentTempManager.AtmJobRunner].GetMembers([Reflection.BindingFlags]'Public,Static,DeclaredOnly') | ForEach-Object { $_.Name } | Sort-Object -Unique)
         Assert-Eq ($publicMembers -join ',') 'Run' 'executor nativo: so Run e publico (nenhuma chave de injecao ou simulacao)'
         Assert-True (-not $runnerSrc.Contains('GetEnvironmentVariable') -and -not $runnerSrc.Contains('ATM_') -and -not $runnerSrc.Contains('Registry')) 'executor nativo nao le ambiente, registro ou chave ATM_'
+        $tjAt = $runnerSrc.IndexOf('static void TerminateJob(')
+        $tj = $runnerSrc.Substring($tjAt, $runnerSrc.IndexOf('const int AtEndSettleMs', $tjAt) - $tjAt) -replace '\s+', ' '
+        Assert-True ($tj.Contains('r.TerminationRequested = true; if (TerminateJobObject(job, 1)) { r.JobTerminated = true; return; } int e = Marshal.GetLastWin32Error(); if (r.TerminationWin32Error == 0) r.TerminationWin32Error = (e != 0) ? e : -1;')) 'encerramento: pedido marcado antes da chamada; erro Win32 lido logo apos a recusa; primeira recusa mantida; recusa sem codigo = -1'
+        Assert-True ($runnerSrc.Contains('r.TerminationFailed = r.TerminationRequested && !r.JobTerminated;') -and [regex]::Matches($runnerSrc, 'TerminateJob\(job, r\)').Count -eq 2 -and [regex]::Matches($runnerSrc, 'TerminateJobObject\(').Count -eq 2) 'TerminationFailed = pedido sem nenhuma chamada bem-sucedida; dois pontos de encerramento, uma unica chamada nativa'
+        Assert-True ($runnerSrc -match 'while \(accOk && acc\.ActiveProcesses > 0 && settle\.ElapsedMilliseconds < AtEndSettleMs\)' -and $runnerSrc -match 'const int AtEndSettleMs = 2000;' -and $runnerSrc -match 'if \(accOk\) r\.ActiveProcessesAtEnd') 'contagem final: espera limitada (2 s) so pela contabilidade do job; consulta que falha deixa -1'
         Assert-True (-not ($runnerSrc -match 'Join\(\s*\)') -and -not ($runnerSrc -match 'INFINITE') -and -not ($runnerSrc -match 'lock\s*\(gate\)\s*\{[^}]*(\.Read\(|Join\(|WaitForSingleObject)')) 'esperas limitadas; o lock nunca cobre leitura bloqueante ou espera de thread'
         $diagSrc = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Diagnose.ps1'))
         Assert-Eq ([regex]::Matches($diagSrc, 'ConvertFrom-AtmGitJobResult -Result').Count) 1 'mapeamento do Git com um unico chamador (Invoke-AtmGitCommand)'
         $gp = @((Get-Command Invoke-AtmGitCommand).Parameters.Keys | Where-Object { @('Verbose', 'Debug', 'ErrorAction', 'WarningAction', 'InformationAction', 'ErrorVariable', 'WarningVariable', 'InformationVariable', 'OutVariable', 'OutBuffer', 'PipelineVariable', 'ProgressAction') -notcontains $_ } | Sort-Object)
         Assert-Eq ($gp -join ',') 'ActiveProcessLimit,Arguments,Git,JobMemoryBytes,MaxOutputBytes,Preflight,TimeoutMs,WorkingDirectory' 'Invoke-AtmGitCommand sem parametro novo (nenhum resultado injetavel)'
-        $script:caseNote = "reais: $($tested -join ', '); sinteticos: $($cases.Count) Git + $($hcases.Count + 1) harness; NAO_TESTADO: falha real de TerminateJobObject, leitor ainda ativo ao montar o resultado de um Run real"
+        $script:caseNote = "reais: $($tested -join ', '); sinteticos: $($cases.Count) Git + $($hcases.Count + 4) harness; NAO_TESTADO: recusa real de TerminateJobObject (e recusa seguida de sucesso), leitor ainda ativo ao montar o resultado de um Run real, falha real da contabilidade do job"
     }
     Test-Case 'Ambiente' 'FINAL-B: custo de processos filhos por camada - cmd, Windows PowerShell 5.1, lancador instalado (fixture) e o mesmo com ambiente minimo; somente medicao, tempos e nomes de variaveis' {
         # Diagnostic for the ARM64 PowerShell 7 slowness (R-B5 verify: about 20 s per CLI call there, 0.5 s with Windows
@@ -5926,6 +5993,41 @@ try {
             $closed = Get-AtmWorktreeLocalWork -WorkTree $clean -Git $testGit
             Assert-True ($closed.StatusCoverage.Status -eq 'NOT_OBSERVABLE' -and $closed.StatusCoverage.Reason -eq 'WORKTREE_DIAGNOSTICS_GATE_CLOSED' -and @($closed.Evidence).Count -eq 0) 'trava fechada: nada lido'
         } finally { Close-AtmPseudonymizer $pz }
+    }
+    Test-Case 'Git' 'V0.2 etapa 1B: propagacao ao chamador - Get-AtmWorktreeLocalWork leva estado e motivo principal do resultado Git a StatusCoverage (incompleta, encerrada apos a saida, ativos no fim, contagem desconhecida, truncada, encerramento recusado); PARTIAL/FAILED nunca viram completos; schema inalterado' {
+        if (& $gitSkip) { return }
+        $fx = & $gitNewFixture 'lwprop'
+        # Test-only: this scope shadows Invoke-AtmBoundedProcess for the calls made from it (PowerShell resolves commands
+        # through the caller's scopes). The stub runs the REAL runner (real `git status` on the sandbox fixture, inside
+        # its job) and then overrides only the job-condition fields; the product's Invoke-AtmGitCommand (preflight, pins,
+        # mapping) and Get-AtmWorktreeLocalWork run unchanged. Nothing in the product can select this.
+        $override = @{}
+        function Invoke-AtmBoundedProcess {
+            param([string]$Executable, [string]$CommandLine, [string]$WorkingDirectory, [string[]]$Environment, [int]$TimeoutMs, [int]$MaxOutputBytes, [long]$JobMemoryBytes, [int]$ActiveProcessLimit)
+            $real = [AgentTempManager.AtmJobRunner]::Run($Executable, $CommandLine, $WorkingDirectory, $Environment, $TimeoutMs, $MaxOutputBytes, $JobMemoryBytes, $ActiveProcessLimit)
+            $set = @{ ExitCode = $real.ExitCode; Output = $real.Output; ErrorOutput = $real.ErrorOutput; ElapsedMs = $real.ElapsedMs; TotalProcesses = $real.TotalProcesses; ActiveProcessesAtEnd = $real.ActiveProcessesAtEnd; ReadersCompleted = $real.ReadersCompleted }
+            foreach ($k in $override.Keys) { $set[$k] = $override[$k] }
+            return (New-AtmTestJobResult $set)
+        }
+        $cases = @(
+            @{ N = 'sem condicao (real)'; O = @{}; St = 'PARTIAL'; Rs = 'HIDDEN_ENTRIES_NOT_OBSERVED'; Ran = $true },
+            @{ N = 'saida incompleta'; O = @{ ReadersCompleted = $false }; St = 'PARTIAL'; Rs = 'GIT_OUTPUT_INCOMPLETE'; Ran = $false },
+            @{ N = 'leitor com falha'; O = @{ ReaderFaulted = $true }; St = 'PARTIAL'; Rs = 'GIT_OUTPUT_INCOMPLETE'; Ran = $false },
+            @{ N = 'encerrada apos a saida'; O = @{ TerminationRequested = $true; JobTerminated = $true }; St = 'PARTIAL'; Rs = 'GIT_JOB_TERMINATED_AFTER_EXIT'; Ran = $false },
+            @{ N = 'ativos no fim'; O = @{ ActiveProcessesAtEnd = 1 }; St = 'PARTIAL'; Rs = 'GIT_JOB_ACTIVE_AT_END'; Ran = $false },
+            @{ N = 'contagem desconhecida'; O = @{ ActiveProcessesAtEnd = -1 }; St = 'PARTIAL'; Rs = 'GIT_JOB_STATE_UNKNOWN'; Ran = $false },
+            @{ N = 'truncada'; O = @{ OutputTruncated = $true }; St = 'PARTIAL'; Rs = 'GIT_OUTPUT_TRUNCATED'; Ran = $false },
+            @{ N = 'encerramento recusado'; O = @{ TerminationRequested = $true; TerminationFailed = $true; TerminationWin32Error = 5; ReadersCompleted = $false }; St = 'FAILED'; Rs = 'GIT_JOB_TERMINATE_FAILED'; Ran = $false })
+        $fields = $null
+        foreach ($c in $cases) {
+            $override = $c.O
+            $lw = & $gitOpen { Get-AtmWorktreeLocalWork -WorkTree $fx.Repo -Git $testGit }
+            $sc = $lw.StatusCoverage
+            if ($null -eq $fields) { $fields = (@($sc.PSObject.Properties.Name) -join ',') }
+            Assert-True ($sc.Status -ceq $c.St -and [string]$sc.Reason -ceq $c.Rs -and [bool]$lw.StatusRan -eq $c.Ran -and (@($sc.PSObject.Properties.Name) -join ',') -ceq 'Status,Reason') "chamador ($($c.N)): StatusCoverage $($sc.Status)/$($sc.Reason), status concluido $($lw.StatusRan)"
+        }
+        Assert-Eq $fields 'Status,Reason' 'StatusCoverage so com Status e Reason (condicoes secundarias nao seguem nesse schema)'
+        $script:caseNote = "$($cases.Count) resultados controlados sobre git status real na fixture; trava do Git aberta so no escopo do teste"
     }
     Test-Case 'Git' 'P3-D: publicacao so por arquivos (sem Git): sem referencias remotas, ponta igual a remota, alcancabilidade nao lida, destacado, sem commits, packed-refs; nada publicado comprovado; somente leitura e sem processos' {
         if (& $gitSkip) { return }

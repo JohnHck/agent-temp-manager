@@ -107,29 +107,72 @@ called by `Invoke-AtmGitCommand`):
   other process is opened, signalled or terminated (`TerminateProcess`, `OpenProcess`, `CreateRemoteThread` are
   absent from `Native.cs`, checked by the layering test). Pre-existing processes are never affected.
 * **Result contract (V0.2 stage 1, additive).** The runner's result reports:
-  * whether termination was requested (at the deadline, or because a member still held the output after the child
-    ended), whether it failed (every call refused), and the Win32 error read right after the first refused call;
-  * whether both output readers stopped before the result was built, and whether one stopped on a read error (an
-    error is never taken for the end of output);
-  * the job's active processes from the accounting query made just before the job handle closes (`-1` when unknown,
-    never `0`).
+  * **Termination.**
+    * `TerminationRequested` is set before the first `TerminateJobObject` call, at the deadline or when a member still
+      held the output after the child ended (at most two calls).
+    * `TerminationFailed` means termination was requested and no call succeeded (`JobTerminated` false).
+    * `TerminationWin32Error` is the error of the **first** refused call, read right after it and kept even if a later
+      call succeeded; `-1` when that call gave no error code, `0` only when no call was refused.
+    * A refusal followed by a success therefore reads `TerminationFailed` false, `JobTerminated` true and a non-zero
+      error: the refusal never disappears.
+  * **Output collection.** `ReadersCompleted` is true when both readers stopped before the result was built.
+    `ReaderFaulted` is true when one stopped on a read error; an error is never taken for the end of output, while a
+    broken pipe is the end of output.
+  * **Active processes.** `ActiveProcessesAtEnd` comes from the job's own accounting after the readers' joins.
+    * While members are still active, the count is polled for at most 2 s. A console child's console host is a job
+      member that leaves shortly after its last client.
+    * What is still active then is reported, and those members end when the job handle closes.
+    * `-1` means unknown (a query failed), never `0`. No process is looked up or opened.
 
   The bytes kept are a consistent copy taken under the reader's lock, which never covers a blocking read or a wait.
-  `KILL_ON_JOB_CLOSE` is a backstop, not evidence that a termination succeeded.
+  Every wait is bounded. `KILL_ON_JOB_CLOSE` is a backstop, not evidence that a termination succeeded.
 
-  `Invoke-AtmGitCommand` lists every condition of a run and reports the gravest as its reason, so `COMPLETE` means
-  none applied. In decreasing severity:
-  * termination failed: `FAILED`;
-  * deadline: `TIMEOUT`;
-  * Git's exit code: `FAILED`;
-  * output not read to its end: `PARTIAL`, `GIT_OUTPUT_INCOMPLETE`;
-  * members terminated after Git exited: `PARTIAL`, `GIT_JOB_TERMINATED_AFTER_EXIT`;
-  * truncation: `PARTIAL`.
+  `Invoke-AtmGitCommand` returns the gravest condition as `Reason` and all of them, most severe first, in
+  `Conditions`. One table for both consumers:
 
-  The test suite fails a child run whose termination failed or whose output is incomplete, whatever its exit code.
-  States that cannot be provoked safely (a refused termination, a reader still running) are tested on synthetic
-  results only. A real refusal of `TerminateJobObject` is not tested. There is no switch, variable or parameter that
-  simulates a result in the product.
+  | Condition | Git result | Test harness |
+  |---|---|---|
+  | not started | `FAILED` `GIT_JOB_UNAVAILABLE` / `GIT_START_FAILED` | `CHILD_RUNNER_<code>` |
+  | termination requested, no call succeeded | `FAILED` `GIT_JOB_TERMINATE_FAILED` | `CHILD_RUNNER_JOB_TERMINATE_FAILED` |
+  | output not read to its end | `PARTIAL` `GIT_OUTPUT_INCOMPLETE` (below the next two) | `CHILD_RUNNER_OUTPUT_INCOMPLETE` |
+  | deadline | `TIMEOUT` `GIT_TIMEOUT` | `CHILD_TIMEOUT` |
+  | exit code not 0 | `FAILED`, classified from the error text | exit code reported |
+  | members terminated after the exit | `PARTIAL` `GIT_JOB_TERMINATED_AFTER_EXIT` | accepted, `JobTerminated` kept |
+  | members still active at the end | `PARTIAL` `GIT_JOB_ACTIVE_AT_END` | accepted |
+  | active count unknown | `PARTIAL` `GIT_JOB_STATE_UNKNOWN` | accepted |
+  | truncation | `PARTIAL` `GIT_OUTPUT_TRUNCATED` | `[SAIDA_TRUNCADA]` |
+
+  The Git column's precedence is: termination failed > deadline > exit code > incomplete output > terminated after
+  the exit > active at the end > count unknown > truncation.
+
+  Deliberate differences:
+  * **Incomplete output.** It ranks above the deadline for the harness, which needs the whole output: a test cannot
+    pass on a partial one. For Git a deadline stays `TIMEOUT`, with `GIT_OUTPUT_INCOMPLETE` kept in `Conditions`.
+  * **The last three job conditions.** They are evidence about the job, not about the output, so they fail nothing
+    in the harness. Git reports them, because a Git observation is complete evidence only when the job also ended
+    cleanly.
+
+  **Exit codes.** For every allowed Git operation, 0 is the only success; any other code is `FAILED`. No operation in
+  this contract accepts another code: the callers run `--version`, `status` and `rev-parse`. `cat-file -e` and
+  `config` are allowed but not called; they exit 1 for "not found", which would be `GIT_COMMAND_FAILED`.
+
+  `COMPLETE` requires exit code 0 and no condition. An unknown active count is never `COMPLETE`.
+
+  **Coverage.** The local-work status coverage (`StatusCoverage`: `Status`, `Reason`) carries only the gravest reason
+  of the Git call. The secondary conditions stay in the Git call's `Conditions` and do not follow into that schema.
+
+  **What is tested where.**
+  * Real runs inside the job, for:
+    * normal exit, truncation and the deadline;
+    * a descendant holding the output;
+    * a descendant active at the end without the output;
+    * a read error on a sandbox file without read access (`UnauthorizedAccessException`);
+    * an `IOException` from a byte range locked in a sandbox file.
+  * The propagation to the local-work status coverage, on a sandbox repository.
+  * A refused termination, a refusal followed by a success, a reader still running in a real run, and a failed job
+    accounting query are tested on synthetic results only; those real failures are not tested.
+
+  There is no switch, variable or parameter that simulates a result in the product.
 * Only allow-listed, read-only Git commands are started, with `--no-optional-locks` (the read commands take no lock,
   so there is none to leave behind when one is terminated), every transport refused by name on the command line
   (`protocol.allow=never` plus `protocol.<file|git|ssh|http|https|ext>.allow=never`, which a repository's own setting

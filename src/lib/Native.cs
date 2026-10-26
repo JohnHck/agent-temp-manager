@@ -627,10 +627,13 @@ namespace AgentTempManager
         public long PeakJobMemory;
         public long JobMemoryLimit;     // read back from the job
         public int ActiveProcessLimit;  // read back from the job
-        // V0.2 stage 1 (additive; nothing above changed). Termination: requested at the deadline or when a member still
-        // held the output after the child ended; failed when every call was refused (KILL_ON_JOB_CLOSE ending the members
-        // when the job handle closes is a backstop, never evidence of success). The Win32 error is read right after the
-        // first refused call and kept even if a later call succeeded.
+        // V0.2 stage 1 (additive; nothing above changed). TerminationRequested: set before the first TerminateJobObject
+        // call (at the deadline, or when a member still held the output after the child ended; at most two calls).
+        // TerminationFailed: termination was requested and no call succeeded (JobTerminated false); a refusal followed
+        // by a success leaves it false with JobTerminated true. TerminationWin32Error: the error of the FIRST refused call,
+        // read right after it and kept even if a later call succeeded; -1 when that call was refused without an error
+        // code; 0 only when no call was refused. So a refusal never disappears from the result. KILL_ON_JOB_CLOSE ending
+        // the members when the job handle closes is a backstop, never evidence of success.
         public bool TerminationRequested;
         public bool TerminationFailed;
         public int TerminationWin32Error;
@@ -639,8 +642,10 @@ namespace AgentTempManager
         // are still declared by the Truncated flags).
         public bool ReadersCompleted;
         public bool ReaderFaulted;
-        // Active processes of the job from the accounting query made after the readers' joins and the exit code, just
-        // before Run returns and closes the job handle; -1 when that query failed or was never made (unknown, not 0).
+        // Active processes of the job, measured after the readers' joins and the exit code, just before Run returns and
+        // closes the job handle: when members are still active (typically the console host of a console child, which
+        // leaves shortly after its last client), the count is polled for at most AtEndSettleMs; what is still active
+        // then is reported and ends when the job handle closes. -1 when a query failed or none was made (unknown, not 0).
         public int ActiveProcessesAtEnd = -1;
     }
 
@@ -1274,8 +1279,11 @@ namespace AgentTempManager
             r.TerminationRequested = true;
             if (TerminateJobObject(job, 1)) { r.JobTerminated = true; return; }
             int e = Marshal.GetLastWin32Error();
-            if (r.TerminationWin32Error == 0) r.TerminationWin32Error = e;
+            if (r.TerminationWin32Error == 0) r.TerminationWin32Error = (e != 0) ? e : -1;
         }
+
+        // Bound for the members still active after the output ended (see AtmJobResult.ActiveProcessesAtEnd).
+        const int AtEndSettleMs = 2000;
 
         // application: absolute path of the program. commandLine: the full command line (program name first), already
         // validated by the caller. environment: KEY=VALUE pairs (the whole environment of the child). Limits: timeout
@@ -1374,12 +1382,20 @@ namespace AgentTempManager
                 r.TerminationFailed = r.TerminationRequested && !r.JobTerminated;
                 int code;
                 if (GetExitCodeProcess(pi.hProcess, out code)) r.ExitCode = code;
+                // Bounded settle: poll the job's own accounting (no process is looked up or opened) while members are
+                // still active, at most AtEndSettleMs. A failed query makes the count unknown (-1), never 0.
                 JOBOBJECT_BASIC_ACCOUNTING_INFORMATION acc;
-                if (QueryInformationJobObject(job, JobObjectBasicAccountingInformation, out acc, (uint)Marshal.SizeOf(typeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION)), IntPtr.Zero))
+                uint accSize = (uint)Marshal.SizeOf(typeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION));
+                bool accOk = QueryInformationJobObject(job, JobObjectBasicAccountingInformation, out acc, accSize, IntPtr.Zero);
+                if (accOk) r.TotalProcesses = (int)acc.TotalProcesses;
+                System.Diagnostics.Stopwatch settle = System.Diagnostics.Stopwatch.StartNew();
+                while (accOk && acc.ActiveProcesses > 0 && settle.ElapsedMilliseconds < AtEndSettleMs)
                 {
-                    r.TotalProcesses = (int)acc.TotalProcesses;
-                    r.ActiveProcessesAtEnd = (int)acc.ActiveProcesses;
+                    System.Threading.Thread.Sleep(20);
+                    accOk = QueryInformationJobObject(job, JobObjectBasicAccountingInformation, out acc, accSize, IntPtr.Zero);
+                    if (accOk) r.TotalProcesses = (int)acc.TotalProcesses;
                 }
+                if (accOk) r.ActiveProcessesAtEnd = (int)acc.ActiveProcesses;
                 JOBOBJECT_EXTENDED_LIMIT_INFORMATION after;
                 if (QueryInformationJobObject(job, JobObjectExtendedLimitInformation, out after, size, IntPtr.Zero)) r.PeakJobMemory = (long)after.PeakJobMemoryUsed.ToUInt64();
                 // Taken after the joins; a reader still running (its pipe still held) gives a consistent prefix and
