@@ -10,7 +10,9 @@
     PATH; clean of a real-looking session root must stop without deleting it (V0.1); update; rollback; tamper
     detection and repair; audit / preview / verify as a real standard user, who cannot write the install
     directory; uninstall (directory and PATH entry removed); then the published 0.1.0 package (GitHub Release asset,
-    SHA-256 pinned) installed, updated to this package, rolled back to 0.1.0, updated again and uninstalled.
+    SHA-256 pinned) installed, updated to this package, rolled back to 0.1.0, updated again and uninstalled; then the
+    same for the published 0.1.1 package (the current published version; SHA-256 pinned), with the four gates
+    checked in the installation after each update to this package.
   Writes summary.json and raw outputs to -OutDir. Exit code = number of failed steps (NOT TESTED is not a failure
   and not a pass).
 #>
@@ -526,6 +528,76 @@ Step 'xversion-update-again-and-uninstall' {
     Assert (-not (Test-Path $installDir) -and -not (Test-Path "$installDir.previous")) 'diretorios ainda existem'
     Assert (-not (([Environment]::GetEnvironmentVariable('Path', 'Machine')) -match 'AgentTempManager')) 'PATH ainda contem o produto'
     "updated to $rcVersion again, uninstalled"
+}
+# V0.2 stage 2: from the published 0.1.1 (the current published version) to this package and back, after the 0.1.0
+# path above (which ends uninstalled). The 0.1.1 package is the asset of the GitHub Release v0.1.1, accepted only with
+# its published SHA-256 (pinned here) and never run before that check; a download that fails is NOT TESTED, never a
+# pass. After each update to this package the four gates of the installation are checked. Ends uninstalled.
+$v011Sha = 'C681761DBB019987A53CAB1C234BE28CD4BFFFDB3F3EDCAEF0A2EEA55C5885A4'
+$v011Url = 'https://github.com/JohnHck/agent-temp-manager/releases/download/v0.1.1/agent-temp-manager-0.1.1.zip'
+$v011Dir = Join-Path $env:ProgramFiles 'AgentTempManager-v011'
+$script:v011Pkg = $null
+$installedGates = {
+    $files = @{ AtmRealDeletionEnabled = 'lib\Engine.Clean.ps1'; AtmWorktreeDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmHandleDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmDiagnoseExportEnabled = 'lib\Report.ps1' }
+    foreach ($g in $files.Keys) {
+        $t = [IO.File]::ReadAllText((Join-Path $installDir $files[$g]))
+        Assert ([regex]::Matches($t, ('\$script:' + $g + '\s*=')).Count -eq 1 -and $t -match ('\$script:' + $g + ' = \$false')) "trava instalada $g nao e uma unica atribuicao a `$false"
+    }
+    'four installed gates $false'
+}
+Step 'xversion-0.1.1-package' {
+    [void][IO.Directory]::CreateDirectory($v011Dir)
+    $zip011 = Join-Path $v011Dir 'agent-temp-manager-0.1.1.zip'
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $v011Url -OutFile $zip011 -UseBasicParsing
+    } catch { $script:notTested = $true; return "0.1.1 package not downloadable on this runner: $($_.Exception.GetType().Name)" }
+    $h = (Get-FileHash -LiteralPath $zip011 -Algorithm SHA256).Hash
+    Assert ($h -eq $v011Sha) "0.1.1 package hash $h != published $v011Sha"
+    Expand-Archive -LiteralPath $zip011 -DestinationPath $v011Dir -Force
+    $script:v011Pkg = @(Get-ChildItem -LiteralPath $v011Dir -Directory)[0].FullName
+    "published 0.1.1 package, SHA-256 $h"
+}
+Step 'xversion-install-0.1.1' {
+    if (-not $script:v011Pkg) { $script:notTested = $true; return '0.1.1 package unavailable' }
+    Assert (-not (Test-Path $installDir)) 'instalacao anterior ainda presente'
+    & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $script:v011Pkg 'install\Install-AgentTempManager.ps1') *> (Join-Path $OutDir 'xversion-install-0.1.1.txt')
+    Assert ($LASTEXITCODE -eq 0) "0.1.1 installer exit $LASTEXITCODE"
+    $r = Invoke-Agent 'version -Lang en-US' 'xversion-version-0.1.1'; Assert ($r.Code -eq 0 -and $r.Text -match 'agent-temp 0\.1\.1\b') "0.1.1 version: exit $($r.Code)"
+    $r = Invoke-Agent 'verify' 'xversion-verify-0.1.1'; Assert ($r.Code -eq 0) "0.1.1 verify exit $($r.Code)"
+    '0.1.1 installed and verified'
+}
+Step 'xversion-update-from-0.1.1' {
+    if (-not $script:v011Pkg) { $script:notTested = $true; return '0.1.1 package unavailable' }
+    & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pkg 'install\Install-AgentTempManager.ps1') -Update *> (Join-Path $OutDir 'xversion-update-from-0.1.1.txt')
+    Assert ($LASTEXITCODE -eq 0) "update exit $LASTEXITCODE"
+    $r = Invoke-Agent 'version -Lang en-US' 'xversion-version-updated-from-0.1.1'
+    Assert ($r.Code -eq 0 -and $r.Text -match ('agent-temp ' + [regex]::Escape($rcVersion) + '\b')) "version after update: exit $($r.Code)"
+    $r = Invoke-Agent 'verify' 'xversion-verify-updated-from-0.1.1'; Assert ($r.Code -eq 0) "verify exit $($r.Code)"
+    $g = & $installedGates
+    Assert (Test-Path (Join-Path "$installDir.previous" 'agent-temp.ps1')) '0.1.1 nao mantida em .previous'
+    "0.1.1 -> $rcVersion, 0.1.1 kept as previous, $g"
+}
+Step 'xversion-rollback-to-0.1.1' {
+    if (-not $script:v011Pkg) { $script:notTested = $true; return '0.1.1 package unavailable' }
+    & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pkg 'install\Restore-AgentTempManagerPrevious.ps1') *> (Join-Path $OutDir 'xversion-rollback-to-0.1.1.txt')
+    Assert ($LASTEXITCODE -eq 0) "rollback exit $LASTEXITCODE"
+    $r = Invoke-Agent 'version -Lang en-US' 'xversion-version-rolledback-0.1.1'; Assert ($r.Code -eq 0 -and $r.Text -match 'agent-temp 0\.1\.1\b') "version after rollback: exit $($r.Code)"
+    $r = Invoke-Agent 'verify' 'xversion-verify-rolledback-0.1.1'; Assert ($r.Code -eq 0) "verify exit $($r.Code)"
+    'back to 0.1.1, verified'
+}
+Step 'xversion-update-again-from-0.1.1-and-uninstall' {
+    if (-not $script:v011Pkg) { $script:notTested = $true; return '0.1.1 package unavailable' }
+    & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pkg 'install\Install-AgentTempManager.ps1') -Update *> (Join-Path $OutDir 'xversion-update2-from-0.1.1.txt')
+    Assert ($LASTEXITCODE -eq 0) "second update exit $LASTEXITCODE"
+    $r = Invoke-Agent 'version -Lang en-US' 'xversion-version-updated2-from-0.1.1'; Assert ($r.Code -eq 0 -and $r.Text -match ('agent-temp ' + [regex]::Escape($rcVersion) + '\b')) "version: exit $($r.Code)"
+    $r = Invoke-Agent 'verify' 'xversion-verify-updated2-from-0.1.1'; Assert ($r.Code -eq 0) "verify exit $($r.Code)"
+    $g = & $installedGates
+    & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pkg 'install\Uninstall-AgentTempManager.ps1') *> (Join-Path $OutDir 'xversion-uninstall-0.1.1.txt')
+    Assert ($LASTEXITCODE -eq 0) "uninstall exit $LASTEXITCODE"
+    Assert (-not (Test-Path $installDir) -and -not (Test-Path "$installDir.previous")) 'diretorios ainda existem'
+    Assert (-not (([Environment]::GetEnvironmentVariable('Path', 'Machine')) -match 'AgentTempManager')) 'PATH ainda contem o produto'
+    "updated to $rcVersion again ($g), uninstalled"
 }
 try { if (Get-LocalUser -Name $userName -ErrorAction SilentlyContinue) { Remove-LocalUser -Name $userName } } catch { $null = $_ }
 

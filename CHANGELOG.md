@@ -13,8 +13,14 @@ Prepared on the release-candidate branch (FINAL-C); published only with the main
 * Runtime-only Claude Desktop provider; `CoworkVMService` identified by a provisional, publicly reported name.
 * Closed gates in every copy, checked in source, build and installation: real deletion, worktree diagnostics, open-file
   diagnostics, diagnose JSON export. D-1 (process working directories) deferred.
-* Security audit (FINAL-A, FINAL-B): F-01, F-02, F-03, F-06, F-07, F-08, F-11, F-13 fixed; F-04, F-05, F-14 pending
-  decisions. F-01 and F-02 also affect 0.1.0.
+* Security audit (FINAL-A, FINAL-B): F-01, F-02, F-03, F-06, F-07, F-08, F-11, F-13 fixed. F-04, F-05 and F-14 were
+  deferred by the maintainer (F-04 to V0.3, before the deletion gate can open; F-05 and F-14 to a later 0.2.x) and
+  stay listed as known limits. F-01 and F-02 also affected 0.1.0 and are fixed there in 0.1.1 (below).
+* Job runner result contract (PR #54):
+  * a refused termination, a reader error, output not read to its end, members terminated after the exit, and members
+    still active at the end are reported, never taken for a complete run;
+  * the Git mapping gives `COMPLETE` only for exit code 0 with none of them.
+  * A real refusal of `TerminateJobObject` is NOT TESTED (synthetic results only).
 * Installation: `verify` and the installer bootstrap run no unverified code (R-B5); update and rollback never destroy
   the only intact installation (R-B6); the staged copy is verified against the source manifest (F-07); the post-install
   verify runs `cmd.exe` from System32 (F-13); the release build refuses an archive unless all four gates are `$false`.
@@ -22,8 +28,22 @@ Prepared on the release-candidate branch (FINAL-C); published only with the main
   other users' environment refused, control characters shown as `?`, `verify` exit code `5` for a missing library):
   listed with the gate that approved each one in the release notes.
 * CI: ARM64 suite jobs (Windows PowerShell 5.1 full, PowerShell 7 subset with 16 cases NOT TESTED), install e2e with
-  integrity variants, installed audit export, encoding and an update from the published 0.1.0 and back; artifacts
+  integrity variants, installed audit export, encoding and an update from the published 0.1.0 and from the published
+  0.1.1 and back; artifacts
   sanitized and scanned before upload; the suite's child calls run inside their own Job Object.
+
+## 0.1.1 (published 2026-10-26, 0.1.x line)
+
+Security fix release of 0.1.0, built and published from the `release/0.1.x` line: tag `v0.1.1`, commit `5c18a6e`,
+[GitHub Release](https://github.com/JohnHck/agent-temp-manager/releases/tag/v0.1.1). That commit is not part of this branch's history. 0.2.0 carries its own fixes for the
+same findings (FINAL-A). It is recorded here as part of the version history.
+
+* F-01, MEDIUM, CVSS 3.1: 5.0 ([GHSA-c68f-jj6j-92r7](https://github.com/JohnHck/agent-temp-manager/security/advisories/GHSA-c68f-jj6j-92r7)): another local user's `TEMP`,
+  `CLAUDE_CONFIG_DIR` or `CLAUDE_CODE_TMPDIR` in network or device form is refused before any file API, and path
+  normalization no longer traverses a reparse point. The higher-impact scenario (NTLM relay) was not demonstrated.
+* F-02, MEDIUM, CVSS 3.1: 6.0 ([GHSA-5m78-qp92-5f9v](https://github.com/JohnHck/agent-temp-manager/security/advisories/GHSA-5m78-qp92-5f9v)): `audit -ExportJson` creates its file through a
+  pinned, handle-relative writer. The create-or-truncate impact in 0.1.0 was identified by code inspection, not
+  demonstrated dynamically.
 
 ## 0.1.0
 
