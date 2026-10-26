@@ -41,3 +41,19 @@ Output: `dist/agent-temp-manager-<version>.zip` (with `src/manifest.json`) and `
    PowerShell 5.1 and 7. A release that changes privilege behaviour needs every row run.
 8. Release: tag `v<version>`, attach the zip and `SHA256SUMS.txt`, paste the CHANGELOG section and the known
    limitations from docs/SECURITY-MODEL.md.
+
+## Corrective release 0.1.1 (security fix of 0.1.0)
+
+Built from the `release/0.1.x` line (from tag `v0.1.0`), never from `main` (V0.2). In addition to the checklist above:
+
+1. The release commit is the exact head that CI tested: `release/0.1.x` is advanced to it by fast-forward (no merge
+   commit, no squash), because the 0.1.x workflow does not run on pushes to that branch.
+2. The package is that run's `release-package` artifact (zip and `SHA256SUMS.txt`), the same archive the six
+   `install e2e` jobs checked and installed; its SHA-256 and the run ID are recorded in the pull request. The archive is
+   not reproducible byte for byte: if the artifact expired, a maintainer-authorized `workflow_dispatch` on the tagged
+   commit rebuilds it and runs the whole e2e again, and the new hash is recorded.
+3. `$script:AtmRealDeletionEnabled = $false` in the source, the archive (`Build-Release.ps1` refuses otherwise) and the
+   installation (e2e `shipped-release-gate`); `$script:AtmVersion = '0.1.1'`.
+4. Tag `v0.1.1` on that commit, GitHub Release with the zip, `SHA256SUMS.txt` and the 0.1.1 release notes, and the
+   security advisories for F-01 and F-02 published the same day, naming 0.1.1 as the patched version. Each of these
+   steps needs the maintainer's explicit authorization.
