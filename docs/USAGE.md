@@ -40,6 +40,11 @@ agent-temp audit -Path "C:\Users\alice\AppData\Local\Temp\claude\C--src-app\<uui
 agent-temp audit -ExportJson D:\reports\audit.json   # optional, explicit, outside audited dirs
 ```
 
+`-ExportJson` (0.1.1): a new file only, outside the audited directories, with no reparse point in its path, on a fixed
+local drive that is not a `subst` letter, not directly in a volume root, in a folder path shorter than 240 characters.
+The folder and its ancestors are held by handle while the file is created and the rules are checked again inside that
+window; the file gets a protected DACL (owner, SYSTEM, Administrators). A refusal prints its code and exits with `10`.
+
 Sections: general summary (exclusive partitions), per user/SID, per project, per direct root,
 LIVENESS_UNKNOWN older than 72 h, errors/ambiguities/coverage, final summary.
 

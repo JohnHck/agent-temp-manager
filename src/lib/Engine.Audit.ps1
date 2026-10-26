@@ -12,7 +12,7 @@
 Set-StrictMode -Version 2.0
 . (Join-Path $PSScriptRoot 'I18n.ps1')
 
-$script:AtmVersion = '0.1.0'
+$script:AtmVersion = '0.1.1'
 $script:AtmRecentHours = 72
 $script:AtmMaxSamples = 10
 $script:AtmRefTerminators = [char[]]@('"', "'", ' ', "`t", "`r", "`n", '|', '<', '>', ';', ',', '&', '^', '(', ')', '[', ']', '{', '}', '=', '`', ':', '.')
@@ -97,9 +97,38 @@ function Get-AtmCurrentIdentity {
     }
 }
 
+function Test-AtmLocalPathForm {
+    <#
+      V0.1.1 (F-01): $true only for a drive-absolute path ('X:\...') on a drive letter that is not a network drive, with
+      no control character and no stream. Paths that come from other users' registry or environment (TEMP,
+      CLAUDE_CONFIG_DIR, CLAUDE_CODE_TMPDIR) must pass this BEFORE any file-system call: a UNC (\\host\share, //host),
+      device (\\?\, \\.\) or WebDAV (\\host@80\x) form would make an elevated process authenticate to a host chosen by
+      that user (NTLM). Only the drive type is queried (no network access).
+    #>
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or $Path -notmatch '^[A-Za-z]:\\' -or $Path -match '[\x00-\x1f\x7f-\x9f]' -or $Path.Substring(2).Contains(':')) { return $false }
+    try { $dt = (New-Object IO.DriveInfo($Path.Substring(0, 1))).DriveType } catch { return $false }
+    return ($dt -ne [IO.DriveType]::Network -and $dt -ne [IO.DriveType]::NoRootDirectory -and $dt -ne [IO.DriveType]::Unknown)
+}
+
 function Get-AtmNormalizedPath {
     param([string]$Path)
     if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    # F-01: no network or device form ever reaches GetLongPathName or GetFullPath (refused as not normalizable).
+    if (-not (Test-AtmLocalPathForm $Path)) { return $null }
+    # F-01: a component that is a reparse point (a symbolic link may point to a network share) is never traversed
+    # here: only the part before it is expanded (8.3 to long names), the rest is kept lexically, and the callers' chain
+    # checks refuse it as before. Test-AtmPathChain reads attributes component by component and stops at the link.
+    try {
+        $lex = [IO.Path]::GetFullPath($Path); if ($lex.Length -gt 3) { $lex = $lex.TrimEnd('\') }
+        $chk = Test-AtmPathChain $lex
+        if ($chk.Status -ceq 'REPARSE_IN_PATH') {
+            $pre = [IO.Path]::GetDirectoryName($chk.At)
+            $lp = $(if ($pre) { [AgentTempManager.AtmNative]::GetLongPath($pre) } else { $null })
+            if (-not $lp -or -not $lex.StartsWith($pre, [StringComparison]::OrdinalIgnoreCase)) { return $lex }
+            return ($lp.TrimEnd('\') + '\' + $lex.Substring($pre.Length).TrimStart('\'))
+        }
+    } catch { return $null }
     try {
         $long = [AgentTempManager.AtmNative]::GetLongPath($Path)
         if (-not $long) {
@@ -550,7 +579,8 @@ function Invoke-AtmInventory {
                 $tempNorm = Get-AtmNormalizedPath $tc.TempPath
                 $basePath = $null
                 if ($tempNorm) { $basePath = Get-AtmNormalizedPath (Join-AtmPath $tempNorm $prov.TempSubdir) }
-                if (-not $basePath) { $st.Add([pscustomobject]@{ Provider = $prov.Id; BasePath = $tc.TempPath; Source = $tc.Source; Status = 'INVALID'; At = $null }); continue }
+                # V0.1.1 (F-01): the raw value is shown in the report: control characters replaced.
+                if (-not $basePath) { $st.Add([pscustomobject]@{ Provider = $prov.Id; BasePath = [regex]::Replace([string]$tc.TempPath, '[\x00-\x1f\x7f-\x9f]', '?'); Source = $tc.Source; Status = 'INVALID'; At = $null }); continue }
                 $key = $basePath.ToLowerInvariant()
                 if ($baseByPath.ContainsKey($key)) {
                     $existing = $baseByPath[$key]

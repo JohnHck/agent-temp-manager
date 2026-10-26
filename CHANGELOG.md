@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.1
+
+Security fix of 0.1.0 ([release notes](docs/release/V0.1.1-RELEASE-NOTES.md)); no new command or capability; real
+deletion stays disabled.
+
+* F-01: `TEMP`, `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_TMPDIR` values of other users in network or device form (or on a
+  network drive letter) never reach file APIs: an `INVALID` base or an unread configuration folder (coverage gap);
+  normalization never traverses a reparse point; another user's configuration folder through a reparse point is not
+  read.
+* F-02: `audit -ExportJson` creates the file relative to its folder held by handle (ancestors pinned, V0.1 rules
+  checked again inside the window, new file only, no reparse point, protected DACL, verified before writing). Stricter:
+  volume root, folder path of 240 characters or more, network or non-fixed drive and `subst` drive refused; the refusal
+  prints its code (exit code `10` unchanged).
+* Tests: helper processes stopped only through the handle from their creation (two stops by PID removed); F-01 and
+  F-02 adversarial fixture tests; install e2e covers the installed audit export and an update from the published
+  0.1.0 and back.
+
 ## 0.1.0
 
 * Initial limited release: audit, preview and TUI. `clean` is **plan only** (release gate); real deletion is

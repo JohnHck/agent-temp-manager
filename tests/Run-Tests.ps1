@@ -132,6 +132,36 @@ function Stop-AtmTestHelperProcess {
     if ($null -ne $Process -and -not $Process.HasExited) { $Process.Kill(); $null = $Process.WaitForExit(10000) }
 }
 
+# Test-only FSCTL helper (V0.1.1, from V0.2 FINAL-A M-1): turns an existing empty folder into a junction through another
+# handle opened with FILE_WRITE_ATTRIBUTES. Used on sandbox fixtures only.
+function Initialize-AtmTestReparse {
+    if (-not ('AtmTestReparse' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices; using Microsoft.Win32.SafeHandles; using System.Text;
+public static class AtmTestReparse {
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  static extern SafeFileHandle CreateFileW(string n, uint a, uint s, IntPtr sa, uint c, uint f, IntPtr t);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  static extern bool DeviceIoControl(SafeFileHandle h, uint code, byte[] inb, int inl, IntPtr outb, int outl, out int ret, IntPtr ov);
+  // Test-only: sets a mount-point (junction) reparse point on an existing empty folder, opened with FILE_WRITE_ATTRIBUTES.
+  public static string SetJunction(string dir, string target) {
+using (SafeFileHandle h = CreateFileW(dir, 0x100, 7, IntPtr.Zero, 3, 0x02000000 | 0x00200000, IntPtr.Zero)) {
+  if (h.IsInvalid) return "OPEN_FAIL " + Marshal.GetLastWin32Error();
+  byte[] s = Encoding.Unicode.GetBytes("\\??\\" + target); byte[] p = Encoding.Unicode.GetBytes(target);
+  int dataLen = 8 + s.Length + 2 + p.Length + 2; byte[] b = new byte[8 + dataLen];
+  BitConverter.GetBytes(0xA0000003u).CopyTo(b, 0); BitConverter.GetBytes((ushort)dataLen).CopyTo(b, 4);
+  BitConverter.GetBytes((ushort)0).CopyTo(b, 8); BitConverter.GetBytes((ushort)s.Length).CopyTo(b, 10);
+  BitConverter.GetBytes((ushort)(s.Length + 2)).CopyTo(b, 12); BitConverter.GetBytes((ushort)p.Length).CopyTo(b, 14);
+  s.CopyTo(b, 16); p.CopyTo(b, 16 + s.Length + 2);
+  int r; bool ok = DeviceIoControl(h, 0x000900A4, b, b.Length, IntPtr.Zero, 0, out r, IntPtr.Zero);
+  return ok ? "SET_OK" : "SET_FAIL " + Marshal.GetLastWin32Error();
+}
+  }
+}
+'@
+    }
+}
+
 $script:profileCounter = 0
 function New-TestProfile {
     param([string]$Name, [string]$Sid = $testOwnerSid, [switch]$NoConfig)
@@ -1045,6 +1075,205 @@ try {
             Assert-True (-not [IO.Directory]::Exists($r)) "confirmado: excluido pelo motor (admin=$asAdmin)"
             Assert-True ($null -ne $o.State.LastClean.PostInventory) "auditoria posterior (admin=$asAdmin)"
         }
+    }
+    Test-Case 'Exportacao' 'V0.1.1 F-02: criacao segura de arquivo (fixtures) - ancestrais e pasta pinados por handle sem compartilhamento de exclusao, criacao relativa ao handle (OBJ_DONT_REPARSE, nunca nome existente), DACL protegida, verificacao antes de escrever; conversao da pasta em juncao DENTRO da janela pinada (deterministica, FSCTL); politica reavaliada dentro da janela; falha de ACL com codigo seguro' {
+        $fa = Join-Path $sandbox 'finala'; $anc = Join-Path $fa 'anc'; $par = Join-Path $anc 'par'; $else = Join-Path $fa 'else'
+        foreach ($d in @($par, $else)) { [void][IO.Directory]::CreateDirectory($d) }
+        $none = [pscustomobject]@{ Bases = @() }
+        # Deterministic: while pinned, neither the folder nor an ancestor can be renamed (and so not replaced by a junction).
+        $s = [AgentTempManager.AtmSafeCreate]::Pin($par)
+        try {
+            Assert-True ($s.IsPinned -and $null -eq $s.Error) "pinado ($($s.Error))"
+            foreach ($victim in @($par, $anc)) { $moved = $false; try { [IO.Directory]::Move($victim, $victim + '-x'); $moved = $true } catch { $null = $_ }; Assert-True (-not $moved) "renomear $(Split-Path $victim -Leaf) com a pasta pinada: recusado (compartilhamento)" }
+            Assert-Eq ([AgentTempManager.AtmSafeCreate]::CreateNew($s, 'd.json', [Text.Encoding]::UTF8.GetBytes('{"a":1}'))) $null 'arquivo criado relativo ao handle'
+            Assert-Eq ([AgentTempManager.AtmSafeCreate]::CreateNew($s, 'd.json', [byte[]]@(1))) 'EXISTS' 'nome existente: nunca sobrescreve'
+            foreach ($bad in @('NUL.json', 'CON', 'a:b', 'x\y', '..', 'a.', 'COM1.txt', 'z*', ('COM' + [char]0xB9), ('LPT' + [char]0xB2 + '.txt'))) { Assert-Eq ([AgentTempManager.AtmSafeCreate]::CreateNew($s, $bad, [byte[]]@(1))) 'FILE_NAME_INVALID' "nome invalido '$bad'" }
+            $null = cmd /c "mklink /J `"$par\j`" `"$else`" >nul 2>nul"
+            Assert-True ((Test-Path -LiteralPath "$par\j") -and [AgentTempManager.AtmSafeCreate]::CreateNew($s, 'j', [byte[]]@(1)) -ceq 'EXISTS' -and @(Get-ChildItem -LiteralPath $else -Force).Count -eq 0) 'juncao no nome do arquivo: recusada, nada no alvo'
+            # Without the privilege mklink fails on stderr: redirected inside cmd (a native stderr line is terminating here).
+            $null = cmd /c "mklink `"$par\s.json`" `"$else\t.json`" >nul 2>nul"
+            if (Test-Path -LiteralPath "$par\s.json") { Assert-True ([AgentTempManager.AtmSafeCreate]::CreateNew($s, 's.json', [byte[]]@(1)) -ceq 'EXISTS' -and -not (Test-Path -LiteralPath "$else\t.json")) 'symlink de arquivo no nome: recusado, alvo nao criado'; $script:caseNote = 'symlink de arquivo: testado' }
+            else { $script:caseNote = 'symlink de arquivo: NAO_TESTADO (sem privilegio para criar)' }
+        } finally { $s.Dispose() }
+        Assert-Eq ([IO.File]::ReadAllText((Join-Path $par 'd.json'))) '{"a":1}' 'conteudo gravado depois da verificacao'
+        $acl = Get-Acl -LiteralPath (Join-Path $par 'd.json')
+        $sids = @($acl.Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } | Sort-Object -Unique)
+        Assert-True ($acl.AreAccessRulesProtected -and (@($sids) -join ',') -ceq 'S-1-3-4,S-1-5-18,S-1-5-32-544') "DACL protegida: dono (OWNER RIGHTS), SYSTEM, Administradores ($($sids -join ','))"
+        # Before pinning: a folder already swapped for a junction (or a junction above it) is refused, nothing in the target.
+        [IO.Directory]::Move($par, $par + '-moved'); New-Junction $par $else
+        $s2 = [AgentTempManager.AtmSafeCreate]::Pin($par); $e2 = $s2.Error; $s2.Dispose()
+        $s3 = [AgentTempManager.AtmSafeCreate]::Pin((Join-Path $par 'sub')); $e3 = $s3.Error; $s3.Dispose()
+        Assert-True ($e2 -ceq 'PARENT_REPARSE_POINT' -and $e3 -ceq 'ANCESTOR_REPARSE_POINT' -and @(Get-ChildItem -LiteralPath $else -Force | Where-Object { $_.Name -ne 'j' }).Count -eq 0) "pasta ou ancestral trocados antes do pin: recusados ($e2, $e3)"
+        foreach ($bp in @('relative\dir', '\\server\share\dir', 'C:\', ($fa + '\anc\..\anc'))) { $sb = [AgentTempManager.AtmSafeCreate]::Pin($bp); Assert-True (-not $sb.IsPinned) "pin recusado: $bp ($($sb.Error))"; $sb.Dispose() }
+        # FINAL-A review (M-1), deterministic, INSIDE the pinned window: share modes do not stop another handle with
+        # FILE_WRITE_ATTRIBUTES from turning the pinned (empty) folder into a junction in place (FSCTL_SET_REPARSE_POINT).
+        # CreateNew must refuse (the folder is re-checked; the creation never follows a reparse point), nothing in the target.
+        Initialize-AtmTestReparse
+        $ip = Join-Path $fa 'inplace'; $ipt = Join-Path $fa 'inplace-target'; foreach ($d in @($ip, $ipt)) { [void][IO.Directory]::CreateDirectory($d) }
+        $ip = [AgentTempManager.AtmNative]::GetLongPath($ip); $ipt = [AgentTempManager.AtmNative]::GetLongPath($ipt)
+        $si = [AgentTempManager.AtmSafeCreate]::Pin($ip)
+        try {
+            Assert-True $si.IsPinned "pasta vazia pinada ($($si.Error))"
+            $set = [AtmTestReparse]::SetJunction($ip, $ipt)
+            Assert-Eq $set 'SET_OK' 'juncao gravada na pasta pinada por outro handle (o pin nao impede: limite documentado)'
+            $ci = [AgentTempManager.AtmSafeCreate]::CreateNew($si, 'in.json', [byte[]]@(123, 125))
+            Assert-True ($null -ne $ci -and @(Get-ChildItem -LiteralPath $ipt -Force).Count -eq 0) "conversao em juncao dentro da janela: recusada ($ci), nada no alvo"
+            $script:caseNote = "$script:caseNote; FSCTL na janela: $ci"
+        } finally { $si.Dispose() }
+        # The fixture folder is now a junction link (removing it removes only the link).
+        if (([IO.File]::GetAttributes($ip) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { [IO.Directory]::Delete($ip, $false) }
+        # The policy runs again inside the pinned window: a condition that appears after a by-name pre-check still refuses.
+        $pol = Join-Path $fa 'pol'; [void][IO.Directory]::CreateDirectory($pol)
+        $marker = Join-Path $pol 'appeared-later'
+        $mp = { param($P) if (Test-Path -LiteralPath $marker) { 'EXPORT_DESTINATION_NOT_ALLOWED' } else { $null } }.GetNewClosure()
+        Assert-True ($null -eq (& $mp (Join-Path $pol 'x.json'))) 'pre-verificacao por nome aceita'
+        [IO.File]::WriteAllText($marker, 'x')
+        Assert-Eq (New-AtmPinnedTextFile -Path (Join-Path $pol 'x.json') -Text '{}' -Policy $mp) 'EXPORT_DESTINATION_NOT_ALLOWED' 'politica reavaliada sob o pin: condicao surgida depois recusa'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $pol 'x.json'))) 'nada criado'
+        # ACL failure: a folder that denies this account file creation is refused with a code, nothing created.
+        $den = Join-Path $fa 'denied'; [void][IO.Directory]::CreateDirectory($den)
+        $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $rule = New-Object Security.AccessControl.FileSystemAccessRule($me, [Security.AccessControl.FileSystemRights]::CreateFiles, [Security.AccessControl.AccessControlType]::Deny)
+        $da = Get-Acl -LiteralPath $den; $da.AddAccessRule($rule); Set-Acl -LiteralPath $den -AclObject $da
+        try {
+            $sd = [AgentTempManager.AtmSafeCreate]::Pin($den)
+            try { $cd = [AgentTempManager.AtmSafeCreate]::CreateNew($sd, 'd.json', [byte[]]@(1)) } finally { $sd.Dispose() }
+            Assert-True ($cd -ceq 'ACCESS_DENIED' -and -not (Test-Path -LiteralPath (Join-Path $den 'd.json'))) "criacao negada pela ACL: codigo seguro ($cd), nada criado"
+        } finally { $da = Get-Acl -LiteralPath $den; [void]$da.RemoveAccessRule($rule); Set-Acl -LiteralPath $den -AclObject $da }
+    }
+    Test-Case 'Exportacao' 'V0.1.1 F-02: corrida adversarial antes do pin (estocastica, fixtures) - a pasta trocada por juncao em laco; arquivo criado ou recusado, nunca no alvo da juncao; sem troca durante as criacoes: NAO_TESTADO' {
+        # Adversarial race (stochastic, BEFORE the pin): another runspace swaps the folder with a junction in a loop between
+        # iterations, so Pin meets the folder, the junction or nothing; it does not attack inside the pinned window (that is
+        # the deterministic FSCTL case above). A file may be created or refused, but never in the junction target.
+        $fa = Join-Path $sandbox 'finala-race'; $rd = Join-Path $fa 'race'; $rt = Join-Path $fa 'race-target'; foreach ($d in @($rd, $rt)) { [void][IO.Directory]::CreateDirectory($d) }
+        $flag = [hashtable]::Synchronized(@{ Stop = $false; Swaps = 0; Errors = 0 })
+        $ps = [PowerShell]::Create()
+        [void]$ps.AddScript({ param($Dir, $Target, $Flag)
+            while (-not $Flag.Stop) {
+                try {
+                    [IO.Directory]::Move($Dir, $Dir + '-real')
+                    try { $null = cmd /c "mklink /J `"$Dir`" `"$Target`" >nul 2>nul"; Start-Sleep -Milliseconds 2; if ((Test-Path -LiteralPath $Dir) -and ((Get-Item -LiteralPath $Dir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { for ($k = 0; $k -lt 500; $k++) { try { [IO.Directory]::Delete($Dir, $false); break } catch { Start-Sleep -Milliseconds 1 } } } }
+                    finally { if (-not (Test-Path -LiteralPath $Dir)) { [IO.Directory]::Move($Dir + '-real', $Dir) } }
+                    $Flag.Swaps++
+                }
+                catch { $Flag.Errors++; Start-Sleep -Milliseconds 1 }
+            } }).AddArgument($rd).AddArgument($rt).AddArgument($flag)
+        $h = $ps.BeginInvoke()
+        $made = 0; $refused = 0; $i = 0; $during = 0
+        try {
+            # The swapper must really be running before the creations start (bounded wait); then at least 150 creations,
+            # continued (up to 1500) until 3 swaps completed while they ran.
+            $w = [Diagnostics.Stopwatch]::StartNew(); while ($flag.Swaps -eq 0 -and $w.ElapsedMilliseconds -lt 10000) { Start-Sleep -Milliseconds 10 }
+            $s0 = $flag.Swaps
+            for (; $i -lt 1500 -and ($i -lt 150 -or ($flag.Swaps - $s0) -lt 3); $i++) {
+                $sr = [AgentTempManager.AtmSafeCreate]::Pin($rd)
+                try { if ($sr.IsPinned -and $null -eq [AgentTempManager.AtmSafeCreate]::CreateNew($sr, "f$i.json", [byte[]]@(123, 125))) { $made++ } else { $refused++ } } finally { $sr.Dispose() }
+            }
+            $during = $flag.Swaps - $s0
+        } finally { $flag.Stop = $true; try { [void]$ps.EndInvoke($h) } catch { $null = $_ }; $ps.Dispose() }
+        # A pinned junction cannot be deleted at once: the swapper retries, so it never stays stuck in one state.
+        $endedSwapped = Test-Path -LiteralPath ($rd + '-real')
+        # Fixture restored (the swapper may stop between its steps): the junction link goes, the real folder comes back.
+        # Only a junction link is ever removed here (never a real folder); the real folder is moved back when its name is free.
+        if (Test-Path -LiteralPath ($rd + '-real')) {
+            if ((Test-Path -LiteralPath $rd) -and ((Get-Item -LiteralPath $rd -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { [IO.Directory]::Delete($rd, $false) }
+            if (-not (Test-Path -LiteralPath $rd)) { [IO.Directory]::Move($rd + '-real', $rd) }
+        }
+        Assert-True (@(Get-ChildItem -LiteralPath $rt -Force).Count -eq 0) "corrida antes do pin: nenhum arquivo no alvo da juncao ($made criados, $refused recusados, $($flag.Swaps) trocas)"
+        Assert-Eq ($made + $refused) $i 'cada criacao criou ou recusou'
+        # No swap while the creations ran: the race was not exercised on this run (never a PASS for it).
+        if ($during -eq 0) { $script:caseSkipped = $true; $script:caseNote = "corrida nao exercitada: nenhuma troca concluida durante as $i criacoes ($($flag.Swaps) no total, $($flag.Errors) tentativas recusadas); nenhum arquivo no alvo"; return }
+        $script:caseNote = "corrida: $made criados, $refused recusados, $during trocas durante as $i criacoes; $($flag.Errors) tentativas de troca recusadas; terminou trocada: $endedSwapped"
+    }
+    Test-Case 'Exportacao' 'V0.1.1 F-02: audit -ExportJson pelo escritor pinado - mesmas regras da V0.1, alias subst de uma base recusado pelo escritor, existente recusado intacto, pasta trocada por juncao recusada; clean -LogFile segue por nome (F-04, latente, exclusao desabilitada)' {
+        $base = Join-Path $sandbox 'finala-v01base'; [void][IO.Directory]::CreateDirectory($base)
+        $inv = [pscustomobject]@{ Bases = @([pscustomobject]@{ Path = $base }) }
+        Assert-True (-not (Test-AtmOutputPathOutsideBases -Path (Join-Path $base 'x.json') -Inventory $inv)) 'dentro da base por nome: recusado'
+        $sl = $null; foreach ($l in [char[]]'QRSTUVWXYZ') { if (-not (Test-Path "$($l):\")) { $sl = $l; break } }
+        if (-not $sl) { $script:caseSkipped = $true; $script:caseNote = 'nenhuma letra de unidade livre'; return }
+        $null = cmd /c subst "$($sl):" "`"$base`"" 2>&1
+        try {
+            if (-not (Test-Path "$($sl):\")) { $script:caseSkipped = $true; $script:caseNote = 'subst indisponivel'; return }
+            # Known V0.1 gap (FINAL-A record): the V0.1 lexical check accepts the alias; the diagnose writer refuses it.
+            Assert-True (Test-AtmOutputPathOutsideBases -Path "$($sl):\x.json" -Inventory $inv -MustNotExist) 'lacuna V0.1 demonstrada em fixture: alias subst de uma base passa na verificacao lexica (nada e gravado por este teste)'
+            $sx = [AgentTempManager.AtmSafeCreate]::Pin("$($sl):\d"); $ex = $sx.Error; $sx.Dispose()
+            Assert-True ($ex -ceq 'SUBSTITUTED_DRIVE' -or $ex -like 'PARENT_*') "o escritor seguro recusa a unidade subst ($ex)"
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $base 'x.json'))) 'nada gravado na base'
+        } finally { $null = cmd /c subst "$($sl):" /d 2>&1 }
+        $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        Assert-True ($cli.Contains('$exported = New-AtmPinnedTextFile -Path $ExportJson') -and -not $cli.Contains("[IO.File]::WriteAllText(`$ExportJson, (ConvertTo-AtmExportJson") -and ([IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Clean.ps1'))).Contains('Add-Content -LiteralPath $LogFile')) 'F-02: audit -ExportJson pelo escritor pinado (mesmas regras, mesma mensagem); F-04: clean -LogFile por nome (latente, registrado)'
+        # A refusal after the file exists (CREATED_ codes) never claims that no file was created (review of FINAL-A).
+        $ncs = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Native.cs'))
+        Assert-True ($ncs.Contains('return "CREATED_PARENT_CHANGED";') -and ([regex]::Matches($cli, [regex]::Escape("-like 'EXPORT_CREATE_CREATED_*') { 'cli.exportRefusedAfterCreate' }"))).Count -eq 1 -and (Get-AtmText 'cli.exportRefusedAfterCreate' 'X') -notmatch 'nenhum arquivo foi criado|no file was created') 'recusa depois da criacao: codigo CREATED_ e mensagem que nao nega o arquivo'
+        # F-02 on a fixture: the audit export path keeps its V0.1 rules and gains the pinned creation.
+        $ax = Join-Path $sandbox 'finala-auditexp'; $axt = Join-Path $sandbox 'finala-auditexp-target'; foreach ($d in @($ax, $axt)) { [void][IO.Directory]::CreateDirectory($d) }
+        $pol = { param($P) if (Test-AtmOutputPathOutsideBases -Path $P -Inventory $inv -MustNotExist) { $null } else { 'EXPORT_DESTINATION_NOT_ALLOWED' } }
+        Assert-Eq (New-AtmPinnedTextFile -Path (Join-Path $ax 'a.json') -Text '{}' -Policy $pol) $null 'exportacao de auditoria criada pelo escritor pinado'
+        Assert-Eq (New-AtmPinnedTextFile -Path (Join-Path $ax 'a.json') -Text 'x' -Policy $pol) 'EXPORT_DESTINATION_NOT_ALLOWED' 'existente: recusado (regra V0.1), conteudo intacto'
+        Assert-Eq ([IO.File]::ReadAllText((Join-Path $ax 'a.json'))) '{}' 'nada sobrescrito'
+        Assert-Eq (New-AtmPinnedTextFile -Path (Join-Path $base 'in.json') -Text '{}' -Policy $pol) 'EXPORT_DESTINATION_NOT_ALLOWED' 'dentro da base: recusado'
+        [IO.Directory]::Move($ax, $ax + '-moved'); New-Junction $ax $axt
+        Assert-True ((New-AtmPinnedTextFile -Path (Join-Path $ax 'b.json') -Text '{}' -Policy $pol) -like 'EXPORT_PIN_*' -and @(Get-ChildItem -LiteralPath $axt -Force).Count -eq 0) 'pasta trocada por juncao: recusada, nada no alvo'
+    }
+    Test-Case 'Camadas' 'V0.1.1 F-01: caminhos de rede ou dispositivo vindos do registro ou ambiente de outros usuarios (TEMP, CLAUDE_CONFIG_DIR, CLAUDE_CODE_TMPDIR): formas de rede ou dispositivo recusadas antes de qualquer API de arquivos (verificacao lexica); pontos de reparse nao atravessados pela normalizacao; pasta de configuracao de outro usuario atraves de ponto de reparse nao lida; lacuna registrada' {
+        foreach ($bad in @('\\127.0.0.1\share', '//127.0.0.1/share', '\\?\C:\x', '\\?\UNC\127.0.0.1\x', '\\.\pipe\x', '\\127.0.0.1@80\x', 'C:x', 'C:\a:b', 'relative\x', '', ("C:\a" + [char]27 + "b"), ("C:\a" + [char]0x85 + "b"), ("C:\a" + [char]0x7F + "b"))) {
+            Assert-True (-not (Test-AtmLocalPathForm $bad)) "forma recusada: '$bad'"
+        }
+        Assert-True (Test-AtmLocalPathForm $env:SystemRoot) 'caminho local de unidade fixa aceito'
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        Assert-Eq (Get-AtmNormalizedPath '\\127.0.0.1\atm-nope\x') $null 'normalizacao recusa UNC sem tocar a rede'
+        Assert-Eq (Get-AtmNormalizedPath '\\127.0.0.1@80\atm-nope') $null 'normalizacao recusa WebDAV'
+        Assert-True ($sw.ElapsedMilliseconds -lt 2000) "sem tentativa de rede ($($sw.ElapsedMilliseconds) ms)"
+        $p = New-TestProfile 'finala-unc'
+        $p.EnvValues = @{ CLAUDE_CONFIG_DIR = @('\\127.0.0.1\atm-nope'); CLAUDE_CODE_TMPDIR = @('\\127.0.0.1\atm-nope2') }
+        $cd = Get-AtmClaudeConfigDirs $p
+        Assert-True (@($cd.Dirs).Count -eq 0 -and $cd.Refused -eq 1) 'CLAUDE_CONFIG_DIR de rede: nao lido, sem cair para o padrao do perfil'
+        $se = Get-AtmClaudeSessionEvidence -ProfileInfo $p -Snapshot ([pscustomobject]@{ Failed = $false; Processes = @() })
+        Assert-True (-not $se.Readable -and @($se.Notes).Count -ge 1) 'evidencia de sessao: ilegivel (lacuna), nunca "sem sessoes"'
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $ia = Get-InvArgs -Profiles @($p)
+        $i = Invoke-AtmInventory @ia
+        $st = @($i.ProfileBaseStatus[$p.Sid + '|' + $p.ProfilePath] | Where-Object { $_.Source -eq 'CLAUDE_CODE_TMPDIR' })
+        Assert-True ($st.Count -ge 1 -and @($st | Where-Object { $_.Status -ne 'INVALID' }).Count -eq 0 -and $sw.ElapsedMilliseconds -lt 60000) "CLAUDE_CODE_TMPDIR de rede: base INVALID, nada lido ($($sw.ElapsedMilliseconds) ms)"
+        # The raw value of an invalid base is shown with its control characters replaced.
+        $pe = New-TestProfile 'finala-ctl'
+        $pe.EnvValues = @{ CLAUDE_CODE_TMPDIR = @("C:\a" + [char]27 + "[2J" + [char]0x9B + "b") }
+        $ia = Get-InvArgs -Profiles @($pe)
+        $ie = Invoke-AtmInventory @ia
+        $se2 = @($ie.ProfileBaseStatus[$pe.Sid + '|' + $pe.ProfilePath] | Where-Object { $_.Source -eq 'CLAUDE_CODE_TMPDIR' })
+        Assert-True ($se2.Count -ge 1 -and @($se2 | Where-Object { $_.Status -ne 'INVALID' -or [string]$_.BasePath -match '[\x00-\x1f\x7f-\x9f]' }).Count -eq 0) "base invalida exibida sem caracteres de controle ($(@($se2 | ForEach-Object { $_.BasePath }) -join ';'))"
+        # A component that is a reparse point is never traversed by the normalization (a directory
+        # symbolic link may point to a network share; a junction stands in for it here: creating one needs no privilege).
+        $mt = Join-Path $sandbox 'finala-m3-target'; $mj = Join-Path $sandbox 'finala-m3-link'
+        [void][IO.Directory]::CreateDirectory((Join-Path $mt 'inner')); New-Junction $mj $mt
+        $mlong = [AgentTempManager.AtmNative]::GetLongPath($sandbox).TrimEnd('\')
+        Assert-Eq (Get-AtmNormalizedPath (Join-Path $mj 'inner')) ($mlong + '\finala-m3-link\inner') 'normalizacao: prefixo expandido, link e restante mantidos lexicamente (nunca resolvidos)'
+        # Another user's CLAUDE_CONFIG_DIR through a reparse point is not read; one's own is read as before.
+        $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $po = New-TestProfile 'finala-m3-other' -Sid 'S-1-5-21-1-2-3-1001'
+        $po.EnvValues = @{ CLAUDE_CONFIG_DIR = @((Join-Path $mj 'inner')) }
+        $co = Get-AtmClaudeConfigDirs $po
+        Assert-True (@($co.Dirs).Count -eq 0 -and $co.Refused -eq 1) 'pasta de configuracao de outro usuario atraves de um ponto de reparse: nao lida, recusa contada'
+        $pm = New-TestProfile 'finala-m3-me' -Sid $me
+        $pm.EnvValues = @{ CLAUDE_CONFIG_DIR = @((Join-Path $mj 'inner')) }
+        $cm = Get-AtmClaudeConfigDirs $pm
+        Assert-True (@($cm.Dirs).Count -eq 1 -and $cm.Refused -eq 0) 'a propria pasta de configuracao segue lida como antes'
+    }
+    Test-Case 'Instalacao' 'V0.1.1: versao 0.1.1 coerente - fonte unica, instalador, manifesto, CLI, changelog e notas corretivas' {
+        $repoRoot = Split-Path -Parent $testsDir
+        Assert-Eq $script:AtmVersion '0.1.1' 'versao na fonte'
+        Assert-Eq ([regex]::Matches([IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Audit.ps1')), '\$script:AtmVersion\s*=').Count) 1 'uma unica atribuicao da versao'
+        Assert-Eq (Get-AtmSourceVersion -SourceDir $srcDir) '0.1.1' 'versao lida pelo instalador e pelo build'
+        $vm = Join-Path $sandbox 'v011-version'; [void][IO.Directory]::CreateDirectory($vm)
+        Copy-AtmTree -From $srcDir -To $vm
+        Write-AtmManifest -Root $vm -Version (Get-AtmSourceVersion -SourceDir $vm)
+        Assert-Eq ([IO.File]::ReadAllText((Join-Path $vm 'manifest.json')) | ConvertFrom-Json).version '0.1.1' 'manifesto escrito com a versao da fonte'
+        $o = (& cmd.exe /c "`"$(Join-Path $srcDir 'bin\agent-temp.cmd')`" version -Lang en-US" 2>&1) -join "`n"
+        Assert-True ($LASTEXITCODE -eq 0 -and $o -match 'agent-temp 0\.1\.1\b' -and $o -match '(?i)real deletion\s*:\s*DISABLED') 'version da CLI: 0.1.1 e exclusao real desabilitada'
+        $cl = [IO.File]::ReadAllText((Join-Path $repoRoot 'CHANGELOG.md'))
+        Assert-True ($cl -match '(?m)^## 0\.1\.1\r?$' -and $cl -match '(?m)^## 0\.1\.0\r?$' -and $cl.IndexOf('## 0.1.1') -lt $cl.IndexOf('## 0.1.0')) 'changelog: 0.1.1 antes da 0.1.0 preservada'
+        foreach ($n in @('V0.1.1-RELEASE-NOTES.md', 'V0.1.1-RELEASE-NOTES.pt-BR.md')) { Assert-True (Test-Path -LiteralPath (Join-Path $repoRoot "docs\release\$n")) "nota corretiva: $n" }
+        Assert-True ([IO.File]::ReadAllText((Join-Path $repoRoot 'src\lib\Engine.Clean.ps1')) -match '(?m)^\$script:AtmRealDeletionEnabled = \$false\r?$') 'exclusao real desabilitada na fonte'
     }
     Test-Case 'Camadas' 'TUI e relatorio nunca chamam APIs de exclusao; motor de auditoria nao exclui nem imprime' {
         $lib = Join-Path $srcDir 'lib'
