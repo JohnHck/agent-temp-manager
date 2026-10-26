@@ -1450,12 +1450,48 @@ function Invoke-AtmBoundedProcess {
     return [AgentTempManager.AtmJobRunner]::Run($Executable, $CommandLine, $WorkingDirectory, $Environment, $TimeoutMs, $MaxOutputBytes, $JobMemoryBytes, $ActiveProcessLimit)
 }
 
+function ConvertFrom-AtmGitJobResult {
+    <#
+      Status of one Git run from the runner's result (V0.2 stage 1). Every condition observed is listed in Conditions,
+      most severe first; the first one is the Reason, so the gravest cause decides and none is lost:
+        not started                                       FAILED   GIT_JOB_UNAVAILABLE | GIT_START_FAILED (alone)
+        termination requested, every call refused         FAILED   GIT_JOB_TERMINATE_FAILED
+        deadline                                          TIMEOUT  GIT_TIMEOUT
+        exit code not 0 (not on the deadline)             FAILED   GIT_OWNERSHIP_REFUSED | GIT_NOT_A_REPOSITORY | GIT_COMMAND_FAILED
+        output not read to its end (reader error, or a
+        reader still running when the result was built)  PARTIAL  GIT_OUTPUT_INCOMPLETE
+        members terminated after Git exited (a
+        descendant still held the output)                 PARTIAL  GIT_JOB_TERMINATED_AFTER_EXIT
+        bytes beyond the cap                              PARTIAL  GIT_OUTPUT_TRUNCATED
+      COMPLETE only when none holds: a partial run is never complete evidence, whatever Git's exit code.
+    #>
+    param($Result)
+    if (-not $Result.Started) {
+        $why = $(if ([string]$Result.Error -like 'JOB_*') { 'GIT_JOB_UNAVAILABLE' } else { 'GIT_START_FAILED' })
+        return [pscustomobject]@{ Status = 'FAILED'; Reason = $why; Conditions = [string[]]@($why) }
+    }
+    $c = New-Object System.Collections.Generic.List[string]
+    if ($Result.TerminationFailed) { $c.Add('GIT_JOB_TERMINATE_FAILED') }
+    if ($Result.TimedOut) { $c.Add('GIT_TIMEOUT') }
+    elseif ($Result.ExitCode -ne 0) {
+        $err = [Text.Encoding]::UTF8.GetString($Result.ErrorOutput)
+        $c.Add($(if ($err -match 'dubious ownership') { 'GIT_OWNERSHIP_REFUSED' } elseif ($err -match 'not a git repository') { 'GIT_NOT_A_REPOSITORY' } else { 'GIT_COMMAND_FAILED' }))
+    }
+    if (-not $Result.ReadersCompleted -or $Result.ReaderFaulted) { $c.Add('GIT_OUTPUT_INCOMPLETE') }
+    if ($Result.TerminationRequested -and -not $Result.TimedOut) { $c.Add('GIT_JOB_TERMINATED_AFTER_EXIT') }
+    if ($Result.OutputTruncated) { $c.Add('GIT_OUTPUT_TRUNCATED') }
+    if ($c.Count -eq 0) { return [pscustomobject]@{ Status = 'COMPLETE'; Reason = $null; Conditions = [string[]]@() } }
+    $status = $(switch -CaseSensitive ($c[0]) { 'GIT_TIMEOUT' { 'TIMEOUT' } 'GIT_OUTPUT_INCOMPLETE' { 'PARTIAL' } 'GIT_JOB_TERMINATED_AFTER_EXIT' { 'PARTIAL' } 'GIT_OUTPUT_TRUNCATED' { 'PARTIAL' } default { 'FAILED' } })
+    return [pscustomobject]@{ Status = $status; Reason = $c[0]; Conditions = [string[]]$c.ToArray() }
+}
+
 function Invoke-AtmGitCommand {
     <#
       One allow-listed Git command. -Git: Resolve-AtmGitExecutable. -WorkingDirectory: mandatory, an existing directory on
       a fixed drive (8.3 names normalized) with no reparse point in its path (Test-AtmPathChain); discovery is bounded by
-      its parent (GIT_CEILING_DIRECTORIES), so Git does not report on a repository above it. Returns Status (COMPLETE | PARTIAL output truncated | FAILED | TIMEOUT | REFUSED | UNAVAILABLE),
-      Reason (a code), ExitCode, Output (UTF-8 text, in memory only), ElapsedMs, TotalProcesses. Git's error text is
+      its parent (GIT_CEILING_DIRECTORIES), so Git does not report on a repository above it. Returns Status (COMPLETE | PARTIAL output truncated or incomplete | FAILED | TIMEOUT | REFUSED | UNAVAILABLE),
+      Reason (a code), Conditions (every condition of the run, most severe first: ConvertFrom-AtmGitJobResult),
+      ExitCode, Output (UTF-8 text, in memory only), ElapsedMs, TotalProcesses. Git's error text is
       never returned: it is classified (GIT_OWNERSHIP_REFUSED, GIT_NOT_A_REPOSITORY, GIT_COMMAND_FAILED).
       P3-B0: every command but `--version` needs the worktree diagnostics gate open (GIT_EXECUTION_GATE_CLOSED) and a
       -Preflight (Get-AtmGitPreflight) that is OK for this very working directory (GIT_PREFLIGHT_REQUIRED); `status`
@@ -1463,7 +1499,7 @@ function Invoke-AtmGitCommand {
     #>
     param($Git, [string[]]$Arguments, [string]$WorkingDirectory, $Preflight = $null, [int]$TimeoutMs = $script:AtmGitDefaultTimeoutMs, [int]$MaxOutputBytes = $script:AtmGitDefaultMaxOutputBytes,
         [long]$JobMemoryBytes = $script:AtmGitDefaultJobMemoryBytes, [int]$ActiveProcessLimit = $script:AtmGitDefaultActiveProcessLimit)
-    $out = [ordered]@{ Status = 'REFUSED'; Reason = $null; ExitCode = $null; Output = $null; OutputTruncated = $false; ElapsedMs = 0; TotalProcesses = 0; MatchCount = $null; PinnedMs = 0 }
+    $out = [ordered]@{ Status = 'REFUSED'; Reason = $null; ExitCode = $null; Output = $null; OutputTruncated = $false; ElapsedMs = 0; TotalProcesses = 0; MatchCount = $null; PinnedMs = 0; Conditions = [string[]]@() }
     $code = Test-AtmGitArguments -Arguments $Arguments
     if ($null -ne $code) { $out.Reason = $code; return [pscustomobject]$out }
     $versionOnly = (@($Arguments).Count -eq 1 -and $Arguments[0] -ceq '--version')
@@ -1513,19 +1549,14 @@ function Invoke-AtmGitCommand {
         $out.PinnedMs = $pinWatch.ElapsedMilliseconds
     }
     $out.ElapsedMs = $r.ElapsedMs; $out.TotalProcesses = $r.TotalProcesses; $out.ExitCode = $(if ($r.Started) { $r.ExitCode } else { $null })
-    if (-not $r.Started) { $out.Status = 'FAILED'; $out.Reason = $(if ($r.Error -like 'JOB_*') { 'GIT_JOB_UNAVAILABLE' } else { 'GIT_START_FAILED' }); return [pscustomobject]$out }
-    if ($r.TimedOut) { $out.Status = 'TIMEOUT'; $out.Reason = 'GIT_TIMEOUT'; return [pscustomobject]$out }
-    $err = [Text.Encoding]::UTF8.GetString($r.ErrorOutput)
-    if ($r.ExitCode -ne 0) {
-        $out.Status = 'FAILED'
-        $out.Reason = $(if ($err -match 'dubious ownership') { 'GIT_OWNERSHIP_REFUSED' } elseif ($err -match 'not a git repository') { 'GIT_NOT_A_REPOSITORY' } else { 'GIT_COMMAND_FAILED' })
-        return [pscustomobject]$out
-    }
+    $o = ConvertFrom-AtmGitJobResult -Result $r
+    $out.Status = $o.Status; $out.Reason = $o.Reason; $out.Conditions = $o.Conditions
+    if ($o.Status -cne 'COMPLETE' -and $o.Status -cne 'PARTIAL') { return [pscustomobject]$out }
+    # PARTIAL: what was read is positive evidence only (a lower bound); the rest is unknown.
     $text = [Text.Encoding]::UTF8.GetString($r.Output)
     # Configuration names can carry credentials (url.<url>.insteadof): they are counted, never returned.
     if ($Arguments[0] -ceq 'config') { $out.MatchCount = @($text.Split([char[]]"`n`0") | Where-Object { $_ }).Count } else { $out.Output = $text }
     $out.OutputTruncated = [bool]$r.OutputTruncated
-    if ($r.OutputTruncated) { $out.Status = 'PARTIAL'; $out.Reason = 'GIT_OUTPUT_TRUNCATED' } else { $out.Status = 'COMPLETE' }
     return [pscustomobject]$out
 }
 
@@ -2499,7 +2530,7 @@ function Get-AtmWorktreeLocalWork {
                 if ($c.Staged + $c.Unstaged + $c.Untracked + $c.Ignored + $c.Conflicts -gt 0) { $positive = $true }
                 # Even complete, `status` does not show changes inside a gitlink (submodules ignored, and one can exist
                 # without .gitmodules) or in entries flagged assume-unchanged or skip-worktree: never complete coverage.
-                $res.StatusCoverage = [pscustomobject]@{ Status = 'PARTIAL'; Reason = $(if ($st.Status -ceq 'PARTIAL') { 'GIT_OUTPUT_TRUNCATED' } else { 'HIDDEN_ENTRIES_NOT_OBSERVED' }) }
+                $res.StatusCoverage = [pscustomobject]@{ Status = 'PARTIAL'; Reason = $(if ($st.Status -ceq 'PARTIAL') { [string]$st.Reason } else { 'HIDDEN_ENTRIES_NOT_OBSERVED' }) }
                 $statusDone = ($st.Status -ceq 'COMPLETE')
                 $res.StatusRan = $statusDone
             }

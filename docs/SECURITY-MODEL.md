@@ -106,6 +106,30 @@ called by `Invoke-AtmGitCommand`):
   processes end when the handle is closed at the end of every run. This is the only termination in the product: no
   other process is opened, signalled or terminated (`TerminateProcess`, `OpenProcess`, `CreateRemoteThread` are
   absent from `Native.cs`, checked by the layering test). Pre-existing processes are never affected.
+* **Result contract (V0.2 stage 1, additive).** The runner's result reports:
+  * whether termination was requested (at the deadline, or because a member still held the output after the child
+    ended), whether it failed (every call refused), and the Win32 error read right after the first refused call;
+  * whether both output readers stopped before the result was built, and whether one stopped on a read error (an
+    error is never taken for the end of output);
+  * the job's active processes from the accounting query made just before the job handle closes (`-1` when unknown,
+    never `0`).
+
+  The bytes kept are a consistent copy taken under the reader's lock, which never covers a blocking read or a wait.
+  `KILL_ON_JOB_CLOSE` is a backstop, not evidence that a termination succeeded.
+
+  `Invoke-AtmGitCommand` lists every condition of a run and reports the gravest as its reason, so `COMPLETE` means
+  none applied. In decreasing severity:
+  * termination failed: `FAILED`;
+  * deadline: `TIMEOUT`;
+  * Git's exit code: `FAILED`;
+  * output not read to its end: `PARTIAL`, `GIT_OUTPUT_INCOMPLETE`;
+  * members terminated after Git exited: `PARTIAL`, `GIT_JOB_TERMINATED_AFTER_EXIT`;
+  * truncation: `PARTIAL`.
+
+  The test suite fails a child run whose termination failed or whose output is incomplete, whatever its exit code.
+  States that cannot be provoked safely (a refused termination, a reader still running) are tested on synthetic
+  results only. A real refusal of `TerminateJobObject` is not tested. There is no switch, variable or parameter that
+  simulates a result in the product.
 * Only allow-listed, read-only Git commands are started, with `--no-optional-locks` (the read commands take no lock,
   so there is none to leave behind when one is terminated), every transport refused by name on the command line
   (`protocol.allow=never` plus `protocol.<file|git|ssh|http|https|ext>.allow=never`, which a repository's own setting

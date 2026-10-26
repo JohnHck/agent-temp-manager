@@ -616,8 +616,8 @@ namespace AgentTempManager
         public int Win32Error;
         public int ProcessId;
         public int ExitCode = -1;
-        public bool TimedOut;           // the deadline came first: the job was terminated
-        public bool JobTerminated;      // TerminateJobObject was called on this run's job (timeout, or members left after the exit)
+        public bool TimedOut;           // the deadline came first: termination of the job was requested
+        public bool JobTerminated;      // a TerminateJobObject call on this run's job succeeded (deadline, or members left after the exit)
         public long ElapsedMs;
         public byte[] Output = new byte[0];
         public bool OutputTruncated;
@@ -627,6 +627,21 @@ namespace AgentTempManager
         public long PeakJobMemory;
         public long JobMemoryLimit;     // read back from the job
         public int ActiveProcessLimit;  // read back from the job
+        // V0.2 stage 1 (additive; nothing above changed). Termination: requested at the deadline or when a member still
+        // held the output after the child ended; failed when every call was refused (KILL_ON_JOB_CLOSE ending the members
+        // when the job handle closes is a backstop, never evidence of success). The Win32 error is read right after the
+        // first refused call and kept even if a later call succeeded.
+        public bool TerminationRequested;
+        public bool TerminationFailed;
+        public int TerminationWin32Error;
+        // Output collection: both readers stopped (end of output or read error) before the result was built. Output
+        // and ErrorOutput are complete only when ReadersCompleted is true and ReaderFaulted false (bytes beyond the cap
+        // are still declared by the Truncated flags).
+        public bool ReadersCompleted;
+        public bool ReaderFaulted;
+        // Active processes of the job from the accounting query made after the readers' joins and the exit code, just
+        // before Run returns and closes the job handle; -1 when that query failed or was never made (unknown, not 0).
+        public int ActiveProcessesAtEnd = -1;
     }
 
     // Read pins (P3-C0, docs/SECURITY-MODEL.md): a handle opened for reading WITHOUT write or delete sharing on a file
@@ -1192,12 +1207,21 @@ namespace AgentTempManager
         [DllImport("kernel32.dll", SetLastError = true)]
         static extern bool CloseHandle(IntPtr handle);
 
+        sealed class ReaderSnapshot
+        {
+            public byte[] Bytes;
+            public bool Truncated;
+            public bool Ended;      // the reader stopped: end of output, or a read error
+            public bool Faulted;    // it stopped on a read error (the output may be incomplete)
+        }
+
         sealed class Reader
         {
             readonly FileStream stream;
             readonly int cap;
+            readonly object gate = new object();
             readonly MemoryStream kept = new MemoryStream();
-            public bool Truncated;
+            bool truncated, ended, faulted;
             public System.Threading.Thread Thread;
             public Reader(IntPtr handle, int cap)
             {
@@ -1209,23 +1233,48 @@ namespace AgentTempManager
             }
             void Run()
             {
-                // Everything is read so the child never blocks on a full pipe; only the first cap bytes are kept.
+                // Everything is read so the child never blocks on a full pipe; only the first cap bytes are kept. The
+                // lock covers the buffer only, never the blocking read. A broken pipe is the end of output (the stream
+                // returns 0); any exception is a read error, recorded instead of being taken for the end.
                 byte[] buf = new byte[8192];
                 try
                 {
                     int n;
                     while ((n = stream.Read(buf, 0, buf.Length)) > 0)
                     {
-                        int room = cap - (int)kept.Length;
-                        if (room > 0) kept.Write(buf, 0, Math.Min(room, n));
-                        if (n > room) Truncated = true;
+                        lock (gate)
+                        {
+                            int room = cap - (int)kept.Length;
+                            if (room > 0) kept.Write(buf, 0, Math.Min(room, n));
+                            if (n > room) truncated = true;
+                        }
                     }
                 }
-                catch (IOException) { }
-                catch (ObjectDisposedException) { }
-                finally { stream.Dispose(); }
+                catch (Exception) { lock (gate) { faulted = true; } }
+                finally
+                {
+                    try { stream.Dispose(); } catch (Exception) { }
+                    lock (gate) { ended = true; }
+                }
             }
-            public byte[] Bytes { get { return kept.ToArray(); } }
+            // A consistent copy, safe while the reader may still be writing.
+            public ReaderSnapshot Snapshot()
+            {
+                lock (gate)
+                {
+                    ReaderSnapshot s = new ReaderSnapshot();
+                    s.Bytes = kept.ToArray(); s.Truncated = truncated; s.Ended = ended; s.Faulted = faulted;
+                    return s;
+                }
+            }
+        }
+
+        static void TerminateJob(IntPtr job, AtmJobResult r)
+        {
+            r.TerminationRequested = true;
+            if (TerminateJobObject(job, 1)) { r.JobTerminated = true; return; }
+            int e = Marshal.GetLastWin32Error();
+            if (r.TerminationWin32Error == 0) r.TerminationWin32Error = e;
         }
 
         // application: absolute path of the program. commandLine: the full command line (program name first), already
@@ -1313,23 +1362,33 @@ namespace AgentTempManager
                 if (wait != WAIT_OBJECT_0)
                 {
                     r.TimedOut = true;
-                    r.JobTerminated = TerminateJobObject(job, 1);
+                    TerminateJob(job, r);
                     WaitForSingleObject(pi.hProcess, 10000);
                 }
                 // Members still holding the output (a grandchild) end with the job.
                 if (!outReader.Thread.Join(2000) || !errReader.Thread.Join(500))
                 {
-                    if (TerminateJobObject(job, 1)) r.JobTerminated = true;
+                    TerminateJob(job, r);
                     outReader.Thread.Join(5000); errReader.Thread.Join(5000);
                 }
+                r.TerminationFailed = r.TerminationRequested && !r.JobTerminated;
                 int code;
                 if (GetExitCodeProcess(pi.hProcess, out code)) r.ExitCode = code;
                 JOBOBJECT_BASIC_ACCOUNTING_INFORMATION acc;
-                if (QueryInformationJobObject(job, JobObjectBasicAccountingInformation, out acc, (uint)Marshal.SizeOf(typeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION)), IntPtr.Zero)) r.TotalProcesses = (int)acc.TotalProcesses;
+                if (QueryInformationJobObject(job, JobObjectBasicAccountingInformation, out acc, (uint)Marshal.SizeOf(typeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION)), IntPtr.Zero))
+                {
+                    r.TotalProcesses = (int)acc.TotalProcesses;
+                    r.ActiveProcessesAtEnd = (int)acc.ActiveProcesses;
+                }
                 JOBOBJECT_EXTENDED_LIMIT_INFORMATION after;
                 if (QueryInformationJobObject(job, JobObjectExtendedLimitInformation, out after, size, IntPtr.Zero)) r.PeakJobMemory = (long)after.PeakJobMemoryUsed.ToUInt64();
-                r.Output = outReader.Bytes; r.OutputTruncated = outReader.Truncated;
-                r.ErrorOutput = errReader.Bytes; r.ErrorTruncated = errReader.Truncated;
+                // Taken after the joins; a reader still running (its pipe still held) gives a consistent prefix and
+                // leaves ReadersCompleted false.
+                ReaderSnapshot so = outReader.Snapshot(), se = errReader.Snapshot();
+                r.Output = so.Bytes; r.OutputTruncated = so.Truncated;
+                r.ErrorOutput = se.Bytes; r.ErrorTruncated = se.Truncated;
+                r.ReadersCompleted = so.Ended && se.Ended;
+                r.ReaderFaulted = so.Faulted || se.Faulted;
                 return r;
             }
             finally
