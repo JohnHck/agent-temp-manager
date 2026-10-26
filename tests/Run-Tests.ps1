@@ -117,6 +117,21 @@ function Test-Case {
     Write-Host ("[{0}] {1} :: {2} ({3} ms) {4}" -f $status, $Area, $Name, $sw.ElapsedMilliseconds, $msg) -ForegroundColor $color
 }
 
+# V0.1.1: a long-running helper process a test inspects while it runs (backported from V0.2 FINAL-B-S). Started by
+# Process.Start, so the object holds the handle from its creation; it is stopped only through that handle and only while
+# it still runs (never by PID: a PID looked up again later could belong to another process).
+function Start-AtmTestHelperProcess {
+    param([string]$File, [string]$Arguments, [string]$WorkingDirectory = $null)
+    $psi = New-Object Diagnostics.ProcessStartInfo($File, $Arguments)
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
+    return [Diagnostics.Process]::Start($psi)
+}
+function Stop-AtmTestHelperProcess {
+    param([Diagnostics.Process]$Process)
+    if ($null -ne $Process -and -not $Process.HasExited) { $Process.Kill(); $null = $Process.WaitForExit(10000) }
+}
+
 $script:profileCounter = 0
 function New-TestProfile {
     param([string]$Name, [string]$Sid = $testOwnerSid, [switch]$NoConfig)
@@ -480,14 +495,14 @@ try {
     Test-Case 'Processos reais' 'Processo real referenciando a root e detectado (CIM, passagem unica)' {
         $p = New-TestProfile 'realproc'
         $r = New-TestRoot -ProfileInfo $p
-        $sp = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList @('-NoProfile', '-Command', "Start-Sleep 60; '$r\sub'") -PassThru -WindowStyle Hidden
-        $cleanupActions.Add([scriptblock]::Create("Stop-Process -Id $($sp.Id) -ErrorAction SilentlyContinue"))
+        $sp = Start-AtmTestHelperProcess -File "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Arguments "-NoProfile -Command `"Start-Sleep 60; '$r\sub'`""
+        $cleanupActions.Add({ Stop-AtmTestHelperProcess -Process $sp }.GetNewClosure())
         Start-Sleep -Milliseconds 1500
         $a = Get-InvArgs -Profiles @($p) -Procs $null
         $a.Remove('ProcessesOverride')
         $i = Invoke-AtmInventory @a
         $x = Find-Part $i $r
-        Stop-Process -Id $sp.Id -ErrorAction SilentlyContinue
+        Stop-AtmTestHelperProcess -Process $sp
         Assert-Eq $x.Class 'ACTIVE_EVIDENCE' "classe (refs: $($x.DirectRefs -join ';'))"
         Assert-True (($x.DirectRefs -join ' ') -match "PID $($sp.Id)") 'pid correto'
     }
@@ -622,11 +637,11 @@ try {
     Test-Case 'Arquivos em uso' 'Processo com diretorio corrente dentro da root -> EM_USO' {
         $p = New-TestProfile 'cwd'
         $r = New-TestRoot -ProfileInfo $p
-        $sp = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep 60') -WorkingDirectory (Join-Path $r 'sub') -PassThru -WindowStyle Hidden
-        $cleanupActions.Add([scriptblock]::Create("Stop-Process -Id $($sp.Id) -ErrorAction SilentlyContinue"))
+        $sp = Start-AtmTestHelperProcess -File "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Arguments '-NoProfile -Command Start-Sleep 60' -WorkingDirectory (Join-Path $r 'sub')
+        $cleanupActions.Add({ Stop-AtmTestHelperProcess -Process $sp }.GetNewClosure())
         Start-Sleep -Milliseconds 1500
         $pr = [AgentTempManager.AtmLockProbe]::ProbeTree($r, 5)
-        Stop-Process -Id $sp.Id -ErrorAction SilentlyContinue
+        Stop-AtmTestHelperProcess -Process $sp
         Assert-True ($pr.InUse -ge 1) "diretorio em uso detectado ($($pr.Samples -join ';'))"
     }
 
