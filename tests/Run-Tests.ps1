@@ -8007,6 +8007,29 @@ try {
         $br = [IO.File]::ReadAllText((Join-Path (Split-Path -Parent $testsDir) 'tools\Build-Release.ps1'))
         foreach ($g in @('AtmRealDeletionEnabled', 'AtmWorktreeDiagnosticsEnabled', 'AtmHandleDiagnosticsEnabled', 'AtmDiagnoseExportEnabled')) { Assert-True ($br.Contains($g)) "F-08: release confere $g no arquivo" }
     }
+    Test-Case 'Instalacao' 'FINAL-C: versao 0.2.0 coerente - fonte unica, instalador, manifesto, CLI, build, changelog e notas (release candidate, nao publicada)' {
+        $repoRoot = Split-Path -Parent $testsDir
+        Assert-Eq $script:AtmVersion '0.2.0' 'versao do release candidate na fonte'
+        $auditSrc = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Audit.ps1'))
+        Assert-Eq ([regex]::Matches($auditSrc, '\$script:AtmVersion\s*=').Count) 1 'uma unica atribuicao da versao'
+        Assert-Eq (Get-AtmSourceVersion -SourceDir $srcDir) '0.2.0' 'versao lida pelo instalador e pelo build'
+        $vm = Join-Path $sandbox 'finalc-version'; [void][IO.Directory]::CreateDirectory($vm)
+        Copy-AtmTree -From $srcDir -To $vm
+        Write-AtmManifest -Root $vm -Version (Get-AtmSourceVersion -SourceDir $vm)
+        Assert-Eq ([IO.File]::ReadAllText((Join-Path $vm 'manifest.json')) | ConvertFrom-Json).version '0.2.0' 'manifesto escrito com a versao da fonte'
+        $o = (& cmd.exe /c "`"$(Join-Path $srcDir 'bin\agent-temp.cmd')`" version -Lang en-US" 2>&1) -join "`n"
+        Assert-True ($LASTEXITCODE -eq 0 -and $o -match 'agent-temp 0\.2\.0\b') 'version da CLI'
+        $br = [IO.File]::ReadAllText((Join-Path $repoRoot 'tools\Build-Release.ps1'))
+        Assert-True ($br.Contains('$version = Get-AtmSourceVersion') -and $br.Contains('"agent-temp-manager-$version"') -and $br.Contains('$script:AtmVersion = ''$version''')) 'build: nome do arquivo e versao conferida no arquivo vem da fonte'
+        $cl = [IO.File]::ReadAllText((Join-Path $repoRoot 'CHANGELOG.md'))
+        Assert-True ($cl -match '(?m)^## 0\.2\.0 \(release candidate, not published\)' -and $cl -match '(?m)^## 0\.1\.0\r?$' -and $cl.IndexOf('## 0.2.0') -lt $cl.IndexOf('## 0.1.0')) 'changelog: 0.2.0 marcada como nao publicada, 0.1.0 preservada'
+        $en = [IO.File]::ReadAllText((Join-Path $repoRoot 'docs\release\V0.2.0-RELEASE-NOTES.md'))
+        $pt = [IO.File]::ReadAllText((Join-Path $repoRoot 'docs\release\V0.2.0-RELEASE-NOTES.pt-BR.md'))
+        Assert-True ($en -match 'release candidate, NOT published' -and $pt -match 'release candidate, N.O publicada') 'notas: release candidate nao publicada (en, pt-BR)'
+        foreach ($g in @('AtmRealDeletionEnabled', 'AtmWorktreeDiagnosticsEnabled', 'AtmHandleDiagnosticsEnabled', 'AtmDiagnoseExportEnabled')) {
+            Assert-True ($en.Contains("$g = `$false") -and $pt.Contains("$g = `$false")) "notas: trava $g listada como fechada"
+        }
+    }
     Test-Case 'Camadas' 'P5-B-S: todo script (src, install, tests) com texto nao ASCII comeca com BOM UTF-8 (o Windows PowerShell 5.1 leria o arquivo como ANSI e corromperia o texto)' {
         # -Include is ignored with -LiteralPath on Windows PowerShell 5.1: filtered by extension (scripts only; the .cmd
         # launcher and JSON files must not get a BOM).
@@ -8028,7 +8051,7 @@ try {
         Assert-Eq $LASTEXITCODE 0 '13: diagnose parcial: codigo 0'
         Assert-True (@(Get-ChildItem -LiteralPath $cwd -Force).Count -eq 0) '13: nenhum arquivo criado sem -ExportJson (diretorio atual)'
         $o = (& cmd.exe /c "`"$cmd`" version -Lang en-US" 2>&1) -join "`n"
-        Assert-True ($LASTEXITCODE -eq 0 -and $o -match ('agent-temp ' + [regex]::Escape($script:AtmVersion)) -and $o -match 'Claude Code' -and $o -match 'Claude Desktop') 'version: codigo 0, versao 0.1.0 e providers'
+        Assert-True ($LASTEXITCODE -eq 0 -and $o -match ('agent-temp ' + [regex]::Escape($script:AtmVersion)) -and $o -match 'Claude Code' -and $o -match 'Claude Desktop') 'version: codigo 0, versao da fonte e providers'
         $o = (& cmd.exe /c "`"$cmd`" help -Lang en-US" 2>&1) -join "`n"
         Assert-True ($LASTEXITCODE -eq 0 -and $o -match 'agent-temp diagnose' -and $o -match '-ExportJson' -and $o -match '-DeadlineSeconds' -and $o -match '-PseudonymKeyFile') 'help: codigo 0 e opcoes do diagnose'
         $o = (& cmd.exe /c "`"$cmd`" nao-existe -Lang en-US" 2>&1) -join "`n"

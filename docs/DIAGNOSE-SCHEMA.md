@@ -1,6 +1,6 @@
 ﻿# Diagnose JSON schema (`atm.diagnose/2`)
 
-The document `agent-temp diagnose -ExportJson <new file>` would write (V0.2, in development, not released). **The
+The document `agent-temp diagnose -ExportJson <new file>` would write (V0.2; release candidate 0.2.0, not published). **The
 export is implemented but disabled in every copy** (diagnose export gate closed: `EXPORT_SECURITY_GATE_CLOSED`, see
 [USAGE.md](USAGE.md#export) and SECURITY-MODEL); the document is produced in memory for the TUI diagnostics area, which
 renders it, and by the tests. If written, it holds the machine name, the account and its SID. Decision record:

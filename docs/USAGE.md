@@ -72,9 +72,10 @@ agent-temp preview
 Paths are grouped into **A. blocked**, **B. needs investigation**, **C. technically eligible** (for human
 review). Eligible paths are printed as allowlist lines `path|fingerprint`.
 
-## Diagnose (read-only, V0.2 in development)
+## Diagnose (read-only, V0.2)
 
-V0.2 is **not released**: `diagnose` exists in the development version only, and its output may still change.
+V0.2 is prepared as release candidate 0.2.0 and is **not published** yet: until then `diagnose` exists only in
+development and release-candidate copies, and its output may still change.
 
 ```powershell
 agent-temp diagnose
@@ -205,7 +206,7 @@ agent-temp clean -AllowListFile list.txt -LogFile D:\logs\clean.jsonl
 4. Each path is revalidated immediately before deletion; paths that changed are preserved. A read-only audit
    runs afterwards.
 
-**V0.1:** `clean` runs every gate and prints the exact plan, then stops with
+**V0.1 and V0.2:** `clean` runs every gate and prints the exact plan, then stops with
 `EXCLUSAO_REAL_DESABILITADA_V0_1`; no confirmation is requested and nothing is deleted. Steps 3-4 above describe
 the behaviour of a future release in which deletion is explicitly authorized.
 

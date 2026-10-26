@@ -58,7 +58,7 @@ Each base yields exclusive partitions: one per direct child of every scope direc
 (`SessionRoot`, `UnrecognizedDir`, `LooseFile`, `ReparsePoint`, `Unmeasured`) plus one `BaseLooseFiles`
 partition for files directly under the base. Only `SessionRoot` partitions can ever become eligible.
 
-## Diagnose pipeline (`Invoke-AtmDiagnose`, V0.2 in development)
+## Diagnose pipeline (`Invoke-AtmDiagnose`, V0.2)
 
 Collection -> normalization -> evidence -> correlation -> presentation:
 

@@ -12,7 +12,7 @@
 Set-StrictMode -Version 2.0
 . (Join-Path $PSScriptRoot 'I18n.ps1')
 
-$script:AtmVersion = '0.1.0'
+$script:AtmVersion = '0.2.0'
 $script:AtmRecentHours = 72
 $script:AtmMaxSamples = 10
 $script:AtmRefTerminators = [char[]]@('"', "'", ' ', "`t", "`r", "`n", '|', '<', '>', ';', ',', '&', '^', '(', ')', '[', ']', '{', '}', '=', '`', ':', '.')

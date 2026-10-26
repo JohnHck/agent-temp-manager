@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.2.0 (release candidate, not published)
+
+Prepared on the release-candidate branch (FINAL-C); published only with the maintainer's explicit authorization
+(tag `v0.2.0` and GitHub Release). Details, limits and open decisions:
+[docs/release/V0.2.0-RELEASE-NOTES.md](docs/release/V0.2.0-RELEASE-NOTES.md).
+
+* `agent-temp diagnose` and TUI area **D**: read-only runtime diagnostics with coverage per collector (process
+  identity, agent processes and sessions from evidence, resource totals per verified tree, provider-declared Windows
+  services, Hyper-V platform and VMs, dependency graph, temporary partitions with runtime evidence, profile
+  discovery); keyed pseudonyms instead of paths; never elevates, runs no Git, writes no file.
+* Runtime-only Claude Desktop provider; `CoworkVMService` identified by a provisional, publicly reported name.
+* Closed gates in every copy, checked in source, build and installation: real deletion, worktree diagnostics, open-file
+  diagnostics, diagnose JSON export. D-1 (process working directories) deferred.
+* Security audit (FINAL-A, FINAL-B): F-01, F-02, F-03, F-06, F-07, F-08, F-11, F-13 fixed; F-04, F-05, F-14 pending
+  decisions. F-01 and F-02 also affect 0.1.0.
+* Installation: `verify` and the installer bootstrap run no unverified code (R-B5); update and rollback never destroy
+  the only intact installation (R-B6); the staged copy is verified against the source manifest (F-07); the post-install
+  verify runs `cmd.exe` from System32 (F-13); the release build refuses an archive unless all four gates are `$false`.
+* Behaviour changes since 0.1.0 (stricter `audit -ExportJson` creation and protected DACL, network or device paths from
+  other users' environment refused, control characters shown as `?`, `verify` exit code `5` for a missing library):
+  listed with the gate that approved each one in the release notes.
+* CI: ARM64 suite jobs (Windows PowerShell 5.1 full, PowerShell 7 subset with 16 cases NOT TESTED), install e2e with
+  integrity variants, installed audit export, encoding and an update from the published 0.1.0 and back; artifacts
+  sanitized and scanned before upload; the suite's child calls run inside their own Job Object.
+
 ## 0.1.0
 
 * Initial limited release: audit, preview and TUI. `clean` is **plan only** (release gate); real deletion is
