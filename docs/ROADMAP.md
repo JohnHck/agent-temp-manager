@@ -145,6 +145,20 @@ writes anything (no fetch, no prune, no index refresh that changes files).
 > **V0.2 is a prerequisite for V0.3.** Real deletion is not enabled until the runtime diagnostics can show, for every
 > candidate, that no process, service, virtual machine or worktree still depends on it.
 
+### Release-candidate risk decisions (maintainer gate after PR #51)
+
+Release candidate 0.2.0 is integrated on `main`, **not published**. Decisions recorded at that gate:
+
+| Item | Decision |
+|---|---|
+| F-04 `clean -LogFile` appends by name | **Deferred to V0.3.** Real deletion stays disabled; the log is written through a pinned handle, preferably keeping append semantics, before the deletion gate can ever open (V0.3 dependency below). Nothing implemented now. |
+| F-05 TEMP base attribution between profiles | **Deferred to V0.2.x**, in its own step with an architecture decision. A base claimed through another user's TEMP value can be attributed to the wrong profile; shared partitions stay blocked; the audit format does not change silently. |
+| F-14 unlisted files outside `providers` | **Deferred to V0.2.x.** The installation keeps its integrity controls and never runs unlisted files; `verify` not reporting them stays documented; preferred fix: a warning without a new exit code. |
+| Windows 11 ARM64, PowerShell 7 | The 16 excluded suite cases are a known limitation of the release candidate: NOT TESTED there, never PASS; the other combinations keep their evidence. |
+| Public CI logs | The scanner protects artifacts, not every public log: residual risk. Before publication the logs of the release build are reviewed without printing personal data; any real exposure blocks publication. |
+| TUI | No waiver of the manual acceptance: NOT TESTED in a real console. V0.2 is not published before that acceptance or a specific HUMAN_GATE that decides on the gap. |
+| Job-object executor termination residual | Open. `KILL_ON_JOB_CLOSE` is not evidence that `TerminateJobObject` succeeded. An additive change to the native result is approved for study, in a separate pull request after the 0.1.1 hotfix; the Git runner stays disabled. |
+
 ---
 
 ## V0.2.1 — Desktop GUI and live monitoring
@@ -221,7 +235,8 @@ already built in V0.1 and the evidence gathered in V0.2.
   not elevated and elevated, credentials-prompt elevation, UAC cancelled, non-interactive session; Windows 10 and
   11; PowerShell 5.1 and 7).
 
-**Dependencies.** V0.2 (runtime diagnostics); the elevation-model decision.
+**Dependencies.** V0.2 (runtime diagnostics); the elevation-model decision; F-04 fixed (`clean -LogFile` written
+through a pinned handle) before the deletion gate can open.
 
 **Mandatory tests.** Junction and symlink swaps during deletion; changes between preview, confirmation and deletion;
 open files; other users' profiles with and without elevation; incomplete coverage; partial failures; both shells.
