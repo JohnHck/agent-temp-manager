@@ -2009,8 +2009,10 @@ function global:Get-FileHash { param([string]$LiteralPath, [string]$Algorithm)
         # Snapshots taken while the reader is still writing: each one a consistent prefix, never past the cap.
         $srv = New-Object IO.Pipes.AnonymousPipeServerStream([IO.Pipes.PipeDirection]::Out, [IO.HandleInheritability]::None)
         $cap = 150000
-        $reader = $ctor.Invoke(@([IntPtr]$srv.ClientSafePipeHandle.DangerousGetHandle(), [int]$cap))
-        $srv.ClientSafePipeHandle.SetHandleAsInvalid()
+        # The raw handle changes owner BEFORE the reader exists (its thread starts at once and closes the handle when it
+        # stops): the original owner is marked invalid first, so the handle never has two owners.
+        $rawH = $srv.ClientSafePipeHandle.DangerousGetHandle(); $srv.ClientSafePipeHandle.SetHandleAsInvalid()
+        $reader = $ctor.Invoke(@([IntPtr]$rawH, [int]$cap))
         $expected = New-Object byte[] 200000; for ($i = 0; $i -lt $expected.Length; $i++) { $expected[$i] = [byte]($i % 251) }
         $bad = 0; $last = 0; $mid = 0
         try {
@@ -2034,8 +2036,8 @@ function global:Get-FileHash { param([string]$LiteralPath, [string]$Algorithm)
         # IOException and ObjectDisposedException, so this exception could escape its thread.
         $wf = Join-Path $dir 'somente-escrita.bin'
         $fs = [IO.File]::Open($wf, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
-        $reader = $ctor.Invoke(@([IntPtr]$fs.SafeFileHandle.DangerousGetHandle(), [int]4096))
-        $fs.SafeFileHandle.SetHandleAsInvalid()
+        $rawH = $fs.SafeFileHandle.DangerousGetHandle(); $fs.SafeFileHandle.SetHandleAsInvalid()
+        $reader = $ctor.Invoke(@([IntPtr]$rawH, [int]4096))
         try { $fs.Dispose() } catch { $null = $_ }
         $joined = $reader.Thread.Join(10000)
         $s = $reader.Snapshot()
@@ -2055,8 +2057,8 @@ function global:Get-FileHash { param([string]$LiteralPath, [string]$Algorithm)
             $fp = [IO.File]::Open($lf, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
             try { $null = $fp.Read((New-Object byte[] 16), 0, 16) } catch { $ioType = $_.Exception.GetBaseException().GetType().FullName } finally { $fp.Dispose() }
             $fr = [IO.File]::Open($lf, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
-            $reader = $ctor.Invoke(@([IntPtr]$fr.SafeFileHandle.DangerousGetHandle(), [int]4096))
-            $fr.SafeFileHandle.SetHandleAsInvalid()
+            $rawH = $fr.SafeFileHandle.DangerousGetHandle(); $fr.SafeFileHandle.SetHandleAsInvalid()
+            $reader = $ctor.Invoke(@([IntPtr]$rawH, [int]4096))
             try { $fr.Dispose() } catch { $null = $_ }
             $joinedIo = $reader.Thread.Join(10000)
             $sIo = $reader.Snapshot()
