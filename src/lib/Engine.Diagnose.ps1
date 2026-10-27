@@ -832,7 +832,7 @@ $script:AtmRuntimeReasonCodes = @(
     'DEADLINE_EXCEEDED', 'PROCESS_SNAPSHOT_TIMEOUT', 'PROCESS_SNAPSHOT_FAILED', 'PROCESS_SNAPSHOT_EMPTY', 'PROCESS_LIMIT_EXCEEDED',
     'PARENT_ID_UNREADABLE', 'PROCESS_NAME_UNREADABLE', 'CREATION_TIME_UNREADABLE', 'DUPLICATE_PID', 'MALFORMED_PROCESS_RECORDS',
     'PROCESS_SNAPSHOT_UNAVAILABLE', 'PROCESS_SNAPSHOT_INCOMPLETE', 'PROVIDER_HINTS_INCOMPLETE', 'IDENTITY_UNVERIFIED_CANDIDATES',
-    'COMMAND_LINE_MARKER_UNAVAILABLE', 'SESSION_REGISTRY_INCOMPLETE', 'LEGACY_SNAPSHOT_UNAVAILABLE', 'PATH_REFERENCE_UNVERIFIED', 'PATH_REFERENCES_INCOMPLETE',
+    'COMMAND_LINE_MARKER_UNAVAILABLE', 'SESSION_REGISTRY_INCOMPLETE', 'LEGACY_SNAPSHOT_UNAVAILABLE', 'PATH_REFERENCE_UNVERIFIED', 'PATH_REFERENCES_INCOMPLETE', 'PATH_REFERENCE_BASES_INCOMPLETE',
     'TREE_INCOMPLETE', 'NO_RUNTIME_EVIDENCE_SOURCE', 'SESSION_REGISTRY_PROVIDER_INVALID', 'SESSION_REGISTRY_FAILED',
     'SESSION_REGISTRY_UNREADABLE', 'SESSION_ENTRIES_UNPARSEABLE', 'SESSION_KEY_COLLISION', 'SESSION_ENTRIES_CONFLICT',
     'INVENTORY_UNAVAILABLE', 'AGENT_PROCESSES_INCOMPLETE', 'MEMBER_NOT_COLLECTED', 'CPU_NOT_SAMPLED', 'COUNTERS_UNREADABLE',
@@ -1182,6 +1182,20 @@ function Get-AtmAgentRuntimeFindingsRun {
     if ($null -eq $legacyTotal -or [int]$legacyTotal -le 0) { $reasons.Add('LEGACY_SNAPSHOT_UNAVAILABLE') }
     elseif ([int]$legacyUninspectable -gt 0) { $reasons.Add('PATH_REFERENCES_INCOMPLETE') }
     if (@($InventoryCoverage | Where-Object { $null -ne $_ -and [string]$_.Collector -ceq 'processes' -and [string]$_.Status -cne 'COMPLETE' }).Count -gt 0) { $reasons.Add('PATH_REFERENCES_INCOMPLETE') }
+    # O2B: references are only searched in the bases the V0.1 inventory discovered and read. temp-profiles covers a base
+    # that was inaccessible, invalid or not enumerated (PROFILES_INACCESSIBLE) and a TEMP location that could not be
+    # verified (TEMP_LOCATION_UNVERIFIED); profile-discovery covers profiles the discovery may have missed. Either one not
+    # conclusive, or missing, means references to an unread base cannot be found (a missing record is unknown, never
+    # complete). The inventory record is not used: PARTIAL there only says it finished after the deadline, with every
+    # base read.
+    foreach ($cn in @('temp-profiles', 'profile-discovery')) {
+        $rec = @($InventoryCoverage | Where-Object { $null -ne $_ -and [string]$_.Collector -ceq $cn })
+        if ($rec.Count -eq 0 -or @($rec | Where-Object { $script:AtmConclusiveCoverage -cnotcontains [string]$_.Status }).Count -gt 0) { $reasons.Add('PATH_REFERENCE_BASES_INCOMPLETE') }
+    }
+    # An ambiguous reference (an unresolved name, or a short-name or wildcard form, under an audited base) is never tied
+    # to a process, so the process that made it is not a candidate. Only the presence of that evidence is read: its text
+    # is localized and is never parsed for a process identity.
+    if (@($Partitions | Where-Object { $null -ne $_ -and @(Get-AtmHintProperty -Item $_ -Name 'AmbiguousRefs' | Where-Object { $_ }).Count -gt 0 }).Count -gt 0) { $reasons.Add('PATH_REFERENCE_UNVERIFIED') }
 
     # 4. SELF (exact rules of R-B1, Get-AtmSelfProcessKeys) outranks everything.
     $selfSet = @{}
@@ -4424,7 +4438,7 @@ function Invoke-AtmDiagnoseRun {
         }
         $procCollection = $sample.First
         $selfKeys = Get-AtmSelfProcessKeys -Collection $sample.First -SelfPid $SelfPid -SelfCreationUtc $SelfCreationUtc -LauncherReferences $launchers.ToArray()
-        $invCovRecords = @($coverage | Where-Object { @('inventory', 'processes', 'temp-profiles') -ccontains $_.Collector })
+        $invCovRecords = @($coverage | Where-Object { @('inventory', 'processes', 'temp-profiles', 'profile-discovery') -ccontains $_.Collector })
         $rtArgs = @{ Collection = $sample.First; Second = $sample.Second; ProviderHints = $hints.ToArray(); SessionRegistries = $regs.ToArray(); InventoryCoverage = $invCovRecords; SelfKeys = $selfKeys; Cpu = $sample.Cpu; Pseudonymizer = $Pseudonymizer }
         if ($null -ne $inv) { $rtArgs['LegacySnapshot'] = $inv.Snapshot; $rtArgs['Partitions'] = @($inv.Partitions) }
         $runtime = Get-AtmAgentRuntimeFindings @rtArgs

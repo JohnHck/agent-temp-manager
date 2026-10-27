@@ -392,6 +392,18 @@ called by `Invoke-AtmGitCommand`):
   * On a real machine some processes are always unreadable, so this reason is expected there.
   * Processes found by other sources stay, and no finding is made up for the gap.
   * Tested on synthetic inputs. A real hidden agent was not demonstrated.
+  * **Bases (O2B).** References are only searched in the bases the inventory discovered and read. The diagnose
+    reports `PATH_REFERENCE_BASES_INCOMPLETE` in these cases:
+    * a base that was inaccessible, invalid or not enumerated, or a TEMP location that could not be verified
+      (`temp-profiles` not conclusive);
+    * profiles the discovery may have missed (`profile-discovery` not conclusive);
+    * either record missing.
+
+    `PATH_REFERENCE_UNVERIFIED` is reported for an ambiguous reference under an audited base, which never makes its
+    process a candidate.
+  * **Open, maintainer decision pending.** A base refused because its path holds a reparse point (`REPARSE_IN_PATH`)
+    or is not on a fixed drive (`UNSUPPORTED_DRIVE`) is not inventoried either. It is not counted in `temp-profiles`,
+    so it does not yet reach `agent-processes`.
 * **Allocation** is an estimate (cluster rounding; MFT-resident files overestimated).
 * **Discovery visibility** (V0.2 P4-B: now reported, still a limit): if the `ProfilesDirectory` value of the Windows
   profile list cannot be resolved or listed, folders under it that have no profile-list entry (residual profiles) are

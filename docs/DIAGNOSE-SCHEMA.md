@@ -138,6 +138,17 @@ never `0`.
 * `LEGACY_SNAPSHOT_UNAVAILABLE`: the V0.1 process snapshot is missing, failed or empty;
 * `PATH_REFERENCES_INCOMPLETE` (O2): some command lines could not be read, so path references may be missing and an
   agent seen only through one may not be listed. It applies even when no candidate was found.
+* `PATH_REFERENCE_BASES_INCOMPLETE` (O2B): references are only searched in the bases the inventory discovered and
+  read. This reason is given even when no candidate was found, and when any of these holds:
+  * `temp-profiles` is not conclusive: a base was inaccessible, invalid or not enumerated (`PROFILES_INACCESSIBLE`),
+    or a TEMP location could not be verified (`TEMP_LOCATION_UNVERIFIED`);
+  * `profile-discovery` is not conclusive;
+  * either record is missing.
+
+  An `inventory` record that is `PARTIAL` only because it finished after the deadline does not count.
+* `PATH_REFERENCE_UNVERIFIED` also when a partition has an ambiguous reference (an unresolved name, or a short-name or
+  wildcard form, under an audited base). Such a reference is never tied to a process, so the process that made it is
+  not a candidate.
 
 | Field | Type | Meaning |
 |---|---|---|

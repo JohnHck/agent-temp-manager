@@ -4116,6 +4116,9 @@ try {
         $lp = @($Rows | ForEach-Object { [pscustomobject]@{ Pid = [int]$_.ProcessId; Name = [string]$_.Name; ParentPid = [int]$_.ParentProcessId; CommandLine = $(if ($Unreadable -contains [long]$_.ProcessId) { $null } else { [string]$_.Name }); CreationUtc = $_.CreationDate } })
         $u = @($lp | Where-Object { -not $_.CommandLine }).Count
         [pscustomobject]@{ Failed = $false; Error = $null; Processes = $lp; Total = $lp.Count; Readable = $lp.Count - $u; Uninspectable = $u; UninspectableByName = @{} } }
+    # O2B: the V0.1 inventory coverage records of a run where every base was discovered and read (and every command line
+    # readable). Without temp-profiles and profile-discovery the bases of the path references are unknown.
+    $b4InvCov = @((New-AtmCoverage -Collector 'inventory' -Status 'COMPLETE'), (New-AtmCoverage -Collector 'processes' -Status 'COMPLETE'), (New-AtmCoverage -Collector 'temp-profiles' -Status 'COMPLETE'), (New-AtmCoverage -Collector 'profile-discovery' -Status 'COMPLETE'))
     Test-Case 'Diagnose' 'Estados de ausencia (P1-B4-b): SESSION_PROCESS_NOT_FOUND so com cobertura conclusiva; sem cobertura ou com qualquer status nao conclusivo vira UNKNOWN' {
         $exercised = @{}
         foreach ($kind in $script:AtmFindingKinds) {
@@ -4228,7 +4231,7 @@ try {
         $self = Get-AtmSelfProcessKeys -Collection $c -SelfPid 3000 -SelfCreationUtc $b4T0.AddMinutes(5) -LauncherReferences @([pscustomobject]@{ Pid = 2500; CreationUtc = $b4T0.AddMinutes(4) }, [pscustomobject]@{ Pid = 2700; CreationUtc = $b4T0.AddMinutes(7) })
         Assert-Eq (@($self.Keys | Sort-Object) -join ',') ((@($k[2500], $k[3000], $k[3001]) | Sort-Object) -join ',') 'SELF: o proprio processo, o launcher verificado e o filho proprio'
         Assert-True (@($self.Unverified | Where-Object { $_.Pid -eq 2700 -and $_.Result -eq 'PID_REUSED' }).Count -eq 1) 'launcher com PID reutilizado nao verificado'
-        $invCov = @(New-AtmCoverage -Collector 'inventory' -Status 'COMPLETE')
+        $invCov = @(New-AtmCoverage -Collector 'inventory' -Status 'COMPLETE') + @($b4InvCov | Where-Object { $_.Collector -cne 'inventory' })
         $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -ProviderHints $hints -SessionRegistries $regs -LegacySnapshot $legacy -Partitions $parts -InventoryCoverage $invCov -SelfKeys $self
         $expect = [ordered]@{
             2000 = 'AGENT_PROCESS'; 2001 = 'AGENT_DESCENDANT'; 2002 = 'AGENT_DESCENDANT'; 2003 = '(none)'; 3000 = 'SELF'; 3001 = 'SELF'
@@ -4241,7 +4244,7 @@ try {
         Assert-Eq $f2000.Provider 'claude-code' 'provider do processo'
         Assert-Eq (@($f2000.Coverage | ForEach-Object { $_.Collector }) -join ',') 'process-snapshot,agent-processes,provider-claude-code,sessions-claude-code' 'cobertura das fontes da evidencia'
         Assert-Eq (@(@($res.Findings | Where-Object { $_.Key -ceq $k[2002] })[0].Coverage | ForEach-Object { $_.Collector }) -join ',') 'process-snapshot,agent-processes,provider-claude-code,sessions-claude-code' 'descendente herda a cobertura da raiz'
-        Assert-Eq (@(@($res.Findings | Where-Object { $_.Key -ceq $k[5000] })[0].Coverage | ForEach-Object { $_.Collector }) -join ',') 'process-snapshot,agent-processes,inventory' 'referencia de caminho depende do inventario'
+        Assert-Eq (@(@($res.Findings | Where-Object { $_.Key -ceq $k[5000] })[0].Coverage | ForEach-Object { $_.Collector }) -join ',') 'process-snapshot,agent-processes,inventory,processes,profile-discovery,temp-profiles' 'referencia de caminho depende do inventario'
         Assert-True (@($res.Findings | ForEach-Object { $_.Evidence } | Where-Object { @('process-matcher', 'session-registry', 'path-reference', 'diagnose') -cnotcontains $_.Source }).Count -eq 0) 'fontes de evidencia sao codigos fixos'
         Assert-Eq (@($res.Findings | Where-Object { $_.Key -ceq $k[2002] })[0].Evidence[0].Detail) $k[2000] 'descendente aponta a raiz verificada'
         Assert-Eq (@($res.Findings | Where-Object { $_.Key -ceq $k[5000] })[0].Evidence[0].Code) 'PATH_REFERENCE' 'referencia de caminho com identidade exata'
@@ -4290,7 +4293,7 @@ try {
         # only because the collection is COMPLETE, and no finding says "not running".
         $noneRows = @((& $b4Row 4 0 'System' $b4T0.AddHours(-1)), (& $b4Row 100 4 'app.exe' $b4T0))
         $none = Get-AtmProcessCollection -Source ({ $noneRows }.GetNewClosure())
-        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $none -ProviderHints $claude -SessionRegistries $emptyReg -LegacySnapshot (& $b4Legacy $noneRows)
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $none -ProviderHints $claude -SessionRegistries $emptyReg -LegacySnapshot (& $b4Legacy $noneRows) -InventoryCoverage $b4InvCov
         Assert-Eq @($res.Findings).Count 0 'sem agente: nenhum achado'
         Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0].Status 'COMPLETE' 'sem agente: coleta completa sem candidatos'
         Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'sessions-claude-code' })[0].Status 'COMPLETE' 'sem agente: registro vazio'
@@ -4371,7 +4374,7 @@ try {
         }
         foreach ($n in $cases.Keys) {
             $v = $cases[$n]
-            $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $v[0] -ProviderHints $v[1] -SessionRegistries $v[2] -LegacySnapshot (& $b4Legacy $partialRows)
+            $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $v[0] -ProviderHints $v[1] -SessionRegistries $v[2] -LegacySnapshot (& $b4Legacy $partialRows) -InventoryCoverage $b4InvCov
             $ac = @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0]
             $sc = @($res.Coverage | Where-Object { $_.Collector -eq 'sessions-claude-code' })
             Assert-Eq $ac.Status $v[3] "$($n): agent-processes"
@@ -4630,7 +4633,7 @@ try {
         $second = Get-AtmProcessCollection -Source ({ $exitedRows }.GetNewClosure())
         Assert-Eq $second.Coverage.Status 'COMPLETE' 'segunda coleta completa'
         $cpu = Measure-AtmProcessCpu -First $c -Second $second -ElapsedMs 500
-        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -Second $second -ProviderHints $claude -SessionRegistries $regs -Cpu $cpu -LegacySnapshot (& $b4Legacy $b4cRows)
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -Second $second -ProviderHints $claude -SessionRegistries $regs -Cpu $cpu -LegacySnapshot (& $b4Legacy $b4cRows) -InventoryCoverage $b4InvCov
         $hasExit = { param($Key) @(@($res.Findings | Where-Object { $_.Key -ceq $Key })[0].Evidence | Where-Object { $_.Code -eq 'PROCESS_EXITED_DURING_RUN' }).Count -eq 1 }
         Assert-True ((& $hasExit (& $b4Key 203 $b4T0.AddMinutes(3))) -and (& $hasExit (& $b4Key 202 $b4T0.AddMinutes(2)))) 'processos encerrados entre coletas completas: evidencia de saida'
         Assert-True (-not (& $hasExit (& $b4Key 200 $b4T0))) 'processo presente: sem evidencia de saida'
@@ -4657,7 +4660,7 @@ try {
         # No agent process: 0 only with a conclusive discovery; otherwise null.
         $noAgent = @($b4cRows | Where-Object { $_.Name -ne 'claude.exe' })
         $cn = Get-AtmProcessCollection -Source ({ $noAgent }.GetNewClosure())
-        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $cn -ProviderHints $claude -LegacySnapshot (& $b4Legacy $noAgent)
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $cn -ProviderHints $claude -LegacySnapshot (& $b4Legacy $noAgent) -InventoryCoverage $b4InvCov
         Assert-True ($res.Totals.Processes -eq 0 -and $res.Totals.Complete -and $res.Totals.Counters.WorkingSetBytes.Sum -eq 0 -and $res.Totals.Counters.CpuPercent.Sum -eq 0) 'nenhum processo identificado com cobertura conclusiva: 0'
         $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $cn -ProviderHints @(& $b4Hints 'claude-code' @([pscustomobject]@{ ImageName = 'claude.exe'; CommandLineMarker = $null }) 'FAILED')
         Assert-True ($res.Totals.Processes -eq 0 -and -not $res.Totals.Complete -and $null -eq $res.Totals.Counters.WorkingSetBytes.Sum -and @($res.Totals.Reasons) -contains 'AGENT_PROCESSES_INCOMPLETE') 'nenhum processo com descoberta inconclusiva: nulo, nunca 0'
@@ -4701,6 +4704,7 @@ try {
             $v = $cases[$n]; $rows = $v[0]
             $col = Get-AtmProcessCollection -Source ({ $rows }.GetNewClosure())
             $inv = @($v[4]); if ($inv.Count -eq 0) { $inv = @(& $procCov $v[3]) }
+            $inv = @($inv) + @($b4InvCov | Where-Object { @('temp-profiles', 'profile-discovery') -ccontains $_.Collector })
             $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $col -ProviderHints $v[1] -SessionRegistries $v[2] -LegacySnapshot $v[3] -InventoryCoverage $inv
             $byName[$n] = $res
             $ac = @($res.Coverage | Where-Object { $_.Collector -ceq 'agent-processes' })[0]
@@ -4721,7 +4725,7 @@ try {
         Assert-True ($null -eq $s4.Provider -and @($s4.Evidence | Where-Object { $_.Code -ceq 'COMMAND_LINE_MARKER_UNAVAILABLE' }).Count -eq 1) 'S4: atribuicao nao resolvida e marcador indisponivel como evidencia'
         Assert-True (@(@($byName['S7 agente identificado junto de lacuna'].Findings | Where-Object { $_.Key -ceq (& $b4Key 700 $b4T0) })[0].Evidence | Where-Object { $_.Code -ceq 'PROCESS_MATCHER_IMAGE' }).Count -eq 1) 'S7: agente mantido com sua evidencia'
         # Presentation (TUI index): the asterisk of the agent category follows agent-processes.
-        $star = { param($Res, $Rows, $Legacy) $c0 = Get-AtmProcessCollection -Source ({ $Rows }.GetNewClosure()); $view = [pscustomobject]@{ findings = @($Res.Findings); coverage = @(@($c0.Coverage) + @($Res.Coverage) + @(& $procCov $Legacy)); graph = [pscustomobject]@{ nodes = @(); edges = @() }; finishedUtc = $b4T0; coverageComplete = $false }; (New-AtmTuiDiagIndex -View $view).Gap['procs'] }
+        $star = { param($Res, $Rows, $Legacy) $c0 = Get-AtmProcessCollection -Source ({ $Rows }.GetNewClosure()); $view = [pscustomobject]@{ findings = @($Res.Findings); coverage = @(@($c0.Coverage) + @($Res.Coverage) + @(& $procCov $Legacy) + @($b4InvCov | Where-Object { @('temp-profiles', 'profile-discovery') -ccontains $_.Collector })); graph = [pscustomobject]@{ nodes = @(); edges = @() }; finishedUtc = $b4T0; coverageComplete = $false }; (New-AtmTuiDiagIndex -View $view).Gap['procs'] }
         Assert-True ($null -eq (& $star $byName['S2 sem agente, fontes completas (zero completo)'] $r.S2 (& $b4Legacy $r.S2))) 'TUI: categoria sem * so com fontes completas (S2)'
         foreach ($n in @('S3 linha de comando ilegivel, nenhum candidato', 'S5 sessao com PID + processo nao inspecionavel', 'S7 agente identificado junto de lacuna')) {
             $key = ($n -split ' ')[0]; $g = & $star $byName[$n] $r[$key] (& $b4Legacy $r[$key] @(300, 501, 701))
@@ -7704,6 +7708,94 @@ try {
         Assert-True ($txt.Contains((Get-AtmText 'diag.discoveryIncomplete' 'PARTIAL')) -and $txt.Contains('PROFILES_DIRECTORY_UNRESOLVED')) '21: descoberta parcial visivel no relatorio'
         $j = $json | ConvertFrom-Json
         Assert-True (@($j.coverage | Where-Object { $_.collector -ceq 'profile-discovery' -and $_.status -ceq 'PARTIAL' }).Count -eq 1) 'JSON: cobertura profile-discovery'
+    }
+    Test-Case 'Diagnose' 'O2B: bases das referencias de caminho (temp-profiles, profile-discovery) e referencias ambiguas entram em agent-processes; registro ausente nunca e completo; inventory apos o prazo nao conta; diagnose integrado com inventario real do sandbox (processos sinteticos)' {
+        # Synthetic processes and coverage records; the integrated part builds real sandbox inventories (no ACL change).
+        # These show the composition of the coverage; they do not show that a real hidden agent was missed.
+        $claude = @(& $b4Hints 'claude-code' @([pscustomobject]@{ ImageName = 'claude.exe'; CommandLineMarker = $null }))
+        $okReg = @([pscustomobject]@{ ProviderId = 'claude-code'; Registry = [pscustomobject]@{ Readable = $true; Unparseable = 0; Entries = @() }; Error = $null })
+        # Inventory records: every collector COMPLETE unless set ('STATUS:REASON'); $null leaves the record out.
+        $covOf = { param([hashtable]$Set = @{})
+            $o = [ordered]@{ 'inventory' = 'COMPLETE'; 'processes' = 'COMPLETE'; 'temp-profiles' = 'COMPLETE'; 'profile-discovery' = 'COMPLETE' }
+            foreach ($k in $Set.Keys) { $o[$k] = $Set[$k] }
+            @(foreach ($k in $o.Keys) { if ($null -eq $o[$k]) { continue }; $sr = ([string]$o[$k]).Split(':'); if ($sr[0] -ceq 'COMPLETE') { New-AtmCoverage -Collector $k -Status 'COMPLETE' } else { New-AtmCoverage -Collector $k -Status $sr[0] -Reasons @($sr[1]) } }) }
+        $sys = & $b4Row 4 0 'System' $b4T0.AddHours(-1)
+        $rNone = @($sys, (& $b4Row 200 4 'app.exe' $b4T0)); $rNode = @($sys, (& $b4Row 300 4 'node.exe' $b4T0))
+        $rClaude = @($sys, (& $b4Row 400 4 'claude.exe' $b4T0)); $rRef = @($sys, (& $b4Row 500 4 'node.exe' $b4T0))
+        $pRef = @([pscustomobject]@{ Provider = 'claude-code'; DirectRefs = @('PID 500 (node.exe)'); AncestorRefs = @(); AmbiguousRefs = @() })
+        $pAmb = @([pscustomobject]@{ Provider = 'claude-code'; DirectRefs = @(); AncestorRefs = @(); AmbiguousRefs = @('texto localizado qualquer') })
+        $inacc = 'PARTIAL:PROFILES_INACCESSIBLE'
+        # Name = rows, partitions, V0.1 snapshot ('ok' | $null), inventory records, agent-processes status, exact reasons, agent pids
+        $cases = [ordered]@{
+            'A fontes completas, nenhum agente (zero completo valido)'    = @($rNone, @(), 'ok', (& $covOf), 'COMPLETE', '', @())
+            'B1 base inacessivel/invalida/nao enumerada (PROFILES_INACCESSIBLE), linha legivel' = @($rNode, @(), 'ok', (& $covOf @{ 'temp-profiles' = $inacc }), 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'B2 TEMP redirecionado nao verificado'                        = @($rNode, @(), 'ok', (& $covOf @{ 'temp-profiles' = 'PARTIAL:TEMP_LOCATION_UNVERIFIED' }), 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'B3 descoberta de perfis incompleta'                          = @($rNode, @(), 'ok', (& $covOf @{ 'profile-discovery' = 'PARTIAL:PROFILES_DIRECTORY_UNREADABLE' }), 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'B4 descoberta nao observavel'                                = @($rNode, @(), 'ok', (& $covOf @{ 'profile-discovery' = 'NOT_OBSERVABLE:DISCOVERY_STATUS_UNAVAILABLE' }), 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'B5 as duas lacunas (motivo uma vez)'                         = @($rNode, @(), 'ok', (& $covOf @{ 'temp-profiles' = $inacc; 'profile-discovery' = 'PARTIAL:PROFILES_DIRECTORY_UNREADABLE' }), 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'C agente pela imagem junto da lacuna'                        = @($rClaude, @(), 'ok', (& $covOf @{ 'temp-profiles' = $inacc }), 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @(400))
+            'C2 agente por referencia junto da lacuna'                    = @($rRef, $pRef, 'ok', (& $covOf @{ 'temp-profiles' = $inacc }), 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @(500))
+            'D inventario ausente'                                         = @($rNone, @(), $null, @(), 'PARTIAL', 'LEGACY_SNAPSHOT_UNAVAILABLE,PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'E colecao valida sem particoes'                              = @($rNone, @(), 'ok', (& $covOf), 'COMPLETE', '', @())
+            'F inventario concluido apos o prazo (inventory PARTIAL)'     = @($rNone, @(), 'ok', (& $covOf @{ 'inventory' = 'PARTIAL:DEADLINE_EXCEEDED' }), 'COMPLETE', '', @())
+            'G referencia ambigua sob base auditada'                      = @($rNode, $pAmb, 'ok', (& $covOf), 'PARTIAL', 'PATH_REFERENCE_UNVERIFIED', @())
+            'G2 referencia ambigua + agente pela imagem'                  = @($rClaude, $pAmb, 'ok', (& $covOf), 'PARTIAL', 'PATH_REFERENCE_UNVERIFIED', @(400))
+            'M1 registro temp-profiles ausente'                           = @($rNone, @(), 'ok', (& $covOf @{ 'temp-profiles' = $null }), 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'M2 registro profile-discovery ausente'                       = @($rNone, @(), 'ok', (& $covOf @{ 'profile-discovery' = $null }), 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'M3 so o registro processes (os dois ausentes, motivo uma vez)' = @($rNone, @(), 'ok', (& $covOf @{ 'temp-profiles' = $null; 'profile-discovery' = $null; 'inventory' = $null }), 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
+        }
+        foreach ($n in $cases.Keys) {
+            $v = $cases[$n]; $rows = $v[0]
+            $col = Get-AtmProcessCollection -Source ({ $rows }.GetNewClosure())
+            $leg = $(if ($v[2]) { & $b4Legacy $rows } else { $null })
+            $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $col -ProviderHints $claude -SessionRegistries $okReg -LegacySnapshot $leg -Partitions $v[1] -InventoryCoverage $v[3]
+            $ac = @($res.Coverage | Where-Object { $_.Collector -ceq 'agent-processes' })[0]
+            Assert-True ($ac.Status -ceq $v[4] -and (@($ac.Reasons) -join ',') -ceq $v[5]) "$($n): agent-processes $($ac.Status) [$(@($ac.Reasons) -join ',')]"
+            $procs = @($res.Findings | Where-Object { $_.Kind -ceq 'Process' })
+            Assert-Eq ((@($procs | ForEach-Object { (ConvertFrom-AtmProcessKey $_.Key).ProcessId }) | Sort-Object) -join ',') (@($v[6]) -join ',') "$($n): agentes preservados, nenhum inventado"
+            if (@($v[6]).Count -eq 0) {
+                $t = $res.Totals
+                if ($v[4] -ceq 'COMPLETE') { Assert-True ($t.Complete -and $t.Counters.WorkingSetBytes.Sum -eq 0) "$($n): zero completo valido" }
+                else { Assert-True (-not $t.Complete -and $null -eq $t.Counters.WorkingSetBytes.Sum -and @($t.Reasons) -ccontains 'AGENT_PROCESSES_INCOMPLETE') "$($n): agent-resources nulo, nunca zero" }
+            }
+        }
+        # Static: profile-discovery is handed to the runtime with the other inventory records.
+        $diagSrc = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Diagnose.ps1'))
+        Assert-True ($diagSrc.Contains("@('inventory', 'processes', 'temp-profiles', 'profile-discovery') -ccontains `$_.Collector")) 'Invoke-AtmDiagnose repassa profile-discovery ao runtime'
+        # Integrated: real sandbox inventories (states from the inventory itself), synthetic process rows, real reports.
+        $irows = @($sys, (& $b4Row 1000 4 'explorer.exe' $b4T0.AddMinutes(-30)), (& $b4Row 2100 1000 'node.exe' $b4T0), (& $b4Row 3000 1000 'powershell.exe' $b4T0.AddMinutes(5)))
+        $isrc = { $irows }.GetNewClosure()
+        $ilegacy = @($irows | ForEach-Object { [pscustomobject]@{ ProcessId = $_.ProcessId; Name = $_.Name; ParentProcessId = $_.ParentProcessId; CommandLine = [string]$_.Name; CreationDate = $_.CreationDate } })
+        $diag = { param([hashtable]$Ia) Invoke-AtmDiagnose -InventoryArgs $Ia -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0]) -ProcessSource $isrc -SelfPid 3000 -SelfCreationUtc $b4T0.AddMinutes(5) -PseudonymKey $testPseudonymKey }
+        $apOf = { param($D) @($D.Coverage | Where-Object { $_.Collector -ceq 'agent-processes' })[0] }
+        $covSt = { param($D, [string]$C) $x = @($D.Coverage | Where-Object { $_.Collector -ceq $C }); if ($x.Count) { $x[0].Status + ':' + (@($x[0].Reasons) -join ',') } else { '(absent)' } }
+        $pc = New-TestProfile 'o2b-ctl'; $null = New-TestRoot -ProfileInfo $pc
+        $d0 = & $diag (Get-InvArgs -Profiles @($pc) -Procs $ilegacy)
+        Assert-True ((& $apOf $d0).Status -ceq 'COMPLETE' -and @((& $apOf $d0).Reasons).Count -eq 0) "integrado controle (bases lidas): agent-processes $((& $apOf $d0).Status) [$(@((& $apOf $d0).Reasons) -join ',')]; temp-profiles $(& $covSt $d0 'temp-profiles'); profile-discovery $(& $covSt $d0 'profile-discovery')"
+        $pi = New-TestProfile 'o2b-inv'; $null = New-TestRoot -ProfileInfo $pi
+        $pi.TempCandidates = @($pi.TempCandidates) + @([pscustomobject]@{ TempPath = (Join-Path $pi.ProfilePath 'Temp|ilegivel'); Source = 'test' })
+        $d1 = & $diag (Get-InvArgs -Profiles @($pi) -Procs $ilegacy)
+        Assert-True ((& $covSt $d1 'temp-profiles') -like 'PARTIAL:*PROFILES_INACCESSIBLE*' -and @((& $apOf $d1).Reasons) -ccontains 'PATH_REFERENCE_BASES_INCOMPLETE' -and (& $apOf $d1).Status -ceq 'PARTIAL') "integrado base INVALID: temp-profiles $(& $covSt $d1 'temp-profiles'); agent-processes $((& $apOf $d1).Status) [$(@((& $apOf $d1).Reasons) -join ',')]"
+        $pu = New-TestProfile 'o2b-unv'; $null = New-TestRoot -ProfileInfo $pu; $pu.Loaded = $false; $pu.EnvStatus = 'NOT_LOADED'; $pu.EnvKnown = $false
+        $d2 = & $diag (Get-InvArgs -Profiles @($pu) -Procs $ilegacy)
+        Assert-True ((& $covSt $d2 'temp-profiles') -like 'PARTIAL:*TEMP_LOCATION_UNVERIFIED*' -and @((& $apOf $d2).Reasons) -ccontains 'PATH_REFERENCE_BASES_INCOMPLETE') "integrado TEMP nao verificado: temp-profiles $(& $covSt $d2 'temp-profiles'); agent-processes [$(@((& $apOf $d2).Reasons) -join ',')]"
+        $ia3 = Get-InvArgs -Profiles $null -Procs $ilegacy; $ia3.Remove('ProfilesOverride'); $ia3['ProfileSource'] = (& $bSource @{ PdThrows = 1; VolThrows = 1; EnumThrows = 1 })
+        $d3 = & $diag $ia3
+        Assert-True ((& $covSt $d3 'profile-discovery') -like 'PARTIAL:*' -and @((& $apOf $d3).Reasons) -ccontains 'PATH_REFERENCE_BASES_INCOMPLETE') "integrado descoberta com lacunas: profile-discovery $(& $covSt $d3 'profile-discovery'); temp-profiles $(& $covSt $d3 'temp-profiles'); agent-processes [$(@((& $apOf $d3).Reasons) -join ',')]"
+        # Consumers of the integrated INVALID run: JSON (export gate untouched: in-memory conversion), report, TUI index.
+        $old = Get-AtmLanguage
+        try {
+            Set-AtmLanguage -Requested 'en-US'; $j1 = ConvertTo-AtmDiagnoseJson -Result $d1 | ConvertFrom-Json; $j0 = ConvertTo-AtmDiagnoseJson -Result $d0 | ConvertFrom-Json
+            $tEn = (Show-AtmDiagnose -Result $d1 6>&1 | Out-String) -replace '\s+', ' '
+            Set-AtmLanguage -Requested 'pt-BR'; $tPt = (Show-AtmDiagnose -Result $d1 6>&1 | Out-String) -replace '\s+', ' '
+        } finally { Set-AtmLanguage -Requested $old }
+        Assert-True (@(@($j1.coverage | Where-Object { $_.collector -ceq 'agent-processes' })[0].reasons) -ccontains 'PATH_REFERENCE_BASES_INCOMPLETE' -and -not $j1.agentResources.complete -and $null -eq $j1.agentResources.counters.workingSetBytes.sum) 'JSON (base INVALID): motivo e agentResources nulo, sem zero completo'
+        Assert-True ($j0.agentResources.complete -and $j0.agentResources.counters.workingSetBytes.sum -eq 0) 'JSON (controle): zero completo valido'
+        Assert-True ($tEn.Contains('PATH_REFERENCE_BASES_INCOMPLETE') -and $tEn.Contains('some temporary bases were not discovered or read')) 'relatorio en-US: codigo e texto'
+        Assert-True ($tPt.Contains('PATH_REFERENCE_BASES_INCOMPLETE') -and $tPt.Contains('algumas bases temporárias não foram descobertas ou lidas')) 'relatorio pt-BR: codigo e texto'
+        $g1 = (New-AtmTuiDiagIndex -View $j1).Gap['procs']; $g0 = (New-AtmTuiDiagIndex -View $j0).Gap['procs']
+        Assert-True ($null -ne $g1 -and $g1.Reasons -like '*PATH_REFERENCE_BASES_INCOMPLETE*' -and $null -eq $g0) "indice da TUI: * com o motivo (base INVALID), sem * no controle ($(if ($g1) { $g1.Status }))"
+        $script:caseNote = "sinteticos: $($cases.Count) composicoes; integrado: controle, base INVALID, TEMP nao verificado, descoberta com lacunas; JSON, relatorio e indice da TUI"
     }
     Test-Case 'Particoes' 'P4-B: escala - milhares de particoes passadas do grafo aos achados em uma passada (indices, sem reconstruir o grafo)' {
         $rows = New-Object System.Collections.Generic.List[object]; $f = New-Object System.Collections.Generic.List[object]; $parts = New-Object System.Collections.Generic.List[object]
