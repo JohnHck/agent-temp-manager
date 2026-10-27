@@ -46,7 +46,8 @@ src/
 4. **Processes**: one `Win32_Process` CIM query. Uninspectable processes are counted by name.
 5. **Evidence**: an index of base paths (long + 8.3 forms) resolves every command line with `IndexOf` and
    component parsing: O(processes x bases), never O(files x processes), no per-file regex. Direct
-   references, ancestor references and ambiguous references are kept apart. Provider evidence: live-session
+   references, ancestor references and ambiguous references are kept apart; ancestor and ambiguous references that
+   no partition carries (an empty base or project folder) are counted too (O2D). Provider evidence: live-session
    registry and activity (transcript) timestamps.
 6. **Classification**: conservative classes + flags (hard flags block, soft flags require investigation).
 

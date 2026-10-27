@@ -950,7 +950,9 @@ function Get-AtmAgentRuntimeFindings {
       -LegacySnapshot: the V0.1 snapshot. -Partitions: V0.1 partitions. -InventoryCoverage: the coverage records of the
       V0.1 inventory (Get-AtmInventoryCoverage), carried by path-reference findings. -BaseStatuses: the Status code of
       every V0.1 base (codes only; $null = not known). -AmbiguousReferences: the V0.1 count of ambiguous references
-      (References.Ambiguous; $null = not supplied). -SelfKeys: Get-AtmSelfProcessKeys.
+      (References.Ambiguous; $null = not supplied). -UnattachedReferences: the V0.1 count of references no partition
+      carries (References.Unattached, O2D); 0 is the only value without a gap ($null, not a whole number or negative is
+      unknown). -SelfKeys: Get-AtmSelfProcessKeys.
       -Cpu: Measure-AtmProcessCpu (optional, for the tree resources).
       Evidence Source is a fixed code (process-matcher, session-registry, path-reference, diagnose); the provider Id is
       only in Finding.Provider, and collector names use it in lower case (a V0.1 Id may be upper case). Each finding
@@ -973,7 +975,7 @@ function Get-AtmAgentRuntimeFindings {
       agent-processes, agent-resources: exactly one record each, also on failure), Trees (Get-AtmProcessTreeResources
       per agent process, overlapping) and Totals (Get-AtmAgentResourceTotals over the union of the agent processes).
     #>
-    param($Collection, $ProviderHints = @(), $SessionRegistries = @(), $LegacySnapshot = $null, $Partitions = @(), $InventoryCoverage = @(), $BaseStatuses = $null, $AmbiguousReferences = $null, $SelfKeys = $null, $Cpu = $null, $Second = $null, [scriptblock]$SessionKeyFunction = $null, $Pseudonymizer = $null)
+    param($Collection, $ProviderHints = @(), $SessionRegistries = @(), $LegacySnapshot = $null, $Partitions = @(), $InventoryCoverage = @(), $BaseStatuses = $null, $AmbiguousReferences = $null, $UnattachedReferences = $null, $SelfKeys = $null, $Cpu = $null, $Second = $null, [scriptblock]$SessionKeyFunction = $null, $Pseudonymizer = $null)
     # Without a pseudonymizer (direct calls), an ephemeral one for this call only, closed even when the call throws.
     $own = $null
     if ($null -eq $Pseudonymizer -and $null -eq $SessionKeyFunction) { $own = New-AtmPseudonymizer; $PSBoundParameters['Pseudonymizer'] = $own }
@@ -982,7 +984,7 @@ function Get-AtmAgentRuntimeFindings {
 
 function Get-AtmAgentRuntimeFindingsRun {
     # The body of Get-AtmAgentRuntimeFindings (same parameters; the pseudonymizer is already set there).
-    param($Collection, $ProviderHints = @(), $SessionRegistries = @(), $LegacySnapshot = $null, $Partitions = @(), $InventoryCoverage = @(), $BaseStatuses = $null, $AmbiguousReferences = $null, $SelfKeys = $null, $Cpu = $null, $Second = $null, [scriptblock]$SessionKeyFunction = $null, $Pseudonymizer = $null)
+    param($Collection, $ProviderHints = @(), $SessionRegistries = @(), $LegacySnapshot = $null, $Partitions = @(), $InventoryCoverage = @(), $BaseStatuses = $null, $AmbiguousReferences = $null, $UnattachedReferences = $null, $SelfKeys = $null, $Cpu = $null, $Second = $null, [scriptblock]$SessionKeyFunction = $null, $Pseudonymizer = $null)
     if ($null -eq $Collection) { throw (Get-AtmText 'err.diagProcess' 'Collection') }
     $findings = New-Object System.Collections.Generic.List[object]
     $coverage = New-Object System.Collections.Generic.List[object]
@@ -1208,6 +1210,10 @@ function Get-AtmAgentRuntimeFindingsRun {
     # The V0.1 count of ambiguous references also counts those with no partition to carry them (an empty base or project
     # folder, e.g. a session folder created after the scan). A count that is not a number is a gap.
     if ($null -ne $AmbiguousReferences) { $na = 0; if (-not [int]::TryParse([string]$AmbiguousReferences, [ref]$na) -or $na -gt 0) { $reasons.Add('PATH_REFERENCE_UNVERIFIED') } }
+    # O2D: a reference no partition carries (an ancestor or ambiguous reference to an empty base or project folder) never
+    # names its process to this source. Only an exact 0 is complete: not supplied, not a whole number or negative is
+    # unknown, never zero.
+    $nu = 0; if (-not [int]::TryParse([string]$UnattachedReferences, [ref]$nu) -or $nu -ne 0) { $reasons.Add('PATH_REFERENCE_UNVERIFIED') }
 
     # 4. SELF (exact rules of R-B1, Get-AtmSelfProcessKeys) outranks everything.
     $selfSet = @{}
@@ -4457,6 +4463,7 @@ function Invoke-AtmDiagnoseRun {
             # Codes and a count only: no path of a base or a reference reaches the runtime this way.
             $rtArgs['BaseStatuses'] = [string[]]@($inv.Bases | ForEach-Object { [string]$_.Status })
             $rtArgs['AmbiguousReferences'] = $inv.References.Ambiguous
+            $rtArgs['UnattachedReferences'] = Get-AtmHintProperty -Item $inv.References -Name 'Unattached'
         }
         $runtime = Get-AtmAgentRuntimeFindings @rtArgs
         foreach ($c in $runtime.Coverage) { $coverage.Add($c) }

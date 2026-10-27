@@ -863,10 +863,15 @@ function Find-AtmReferences {
       Builds an index of every audited base path (long and 8.3 forms) and resolves each process command line
       against it with IndexOf + component parsing: O(processes x bases), never O(files x processes),
       and no per-file regex. Command lines are never stored or printed.
+      Unattached (O2D): the ancestor and ambiguous references, among those counted in Ancestor and Ambiguous, that no
+      partition carries (an empty base or project folder): the same unit (one match of a base form in one command line,
+      so a repeated match counts again), counted where the reference is attached, never derived from other counts. A
+      reference attached to at least one partition is not counted; a direct reference always has its partition. $null
+      when the snapshot failed (nothing was evaluated, never a known zero).
     #>
     param($Bases, $Snapshot, [int[]]$SelfPids)
-    $stats = [ordered]@{ Direct = 0; Ancestor = 0; Ambiguous = 0; Unresolved = New-Object System.Collections.Generic.List[string]; SelfExcluded = @($SelfPids) }
-    if ($Snapshot.Failed) { return [pscustomobject]$stats }
+    $stats = [ordered]@{ Direct = 0; Ancestor = 0; Ambiguous = 0; Unattached = 0; Unresolved = New-Object System.Collections.Generic.List[string]; SelfExcluded = @($SelfPids) }
+    if ($Snapshot.Failed) { $stats.Unattached = $null; return [pscustomobject]$stats }
     $variants = New-Object System.Collections.Generic.List[object]
     foreach ($b in $Bases) {
         $forms = @($b.Path)
@@ -888,24 +893,24 @@ function Find-AtmReferences {
                 $b = $v.Base
                 if ($end -ge $n.Length -or ($term -contains $n[$end])) {
                     foreach ($p in $b.Partitions) { $p.AncestorRefs.Add("$who -> base"); Add-AtmFlag $p 'ANCESTOR_REFERENCE' }
-                    $stats.Ancestor++
+                    $stats.Ancestor++; if ($b.Partitions.Count -eq 0) { $stats.Unattached++ }
                 } elseif ($n[$end] -eq '\') {
                     $i = $end + 1; $sb = New-Object Text.StringBuilder
                     while ($i -lt $n.Length -and $n[$i] -ne '\' -and -not ($term -contains $n[$i])) { [void]$sb.Append($n[$i]); $i++ }
                     $slugTok = $sb.ToString()
                     if ($slugTok -eq '') {
                         foreach ($p in $b.Partitions) { $p.AncestorRefs.Add("$who -> base"); Add-AtmFlag $p 'ANCESTOR_REFERENCE' }
-                        $stats.Ancestor++
+                        $stats.Ancestor++; if ($b.Partitions.Count -eq 0) { $stats.Unattached++ }
                     } elseif (-not $b.Slugs.ContainsKey($slugTok)) {
                         if ($slugTok.IndexOfAny([char[]]'~*?') -ge 0) {
                             foreach ($p in $b.Partitions) { $p.AmbiguousRefs.Add((Get-AtmText 'ref.ambiguousBase' $who)); Add-AtmFlag $p 'AMBIGUOUS_REFERENCE' }
-                            $stats.Ambiguous++
+                            $stats.Ambiguous++; if ($b.Partitions.Count -eq 0) { $stats.Unattached++ }
                         } else {
                             # Unresolved name under the base (e.g. "<uuid>suffix", a dir created after the scan,
                             # an encoding we do not parse): never ignore it - every partition of the base is ambiguous.
                             $stats.Unresolved.Add((Get-AtmText 'ref.unresolved' $who $b.Path))
                             foreach ($p in $b.Partitions) { $p.AmbiguousRefs.Add((Get-AtmText 'ref.unresolvedBase' $who)); Add-AtmFlag $p 'AMBIGUOUS_REFERENCE' }
-                            $stats.Ambiguous++
+                            $stats.Ambiguous++; if ($b.Partitions.Count -eq 0) { $stats.Unattached++ }
                         }
                     } else {
                         $slug = $b.Slugs[$slugTok]
@@ -915,21 +920,21 @@ function Find-AtmReferences {
                             $rootTok = $sb2.ToString()
                             if ($rootTok -eq '') {
                                 foreach ($p in $slug.Partitions) { $p.AncestorRefs.Add("$who -> projeto"); Add-AtmFlag $p 'ANCESTOR_REFERENCE' }
-                                $stats.Ancestor++
+                                $stats.Ancestor++; if ($slug.Partitions.Count -eq 0) { $stats.Unattached++ }
                             } elseif ($slug.Roots.ContainsKey($rootTok)) {
                                 $slug.Roots[$rootTok].DirectRefs.Add($who)
                                 $stats.Direct++
                             } elseif ($rootTok.IndexOfAny([char[]]'~*?') -ge 0) {
                                 foreach ($p in $slug.Partitions) { $p.AmbiguousRefs.Add((Get-AtmText 'ref.ambiguousScope' $who)); Add-AtmFlag $p 'AMBIGUOUS_REFERENCE' }
-                                $stats.Ambiguous++
+                                $stats.Ambiguous++; if ($slug.Partitions.Count -eq 0) { $stats.Unattached++ }
                             } else {
                                 $stats.Unresolved.Add((Get-AtmText 'ref.unresolved' $who $slug.Path))
                                 foreach ($p in $slug.Partitions) { $p.AmbiguousRefs.Add((Get-AtmText 'ref.unresolvedScope' $who)); Add-AtmFlag $p 'AMBIGUOUS_REFERENCE' }
-                                $stats.Ambiguous++
+                                $stats.Ambiguous++; if ($slug.Partitions.Count -eq 0) { $stats.Unattached++ }
                             }
                         } else {
                             foreach ($p in $slug.Partitions) { $p.AncestorRefs.Add("$who -> projeto"); Add-AtmFlag $p 'ANCESTOR_REFERENCE' }
-                            $stats.Ancestor++
+                            $stats.Ancestor++; if ($slug.Partitions.Count -eq 0) { $stats.Unattached++ }
                         }
                     }
                 }

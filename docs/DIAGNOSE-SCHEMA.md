@@ -153,7 +153,9 @@ never `0`.
 * `PATH_REFERENCE_UNVERIFIED` also when a partition has an ambiguous reference (an unresolved name, or a short-name or
   wildcard form, under an audited base). Such a reference is never tied to a process, so the process that made it is
   not a candidate. The inventory's count of ambiguous references is read too (O2C), so a reference with no partition to
-  carry it (an empty base or project folder, e.g. a session folder created after the scan) is not lost.
+  carry it (an empty base or project folder, e.g. a session folder created after the scan) is not lost. The same
+  reason is given for any ancestor or ambiguous reference that no partition carries (O2D: an internal count of the
+  inventory, never exported), and when that count is missing, not a whole number or negative.
 
 | Field | Type | Meaning |
 |---|---|---|

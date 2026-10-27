@@ -408,8 +408,14 @@ called by `Invoke-AtmGitCommand`):
     is still not followed or read.
   * **Ambiguous references without a partition (O2C).** The inventory's count of ambiguous references is read too, so a
     reference under an empty base or project folder gives `PATH_REFERENCE_UNVERIFIED`.
-  * **Open.** An ancestor reference to an empty base or project folder is counted with no partition to carry it, and
-    the count cannot tell it from attached ones. Such a process is not a candidate and the gap is not reported yet.
+  * **References without a partition (O2D).** The reference index also counts, where each reference is attached, the
+    ancestor and ambiguous references that no partition carries (an empty base or project folder). Any such reference,
+    a count that is missing (a failed snapshot evaluated nothing), not a whole number or negative gives
+    `PATH_REFERENCE_UNVERIFIED`; a reference attached to at least one partition is not counted. Matching, traversal,
+    classification and eligibility are unchanged.
+  * **Limit of the matcher.** Path references are found only where a command line holds an audited base in its long
+    or 8.3 form. A relative path, an environment variable, a `..` segment, a path mixing long and 8.3 components or an
+    administrative share is not recognized, so such a reference is neither attached nor counted.
   * `temp-profiles` and the V0.1 coverage do not count a refused base either; the profile is labelled "not audited".
 * **Allocation** is an estimate (cluster rounding; MFT-resident files overestimated).
 * **Discovery visibility** (V0.2 P4-B: now reported, still a limit): if the `ProfilesDirectory` value of the Windows
