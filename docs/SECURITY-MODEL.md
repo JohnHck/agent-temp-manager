@@ -401,9 +401,16 @@ called by `Invoke-AtmGitCommand`):
 
     `PATH_REFERENCE_UNVERIFIED` is reported for an ambiguous reference under an audited base, which never makes its
     process a candidate.
-  * **Open, maintainer decision pending.** A base refused because its path holds a reparse point (`REPARSE_IN_PATH`)
-    or is not on a fixed drive (`UNSUPPORTED_DRIVE`) is not inventoried either. It is not counted in `temp-profiles`,
-    so it does not yet reach `agent-processes`.
+  * **Base states (O2C).** A base refused because its path holds a reparse point (`REPARSE_IN_PATH`) or is not on a
+    fixed drive (`UNSUPPORTED_DRIVE`) is not inventoried and is not counted in `temp-profiles`. The diagnose reads the
+    state of every base: any state other than read (`OK`) or confirmed absent (`NOT_FOUND`, `NOT_DIRECTORY`) gives
+    `PATH_REFERENCE_BASES_INCOMPLETE`, and so does a state it does not know. The refusal itself is unchanged: such a base
+    is still not followed or read.
+  * **Ambiguous references without a partition (O2C).** The inventory's count of ambiguous references is read too, so a
+    reference under an empty base or project folder gives `PATH_REFERENCE_UNVERIFIED`.
+  * **Open.** An ancestor reference to an empty base or project folder is counted with no partition to carry it, and
+    the count cannot tell it from attached ones. Such a process is not a candidate and the gap is not reported yet.
+  * `temp-profiles` and the V0.1 coverage do not count a refused base either; the profile is labelled "not audited".
 * **Allocation** is an estimate (cluster rounding; MFT-resident files overestimated).
 * **Discovery visibility** (V0.2 P4-B: now reported, still a limit): if the `ProfilesDirectory` value of the Windows
   profile list cannot be resolved or listed, folders under it that have no profile-list entry (residual profiles) are

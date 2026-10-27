@@ -4119,7 +4119,8 @@ try {
         $u = @($lp | Where-Object { -not $_.CommandLine }).Count
         [pscustomobject]@{ Failed = $false; Error = $null; Processes = $lp; Total = $lp.Count; Readable = $lp.Count - $u; Uninspectable = $u; UninspectableByName = @{} } }
     # O2B: the V0.1 inventory coverage records of a run where every base was discovered and read (and every command line
-    # readable). Without temp-profiles and profile-discovery the bases of the path references are unknown.
+    # readable). Without temp-profiles and profile-discovery the bases of the path references are unknown. The cases that
+    # use it also pass -BaseStatuses @() (O2C: no base in a state that is a gap; without it the states are unknown).
     $b4InvCov = @((New-AtmCoverage -Collector 'inventory' -Status 'COMPLETE'), (New-AtmCoverage -Collector 'processes' -Status 'COMPLETE'), (New-AtmCoverage -Collector 'temp-profiles' -Status 'COMPLETE'), (New-AtmCoverage -Collector 'profile-discovery' -Status 'COMPLETE'))
     Test-Case 'Diagnose' 'Estados de ausencia (P1-B4-b): SESSION_PROCESS_NOT_FOUND so com cobertura conclusiva; sem cobertura ou com qualquer status nao conclusivo vira UNKNOWN' {
         $exercised = @{}
@@ -4234,7 +4235,7 @@ try {
         Assert-Eq (@($self.Keys | Sort-Object) -join ',') ((@($k[2500], $k[3000], $k[3001]) | Sort-Object) -join ',') 'SELF: o proprio processo, o launcher verificado e o filho proprio'
         Assert-True (@($self.Unverified | Where-Object { $_.Pid -eq 2700 -and $_.Result -eq 'PID_REUSED' }).Count -eq 1) 'launcher com PID reutilizado nao verificado'
         $invCov = @(New-AtmCoverage -Collector 'inventory' -Status 'COMPLETE') + @($b4InvCov | Where-Object { $_.Collector -cne 'inventory' })
-        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -ProviderHints $hints -SessionRegistries $regs -LegacySnapshot $legacy -Partitions $parts -InventoryCoverage $invCov -SelfKeys $self
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -ProviderHints $hints -SessionRegistries $regs -LegacySnapshot $legacy -Partitions $parts -InventoryCoverage $invCov -BaseStatuses @() -SelfKeys $self
         $expect = [ordered]@{
             2000 = 'AGENT_PROCESS'; 2001 = 'AGENT_DESCENDANT'; 2002 = 'AGENT_DESCENDANT'; 2003 = '(none)'; 3000 = 'SELF'; 3001 = 'SELF'
             2500 = 'SELF'; 2501 = 'AGENT_DESCENDANT'; 2700 = 'AGENT_DESCENDANT'
@@ -4295,7 +4296,7 @@ try {
         # only because the collection is COMPLETE, and no finding says "not running".
         $noneRows = @((& $b4Row 4 0 'System' $b4T0.AddHours(-1)), (& $b4Row 100 4 'app.exe' $b4T0))
         $none = Get-AtmProcessCollection -Source ({ $noneRows }.GetNewClosure())
-        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $none -ProviderHints $claude -SessionRegistries $emptyReg -LegacySnapshot (& $b4Legacy $noneRows) -InventoryCoverage $b4InvCov
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $none -ProviderHints $claude -SessionRegistries $emptyReg -LegacySnapshot (& $b4Legacy $noneRows) -InventoryCoverage $b4InvCov -BaseStatuses @()
         Assert-Eq @($res.Findings).Count 0 'sem agente: nenhum achado'
         Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0].Status 'COMPLETE' 'sem agente: coleta completa sem candidatos'
         Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'sessions-claude-code' })[0].Status 'COMPLETE' 'sem agente: registro vazio'
@@ -4376,7 +4377,7 @@ try {
         }
         foreach ($n in $cases.Keys) {
             $v = $cases[$n]
-            $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $v[0] -ProviderHints $v[1] -SessionRegistries $v[2] -LegacySnapshot (& $b4Legacy $partialRows) -InventoryCoverage $b4InvCov
+            $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $v[0] -ProviderHints $v[1] -SessionRegistries $v[2] -LegacySnapshot (& $b4Legacy $partialRows) -InventoryCoverage $b4InvCov -BaseStatuses @()
             $ac = @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0]
             $sc = @($res.Coverage | Where-Object { $_.Collector -eq 'sessions-claude-code' })
             Assert-Eq $ac.Status $v[3] "$($n): agent-processes"
@@ -4635,7 +4636,7 @@ try {
         $second = Get-AtmProcessCollection -Source ({ $exitedRows }.GetNewClosure())
         Assert-Eq $second.Coverage.Status 'COMPLETE' 'segunda coleta completa'
         $cpu = Measure-AtmProcessCpu -First $c -Second $second -ElapsedMs 500
-        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -Second $second -ProviderHints $claude -SessionRegistries $regs -Cpu $cpu -LegacySnapshot (& $b4Legacy $b4cRows) -InventoryCoverage $b4InvCov
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -Second $second -ProviderHints $claude -SessionRegistries $regs -Cpu $cpu -LegacySnapshot (& $b4Legacy $b4cRows) -InventoryCoverage $b4InvCov -BaseStatuses @()
         $hasExit = { param($Key) @(@($res.Findings | Where-Object { $_.Key -ceq $Key })[0].Evidence | Where-Object { $_.Code -eq 'PROCESS_EXITED_DURING_RUN' }).Count -eq 1 }
         Assert-True ((& $hasExit (& $b4Key 203 $b4T0.AddMinutes(3))) -and (& $hasExit (& $b4Key 202 $b4T0.AddMinutes(2)))) 'processos encerrados entre coletas completas: evidencia de saida'
         Assert-True (-not (& $hasExit (& $b4Key 200 $b4T0))) 'processo presente: sem evidencia de saida'
@@ -4662,7 +4663,7 @@ try {
         # No agent process: 0 only with a conclusive discovery; otherwise null.
         $noAgent = @($b4cRows | Where-Object { $_.Name -ne 'claude.exe' })
         $cn = Get-AtmProcessCollection -Source ({ $noAgent }.GetNewClosure())
-        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $cn -ProviderHints $claude -LegacySnapshot (& $b4Legacy $noAgent) -InventoryCoverage $b4InvCov
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $cn -ProviderHints $claude -LegacySnapshot (& $b4Legacy $noAgent) -InventoryCoverage $b4InvCov -BaseStatuses @()
         Assert-True ($res.Totals.Processes -eq 0 -and $res.Totals.Complete -and $res.Totals.Counters.WorkingSetBytes.Sum -eq 0 -and $res.Totals.Counters.CpuPercent.Sum -eq 0) 'nenhum processo identificado com cobertura conclusiva: 0'
         $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $cn -ProviderHints @(& $b4Hints 'claude-code' @([pscustomobject]@{ ImageName = 'claude.exe'; CommandLineMarker = $null }) 'FAILED')
         Assert-True ($res.Totals.Processes -eq 0 -and -not $res.Totals.Complete -and $null -eq $res.Totals.Counters.WorkingSetBytes.Sum -and @($res.Totals.Reasons) -contains 'AGENT_PROCESSES_INCOMPLETE') 'nenhum processo com descoberta inconclusiva: nulo, nunca 0'
@@ -4707,7 +4708,7 @@ try {
             $col = Get-AtmProcessCollection -Source ({ $rows }.GetNewClosure())
             $inv = @($v[4]); if ($inv.Count -eq 0) { $inv = @(& $procCov $v[3]) }
             $inv = @($inv) + @($b4InvCov | Where-Object { @('temp-profiles', 'profile-discovery') -ccontains $_.Collector })
-            $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $col -ProviderHints $v[1] -SessionRegistries $v[2] -LegacySnapshot $v[3] -InventoryCoverage $inv
+            $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $col -ProviderHints $v[1] -SessionRegistries $v[2] -LegacySnapshot $v[3] -InventoryCoverage $inv -BaseStatuses @()
             $byName[$n] = $res
             $ac = @($res.Coverage | Where-Object { $_.Collector -ceq 'agent-processes' })[0]
             # Composition: status and the exact reasons (each once).
@@ -7750,7 +7751,7 @@ try {
             $v = $cases[$n]; $rows = $v[0]
             $col = Get-AtmProcessCollection -Source ({ $rows }.GetNewClosure())
             $leg = $(if ($v[2]) { & $b4Legacy $rows } else { $null })
-            $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $col -ProviderHints $claude -SessionRegistries $okReg -LegacySnapshot $leg -Partitions $v[1] -InventoryCoverage $v[3]
+            $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $col -ProviderHints $claude -SessionRegistries $okReg -LegacySnapshot $leg -Partitions $v[1] -InventoryCoverage $v[3] -BaseStatuses @()
             $ac = @($res.Coverage | Where-Object { $_.Collector -ceq 'agent-processes' })[0]
             Assert-True ($ac.Status -ceq $v[4] -and (@($ac.Reasons) -join ',') -ceq $v[5]) "$($n): agent-processes $($ac.Status) [$(@($ac.Reasons) -join ',')]"
             $procs = @($res.Findings | Where-Object { $_.Kind -ceq 'Process' })
@@ -7798,6 +7799,139 @@ try {
         $g1 = (New-AtmTuiDiagIndex -View $j1).Gap['procs']; $g0 = (New-AtmTuiDiagIndex -View $j0).Gap['procs']
         Assert-True ($null -ne $g1 -and $g1.Reasons -like '*PATH_REFERENCE_BASES_INCOMPLETE*' -and $null -eq $g0) "indice da TUI: * com o motivo (base INVALID), sem * no controle ($(if ($g1) { $g1.Status }))"
         $script:caseNote = "sinteticos: $($cases.Count) composicoes; integrado: controle, base INVALID, TEMP nao verificado, descoberta com lacunas; JSON, relatorio e indice da TUI"
+    }
+    Test-Case 'Diagnose' 'O2C: estados das bases das referencias (REPARSE_IN_PATH, UNSUPPORTED_DRIVE, estado inesperado ou nao fornecido) e referencias ambiguas sem particao entram em agent-processes; ausencia confirmada, conjunto vazio, base compartilhada e estrutura nao reconhecida nao contaminam; diagnose integrado com inventario real do sandbox (processos sinteticos)' {
+        # Synthetic processes. REPARSE_IN_PATH is real (a sandbox junction, as in the inventory reparse case);
+        # UNSUPPORTED_DRIVE is injected into a real inventory (the runner is not assumed to have a removable or RAM drive).
+        # These show the propagation of the gap; they do not show that a real hidden agent was missed.
+        $sys = & $b4Row 4 0 'System' $b4T0.AddHours(-1)
+        $irows = @($sys, (& $b4Row 1000 4 'explorer.exe' $b4T0.AddMinutes(-30)), (& $b4Row 2100 1000 'node.exe' $b4T0), (& $b4Row 3000 1000 'powershell.exe' $b4T0.AddMinutes(5)))
+        $irowsC = @($irows) + @(& $b4Row 2200 1000 'claude.exe' $b4T0)
+        # V0.1 rows: the command line of node.exe (PID 2100) names a path; the others only their image.
+        $legOf = { param($Rows, [string]$NodeCmd) @($Rows | ForEach-Object { [pscustomobject]@{ ProcessId = $_.ProcessId; Name = $_.Name; ParentProcessId = $_.ParentProcessId; CommandLine = $(if ($_.ProcessId -eq 2100) { $NodeCmd } else { [string]$_.Name }); CreationDate = $_.CreationDate } }) }
+        $diag = { param([hashtable]$Ia, $Rows) $src = { $Rows }.GetNewClosure(); Invoke-AtmDiagnose -InventoryArgs $Ia -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0]) -ProcessSource $src -SelfPid 3000 -SelfCreationUtc $b4T0.AddMinutes(5) -PseudonymKey $testPseudonymKey }
+        $apOf = { param($D) @($D.Coverage | Where-Object { $_.Collector -ceq 'agent-processes' })[0] }
+        $covSt = { param($D, [string]$C) $x = @($D.Coverage | Where-Object { $_.Collector -ceq $C }); if ($x.Count) { $x[0].Status + ':' + (@($x[0].Reasons) -join ',') } else { '(absent)' } }
+        $pidsOf = { param($D) (@(@($D.Findings | Where-Object { $_.Kind -ceq 'Process' -and @('AGENT_PROCESS', 'AGENT_DESCENDANT') -ccontains $_.State }) | ForEach-Object { (ConvertFrom-AtmProcessKey $_.Key).ProcessId }) | Sort-Object) -join ',' }
+        # Every integrated observation is kept, so a failure lists all of them (Status, reasons that must be there, agents).
+        $obs = New-Object System.Collections.Generic.List[string]; $bad = New-Object System.Collections.Generic.List[string]
+        $check = { param([string]$Name, $D, [string]$Status, [string]$Want, [string]$Agents)
+            $ac = & $apOf $D; $rs = @($ac.Reasons); $ag = & $pidsOf $D; $ar = $D.AgentResources
+            $okRs = $(if ($Want) { @($Want.Split(',') | Where-Object { $rs -cnotcontains $_ }).Count -eq 0 } else { $rs.Count -eq 0 })
+            $okAr = $(if ($Agents -ne '') { $true } elseif ($Status -ceq 'COMPLETE') { [bool]$ar.Complete -and $ar.Counters.WorkingSetBytes.Sum -eq 0 } else { -not $ar.Complete -and $null -eq $ar.Counters.WorkingSetBytes.Sum })
+            $line = "$($Name): agent-processes $($ac.Status) [$($rs -join ',')], agentes [$ag], agent-resources completo=$([bool]$ar.Complete); temp-profiles $(& $covSt $D 'temp-profiles')"
+            $obs.Add($line)
+            if (-not ($ac.Status -ceq $Status -and $okRs -and $ag -ceq $Agents -and $okAr)) { $bad.Add($line) } }
+        # I0 control: every base read; the reference to an inventoried root makes node.exe an agent.
+        $p0 = New-TestProfile 'o2c-ctl'; $r0 = New-TestRoot -ProfileInfo $p0
+        $d0 = & $diag (Get-InvArgs -Profiles @($p0) -Procs (& $legOf $irows "node.exe $r0\x.js")) $irows
+        & $check 'I0 controle (base lida, referencia direta)' $d0 'COMPLETE' '' '2100'
+        # I1 REPARSE_IN_PATH: the TEMP of the profile is a junction; the command line names a session folder through it.
+        $p1 = New-TestProfile 'o2c-rp'; $real1 = Join-Path $sandbox 'temp-real-o2c-rp'; $u1 = [guid]::NewGuid().ToString()
+        [void][IO.Directory]::CreateDirectory((Join-Path $real1 ('claude\C--x\' + $u1)))
+        $j1 = Join-Path $p1.ProfilePath 'AppData\Local\TempJ'; New-Junction -Link $j1 -Target $real1
+        $p1.TempCandidates = @([pscustomobject]@{ TempPath = $j1; Source = 'test' })
+        $ia1 = Get-InvArgs -Profiles @($p1) -Procs (& $legOf $irows "node.exe $j1\claude\C--x\$u1\x.js")
+        $st1 = @((Invoke-AtmInventory @ia1).Bases | ForEach-Object { $_.Status }) -join ','
+        Assert-Eq $st1 'REPARSE_IN_PATH' 'I1: estado real da base (juncao no caminho)'
+        $d1 = & $diag $ia1 $irows
+        & $check 'I1 base REPARSE_IN_PATH, linha legivel com referencia potencial' $d1 'PARTIAL' 'PATH_REFERENCE_BASES_INCOMPLETE' ''
+        $d1c = & $diag (Get-InvArgs -Profiles @($p1) -Procs (& $legOf $irowsC "node.exe $j1\claude\C--x\$u1\x.js")) $irowsC
+        & $check 'I1c REPARSE_IN_PATH + agente pela imagem' $d1c 'PARTIAL' 'PATH_REFERENCE_BASES_INCOMPLETE' '2200'
+        # I2 UNSUPPORTED_DRIVE: injected for this base only (the chain check of every other path is the real one).
+        $p2 = New-TestProfile 'o2c-ud'; $r2 = New-TestRoot -ProfileInfo $p2; $ud = Get-Base $p2; $origChain = ${function:Test-AtmPathChain}
+        $d2 = & {
+            function Test-AtmPathChain { param([string]$Path) if ($Path.StartsWith($ud, [StringComparison]::OrdinalIgnoreCase)) { return [pscustomobject]@{ Status = 'UNSUPPORTED_DRIVE'; At = $Path.Substring(0, 3); Detail = 'Removable' } }; & $origChain $Path }
+            $ia2 = Get-InvArgs -Profiles @($p2) -Procs (& $legOf $irows "node.exe $r2\x.js")
+            Assert-Eq (@((Invoke-AtmInventory @ia2).Bases | ForEach-Object { $_.Status }) -join ',') 'UNSUPPORTED_DRIVE' 'I2: estado injetado da base'
+            & $diag $ia2 $irows }
+        & $check 'I2 base UNSUPPORTED_DRIVE (injetado), linha legivel com referencia potencial' $d2 'PARTIAL' 'PATH_REFERENCE_BASES_INCOMPLETE' ''
+        # I3 empty base: a session folder created after the scan; the reference has no partition to be attached to.
+        $p3 = New-TestProfile 'o2c-eb'
+        $d3 = & $diag (Get-InvArgs -Profiles @($p3) -Procs (& $legOf $irows "node.exe $(Get-Base $p3)\C--work-proj\$([guid]::NewGuid())\x.js")) $irows
+        & $check 'I3 base vazia, referencia a pasta criada depois da varredura' $d3 'PARTIAL' 'PATH_REFERENCE_UNVERIFIED' ''
+        # I4 empty project folder (the base has another project): same, one level down.
+        $p4 = New-TestProfile 'o2c-es'; $null = New-TestRoot -ProfileInfo $p4 -Slug 'C--other'
+        [void][IO.Directory]::CreateDirectory((Join-Path (Get-Base $p4) 'C--work-proj'))
+        $d4 = & $diag (Get-InvArgs -Profiles @($p4) -Procs (& $legOf $irows "node.exe $(Get-Base $p4)\C--work-proj\$([guid]::NewGuid())\x.js")) $irows
+        & $check 'I4 projeto vazio, referencia a pasta criada depois da varredura' $d4 'PARTIAL' 'PATH_REFERENCE_UNVERIFIED' ''
+        # I5 states that are not gaps: NOT_FOUND, NOT_DIRECTORY, an unrecognized structure and a shared base.
+        $p5 = New-TestProfile 'o2c-nc'; $null = New-TestRoot -ProfileInfo $p5
+        $tf = Join-Path $p5.ProfilePath 'TempF'; [void][IO.Directory]::CreateDirectory($tf); [IO.File]::WriteAllBytes((Join-Path $tf 'claude'), [byte[]]@(1))
+        $tu = Join-Path $p5.ProfilePath 'TempU'; [void][IO.Directory]::CreateDirectory((Join-Path $tu 'claude\not_a_scope\notuuid'))
+        $p5.TempCandidates = @($p5.TempCandidates) + @([pscustomobject]@{ TempPath = (Join-Path $p5.ProfilePath 'NoSuchTemp'); Source = 'test' }, [pscustomobject]@{ TempPath = $tf; Source = 'test' }, [pscustomobject]@{ TempPath = $tu; Source = 'test' })
+        $p5b = New-TestProfile 'o2c-nc2'; $p5b.TempCandidates = @($p5.TempCandidates[0])
+        $ia5 = Get-InvArgs -Profiles @($p5, $p5b) -Procs (& $legOf $irows 'node.exe')
+        $i5 = Invoke-AtmInventory @ia5
+        $st5 = @($i5.Bases | ForEach-Object { $_.Status } | Sort-Object -Unique) -join ','
+        $sh5 = @($i5.ProfileBaseStatus[$p5b.Sid + '|' + $p5b.ProfilePath] | Where-Object { ([string]$_.Status).StartsWith('SHARED_WITH_') }).Count
+        $ur5 = @($i5.Bases | Where-Object { $_.Status -ceq 'OK' -and -not $_.StructureRecognized }).Count
+        Assert-True ($st5 -ceq 'NOT_DIRECTORY,NOT_FOUND,OK' -and $sh5 -eq 1 -and $ur5 -eq 1) "I5: estados reais da fixture [$st5], base compartilhada $sh5, estrutura nao reconhecida $ur5"
+        $d5 = & $diag $ia5 $irows
+        & $check 'I5 NOT_FOUND, NOT_DIRECTORY, estrutura nao reconhecida e base compartilhada' $d5 'COMPLETE' '' ''
+        Assert-True ($bad.Count -eq 0) ("integrado: " + ($(if ($bad.Count) { 'FALHAS: ' + ($bad -join ' | ') + ' || ' } else { '' })) + ($obs -join ' | '))
+        # Open finding, observed and NOT asserted: an ancestor reference to an empty base or project folder is counted by
+        # the V0.1 reference index (References.Ancestor) with no partition to carry it, and that count cannot tell it from
+        # attached ones. Recorded in the note; closing it needs a change in Find-AtmReferences (outside this round).
+        $p6 = New-TestProfile 'o2c-ab'
+        $d6 = & $diag (Get-InvArgs -Profiles @($p6) -Procs (& $legOf $irows "node.exe --tmp $(Get-Base $p6)")) $irows
+        $p7 = New-TestProfile 'o2c-ap'; $null = New-TestRoot -ProfileInfo $p7 -Slug 'C--other'; [void][IO.Directory]::CreateDirectory((Join-Path (Get-Base $p7) 'C--work-proj'))
+        $d7 = & $diag (Get-InvArgs -Profiles @($p7) -Procs (& $legOf $irows "node.exe --cwd $(Get-Base $p7)\C--work-proj")) $irows
+        $open = "ACHADO ABERTO (observado, nao asserido): ancestral a base vazia: agent-processes $((& $apOf $d6).Status) [$(@((& $apOf $d6).Reasons) -join ',')], agentes [$(& $pidsOf $d6)]; ancestral a projeto vazio: agent-processes $((& $apOf $d7).Status) [$(@((& $apOf $d7).Reasons) -join ',')], agentes [$(& $pidsOf $d7)]"
+        # Consumers of the integrated REPARSE_IN_PATH and empty-base runs: JSON (in-memory conversion), report, TUI index.
+        $old = Get-AtmLanguage
+        try {
+            Set-AtmLanguage -Requested 'en-US'; $j1 = ConvertTo-AtmDiagnoseJson -Result $d1 | ConvertFrom-Json; $j3 = ConvertTo-AtmDiagnoseJson -Result $d3 | ConvertFrom-Json; $j0 = ConvertTo-AtmDiagnoseJson -Result $d0 | ConvertFrom-Json
+            $tEn = (Show-AtmDiagnose -Result $d1 6>&1 | Out-String) -replace '\s+', ' '
+            Set-AtmLanguage -Requested 'pt-BR'; $tPt = (Show-AtmDiagnose -Result $d1 6>&1 | Out-String) -replace '\s+', ' '
+        } finally { Set-AtmLanguage -Requested $old }
+        Assert-True (@(@($j1.coverage | Where-Object { $_.collector -ceq 'agent-processes' })[0].reasons) -ccontains 'PATH_REFERENCE_BASES_INCOMPLETE' -and -not $j1.agentResources.complete -and $null -eq $j1.agentResources.counters.workingSetBytes.sum) 'JSON (REPARSE_IN_PATH): motivo e agentResources nulo, sem zero completo'
+        Assert-True (@(@($j3.coverage | Where-Object { $_.collector -ceq 'agent-processes' })[0].reasons) -ccontains 'PATH_REFERENCE_UNVERIFIED' -and -not $j3.agentResources.complete) 'JSON (base vazia): motivo e agentResources nao completo'
+        Assert-True ($tEn.Contains('PATH_REFERENCE_BASES_INCOMPLETE') -and $tEn.Contains('some temporary bases were not discovered or read')) 'relatorio en-US (REPARSE_IN_PATH): codigo e texto'
+        Assert-True ($tPt.Contains('PATH_REFERENCE_BASES_INCOMPLETE') -and $tPt.Contains('algumas bases temporárias não foram descobertas ou lidas')) 'relatorio pt-BR (REPARSE_IN_PATH): codigo e texto'
+        $g1 = (New-AtmTuiDiagIndex -View $j1).Gap['procs']; $g3 = (New-AtmTuiDiagIndex -View $j3).Gap['procs']; $g0 = (New-AtmTuiDiagIndex -View $j0).Gap['procs']
+        Assert-True ($null -ne $g1 -and $g1.Reasons -like '*PATH_REFERENCE_BASES_INCOMPLETE*' -and $null -ne $g3 -and $g3.Reasons -like '*PATH_REFERENCE_UNVERIFIED*' -and $null -eq $g0) 'indice da TUI: * com o motivo (REPARSE_IN_PATH, base vazia), sem * no controle'
+        # Synthetic compositions on the runtime: base states (codes) and the ambiguous count as Invoke-AtmDiagnose hands them.
+        $claude = @(& $b4Hints 'claude-code' @([pscustomobject]@{ ImageName = 'claude.exe'; CommandLineMarker = $null }))
+        $okReg = @([pscustomobject]@{ ProviderId = 'claude-code'; Registry = [pscustomobject]@{ Readable = $true; Unparseable = 0; Entries = @() }; Error = $null })
+        $rNone = @($sys, (& $b4Row 200 4 'app.exe' $b4T0)); $rNode = @($sys, (& $b4Row 300 4 'node.exe' $b4T0)); $rClaude = @($sys, (& $b4Row 400 4 'claude.exe' $b4T0))
+        $omit = 'omitido'
+        # Name = rows, base states ('omitido' = not supplied), ambiguous count ('omitido' = not supplied), status, exact reasons, agents
+        $cases = [ordered]@{
+            'S1 bases lidas ou ausencia confirmada (OK, NOT_FOUND, NOT_DIRECTORY)' = @($rNone, @('OK', 'NOT_FOUND', 'NOT_DIRECTORY'), 0, 'COMPLETE', '', @())
+            'S2 conjunto vazio de bases (valido)'                    = @($rNone, @(), 0, 'COMPLETE', '', @())
+            'S3 REPARSE_IN_PATH'                                     = @($rNode, @('OK', 'REPARSE_IN_PATH'), 0, 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'S4 UNSUPPORTED_DRIVE'                                   = @($rNode, @('UNSUPPORTED_DRIVE'), 0, 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'S5 INACCESSIBLE, INVALID, ENUMERATION_FAILED (motivo uma vez)' = @($rNode, @('INACCESSIBLE', 'INVALID', 'ENUMERATION_FAILED'), 0, 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'S6 estado inesperado (conservador)'                     = @($rNode, @('ESTADO_FUTURO'), 0, 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'S7 estados nao fornecidos (desconhecido, nunca completo)' = @($rNone, $omit, 0, 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'S8 agente pela imagem + REPARSE_IN_PATH'                = @($rClaude, @('REPARSE_IN_PATH'), 0, 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @(400))
+            'S9 referencias ambiguas contadas, sem particao'         = @($rNode, @('OK'), 2, 'PARTIAL', 'PATH_REFERENCE_UNVERIFIED', @())
+            'S10 contagem ilegivel (conservador)'                    = @($rNode, @('OK'), 'x', 'PARTIAL', 'PATH_REFERENCE_UNVERIFIED', @())
+            'S11 contagem nao fornecida (so as particoes contam)'    = @($rNone, @('OK'), $omit, 'COMPLETE', '', @())
+            'S12 as duas lacunas + agente pela imagem'               = @($rClaude, @('UNSUPPORTED_DRIVE'), 1, 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE,PATH_REFERENCE_UNVERIFIED', @(400))
+        }
+        foreach ($n in $cases.Keys) {
+            $v = $cases[$n]; $rows = $v[0]
+            $col = Get-AtmProcessCollection -Source ({ $rows }.GetNewClosure())
+            $ra = @{ Pseudonymizer = $b4Pz; Collection = $col; ProviderHints = $claude; SessionRegistries = $okReg; LegacySnapshot = (& $b4Legacy $rows); Partitions = @(); InventoryCoverage = $b4InvCov }
+            if (-not ($v[1] -is [string] -and $v[1] -ceq $omit)) { $ra['BaseStatuses'] = [string[]]@($v[1]) }
+            if (-not ($v[2] -is [string] -and $v[2] -ceq $omit)) { $ra['AmbiguousReferences'] = $v[2] }
+            $res = Get-AtmAgentRuntimeFindings @ra
+            $ac = @($res.Coverage | Where-Object { $_.Collector -ceq 'agent-processes' })[0]
+            Assert-True ($ac.Status -ceq $v[3] -and (@($ac.Reasons) -join ',') -ceq $v[4]) "$($n): agent-processes $($ac.Status) [$(@($ac.Reasons) -join ',')]"
+            $procs = @($res.Findings | Where-Object { $_.Kind -ceq 'Process' })
+            Assert-Eq ((@($procs | ForEach-Object { (ConvertFrom-AtmProcessKey $_.Key).ProcessId }) | Sort-Object) -join ',') (@($v[5]) -join ',') "$($n): agentes preservados, nenhum inventado"
+            if (@($v[5]).Count -eq 0) {
+                $t = $res.Totals
+                if ($v[3] -ceq 'COMPLETE') { Assert-True ($t.Complete -and $t.Counters.WorkingSetBytes.Sum -eq 0) "$($n): zero completo valido" }
+                else { Assert-True (-not $t.Complete -and $null -eq $t.Counters.WorkingSetBytes.Sum -and @($t.Reasons) -ccontains 'AGENT_PROCESSES_INCOMPLETE') "$($n): agent-resources nulo, nunca zero" }
+            }
+        }
+        # Static: Invoke-AtmDiagnose hands the base states (codes only, never a path) and the ambiguous count to the runtime.
+        $diagSrc = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Diagnose.ps1'))
+        Assert-True ($diagSrc.Contains("`$rtArgs['BaseStatuses'] = [string[]]@(`$inv.Bases | ForEach-Object { [string]`$_.Status })") -and $diagSrc.Contains("`$rtArgs['AmbiguousReferences'] = `$inv.References.Ambiguous")) 'Invoke-AtmDiagnose repassa estados das bases e contagem de ambiguas'
+        $script:caseNote = "integrado: controle, REPARSE_IN_PATH real (juncao), UNSUPPORTED_DRIVE injetado, base vazia, projeto vazio, estados sem lacuna; sinteticos: $($cases.Count) composicoes; JSON, relatorio e indice da TUI; $open"
     }
     Test-Case 'Particoes' 'P4-B: escala - milhares de particoes passadas do grafo aos achados em uma passada (indices, sem reconstruir o grafo)' {
         $rows = New-Object System.Collections.Generic.List[object]; $f = New-Object System.Collections.Generic.List[object]; $parts = New-Object System.Collections.Generic.List[object]

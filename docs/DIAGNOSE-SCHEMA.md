@@ -143,12 +143,17 @@ never `0`.
   * `temp-profiles` is not conclusive: a base was inaccessible, invalid or not enumerated (`PROFILES_INACCESSIBLE`),
     or a TEMP location could not be verified (`TEMP_LOCATION_UNVERIFIED`);
   * `profile-discovery` is not conclusive;
-  * either record is missing.
+  * either record is missing;
+  * a base is in any state other than read (`OK`) or confirmed absent (`NOT_FOUND`, `NOT_DIRECTORY`) (O2C). This
+    includes a base refused for safety, which `temp-profiles` does not count: a reparse point in its path
+    (`REPARSE_IN_PATH`) or a drive that is not fixed (`UNSUPPORTED_DRIVE`). A refusal is never proof that no agent uses
+    the base. A state not known to the runtime counts the same way, and base states that were not supplied are unknown.
 
   An `inventory` record that is `PARTIAL` only because it finished after the deadline does not count.
 * `PATH_REFERENCE_UNVERIFIED` also when a partition has an ambiguous reference (an unresolved name, or a short-name or
   wildcard form, under an audited base). Such a reference is never tied to a process, so the process that made it is
-  not a candidate.
+  not a candidate. The inventory's count of ambiguous references is read too (O2C), so a reference with no partition to
+  carry it (an empty base or project folder, e.g. a session folder created after the scan) is not lost.
 
 | Field | Type | Meaning |
 |---|---|---|
