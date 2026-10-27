@@ -377,6 +377,21 @@ called by `Invoke-AtmGitCommand`):
   installation there are always some (17 on the CI runners), so the coverage gate blocks every candidate: in V0.1
   `clean` stops before the release gate is even reached. Enabling real deletion (V0.3) requires a reviewed decision
   on how known protected system processes are treated; the gate is not relaxed before that.
+* **Agent discovery and unreadable command lines (V0.2, O2).** Agent processes are found from three sources:
+  * the provider's image name (readable for every process);
+  * the session registries;
+  * path references from the V0.1 command lines.
+
+  A process whose command line cannot be read (another account's, or a protected one) yields no path reference. An
+  agent that only such a reference would have shown therefore stays unseen.
+  * The diagnose reports that gap as a reason of `agent-processes` even when no candidate was found:
+    * `PATH_REFERENCES_INCOMPLETE` for command lines that could not be read;
+    * `LEGACY_SNAPSHOT_UNAVAILABLE` for a V0.1 snapshot that is missing, failed or empty.
+  * `agent-processes` is then `PARTIAL`. `agent-resources` reports no zero as complete: with no agent process found,
+    its sums are `null`.
+  * On a real machine some processes are always unreadable, so this reason is expected there.
+  * Processes found by other sources stay, and no finding is made up for the gap.
+  * Tested on synthetic inputs. A real hidden agent was not demonstrated.
 * **Allocation** is an estimate (cluster rounding; MFT-resident files overestimated).
 * **Discovery visibility** (V0.2 P4-B: now reported, still a limit): if the `ProfilesDirectory` value of the Windows
   profile list cannot be resolved or listed, folders under it that have no profile-list entry (residual profiles) are

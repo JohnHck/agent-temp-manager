@@ -832,7 +832,7 @@ $script:AtmRuntimeReasonCodes = @(
     'DEADLINE_EXCEEDED', 'PROCESS_SNAPSHOT_TIMEOUT', 'PROCESS_SNAPSHOT_FAILED', 'PROCESS_SNAPSHOT_EMPTY', 'PROCESS_LIMIT_EXCEEDED',
     'PARENT_ID_UNREADABLE', 'PROCESS_NAME_UNREADABLE', 'CREATION_TIME_UNREADABLE', 'DUPLICATE_PID', 'MALFORMED_PROCESS_RECORDS',
     'PROCESS_SNAPSHOT_UNAVAILABLE', 'PROCESS_SNAPSHOT_INCOMPLETE', 'PROVIDER_HINTS_INCOMPLETE', 'IDENTITY_UNVERIFIED_CANDIDATES',
-    'COMMAND_LINE_MARKER_UNAVAILABLE', 'SESSION_REGISTRY_INCOMPLETE', 'LEGACY_SNAPSHOT_UNAVAILABLE', 'PATH_REFERENCE_UNVERIFIED',
+    'COMMAND_LINE_MARKER_UNAVAILABLE', 'SESSION_REGISTRY_INCOMPLETE', 'LEGACY_SNAPSHOT_UNAVAILABLE', 'PATH_REFERENCE_UNVERIFIED', 'PATH_REFERENCES_INCOMPLETE',
     'TREE_INCOMPLETE', 'NO_RUNTIME_EVIDENCE_SOURCE', 'SESSION_REGISTRY_PROVIDER_INVALID', 'SESSION_REGISTRY_FAILED',
     'SESSION_REGISTRY_UNREADABLE', 'SESSION_ENTRIES_UNPARSEABLE', 'SESSION_KEY_COLLISION', 'SESSION_ENTRIES_CONFLICT',
     'INVENTORY_UNAVAILABLE', 'AGENT_PROCESSES_INCOMPLETE', 'MEMBER_NOT_COLLECTED', 'CPU_NOT_SAMPLED', 'COUNTERS_UNREADABLE',
@@ -1166,6 +1166,22 @@ function Get-AtmAgentRuntimeFindingsRun {
             }
         }
     }
+    # The path-reference source as a whole (O2): references come from the V0.1 command lines, so a process whose command
+    # line was not read produces none, and an agent that only a reference would have shown stays unseen. Its gaps are
+    # gaps of agent-processes even when no candidate was found (never read as "no agent"): a snapshot that is missing,
+    # failed or empty, command lines that were not readable, or the V0.1 process coverage record not complete. The
+    # processes found by other sources stay; no finding is made up for the gap.
+    $legacyTotal = $null; $legacyUninspectable = $null
+    if ($null -ne $LegacySnapshot -and -not $LegacySnapshot.Failed) {
+        $lprocs = @(Get-AtmHintProperty -Item $LegacySnapshot -Name 'Processes' | Where-Object { $null -ne $_ })
+        $legacyTotal = Get-AtmHintProperty -Item $LegacySnapshot -Name 'Total'
+        if ($null -eq $legacyTotal) { $legacyTotal = $lprocs.Count }
+        $legacyUninspectable = Get-AtmHintProperty -Item $LegacySnapshot -Name 'Uninspectable'
+        if ($null -eq $legacyUninspectable) { $legacyUninspectable = @($lprocs | Where-Object { -not (Get-AtmHintProperty -Item $_ -Name 'CommandLine') }).Count }
+    }
+    if ($null -eq $legacyTotal -or [int]$legacyTotal -le 0) { $reasons.Add('LEGACY_SNAPSHOT_UNAVAILABLE') }
+    elseif ([int]$legacyUninspectable -gt 0) { $reasons.Add('PATH_REFERENCES_INCOMPLETE') }
+    if (@($InventoryCoverage | Where-Object { $null -ne $_ -and [string]$_.Collector -ceq 'processes' -and [string]$_.Status -cne 'COMPLETE' }).Count -gt 0) { $reasons.Add('PATH_REFERENCES_INCOMPLETE') }
 
     # 4. SELF (exact rules of R-B1, Get-AtmSelfProcessKeys) outranks everything.
     $selfSet = @{}

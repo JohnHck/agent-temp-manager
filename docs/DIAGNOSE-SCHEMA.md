@@ -132,6 +132,13 @@ not counted, so the totals are complete only when `agent-processes` is conclusiv
 by the observed sources and a conclusive `agent-processes`, the sums are `0`; otherwise an unread value is `null`,
 never `0`.
 
+`agent-processes` is not conclusive when a source of agent discovery has a gap. A reason names each gap:
+* `SESSION_REGISTRY_INCOMPLETE`: a session registry could not be read;
+* `COMMAND_LINE_MARKER_UNAVAILABLE`: a provider's command-line marker could not be checked;
+* `LEGACY_SNAPSHOT_UNAVAILABLE`: the V0.1 process snapshot is missing, failed or empty;
+* `PATH_REFERENCES_INCOMPLETE` (O2): some command lines could not be read, so path references may be missing and an
+  agent seen only through one may not be listed. It applies even when no candidate was found.
+
 | Field | Type | Meaning |
 |---|---|---|
 | `collected` | boolean | `false` when the runtime was not observed (deadline); the other fields are then `null` or empty. |

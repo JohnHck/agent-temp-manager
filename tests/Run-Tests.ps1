@@ -4109,6 +4109,13 @@ try {
     $b4SKey = { param([string]$Provider, [string]$SessionId) ConvertTo-AtmSessionKey -Pseudonymizer $b4Pz -Provider $Provider -ProfileSid '' -ProfilePath '' -SessionId $SessionId }
     $b4PKey = { param([string]$Path) ConvertTo-AtmPartitionKey -Pseudonymizer $b4Pz -Provider 'claude-code' -Path $Path }
     $b4State = { param($Result, [string]$Key) $f = @($Result.Findings | Where-Object { $_.Key -ceq $Key }); if ($f.Count -eq 1) { $f[0].State } elseif ($f.Count -eq 0) { '(none)' } else { "(x$($f.Count))" } }
+    # O2: the V0.1 snapshot of the same rows. Every command line readable unless its PID is in -Unreadable (that process
+    # is then Uninspectable, as for another account's or a protected process). Cases that mean "every source complete"
+    # pass it: without a V0.1 snapshot the path-reference source is a gap of agent-processes.
+    $b4Legacy = { param($Rows, [long[]]$Unreadable = @())
+        $lp = @($Rows | ForEach-Object { [pscustomobject]@{ Pid = [int]$_.ProcessId; Name = [string]$_.Name; ParentPid = [int]$_.ParentProcessId; CommandLine = $(if ($Unreadable -contains [long]$_.ProcessId) { $null } else { [string]$_.Name }); CreationUtc = $_.CreationDate } })
+        $u = @($lp | Where-Object { -not $_.CommandLine }).Count
+        [pscustomobject]@{ Failed = $false; Error = $null; Processes = $lp; Total = $lp.Count; Readable = $lp.Count - $u; Uninspectable = $u; UninspectableByName = @{} } }
     Test-Case 'Diagnose' 'Estados de ausencia (P1-B4-b): SESSION_PROCESS_NOT_FOUND so com cobertura conclusiva; sem cobertura ou com qualquer status nao conclusivo vira UNKNOWN' {
         $exercised = @{}
         foreach ($kind in $script:AtmFindingKinds) {
@@ -4244,7 +4251,8 @@ try {
         foreach ($s in $sess.Keys) { Assert-Eq (& $b4State $res (& $b4SKey 'claude-code' $s)) $sess[$s] "sessao $s" }
         $ac = @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0]
         Assert-Eq $ac.Status 'PARTIAL' 'cobertura de processos de agentes parcial (marcador indisponivel, referencia nao verificada)'
-        Assert-Eq (@($ac.Reasons | Sort-Object) -join ',') 'COMMAND_LINE_MARKER_UNAVAILABLE,PATH_REFERENCE_UNVERIFIED' 'motivos'
+        # O2: process 6002 has no readable command line in the V0.1 snapshot, so the path references may be incomplete.
+        Assert-Eq (@($ac.Reasons | Sort-Object) -join ',') 'COMMAND_LINE_MARKER_UNAVAILABLE,PATH_REFERENCE_UNVERIFIED,PATH_REFERENCES_INCOMPLETE' 'motivos'
         Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'sessions-claude-code' })[0].Status 'COMPLETE' 'registro de sessoes completo'
         # Resources per agent tree: partial counters stay partial (never 0), and so does an unsampled CPU.
         $t = @($res.Trees | Where-Object { $_.RootKey -ceq $k[2000] })[0]
@@ -4282,7 +4290,7 @@ try {
         # only because the collection is COMPLETE, and no finding says "not running".
         $noneRows = @((& $b4Row 4 0 'System' $b4T0.AddHours(-1)), (& $b4Row 100 4 'app.exe' $b4T0))
         $none = Get-AtmProcessCollection -Source ({ $noneRows }.GetNewClosure())
-        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $none -ProviderHints $claude -SessionRegistries $emptyReg
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $none -ProviderHints $claude -SessionRegistries $emptyReg -LegacySnapshot (& $b4Legacy $noneRows)
         Assert-Eq @($res.Findings).Count 0 'sem agente: nenhum achado'
         Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0].Status 'COMPLETE' 'sem agente: coleta completa sem candidatos'
         Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'sessions-claude-code' })[0].Status 'COMPLETE' 'sem agente: registro vazio'
@@ -4363,7 +4371,7 @@ try {
         }
         foreach ($n in $cases.Keys) {
             $v = $cases[$n]
-            $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $v[0] -ProviderHints $v[1] -SessionRegistries $v[2]
+            $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $v[0] -ProviderHints $v[1] -SessionRegistries $v[2] -LegacySnapshot (& $b4Legacy $partialRows)
             $ac = @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0]
             $sc = @($res.Coverage | Where-Object { $_.Collector -eq 'sessions-claude-code' })
             Assert-Eq $ac.Status $v[3] "$($n): agent-processes"
@@ -4622,7 +4630,7 @@ try {
         $second = Get-AtmProcessCollection -Source ({ $exitedRows }.GetNewClosure())
         Assert-Eq $second.Coverage.Status 'COMPLETE' 'segunda coleta completa'
         $cpu = Measure-AtmProcessCpu -First $c -Second $second -ElapsedMs 500
-        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -Second $second -ProviderHints $claude -SessionRegistries $regs -Cpu $cpu
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $c -Second $second -ProviderHints $claude -SessionRegistries $regs -Cpu $cpu -LegacySnapshot (& $b4Legacy $b4cRows)
         $hasExit = { param($Key) @(@($res.Findings | Where-Object { $_.Key -ceq $Key })[0].Evidence | Where-Object { $_.Code -eq 'PROCESS_EXITED_DURING_RUN' }).Count -eq 1 }
         Assert-True ((& $hasExit (& $b4Key 203 $b4T0.AddMinutes(3))) -and (& $hasExit (& $b4Key 202 $b4T0.AddMinutes(2)))) 'processos encerrados entre coletas completas: evidencia de saida'
         Assert-True (-not (& $hasExit (& $b4Key 200 $b4T0))) 'processo presente: sem evidencia de saida'
@@ -4649,7 +4657,7 @@ try {
         # No agent process: 0 only with a conclusive discovery; otherwise null.
         $noAgent = @($b4cRows | Where-Object { $_.Name -ne 'claude.exe' })
         $cn = Get-AtmProcessCollection -Source ({ $noAgent }.GetNewClosure())
-        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $cn -ProviderHints $claude
+        $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $cn -ProviderHints $claude -LegacySnapshot (& $b4Legacy $noAgent)
         Assert-True ($res.Totals.Processes -eq 0 -and $res.Totals.Complete -and $res.Totals.Counters.WorkingSetBytes.Sum -eq 0 -and $res.Totals.Counters.CpuPercent.Sum -eq 0) 'nenhum processo identificado com cobertura conclusiva: 0'
         $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $cn -ProviderHints @(& $b4Hints 'claude-code' @([pscustomobject]@{ ImageName = 'claude.exe'; CommandLineMarker = $null }) 'FAILED')
         Assert-True ($res.Totals.Processes -eq 0 -and -not $res.Totals.Complete -and $null -eq $res.Totals.Counters.WorkingSetBytes.Sum -and @($res.Totals.Reasons) -contains 'AGENT_PROCESSES_INCOMPLETE') 'nenhum processo com descoberta inconclusiva: nulo, nunca 0'
@@ -4658,6 +4666,94 @@ try {
         $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $failed -ProviderHints $claude -SessionRegistries $regs
         Assert-Eq (@($res.Coverage | ForEach-Object { $_.Collector + '=' + $_.Status }) -join ',') 'sessions-claude-code=COMPLETE,agent-processes=FAILED,agent-resources=FAILED' 'coleta com falha: um registro por coletor'
         Assert-True ($null -eq $res.Totals.Counters.WorkingSetBytes.Sum) 'coleta com falha: totais nulos'
+    }
+    Test-Case 'Diagnose' 'O2: lacunas da fonte de referencias de caminho (linhas de comando da V0.1) entram em agent-processes mesmo sem candidato; zero completo so com todas as fontes completas; agent-resources nulo; indice da TUI, relatorio e JSON (sinteticos)' {
+        # Synthetic inputs only: no process is started or inspected. These show the composition of the coverage; they do
+        # not show that a real hidden agent was missed.
+        $claude = @(& $b4Hints 'claude-code' @([pscustomobject]@{ ImageName = 'claude.exe'; CommandLineMarker = $null }))
+        $desk = @(& $b4Hints 'claude-desktop' @([pscustomobject]@{ ImageName = 'claude.exe'; CommandLineMarker = 'pzs8sxrjxfjjc' }))
+        $okReg = { param($Entries) @([pscustomobject]@{ ProviderId = 'claude-code'; Registry = [pscustomobject]@{ Readable = $true; Unparseable = 0; Entries = @($Entries) }; Error = $null }) }
+        $badReg = @([pscustomobject]@{ ProviderId = 'claude-code'; Registry = [pscustomobject]@{ Readable = $false; Unparseable = 0; Entries = @() }; Error = $null })
+        $procCov = { param($Legacy) if ($null -ne $Legacy -and -not $Legacy.Failed -and $Legacy.Uninspectable -gt 0) { New-AtmCoverage -Collector 'processes' -Status 'PARTIAL' -Reasons @('UNINSPECTABLE_PROCESSES') -ElevationWouldHelp 'YES' } else { New-AtmCoverage -Collector 'processes' -Status 'COMPLETE' -ElevationWouldHelp 'NO' } }
+        $sys = & $b4Row 4 0 'System' $b4T0.AddHours(-1)
+        $r = @{
+            S1 = @($sys, (& $b4Row 100 4 'claude.exe' $b4T0)); S2 = @($sys, (& $b4Row 200 4 'app.exe' $b4T0)); S3 = @($sys, (& $b4Row 300 4 'node.exe' $b4T0))
+            S4 = @($sys, (& $b4Row 400 4 'claude.exe' $b4T0)); S5 = @($sys, (& $b4Row 500 4 'node.exe' $b4T0), (& $b4Row 501 4 'node.exe' $b4T0)); S6 = @($sys, (& $b4Row 600 4 'node.exe' $b4T0))
+            S7 = @($sys, (& $b4Row 700 4 'claude.exe' $b4T0), (& $b4Row 701 4 'node.exe' $b4T0)) }
+        $failedLegacy = [pscustomobject]@{ Failed = $true; Error = 'x'; Processes = @(); Total = 0; Readable = 0; Uninspectable = 0; UninspectableByName = @{} }
+        $emptyLegacy = [pscustomobject]@{ Failed = $false; Error = $null; Processes = @(); Total = 0; Readable = 0; Uninspectable = 0; UninspectableByName = @{} }
+        # Name = rows, hints, registries, V0.1 snapshot, extra inventory records, agent-processes status, exact reasons, agent processes (key pid -> state)
+        $cases = [ordered]@{
+            'S1 agente pela imagem, fontes completas'           = @($r.S1, $claude, (& $okReg @()), (& $b4Legacy $r.S1), @(), 'COMPLETE', '', @{ 100 = 'AGENT_PROCESS' })
+            'S2 sem agente, fontes completas (zero completo)'   = @($r.S2, $claude, (& $okReg @()), (& $b4Legacy $r.S2), @(), 'COMPLETE', '', @{})
+            'S3 linha de comando ilegivel, nenhum candidato'     = @($r.S3, $claude, (& $okReg @()), (& $b4Legacy $r.S3 @(300)), @(), 'PARTIAL', 'PATH_REFERENCES_INCOMPLETE', @{})
+            'S4 observado mas nao classificavel'                 = @($r.S4, @($claude + $desk), (& $okReg @()), (& $b4Legacy $r.S4 @(400)), @(), 'PARTIAL', 'COMMAND_LINE_MARKER_UNAVAILABLE,PATH_REFERENCES_INCOMPLETE', @{ 400 = 'AGENT_PROCESS' })
+            'S5 sessao com PID + processo nao inspecionavel'     = @($r.S5, $claude, (& $okReg @([pscustomobject]@{ SessionId = 'o2s5'; Pid = 500; StartUtc = $b4T0 })), (& $b4Legacy $r.S5 @(501)), @(), 'PARTIAL', 'PATH_REFERENCES_INCOMPLETE', @{ 500 = 'AGENT_PROCESS' })
+            'S6 registro ilegivel + linha ilegivel'              = @($r.S6, $claude, $badReg, (& $b4Legacy $r.S6 @(600)), @(), 'PARTIAL', 'PATH_REFERENCES_INCOMPLETE,SESSION_REGISTRY_INCOMPLETE', @{})
+            'S7 agente identificado junto de lacuna'             = @($r.S7, $claude, (& $okReg @()), (& $b4Legacy $r.S7 @(701)), @(), 'PARTIAL', 'PATH_REFERENCES_INCOMPLETE', @{ 700 = 'AGENT_PROCESS' })
+            'L1 fotografia V0.1 ausente'                         = @($r.S2, $claude, (& $okReg @()), $null, @(), 'PARTIAL', 'LEGACY_SNAPSHOT_UNAVAILABLE', @{})
+            'L2 fotografia V0.1 com falha, sem referencias'      = @($r.S2, $claude, (& $okReg @()), $failedLegacy, @(), 'PARTIAL', 'LEGACY_SNAPSHOT_UNAVAILABLE', @{})
+            'L3 fotografia V0.1 vazia (sem falha declarada)'     = @($r.S2, $claude, (& $okReg @()), $emptyLegacy, @(), 'PARTIAL', 'LEGACY_SNAPSHOT_UNAVAILABLE', @{})
+            'L4 registro processes nao concluido com Uninspectable 0 (defensivo)' = @($r.S2, $claude, (& $okReg @()), (& $b4Legacy $r.S2), @(New-AtmCoverage -Collector 'processes' -Status 'FAILED' -Reasons @('PROCESS_SNAPSHOT_FAILED')), 'PARTIAL', 'PATH_REFERENCES_INCOMPLETE', @{})
+        }
+        $byName = @{}
+        foreach ($n in $cases.Keys) {
+            $v = $cases[$n]; $rows = $v[0]
+            $col = Get-AtmProcessCollection -Source ({ $rows }.GetNewClosure())
+            $inv = @($v[4]); if ($inv.Count -eq 0) { $inv = @(& $procCov $v[3]) }
+            $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $col -ProviderHints $v[1] -SessionRegistries $v[2] -LegacySnapshot $v[3] -InventoryCoverage $inv
+            $byName[$n] = $res
+            $ac = @($res.Coverage | Where-Object { $_.Collector -ceq 'agent-processes' })[0]
+            # Composition: status and the exact reasons (each once).
+            Assert-True ($ac.Status -ceq $v[5] -and (@($ac.Reasons) -join ',') -ceq $v[6]) "$($n): agent-processes $($ac.Status) [$(@($ac.Reasons) -join ',')]"
+            # Matcher and sources: the agents found stay, none is made up for a gap.
+            $procs = @($res.Findings | Where-Object { $_.Kind -ceq 'Process' -and $_.State -cne 'SELF' })
+            Assert-Eq $procs.Count $v[7].Count "$($n): processos de agente"
+            foreach ($pid0 in $v[7].Keys) { Assert-Eq (& $b4State $res (& $b4Key $pid0 $b4T0)) $v[7][$pid0] "$($n): processo $pid0" }
+            # agent-resources: with no agent process, 0 only when agent-processes is conclusive; otherwise null, never 0.
+            if ($v[7].Count -eq 0) {
+                $t = $res.Totals
+                if ($v[5] -ceq 'COMPLETE') { Assert-True ($t.Complete -and $t.Counters.WorkingSetBytes.Sum -eq 0 -and $t.Counters.CpuPercent.Sum -eq 0) "$($n): zero completo valido" }
+                else { Assert-True (-not $t.Complete -and $null -eq $t.Counters.WorkingSetBytes.Sum -and $null -eq $t.Counters.CpuPercent.Sum -and @($t.Reasons) -ccontains 'AGENT_PROCESSES_INCOMPLETE') "$($n): agent-resources nulo e incompleto, nunca zero" }
+            }
+        }
+        $s4 = @($byName['S4 observado mas nao classificavel'].Findings | Where-Object { $_.Key -ceq (& $b4Key 400 $b4T0) })[0]
+        Assert-True ($null -eq $s4.Provider -and @($s4.Evidence | Where-Object { $_.Code -ceq 'COMMAND_LINE_MARKER_UNAVAILABLE' }).Count -eq 1) 'S4: atribuicao nao resolvida e marcador indisponivel como evidencia'
+        Assert-True (@(@($byName['S7 agente identificado junto de lacuna'].Findings | Where-Object { $_.Key -ceq (& $b4Key 700 $b4T0) })[0].Evidence | Where-Object { $_.Code -ceq 'PROCESS_MATCHER_IMAGE' }).Count -eq 1) 'S7: agente mantido com sua evidencia'
+        # Presentation (TUI index): the asterisk of the agent category follows agent-processes.
+        $star = { param($Res, $Rows, $Legacy) $c0 = Get-AtmProcessCollection -Source ({ $Rows }.GetNewClosure()); $view = [pscustomobject]@{ findings = @($Res.Findings); coverage = @(@($c0.Coverage) + @($Res.Coverage) + @(& $procCov $Legacy)); graph = [pscustomobject]@{ nodes = @(); edges = @() }; finishedUtc = $b4T0; coverageComplete = $false }; (New-AtmTuiDiagIndex -View $view).Gap['procs'] }
+        Assert-True ($null -eq (& $star $byName['S2 sem agente, fontes completas (zero completo)'] $r.S2 (& $b4Legacy $r.S2))) 'TUI: categoria sem * so com fontes completas (S2)'
+        foreach ($n in @('S3 linha de comando ilegivel, nenhum candidato', 'S5 sessao com PID + processo nao inspecionavel', 'S7 agente identificado junto de lacuna')) {
+            $key = ($n -split ' ')[0]; $g = & $star $byName[$n] $r[$key] (& $b4Legacy $r[$key] @(300, 501, 701))
+            Assert-True ($null -ne $g -and $g.Status -like '*agent-processes=PARTIAL*' -and $g.Reasons -like '*PATH_REFERENCES_INCOMPLETE*') "TUI: $key com * ($($g.Status); $($g.Reasons))"
+        }
+        # Integrated diagnose (fixture profile, injected processes): JSON and report, both languages; then the contrast with
+        # every command line readable.
+        $po = New-TestProfile 'o2int'
+        $irows = @($sys, (& $b4Row 1000 4 'explorer.exe' $b4T0.AddMinutes(-30)), (& $b4Row 2100 1000 'node.exe' $b4T0), (& $b4Row 3000 1000 'powershell.exe' $b4T0.AddMinutes(5)))
+        $isrc = { $irows }.GetNewClosure()
+        $ilegacy = { param([long[]]$Unreadable) @($irows | ForEach-Object { [pscustomobject]@{ ProcessId = $_.ProcessId; Name = $_.Name; ParentProcessId = $_.ParentProcessId; CommandLine = $(if ($Unreadable -contains [long]$_.ProcessId) { $null } else { [string]$_.Name }); CreationDate = $_.CreationDate } }) }
+        $diag = { param($Procs) Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($po) -Procs $Procs) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0]) -ProcessSource $isrc -SelfPid 3000 -SelfCreationUtc $b4T0.AddMinutes(5) -PseudonymKey $testPseudonymKey }
+        $dGap = & $diag (& $ilegacy @(2100))
+        $dOk = & $diag (& $ilegacy @())
+        $apOf = { param($D) @($D.Coverage | Where-Object { $_.Collector -ceq 'agent-processes' })[0] }
+        Assert-True ((& $apOf $dGap).Status -ceq 'PARTIAL' -and @((& $apOf $dGap).Reasons) -ccontains 'PATH_REFERENCES_INCOMPLETE') "diagnose integrado com linha ilegivel: agent-processes $((& $apOf $dGap).Status) [$(@((& $apOf $dGap).Reasons) -join ',')]"
+        Assert-True ((& $apOf $dOk).Status -ceq 'COMPLETE') "diagnose integrado com todas as linhas legiveis: agent-processes $((& $apOf $dOk).Status) [$(@((& $apOf $dOk).Reasons) -join ',')]"
+        $old = Get-AtmLanguage
+        try {
+            Set-AtmLanguage -Requested 'en-US'
+            $jGap = ConvertTo-AtmDiagnoseJson -Result $dGap | ConvertFrom-Json; $jOk = ConvertTo-AtmDiagnoseJson -Result $dOk | ConvertFrom-Json
+            $tEn = (Show-AtmDiagnose -Result $dGap 6>&1 | Out-String) -replace '\s+', ' '
+            Set-AtmLanguage -Requested 'pt-BR'
+            $tPt = (Show-AtmDiagnose -Result $dGap 6>&1 | Out-String) -replace '\s+', ' '
+        } finally { Set-AtmLanguage -Requested $old }
+        $jap = @($jGap.coverage | Where-Object { $_.collector -ceq 'agent-processes' })[0]
+        Assert-True ($jap.status -ceq 'PARTIAL' -and @($jap.reasons) -ccontains 'PATH_REFERENCES_INCOMPLETE') 'JSON: agent-processes PARTIAL com o motivo'
+        Assert-True ($jGap.agentResources.collected -and -not $jGap.agentResources.complete -and $jGap.agentResources.processes -eq 0 -and $null -eq $jGap.agentResources.counters.workingSetBytes.sum -and @($jGap.agentResources.reasons) -ccontains 'AGENT_PROCESSES_INCOMPLETE') 'JSON: agentResources sem zero completo (nulo, incompleto)'
+        Assert-True ($jOk.agentResources.complete -and $jOk.agentResources.counters.workingSetBytes.sum -eq 0) 'JSON: contraste com todas as linhas legiveis: zero completo'
+        Assert-True ($tEn.Contains('PATH_REFERENCES_INCOMPLETE') -and $tEn.Contains('some command lines could not be read')) 'relatorio en-US: codigo e texto do motivo'
+        Assert-True ($tPt.Contains('PATH_REFERENCES_INCOMPLETE') -and $tPt.Contains('algumas linhas de comando não puderam ser lidas')) 'relatorio pt-BR: codigo e texto do motivo'
+        $script:caseNote = "sinteticos: $($cases.Count) composicoes + TUI + diagnose integrado (JSON e relatorio); nenhum agente oculto real demonstrado"
     }
     Test-Case 'Diagnose' 'Prazo (P1-B4-c): prazo zero deixa todos os coletores de runtime TIMEOUT e agentResources nao coletado; prazo curto nunca vira COMPLETE nem 0' {
         $p = New-TestProfile 'b4cdl'
