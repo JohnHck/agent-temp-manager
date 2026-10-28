@@ -835,7 +835,7 @@ $script:AtmRuntimeReasonCodes = @(
     'DEADLINE_EXCEEDED', 'PROCESS_SNAPSHOT_TIMEOUT', 'PROCESS_SNAPSHOT_FAILED', 'PROCESS_SNAPSHOT_EMPTY', 'PROCESS_LIMIT_EXCEEDED',
     'PARENT_ID_UNREADABLE', 'PROCESS_NAME_UNREADABLE', 'CREATION_TIME_UNREADABLE', 'DUPLICATE_PID', 'MALFORMED_PROCESS_RECORDS',
     'PROCESS_SNAPSHOT_UNAVAILABLE', 'PROCESS_SNAPSHOT_INCOMPLETE', 'PROVIDER_HINTS_INCOMPLETE', 'IDENTITY_UNVERIFIED_CANDIDATES',
-    'COMMAND_LINE_MARKER_UNAVAILABLE', 'SESSION_REGISTRY_INCOMPLETE', 'LEGACY_SNAPSHOT_UNAVAILABLE', 'PATH_REFERENCE_UNVERIFIED', 'PATH_REFERENCES_INCOMPLETE', 'PATH_REFERENCE_BASES_INCOMPLETE',
+    'COMMAND_LINE_MARKER_UNAVAILABLE', 'SESSION_REGISTRY_INCOMPLETE', 'LEGACY_SNAPSHOT_UNAVAILABLE', 'PATH_REFERENCE_UNVERIFIED', 'PATH_REFERENCES_INCOMPLETE', 'PATH_REFERENCE_BASES_INCOMPLETE', 'AGENT_DISCOVERY_HEURISTIC',
     'TREE_INCOMPLETE', 'NO_RUNTIME_EVIDENCE_SOURCE', 'SESSION_REGISTRY_PROVIDER_INVALID', 'SESSION_REGISTRY_FAILED',
     'SESSION_REGISTRY_UNREADABLE', 'SESSION_ENTRIES_UNPARSEABLE', 'SESSION_KEY_COLLISION', 'SESSION_ENTRIES_CONFLICT',
     'INVENTORY_UNAVAILABLE', 'AGENT_PROCESSES_INCOMPLETE', 'MEMBER_NOT_COLLECTED', 'CPU_NOT_SAMPLED', 'COUNTERS_UNREADABLE',
@@ -1267,7 +1267,16 @@ function Get-AtmAgentRuntimeFindingsRun {
         $rs = @(Get-AtmSortedCodes $reasons)
         # Nothing was searched (no matcher, no session registry, no path reference): not observable, never "no agent".
         if ($matcherCount -eq 0 -and $registries.Count -eq 0 -and $refPids.Count -eq 0) { $agentCov = New-AtmCoverage -Collector 'agent-processes' -Status 'NOT_OBSERVABLE' -Reasons (@('NO_RUNTIME_EVIDENCE_SOURCE') + $rs) -ElevationWouldHelp 'NO' }
-        else { $agentCov = New-AtmCoverage -Collector 'agent-processes' -Status $(if ($rs.Count -gt 0) { 'PARTIAL' } else { 'COMPLETE' }) -Reasons $rs -ElevationWouldHelp $(if ($rs.Count -eq 0) { 'NO' } else { 'UNKNOWN' }) -Observed $agentKeys.Count }
+        else {
+            # The discovery is heuristic: provider image names, session registries, and path references written in a form
+            # the matcher recognizes (an absolute base, long or 8.3). A collection that finished with every input read
+            # shows which agents were found, never that every agent was: a reference in a form not recognized (relative,
+            # an environment variable, '..', mixed forms, an administrative share) is not seen at all, so its absence
+            # cannot be detected either. No source here can prove an exhaustive discovery, so agent-processes is never
+            # COMPLETE. The agents found stay, nothing is made up, and the specific reasons above are kept.
+            $ars = @(Get-AtmSortedCodes (@($rs) + @('AGENT_DISCOVERY_HEURISTIC')))
+            $agentCov = New-AtmCoverage -Collector 'agent-processes' -Status 'PARTIAL' -Reasons $ars -ElevationWouldHelp $(if ($rs.Count -eq 0) { 'NO' } else { 'UNKNOWN' }) -Observed $agentKeys.Count
+        }
         $coverage.Add($agentCov)
         $pcov = @($snapCov, $agentCov)
         foreach ($k in $selfSet.Keys) {

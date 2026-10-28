@@ -413,10 +413,19 @@ called by `Invoke-AtmGitCommand`):
     a count that is missing (a failed snapshot evaluated nothing), not a whole number or negative gives
     `PATH_REFERENCE_UNVERIFIED`; a reference attached to at least one partition is not counted. Matching, traversal,
     classification and eligibility are unchanged.
-  * **Limit of the matcher.** Path references are found only where a command line holds an audited base in its long
-    or 8.3 form. A relative path, an environment variable, a `..` segment, a path mixing long and 8.3 components or an
-    administrative share is not recognized, so such a reference is neither attached nor counted.
-  * `temp-profiles` and the V0.1 coverage do not count a refused base either; the profile is labelled "not audited".
+  * **Heuristic discovery (R20).** Path references are found only where a command line holds an audited base, as one
+    unbroken text, in its long or 8.3 form. A relative path, an environment variable, a `..` segment that breaks the
+    base text, a path mixing long and 8.3 components or an administrative share is not recognized: such a reference is
+    neither attached nor counted, and its absence cannot be detected either. (A `..` right after the base is an
+    unresolved name: ambiguous, reported.) The matcher is not extended, and nothing resolves the working directory or
+    environment of another process. Instead, the limitation is declared on every run where a source was searched:
+    `agent-processes` always carries `AGENT_DISCOVERY_HEURISTIC` and is never `COMPLETE`, also when every input was read,
+    beside any specific reason. A finished collection shows which agents were found, never that every agent was. The
+    agents found and their evidence stay, nothing is made up, and `agent-resources` never reports a complete zero
+    (with no agent found its sums are `null`; with agents, the sums of what was read, not complete). Consequently the
+    diagnose `coverageComplete` is always `false`. Tested on synthetic forms; a real hidden agent was not demonstrated.
+  * `temp-profiles` and the V0.1 coverage do not count a refused base either; the profile is labelled "not audited", while
+    the V0.1 coverage can read complete. Open, to be fixed before publication (separate change).
 * **Allocation** is an estimate (cluster rounding; MFT-resident files overestimated).
 * **Discovery visibility** (V0.2 P4-B: now reported, still a limit): if the `ProfilesDirectory` value of the Windows
   profile list cannot be resolved or listed, folders under it that have no profile-list entry (residual profiles) are

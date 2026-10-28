@@ -4259,7 +4259,8 @@ try {
         $ac = @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0]
         Assert-Eq $ac.Status 'PARTIAL' 'cobertura de processos de agentes parcial (marcador indisponivel, referencia nao verificada)'
         # O2: process 6002 has no readable command line in the V0.1 snapshot, so the path references may be incomplete.
-        Assert-Eq (@($ac.Reasons | Sort-Object) -join ',') 'COMMAND_LINE_MARKER_UNAVAILABLE,PATH_REFERENCE_UNVERIFIED,PATH_REFERENCES_INCOMPLETE' 'motivos'
+        # The discovery is heuristic (R20): its limitation is always a reason of agent-processes, beside the specific ones.
+        Assert-Eq (@($ac.Reasons | Sort-Object) -join ',') 'AGENT_DISCOVERY_HEURISTIC,COMMAND_LINE_MARKER_UNAVAILABLE,PATH_REFERENCE_UNVERIFIED,PATH_REFERENCES_INCOMPLETE' 'motivos'
         Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'sessions-claude-code' })[0].Status 'COMPLETE' 'registro de sessoes completo'
         # Resources per agent tree: partial counters stay partial (never 0), and so does an unsampled CPU.
         $t = @($res.Trees | Where-Object { $_.RootKey -ceq $k[2000] })[0]
@@ -4293,13 +4294,15 @@ try {
         Assert-Eq @($res.Findings | Where-Object { $_.Kind -eq 'Process' }).Count 0 'coleta com falha: nenhum processo afirmado'
         Assert-Eq (& $b4State $res (& $b4SKey 'claude-code' 's3')) 'UNKNOWN' 'coleta com falha: sessao UNKNOWN'
         Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0].Status 'FAILED' 'cobertura FAILED'
-        # Agent not installed: no process, empty registry. Nothing is claimed about the agent; coverage is conclusive
-        # only because the collection is COMPLETE, and no finding says "not running".
+        # Agent not installed: no process, empty registry. Nothing is claimed about the agent and no finding says "not
+        # running". Every input was read, but the discovery is heuristic (R20): agent-processes is PARTIAL with that
+        # limitation as its only reason (it was COMPLETE before the heuristic-discovery contract).
         $noneRows = @((& $b4Row 4 0 'System' $b4T0.AddHours(-1)), (& $b4Row 100 4 'app.exe' $b4T0))
         $none = Get-AtmProcessCollection -Source ({ $noneRows }.GetNewClosure())
         $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $none -ProviderHints $claude -SessionRegistries $emptyReg -LegacySnapshot (& $b4Legacy $noneRows) -InventoryCoverage $b4InvCov -BaseStatuses @() -UnattachedReferences 0
         Assert-Eq @($res.Findings).Count 0 'sem agente: nenhum achado'
-        Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0].Status 'COMPLETE' 'sem agente: coleta completa sem candidatos'
+        $ac0 = @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0]
+        Assert-True ($ac0.Status -ceq 'PARTIAL' -and (@($ac0.Reasons) -join ',') -ceq 'AGENT_DISCOVERY_HEURISTIC' -and $ac0.ElevationWouldHelp -ceq 'NO') "sem agente: entradas lidas sem candidatos, so a limitacao da heuristica ($($ac0.Status) [$(@($ac0.Reasons) -join ',')] $($ac0.ElevationWouldHelp))"
         Assert-Eq @($res.Coverage | Where-Object { $_.Collector -eq 'sessions-claude-code' })[0].Status 'COMPLETE' 'sem agente: registro vazio'
         # The real provider without the agent installed (no config directory): readable, no entries.
         $np = New-TestProfile 'b4none' -NoConfig
@@ -4366,13 +4369,13 @@ try {
         $svcOnly = [pscustomobject]@{ ProviderId = 'fake-svc'; ProcessMatchers = @(); ServiceHints = @([pscustomobject]@{ Name = 'FakeSvc'; Role = $null }); VirtualizationHints = @(); Coverage = (New-AtmCoverage -Collector 'provider-fake-svc' -Status 'COMPLETE') }
         # Name = (collection, hints, registries, agent-processes status, required reason, sessions status, 200 state, s9 state)
         $cases = [ordered]@{
-            'registro completo com sessao valida' = @($c, $claude, (& $reg $true 0 @($live, $gone) $null), 'COMPLETE', $null, 'COMPLETE', 'AGENT_PROCESS', 'SESSION_PROCESS_NOT_FOUND')
-            'registro completo e vazio'           = @($c, $claude, (& $reg $true 0 @() $null), 'COMPLETE', $null, 'COMPLETE', 'AGENT_PROCESS', '(none)')
+            'registro completo com sessao valida' = @($c, $claude, (& $reg $true 0 @($live, $gone) $null), 'PARTIAL', $null, 'COMPLETE', 'AGENT_PROCESS', 'SESSION_PROCESS_NOT_FOUND')
+            'registro completo e vazio'           = @($c, $claude, (& $reg $true 0 @() $null), 'PARTIAL', $null, 'COMPLETE', 'AGENT_PROCESS', '(none)')
             'registro FAILED por excecao'         = @($c, $claude, (& $reg $true 0 @() 'IOException'), 'PARTIAL', 'SESSION_REGISTRY_INCOMPLETE', 'FAILED', 'AGENT_PROCESS', '(none)')
             'registro PARTIAL (entradas ilegiveis)' = @($c, $claude, (& $reg $true 2 @($live, $gone) $null), 'PARTIAL', 'SESSION_REGISTRY_INCOMPLETE', 'PARTIAL', 'AGENT_PROCESS', 'UNKNOWN')
             'registro nao legivel'                = @($c, $claude, (& $reg $false 0 @() $null), 'PARTIAL', 'SESSION_REGISTRY_INCOMPLETE', 'FAILED', 'AGENT_PROCESS', '(none)')
             'snapshot parcial'                    = @($cp, $claude, (& $reg $true 0 @($live, $gone) $null), 'PARTIAL', 'PROCESS_SNAPSHOT_INCOMPLETE', 'COMPLETE', 'AGENT_PROCESS', 'UNKNOWN')
-            'hints sem fonte de sessao'           = @($c, $claude, @(), 'COMPLETE', $null, '(none)', 'AGENT_PROCESS', '(none)')
+            'hints sem fonte de sessao'           = @($c, $claude, @(), 'PARTIAL', $null, '(none)', 'AGENT_PROCESS', '(none)')
             'somente servico'                     = @($c, @($svcOnly), @(), 'NOT_OBSERVABLE', 'NO_RUNTIME_EVIDENCE_SOURCE', '(none)', '(none)', '(none)')
             'somente servico, registro FAILED'    = @($c, @($svcOnly), (& $reg $true 0 @() 'IOException'), 'PARTIAL', 'SESSION_REGISTRY_INCOMPLETE', 'FAILED', '(none)', '(none)')
         }
@@ -4382,8 +4385,9 @@ try {
             $ac = @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0]
             $sc = @($res.Coverage | Where-Object { $_.Collector -eq 'sessions-claude-code' })
             Assert-Eq $ac.Status $v[3] "$($n): agent-processes"
-            if ($v[4]) { Assert-True (@($ac.Reasons) -ccontains $v[4]) "$($n): motivo $($v[4]) em $(@($ac.Reasons) -join ',')" }
-            else { Assert-Eq @($ac.Reasons).Count 0 "$($n): sem motivos" }
+            # Heuristic discovery (R20): every observable case also carries AGENT_DISCOVERY_HEURISTIC; NOT_OBSERVABLE does not.
+            if ($v[4]) { Assert-True (@($ac.Reasons) -ccontains $v[4] -and (($v[3] -ceq 'NOT_OBSERVABLE') -ne (@($ac.Reasons) -ccontains 'AGENT_DISCOVERY_HEURISTIC'))) "$($n): motivo $($v[4]) em $(@($ac.Reasons) -join ',')" }
+            else { Assert-Eq (@($ac.Reasons) -join ',') 'AGENT_DISCOVERY_HEURISTIC' "$($n): so a limitacao da heuristica" }
             Assert-Eq $(if ($sc.Count -eq 1) { $sc[0].Status } else { '(none)' }) $v[5] "$($n): sessions-claude-code"
             Assert-Eq (& $b4State $res (& $b4Key 200 $b4T0)) $v[6] "$($n): evidencia positiva do processo 200 preservada"
             Assert-Eq (& $b4State $res (& $b4SKey 'claude-code' 's9')) $v[7] "$($n): sessao com PID ausente"
@@ -4504,10 +4508,14 @@ try {
         $d = & $run $testPseudonymKey
         $k = @{}; foreach ($r in $b4cRows) { $k[[int]$r.ProcessId] = & $b4Key $r.ProcessId $r.CreationDate }
         $cs = @{}; foreach ($c in $d.Coverage) { $cs[$c.Collector] = $c }
-        foreach ($c in @('process-snapshot', 'sessions-claude-code', 'agent-processes', 'agent-resources')) { Assert-Eq $cs[$c].Status 'COMPLETE' "$c completo: $(@($cs[$c].Reasons) -join ',')" }
+        foreach ($c in @('process-snapshot', 'sessions-claude-code')) { Assert-Eq $cs[$c].Status 'COMPLETE' "$c completo: $(@($cs[$c].Reasons) -join ',')" }
+        # Heuristic discovery (R20): agent-processes was COMPLETE here; now PARTIAL with that limitation only, and
+        # agent-resources is not complete because of it alone (its sums stay, below).
+        Assert-True ($cs['agent-processes'].Status -ceq 'PARTIAL' -and (@($cs['agent-processes'].Reasons) -join ',') -ceq 'AGENT_DISCOVERY_HEURISTIC') "agent-processes: so a limitacao da heuristica ($(@($cs['agent-processes'].Reasons) -join ','))"
+        Assert-True ($cs['agent-resources'].Status -ceq 'PARTIAL' -and (@($cs['agent-resources'].Reasons) -join ',') -ceq 'AGENT_PROCESSES_INCOMPLETE') "agent-resources: so por agent-processes ($(@($cs['agent-resources'].Reasons) -join ','))"
         Assert-Eq @($d.Coverage | Where-Object { $_.Collector -like 'sessions-*' }).Count 1 'um registro de sessoes por provider (dois perfis)'
         # P1-C: working directories are not observed and open files are a sample, so a diagnose is never complete.
-        Assert-True (-not $d.CoverageComplete -and (@($d.Coverage | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status } | Where-Object { $_.Collector -notlike 'virtual*' } | ForEach-Object { $_.Collector } | Sort-Object) -join ',') -eq 'handles,process-cwd,service-properties,services,worktree-discovery') 'cobertura incompleta so por diretorios de trabalho, arquivos abertos (trava), servicos (nenhum declarado) e worktrees (trava); virtualizacao depende da maquina'
+        Assert-True (-not $d.CoverageComplete -and (@($d.Coverage | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status } | Where-Object { $_.Collector -notlike 'virtual*' } | ForEach-Object { $_.Collector } | Sort-Object) -join ',') -eq 'agent-processes,agent-resources,handles,process-cwd,service-properties,services,worktree-discovery') 'cobertura incompleta so pela descoberta heuristica de agentes, diretorios de trabalho, arquivos abertos (trava), servicos (nenhum declarado) e worktrees (trava); virtualizacao depende da maquina'
         $expect = @{ 200 = 'AGENT_PROCESS'; 202 = 'AGENT_PROCESS'; 201 = 'AGENT_DESCENDANT'; 203 = 'AGENT_DESCENDANT'; 3000 = 'SELF'; 3001 = 'SELF'; 1000 = '(none)'; 4 = '(none)' }
         foreach ($e in $expect.GetEnumerator()) { Assert-Eq (& $b4State $d $k[[int]$e.Key]) $e.Value "processo $($e.Key)" }
         # Sessions: one key per profile for the same session id; LIVE (exact identity) and absent from a complete collection.
@@ -4518,8 +4526,9 @@ try {
         Assert-Eq (& $b4State $d $k2) 'SESSION_PROCESS_NOT_FOUND' 'mesma sessao no perfil 2: PID ausente de coleta completa'
         # Totals over the union: 200, 201, 202, 203 once each (the trees of 200 and 202 overlap); SELF excluded.
         $t = $d.AgentResources
-        Assert-True ($t.Processes -eq 4 -and $t.Complete -and $t.Counters.WorkingSetBytes.Sum -eq 4000 -and $t.Counters.WorkingSetBytes.Complete) "totais da uniao: $($t.Processes) processos, $($t.Counters.WorkingSetBytes.Sum) bytes, $(@($t.Reasons) -join ',')"
-        Assert-True ($t.Counters.CpuPercent.Complete -and $t.Counters.CpuPercent.Sum -eq 0 -and $t.CpuIntervalMs -ge 400) "CPU amostrada (~500 ms): $($t.CpuIntervalMs) ms"
+        # Every counter of every member read (Known = members); not Complete only because the discovery is heuristic.
+        Assert-True ($t.Processes -eq 4 -and -not $t.Complete -and (@($t.Reasons) -join ',') -ceq 'AGENT_PROCESSES_INCOMPLETE' -and $t.Counters.WorkingSetBytes.Sum -eq 4000 -and $t.Counters.WorkingSetBytes.Known -eq 4) "totais da uniao: $($t.Processes) processos, $($t.Counters.WorkingSetBytes.Sum) bytes, $(@($t.Reasons) -join ',')"
+        Assert-True ($t.Counters.CpuPercent.Known -eq 4 -and $t.Counters.CpuPercent.Sum -eq 0 -and $t.CpuIntervalMs -ge 400) "CPU amostrada (~500 ms): $($t.CpuIntervalMs) ms"
         $naive = 0; foreach ($tree in @($d.Findings | Where-Object { $_.State -eq 'AGENT_PROCESS' })) { $naive += @(Get-AtmProcessTree -Collection (Get-AtmProcessCollection -Source $src) -RootKey $tree.Key).Members.Count }
         Assert-True ($naive -gt $t.Processes) "arvores sobrepostas somariam $naive, a uniao conta $($t.Processes)"
         # Order: temporary partitions first (V0.1 order), then runtime findings by Kind and Key (ordinal).
@@ -4539,7 +4548,7 @@ try {
         try { Set-AtmLanguage -Requested 'en-US'; $en = ConvertTo-AtmDiagnoseJson -Result $d; $txt = (Show-AtmDiagnose -Result $d 6>&1 | Out-String); Set-AtmLanguage -Requested 'pt-BR'; $pt = ConvertTo-AtmDiagnoseJson -Result $d; $txtPt = (Show-AtmDiagnose -Result $d 6>&1 | Out-String) } finally { Set-AtmLanguage -Requested $old }
         Assert-Eq ($en -replace '"language":\s*"[^"]*"', '') ($pt -replace '"language":\s*"[^"]*"', '') 'JSON identico nos dois idiomas (exceto language)'
         $j = $en | ConvertFrom-Json
-        Assert-True ($j.agentResources.collected -and $j.agentResources.processes -eq 4 -and $j.agentResources.counters.workingSetBytes.sum -eq 4000 -and $j.agentResources.counters.cpuPercent.complete) 'agentResources no JSON'
+        Assert-True ($j.agentResources.collected -and $j.agentResources.processes -eq 4 -and $j.agentResources.counters.workingSetBytes.sum -eq 4000 -and $j.agentResources.counters.cpuPercent.known -eq 4 -and -not $j.agentResources.complete) 'agentResources no JSON (todos os contadores lidos; nao completo so pela descoberta heuristica)'
         $rtJson = (@($j.findings | Where-Object { $_.kind -ne 'TempPartition' }) | ConvertTo-Json -Depth 8)
         Assert-True (-not $rtJson.Contains($sid)) 'SessionId original nunca nos achados de runtime'
         Assert-True (@($j.findings | Where-Object { $_.kind -eq 'AgentSession' -and $_.key -notmatch '^claude-code/s-[0-9a-f]{32}$' }).Count -eq 0) 'chaves de sessao pseudonimas'
@@ -4644,7 +4653,7 @@ try {
         Assert-True (& $hasExit (& $b4SKey 'claude-code' 'x1')) 'sessao viva cujo processo encerrou: evidencia desatualizada'
         Assert-Eq (& $b4State $res (& $b4Key 203 $b4T0.AddMinutes(3))) 'AGENT_DESCENDANT' 'estado mantido (evidencia, nao estado novo)'
         $t = $res.Totals
-        Assert-True (-not $t.Complete -and @($t.Reasons) -contains 'CPU_PROCESS_EXITED' -and $t.Counters.CpuPercent.Known -eq ($t.Processes - 2) -and $t.Counters.WorkingSetBytes.Complete) "CPU sem os encerrados: parcial ($(@($t.Reasons) -join ','); conhecidos $($t.Counters.CpuPercent.Known) de $($t.Processes); WS completo $($t.Counters.WorkingSetBytes.Complete); agent-processes $(@($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0].Status))"
+        Assert-True (-not $t.Complete -and @($t.Reasons) -contains 'CPU_PROCESS_EXITED' -and $t.Counters.CpuPercent.Known -eq ($t.Processes - 2) -and $t.Counters.WorkingSetBytes.Known -eq $t.Processes) "CPU sem os encerrados: parcial ($(@($t.Reasons) -join ','); conhecidos $($t.Counters.CpuPercent.Known) de $($t.Processes); WS lidos $($t.Counters.WorkingSetBytes.Known); agent-processes $(@($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0].Status))"
         # A reused PID in a PARTIAL second collection proves nothing: no exit evidence.
         $reusedRows = @($b4cRows | Where-Object { $_.ProcessId -ne 203 }) + @((& $b4Row 203 202 'node.exe' $b4T0.AddMinutes(9)), (& $b4Row 9999 4 'nodate.exe' $null))
         $partial = Get-AtmProcessCollection -Source ({ $reusedRows }.GetNewClosure())
@@ -4661,20 +4670,26 @@ try {
         Assert-True (@($res.Totals.Reasons) -contains 'CPU_NOT_SAMPLED' -and @($res.Totals.Reasons) -contains 'DEADLINE_EXCEEDED' -and $null -eq $res.Totals.CpuIntervalMs) "prazo insuficiente: $(@($res.Totals.Reasons) -join ',')"
         $rc = @($res.Coverage | Where-Object { $_.Collector -eq 'agent-resources' })[0]
         Assert-True ($rc.Status -eq 'PARTIAL' -and @($rc.Reasons) -contains 'CPU_NOT_SAMPLED') 'agent-resources parcial'
-        # No agent process: 0 only with a conclusive discovery; otherwise null.
+        # No agent process: 0 only with a conclusive discovery; otherwise null. The runtime never has a conclusive discovery
+        # any more (heuristic, R20), so with every input read the sums are null too (they were a complete 0 before); the
+        # unit contract of Get-AtmAgentResourceTotals is unchanged (a conclusive coverage still gives 0), now unreachable
+        # from the runtime.
         $noAgent = @($b4cRows | Where-Object { $_.Name -ne 'claude.exe' })
         $cn = Get-AtmProcessCollection -Source ({ $noAgent }.GetNewClosure())
         $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $cn -ProviderHints $claude -LegacySnapshot (& $b4Legacy $noAgent) -InventoryCoverage $b4InvCov -BaseStatuses @() -UnattachedReferences 0
-        Assert-True ($res.Totals.Processes -eq 0 -and $res.Totals.Complete -and $res.Totals.Counters.WorkingSetBytes.Sum -eq 0 -and $res.Totals.Counters.CpuPercent.Sum -eq 0) 'nenhum processo identificado com cobertura conclusiva: 0'
+        $acN = @($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0]
+        Assert-True ($res.Totals.Processes -eq 0 -and -not $res.Totals.Complete -and $null -eq $res.Totals.Counters.WorkingSetBytes.Sum -and $null -eq $res.Totals.Counters.CpuPercent.Sum -and (@($res.Totals.Reasons) -join ',') -ceq 'AGENT_PROCESSES_INCOMPLETE' -and (@($acN.Reasons) -join ',') -ceq 'AGENT_DISCOVERY_HEURISTIC') 'nenhum processo com todas as entradas lidas: nulo (descoberta heuristica), nunca 0'
+        $unit = Get-AtmAgentResourceTotals -Collection $cn -MemberKeys @() -AgentCoverage (New-AtmCoverage -Collector 'agent-processes' -Status 'COMPLETE')
+        Assert-True ($unit.Complete -and $unit.Counters.WorkingSetBytes.Sum -eq 0 -and $unit.Counters.CpuPercent.Sum -eq 0) 'contrato da funcao de totais: cobertura conclusiva sintetica ainda da 0 (inalcancavel pelo runtime)'
         $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $cn -ProviderHints @(& $b4Hints 'claude-code' @([pscustomobject]@{ ImageName = 'claude.exe'; CommandLineMarker = $null }) 'FAILED')
-        Assert-True ($res.Totals.Processes -eq 0 -and -not $res.Totals.Complete -and $null -eq $res.Totals.Counters.WorkingSetBytes.Sum -and @($res.Totals.Reasons) -contains 'AGENT_PROCESSES_INCOMPLETE') 'nenhum processo com descoberta inconclusiva: nulo, nunca 0'
+        Assert-True ($res.Totals.Processes -eq 0 -and -not $res.Totals.Complete -and $null -eq $res.Totals.Counters.WorkingSetBytes.Sum -and @($res.Totals.Reasons) -contains 'AGENT_PROCESSES_INCOMPLETE' -and @(@($res.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0].Reasons) -ccontains 'PROVIDER_HINTS_INCOMPLETE') 'nenhum processo com descoberta inconclusiva: nulo, nunca 0 (motivo especifico mantido)'
         # Failed collection: every runtime collector still has exactly one record.
         $failed = Get-AtmProcessCollection -Source { throw (New-Object System.InvalidOperationException 'x') }
         $res = Get-AtmAgentRuntimeFindings -Pseudonymizer $b4Pz -Collection $failed -ProviderHints $claude -SessionRegistries $regs
         Assert-Eq (@($res.Coverage | ForEach-Object { $_.Collector + '=' + $_.Status }) -join ',') 'sessions-claude-code=COMPLETE,agent-processes=FAILED,agent-resources=FAILED' 'coleta com falha: um registro por coletor'
         Assert-True ($null -eq $res.Totals.Counters.WorkingSetBytes.Sum) 'coleta com falha: totais nulos'
     }
-    Test-Case 'Diagnose' 'O2: lacunas da fonte de referencias de caminho (linhas de comando da V0.1) entram em agent-processes mesmo sem candidato; zero completo so com todas as fontes completas; agent-resources nulo; indice da TUI, relatorio e JSON (sinteticos)' {
+    Test-Case 'Diagnose' 'O2: lacunas da fonte de referencias de caminho (linhas de comando da V0.1) entram em agent-processes mesmo sem candidato; nunca zero completo (descoberta heuristica); agent-resources nulo; indice da TUI, relatorio e JSON (sinteticos)' {
         # Synthetic inputs only: no process is started or inspected. These show the composition of the coverage; they do
         # not show that a real hidden agent was missed.
         $claude = @(& $b4Hints 'claude-code' @([pscustomobject]@{ ImageName = 'claude.exe'; CommandLineMarker = $null }))
@@ -4691,17 +4706,17 @@ try {
         $emptyLegacy = [pscustomobject]@{ Failed = $false; Error = $null; Processes = @(); Total = 0; Readable = 0; Uninspectable = 0; UninspectableByName = @{} }
         # Name = rows, hints, registries, V0.1 snapshot, extra inventory records, agent-processes status, exact reasons, agent processes (key pid -> state)
         $cases = [ordered]@{
-            'S1 agente pela imagem, fontes completas'           = @($r.S1, $claude, (& $okReg @()), (& $b4Legacy $r.S1), @(), 'COMPLETE', '', @{ 100 = 'AGENT_PROCESS' })
-            'S2 sem agente, fontes completas (zero completo)'   = @($r.S2, $claude, (& $okReg @()), (& $b4Legacy $r.S2), @(), 'COMPLETE', '', @{})
-            'S3 linha de comando ilegivel, nenhum candidato'     = @($r.S3, $claude, (& $okReg @()), (& $b4Legacy $r.S3 @(300)), @(), 'PARTIAL', 'PATH_REFERENCES_INCOMPLETE', @{})
-            'S4 observado mas nao classificavel'                 = @($r.S4, @($claude + $desk), (& $okReg @()), (& $b4Legacy $r.S4 @(400)), @(), 'PARTIAL', 'COMMAND_LINE_MARKER_UNAVAILABLE,PATH_REFERENCES_INCOMPLETE', @{ 400 = 'AGENT_PROCESS' })
-            'S5 sessao com PID + processo nao inspecionavel'     = @($r.S5, $claude, (& $okReg @([pscustomobject]@{ SessionId = 'o2s5'; Pid = 500; StartUtc = $b4T0 })), (& $b4Legacy $r.S5 @(501)), @(), 'PARTIAL', 'PATH_REFERENCES_INCOMPLETE', @{ 500 = 'AGENT_PROCESS' })
-            'S6 registro ilegivel + linha ilegivel'              = @($r.S6, $claude, $badReg, (& $b4Legacy $r.S6 @(600)), @(), 'PARTIAL', 'PATH_REFERENCES_INCOMPLETE,SESSION_REGISTRY_INCOMPLETE', @{})
-            'S7 agente identificado junto de lacuna'             = @($r.S7, $claude, (& $okReg @()), (& $b4Legacy $r.S7 @(701)), @(), 'PARTIAL', 'PATH_REFERENCES_INCOMPLETE', @{ 700 = 'AGENT_PROCESS' })
-            'L1 fotografia V0.1 ausente'                         = @($r.S2, $claude, (& $okReg @()), $null, @(), 'PARTIAL', 'LEGACY_SNAPSHOT_UNAVAILABLE', @{})
-            'L2 fotografia V0.1 com falha, sem referencias'      = @($r.S2, $claude, (& $okReg @()), $failedLegacy, @(), 'PARTIAL', 'LEGACY_SNAPSHOT_UNAVAILABLE', @{})
-            'L3 fotografia V0.1 vazia (sem falha declarada)'     = @($r.S2, $claude, (& $okReg @()), $emptyLegacy, @(), 'PARTIAL', 'LEGACY_SNAPSHOT_UNAVAILABLE', @{})
-            'L4 registro processes nao concluido com Uninspectable 0 (defensivo)' = @($r.S2, $claude, (& $okReg @()), (& $b4Legacy $r.S2), @(New-AtmCoverage -Collector 'processes' -Status 'FAILED' -Reasons @('PROCESS_SNAPSHOT_FAILED')), 'PARTIAL', 'PATH_REFERENCES_INCOMPLETE', @{})
+            'S1 agente pela imagem, entradas lidas'             = @($r.S1, $claude, (& $okReg @()), (& $b4Legacy $r.S1), @(), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC', @{ 100 = 'AGENT_PROCESS' })
+            'S2 sem agente, entradas lidas (descoberta heuristica)' = @($r.S2, $claude, (& $okReg @()), (& $b4Legacy $r.S2), @(), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC', @{})
+            'S3 linha de comando ilegivel, nenhum candidato'     = @($r.S3, $claude, (& $okReg @()), (& $b4Legacy $r.S3 @(300)), @(), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCES_INCOMPLETE', @{})
+            'S4 observado mas nao classificavel'                 = @($r.S4, @($claude + $desk), (& $okReg @()), (& $b4Legacy $r.S4 @(400)), @(), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,COMMAND_LINE_MARKER_UNAVAILABLE,PATH_REFERENCES_INCOMPLETE', @{ 400 = 'AGENT_PROCESS' })
+            'S5 sessao com PID + processo nao inspecionavel'     = @($r.S5, $claude, (& $okReg @([pscustomobject]@{ SessionId = 'o2s5'; Pid = 500; StartUtc = $b4T0 })), (& $b4Legacy $r.S5 @(501)), @(), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCES_INCOMPLETE', @{ 500 = 'AGENT_PROCESS' })
+            'S6 registro ilegivel + linha ilegivel'              = @($r.S6, $claude, $badReg, (& $b4Legacy $r.S6 @(600)), @(), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCES_INCOMPLETE,SESSION_REGISTRY_INCOMPLETE', @{})
+            'S7 agente identificado junto de lacuna'             = @($r.S7, $claude, (& $okReg @()), (& $b4Legacy $r.S7 @(701)), @(), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCES_INCOMPLETE', @{ 700 = 'AGENT_PROCESS' })
+            'L1 fotografia V0.1 ausente'                         = @($r.S2, $claude, (& $okReg @()), $null, @(), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,LEGACY_SNAPSHOT_UNAVAILABLE', @{})
+            'L2 fotografia V0.1 com falha, sem referencias'      = @($r.S2, $claude, (& $okReg @()), $failedLegacy, @(), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,LEGACY_SNAPSHOT_UNAVAILABLE', @{})
+            'L3 fotografia V0.1 vazia (sem falha declarada)'     = @($r.S2, $claude, (& $okReg @()), $emptyLegacy, @(), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,LEGACY_SNAPSHOT_UNAVAILABLE', @{})
+            'L4 registro processes nao concluido com Uninspectable 0 (defensivo)' = @($r.S2, $claude, (& $okReg @()), (& $b4Legacy $r.S2), @(New-AtmCoverage -Collector 'processes' -Status 'FAILED' -Reasons @('PROCESS_SNAPSHOT_FAILED')), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCES_INCOMPLETE', @{})
         }
         $byName = @{}
         foreach ($n in $cases.Keys) {
@@ -4718,11 +4733,11 @@ try {
             $procs = @($res.Findings | Where-Object { $_.Kind -ceq 'Process' -and $_.State -cne 'SELF' })
             Assert-Eq $procs.Count $v[7].Count "$($n): processos de agente"
             foreach ($pid0 in $v[7].Keys) { Assert-Eq (& $b4State $res (& $b4Key $pid0 $b4T0)) $v[7][$pid0] "$($n): processo $pid0" }
-            # agent-resources: with no agent process, 0 only when agent-processes is conclusive; otherwise null, never 0.
+            # agent-resources: with no agent process, 0 only when agent-processes is conclusive, which the heuristic
+            # discovery never is (R20): null, never 0, also when every input was read (S2 was a complete 0 before).
             if ($v[7].Count -eq 0) {
                 $t = $res.Totals
-                if ($v[5] -ceq 'COMPLETE') { Assert-True ($t.Complete -and $t.Counters.WorkingSetBytes.Sum -eq 0 -and $t.Counters.CpuPercent.Sum -eq 0) "$($n): zero completo valido" }
-                else { Assert-True (-not $t.Complete -and $null -eq $t.Counters.WorkingSetBytes.Sum -and $null -eq $t.Counters.CpuPercent.Sum -and @($t.Reasons) -ccontains 'AGENT_PROCESSES_INCOMPLETE') "$($n): agent-resources nulo e incompleto, nunca zero" }
+                Assert-True (-not $t.Complete -and $null -eq $t.Counters.WorkingSetBytes.Sum -and $null -eq $t.Counters.CpuPercent.Sum -and @($t.Reasons) -ccontains 'AGENT_PROCESSES_INCOMPLETE') "$($n): agent-resources nulo e incompleto, nunca zero"
             }
         }
         $s4 = @($byName['S4 observado mas nao classificavel'].Findings | Where-Object { $_.Key -ceq (& $b4Key 400 $b4T0) })[0]
@@ -4730,7 +4745,9 @@ try {
         Assert-True (@(@($byName['S7 agente identificado junto de lacuna'].Findings | Where-Object { $_.Key -ceq (& $b4Key 700 $b4T0) })[0].Evidence | Where-Object { $_.Code -ceq 'PROCESS_MATCHER_IMAGE' }).Count -eq 1) 'S7: agente mantido com sua evidencia'
         # Presentation (TUI index): the asterisk of the agent category follows agent-processes.
         $star = { param($Res, $Rows, $Legacy) $c0 = Get-AtmProcessCollection -Source ({ $Rows }.GetNewClosure()); $view = [pscustomobject]@{ findings = @($Res.Findings); coverage = @(@($c0.Coverage) + @($Res.Coverage) + @(& $procCov $Legacy) + @($b4InvCov | Where-Object { @('temp-profiles', 'profile-discovery') -ccontains $_.Collector })); graph = [pscustomobject]@{ nodes = @(); edges = @() }; finishedUtc = $b4T0; coverageComplete = $false }; (New-AtmTuiDiagIndex -View $view).Gap['procs'] }
-        Assert-True ($null -eq (& $star $byName['S2 sem agente, fontes completas (zero completo)'] $r.S2 (& $b4Legacy $r.S2))) 'TUI: categoria sem * so com fontes completas (S2)'
+        # Every input read (S2): the * of the agent category carries the heuristic limitation only, never a specific gap.
+        $g2 = & $star $byName['S2 sem agente, entradas lidas (descoberta heuristica)'] $r.S2 (& $b4Legacy $r.S2)
+        Assert-True ($null -ne $g2 -and $g2.Reasons -like '*AGENT_DISCOVERY_HEURISTIC*' -and $g2.Reasons -notlike '*PATH_REFERENCES_INCOMPLETE*') "TUI: S2 com * so pela heuristica ($(if ($g2) { $g2.Reasons }))"
         foreach ($n in @('S3 linha de comando ilegivel, nenhum candidato', 'S5 sessao com PID + processo nao inspecionavel', 'S7 agente identificado junto de lacuna')) {
             $key = ($n -split ' ')[0]; $g = & $star $byName[$n] $r[$key] (& $b4Legacy $r[$key] @(300, 501, 701))
             Assert-True ($null -ne $g -and $g.Status -like '*agent-processes=PARTIAL*' -and $g.Reasons -like '*PATH_REFERENCES_INCOMPLETE*') "TUI: $key com * ($($g.Status); $($g.Reasons))"
@@ -4746,7 +4763,7 @@ try {
         $dOk = & $diag (& $ilegacy @())
         $apOf = { param($D) @($D.Coverage | Where-Object { $_.Collector -ceq 'agent-processes' })[0] }
         Assert-True ((& $apOf $dGap).Status -ceq 'PARTIAL' -and @((& $apOf $dGap).Reasons) -ccontains 'PATH_REFERENCES_INCOMPLETE') "diagnose integrado com linha ilegivel: agent-processes $((& $apOf $dGap).Status) [$(@((& $apOf $dGap).Reasons) -join ',')]"
-        Assert-True ((& $apOf $dOk).Status -ceq 'COMPLETE') "diagnose integrado com todas as linhas legiveis: agent-processes $((& $apOf $dOk).Status) [$(@((& $apOf $dOk).Reasons) -join ',')]"
+        Assert-True ((& $apOf $dOk).Status -ceq 'PARTIAL' -and (@((& $apOf $dOk).Reasons) -join ',') -ceq 'AGENT_DISCOVERY_HEURISTIC') "diagnose integrado com todas as linhas legiveis: so a limitacao da heuristica, agent-processes $((& $apOf $dOk).Status) [$(@((& $apOf $dOk).Reasons) -join ',')]"
         $old = Get-AtmLanguage
         try {
             Set-AtmLanguage -Requested 'en-US'
@@ -4758,7 +4775,8 @@ try {
         $jap = @($jGap.coverage | Where-Object { $_.collector -ceq 'agent-processes' })[0]
         Assert-True ($jap.status -ceq 'PARTIAL' -and @($jap.reasons) -ccontains 'PATH_REFERENCES_INCOMPLETE') 'JSON: agent-processes PARTIAL com o motivo'
         Assert-True ($jGap.agentResources.collected -and -not $jGap.agentResources.complete -and $jGap.agentResources.processes -eq 0 -and $null -eq $jGap.agentResources.counters.workingSetBytes.sum -and @($jGap.agentResources.reasons) -ccontains 'AGENT_PROCESSES_INCOMPLETE') 'JSON: agentResources sem zero completo (nulo, incompleto)'
-        Assert-True ($jOk.agentResources.complete -and $jOk.agentResources.counters.workingSetBytes.sum -eq 0) 'JSON: contraste com todas as linhas legiveis: zero completo'
+        Assert-True (-not $jOk.agentResources.complete -and $null -eq $jOk.agentResources.counters.workingSetBytes.sum -and (@(@($jOk.coverage | Where-Object { $_.collector -ceq 'agent-processes' })[0].reasons) -join ',') -ceq 'AGENT_DISCOVERY_HEURISTIC') 'JSON: contraste com todas as linhas legiveis: so a heuristica, agentResources nulo (era zero completo antes do contrato heuristico)'
+        Assert-True ($tEn.Contains('AGENT_DISCOVERY_HEURISTIC') -and $tEn.Contains('agent discovery is heuristic') -and $tPt.Contains('a descoberta de agentes é heurística')) 'relatorio en-US e pt-BR: codigo e texto da limitacao da heuristica'
         Assert-True ($tEn.Contains('PATH_REFERENCES_INCOMPLETE') -and $tEn.Contains('some command lines could not be read')) 'relatorio en-US: codigo e texto do motivo'
         Assert-True ($tPt.Contains('PATH_REFERENCES_INCOMPLETE') -and $tPt.Contains('algumas linhas de comando não puderam ser lidas')) 'relatorio pt-BR: codigo e texto do motivo'
         $script:caseNote = "sinteticos: $($cases.Count) composicoes + TUI + diagnose integrado (JSON e relatorio); nenhum agente oculto real demonstrado"
@@ -5138,7 +5156,10 @@ try {
         $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -PseudonymKey $testPseudonymKey
         Assert-Eq $d.SchemaVersion 'atm.diagnose/2' 'schema'
         Assert-Eq (@($d.Coverage | ForEach-Object { $_.Collector }) -join ',') 'identity,provider-claude-code,inventory,processes,temp-profiles,profile-discovery,process-snapshot,sessions-claude-code,agent-processes,agent-resources,services,service-properties,virtualization-platform,virtual-machines,virtualization-processes,worktree-discovery,process-cwd,handles,dependency-graph' 'coletores (Claude Code v2: dicas de runtime lidas; runtime de agentes da P1-B4-c; P2-A; P2-B; P1-C; P4-B: descoberta de perfis e grafo; P5-A: worktrees nao observadas com a trava fechada)'
-        foreach ($c in @($d.Coverage | Where-Object { $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' -and $_.Collector -ne 'worktree-discovery' -and $_.Collector -notlike 'service*' -and $_.Collector -notlike 'virtual*' })) { Assert-Eq $c.Status 'COMPLETE' "$($c.Collector) completo" }
+        foreach ($c in @($d.Coverage | Where-Object { $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' -and $_.Collector -ne 'worktree-discovery' -and $_.Collector -notlike 'service*' -and $_.Collector -notlike 'virtual*' -and $_.Collector -notlike 'agent-*' })) { Assert-Eq $c.Status 'COMPLETE' "$($c.Collector) completo" }
+        # Heuristic discovery (R20): agent-processes PARTIAL with that limitation only; agent-resources only because of it.
+        $apx = @($d.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0]; $arx = @($d.Coverage | Where-Object { $_.Collector -eq 'agent-resources' })[0]
+        Assert-True ($apx.Status -ceq 'PARTIAL' -and (@($apx.Reasons) -join ',') -ceq 'AGENT_DISCOVERY_HEURISTIC' -and $arx.Status -ceq 'PARTIAL' -and (@($arx.Reasons) -join ',') -ceq 'AGENT_PROCESSES_INCOMPLETE') "descoberta heuristica: agent-processes [$(@($apx.Reasons) -join ',')], agent-resources [$(@($arx.Reasons) -join ',')]"
         $hc = @($d.Coverage | Where-Object { $_.Collector -eq 'handles' })[0]; $wc = @($d.Coverage | Where-Object { $_.Collector -eq 'process-cwd' })[0]
         $sv = @($d.Coverage | Where-Object { $_.Collector -like 'service*' })
         Assert-True ($sv.Count -eq 2 -and @($sv | Where-Object { $_.Status -ceq 'NOT_OBSERVABLE' -and @($_.Reasons) -ccontains 'SERVICE_HINTS_NONE' }).Count -eq 2) 'P2-A: nenhum servico declarado pelo Claude Code: servicos NOT_OBSERVABLE, nunca ausencia'
@@ -5183,7 +5204,11 @@ try {
             Assert-Eq ([bool]$d.Inventory.CoverageComplete) $control ("$n`: Inventory.CoverageComplete (bases $(@($d.Inventory.Bases | ForEach-Object { $_.Status }) -join ','); registros legiveis $(@($d.Inventory.Registries.Values | ForEach-Object { $_.Readable }) -join ','))")
             # P1-C: process-cwd (deferred) and handles (a sample) are never complete; apart from them the control is complete.
             # P5-A: worktree-discovery (closed gate) is always NOT_OBSERVABLE too.
-            $incomplete = @($d.Coverage | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status -and $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' -and $_.Collector -ne 'worktree-discovery' -and $_.Collector -notlike 'service*' -and $_.Collector -notlike 'virtual*' })
+            # Heuristic discovery (R20): agent-processes and agent-resources are never complete either; they are checked on
+            # their own below (exact reasons), so each row still has to show its own incomplete collector here.
+            $incomplete = @($d.Coverage | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status -and $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' -and $_.Collector -ne 'worktree-discovery' -and $_.Collector -notlike 'service*' -and $_.Collector -notlike 'virtual*' -and $_.Collector -notlike 'agent-*' })
+            $apx = @($d.Coverage | Where-Object { $_.Collector -eq 'agent-processes' })[0]
+            Assert-True ($apx.Status -ceq 'PARTIAL' -and @($apx.Reasons) -ccontains 'AGENT_DISCOVERY_HEURISTIC' -and ((-not $control) -or (@($apx.Reasons) -join ',') -ceq 'AGENT_DISCOVERY_HEURISTIC')) "$n`: agent-processes [$(@($apx.Reasons) -join ',')] (controle: so a heuristica)"
             Assert-True (-not $d.CoverageComplete -and (($incomplete.Count -eq 0) -eq $control)) "$n`: diagnose incompleto; fora de process-cwd/handles, completo so no controle ($(@($incomplete | ForEach-Object { $_.Collector }) -join ','))"
             if (-not $control) {
                 $c = @($d.Coverage | Where-Object { $_.Collector -eq $row.Collector })[0]
@@ -5194,7 +5219,7 @@ try {
                 if ($n -eq 'inaccessible') { Assert-Eq @($d.Inventory.InaccessibleProfiles).Count 1 'perfil inacessivel no inventario' }
                 if ($n -eq 'unverified') { Assert-Eq @($d.Inventory.UnverifiedTempProfiles).Count 1 'TEMP nao verificavel no inventario' }
             } else {
-                foreach ($c in @($d.Coverage | Where-Object { $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' -and $_.Collector -ne 'worktree-discovery' -and $_.Collector -notlike 'service*' -and $_.Collector -notlike 'virtual*' })) { Assert-Eq $c.Status 'COMPLETE' "controle: $($c.Collector) completo" }
+                foreach ($c in @($d.Coverage | Where-Object { $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' -and $_.Collector -ne 'worktree-discovery' -and $_.Collector -notlike 'service*' -and $_.Collector -notlike 'virtual*' -and $_.Collector -notlike 'agent-*' })) { Assert-Eq $c.Status 'COMPLETE' "controle: $($c.Collector) completo" }
             }
             $j = (ConvertTo-AtmDiagnoseJson -Result $d) | ConvertFrom-Json
             Assert-Eq ([bool]$j.coverageComplete) $false "$n`: JSON coverageComplete (P1-C: nunca completo)"
@@ -7731,22 +7756,22 @@ try {
         $inacc = 'PARTIAL:PROFILES_INACCESSIBLE'
         # Name = rows, partitions, V0.1 snapshot ('ok' | $null), inventory records, agent-processes status, exact reasons, agent pids
         $cases = [ordered]@{
-            'A fontes completas, nenhum agente (zero completo valido)'    = @($rNone, @(), 'ok', (& $covOf), 'COMPLETE', '', @())
-            'B1 base inacessivel/invalida/nao enumerada (PROFILES_INACCESSIBLE), linha legivel' = @($rNode, @(), 'ok', (& $covOf @{ 'temp-profiles' = $inacc }), 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
-            'B2 TEMP redirecionado nao verificado'                        = @($rNode, @(), 'ok', (& $covOf @{ 'temp-profiles' = 'PARTIAL:TEMP_LOCATION_UNVERIFIED' }), 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
-            'B3 descoberta de perfis incompleta'                          = @($rNode, @(), 'ok', (& $covOf @{ 'profile-discovery' = 'PARTIAL:PROFILES_DIRECTORY_UNREADABLE' }), 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
-            'B4 descoberta nao observavel'                                = @($rNode, @(), 'ok', (& $covOf @{ 'profile-discovery' = 'NOT_OBSERVABLE:DISCOVERY_STATUS_UNAVAILABLE' }), 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
-            'B5 as duas lacunas (motivo uma vez)'                         = @($rNode, @(), 'ok', (& $covOf @{ 'temp-profiles' = $inacc; 'profile-discovery' = 'PARTIAL:PROFILES_DIRECTORY_UNREADABLE' }), 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
-            'C agente pela imagem junto da lacuna'                        = @($rClaude, @(), 'ok', (& $covOf @{ 'temp-profiles' = $inacc }), 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @(400))
-            'C2 agente por referencia junto da lacuna'                    = @($rRef, $pRef, 'ok', (& $covOf @{ 'temp-profiles' = $inacc }), 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @(500))
-            'D inventario ausente'                                         = @($rNone, @(), $null, @(), 'PARTIAL', 'LEGACY_SNAPSHOT_UNAVAILABLE,PATH_REFERENCE_BASES_INCOMPLETE', @())
-            'E colecao valida sem particoes'                              = @($rNone, @(), 'ok', (& $covOf), 'COMPLETE', '', @())
-            'F inventario concluido apos o prazo (inventory PARTIAL)'     = @($rNone, @(), 'ok', (& $covOf @{ 'inventory' = 'PARTIAL:DEADLINE_EXCEEDED' }), 'COMPLETE', '', @())
-            'G referencia ambigua sob base auditada'                      = @($rNode, $pAmb, 'ok', (& $covOf), 'PARTIAL', 'PATH_REFERENCE_UNVERIFIED', @())
-            'G2 referencia ambigua + agente pela imagem'                  = @($rClaude, $pAmb, 'ok', (& $covOf), 'PARTIAL', 'PATH_REFERENCE_UNVERIFIED', @(400))
-            'M1 registro temp-profiles ausente'                           = @($rNone, @(), 'ok', (& $covOf @{ 'temp-profiles' = $null }), 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
-            'M2 registro profile-discovery ausente'                       = @($rNone, @(), 'ok', (& $covOf @{ 'profile-discovery' = $null }), 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
-            'M3 so o registro processes (os dois ausentes, motivo uma vez)' = @($rNone, @(), 'ok', (& $covOf @{ 'temp-profiles' = $null; 'profile-discovery' = $null; 'inventory' = $null }), 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'A entradas lidas, nenhum agente (so a heuristica)'           = @($rNone, @(), 'ok', (& $covOf), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC', @())
+            'B1 base inacessivel/invalida/nao enumerada (PROFILES_INACCESSIBLE), linha legivel' = @($rNode, @(), 'ok', (& $covOf @{ 'temp-profiles' = $inacc }), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'B2 TEMP redirecionado nao verificado'                        = @($rNode, @(), 'ok', (& $covOf @{ 'temp-profiles' = 'PARTIAL:TEMP_LOCATION_UNVERIFIED' }), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'B3 descoberta de perfis incompleta'                          = @($rNode, @(), 'ok', (& $covOf @{ 'profile-discovery' = 'PARTIAL:PROFILES_DIRECTORY_UNREADABLE' }), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'B4 descoberta nao observavel'                                = @($rNode, @(), 'ok', (& $covOf @{ 'profile-discovery' = 'NOT_OBSERVABLE:DISCOVERY_STATUS_UNAVAILABLE' }), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'B5 as duas lacunas (motivo uma vez)'                         = @($rNode, @(), 'ok', (& $covOf @{ 'temp-profiles' = $inacc; 'profile-discovery' = 'PARTIAL:PROFILES_DIRECTORY_UNREADABLE' }), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'C agente pela imagem junto da lacuna'                        = @($rClaude, @(), 'ok', (& $covOf @{ 'temp-profiles' = $inacc }), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCE_BASES_INCOMPLETE', @(400))
+            'C2 agente por referencia junto da lacuna'                    = @($rRef, $pRef, 'ok', (& $covOf @{ 'temp-profiles' = $inacc }), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCE_BASES_INCOMPLETE', @(500))
+            'D inventario ausente'                                         = @($rNone, @(), $null, @(), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,LEGACY_SNAPSHOT_UNAVAILABLE,PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'E colecao valida sem particoes'                              = @($rNone, @(), 'ok', (& $covOf), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC', @())
+            'F inventario concluido apos o prazo (inventory PARTIAL)'     = @($rNone, @(), 'ok', (& $covOf @{ 'inventory' = 'PARTIAL:DEADLINE_EXCEEDED' }), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC', @())
+            'G referencia ambigua sob base auditada'                      = @($rNode, $pAmb, 'ok', (& $covOf), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCE_UNVERIFIED', @())
+            'G2 referencia ambigua + agente pela imagem'                  = @($rClaude, $pAmb, 'ok', (& $covOf), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCE_UNVERIFIED', @(400))
+            'M1 registro temp-profiles ausente'                           = @($rNone, @(), 'ok', (& $covOf @{ 'temp-profiles' = $null }), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'M2 registro profile-discovery ausente'                       = @($rNone, @(), 'ok', (& $covOf @{ 'profile-discovery' = $null }), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'M3 so o registro processes (os dois ausentes, motivo uma vez)' = @($rNone, @(), 'ok', (& $covOf @{ 'temp-profiles' = $null; 'profile-discovery' = $null; 'inventory' = $null }), 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCE_BASES_INCOMPLETE', @())
         }
         foreach ($n in $cases.Keys) {
             $v = $cases[$n]; $rows = $v[0]
@@ -7758,9 +7783,9 @@ try {
             $procs = @($res.Findings | Where-Object { $_.Kind -ceq 'Process' })
             Assert-Eq ((@($procs | ForEach-Object { (ConvertFrom-AtmProcessKey $_.Key).ProcessId }) | Sort-Object) -join ',') (@($v[6]) -join ',') "$($n): agentes preservados, nenhum inventado"
             if (@($v[6]).Count -eq 0) {
+                # Never a complete 0 (heuristic discovery, R20): the controls were a complete 0 before that contract.
                 $t = $res.Totals
-                if ($v[4] -ceq 'COMPLETE') { Assert-True ($t.Complete -and $t.Counters.WorkingSetBytes.Sum -eq 0) "$($n): zero completo valido" }
-                else { Assert-True (-not $t.Complete -and $null -eq $t.Counters.WorkingSetBytes.Sum -and @($t.Reasons) -ccontains 'AGENT_PROCESSES_INCOMPLETE') "$($n): agent-resources nulo, nunca zero" }
+                Assert-True (-not $t.Complete -and $null -eq $t.Counters.WorkingSetBytes.Sum -and @($t.Reasons) -ccontains 'AGENT_PROCESSES_INCOMPLETE') "$($n): agent-resources nulo, nunca zero"
             }
         }
         # Static: profile-discovery is handed to the runtime with the other inventory records.
@@ -7775,7 +7800,7 @@ try {
         $covSt = { param($D, [string]$C) $x = @($D.Coverage | Where-Object { $_.Collector -ceq $C }); if ($x.Count) { $x[0].Status + ':' + (@($x[0].Reasons) -join ',') } else { '(absent)' } }
         $pc = New-TestProfile 'o2b-ctl'; $null = New-TestRoot -ProfileInfo $pc
         $d0 = & $diag (Get-InvArgs -Profiles @($pc) -Procs $ilegacy)
-        Assert-True ((& $apOf $d0).Status -ceq 'COMPLETE' -and @((& $apOf $d0).Reasons).Count -eq 0) "integrado controle (bases lidas): agent-processes $((& $apOf $d0).Status) [$(@((& $apOf $d0).Reasons) -join ',')]; temp-profiles $(& $covSt $d0 'temp-profiles'); profile-discovery $(& $covSt $d0 'profile-discovery')"
+        Assert-True ((& $apOf $d0).Status -ceq 'PARTIAL' -and (@((& $apOf $d0).Reasons) -join ',') -ceq 'AGENT_DISCOVERY_HEURISTIC') "integrado controle (bases lidas, so a heuristica): agent-processes $((& $apOf $d0).Status) [$(@((& $apOf $d0).Reasons) -join ',')]; temp-profiles $(& $covSt $d0 'temp-profiles'); profile-discovery $(& $covSt $d0 'profile-discovery')"
         $pi = New-TestProfile 'o2b-inv'; $null = New-TestRoot -ProfileInfo $pi
         $pi.TempCandidates = @($pi.TempCandidates) + @([pscustomobject]@{ TempPath = (Join-Path $pi.ProfilePath 'Temp|ilegivel'); Source = 'test' })
         $d1 = & $diag (Get-InvArgs -Profiles @($pi) -Procs $ilegacy)
@@ -7794,11 +7819,11 @@ try {
             Set-AtmLanguage -Requested 'pt-BR'; $tPt = (Show-AtmDiagnose -Result $d1 6>&1 | Out-String) -replace '\s+', ' '
         } finally { Set-AtmLanguage -Requested $old }
         Assert-True (@(@($j1.coverage | Where-Object { $_.collector -ceq 'agent-processes' })[0].reasons) -ccontains 'PATH_REFERENCE_BASES_INCOMPLETE' -and -not $j1.agentResources.complete -and $null -eq $j1.agentResources.counters.workingSetBytes.sum) 'JSON (base INVALID): motivo e agentResources nulo, sem zero completo'
-        Assert-True ($j0.agentResources.complete -and $j0.agentResources.counters.workingSetBytes.sum -eq 0) 'JSON (controle): zero completo valido'
+        Assert-True (-not $j0.agentResources.complete -and $null -eq $j0.agentResources.counters.workingSetBytes.sum -and (@(@($j0.coverage | Where-Object { $_.collector -ceq 'agent-processes' })[0].reasons) -join ',') -ceq 'AGENT_DISCOVERY_HEURISTIC') 'JSON (controle): so a heuristica, agentResources nulo (era zero completo antes do contrato heuristico)'
         Assert-True ($tEn.Contains('PATH_REFERENCE_BASES_INCOMPLETE') -and $tEn.Contains('some temporary bases were not discovered or read')) 'relatorio en-US: codigo e texto'
         Assert-True ($tPt.Contains('PATH_REFERENCE_BASES_INCOMPLETE') -and $tPt.Contains('algumas bases temporárias não foram descobertas ou lidas')) 'relatorio pt-BR: codigo e texto'
         $g1 = (New-AtmTuiDiagIndex -View $j1).Gap['procs']; $g0 = (New-AtmTuiDiagIndex -View $j0).Gap['procs']
-        Assert-True ($null -ne $g1 -and $g1.Reasons -like '*PATH_REFERENCE_BASES_INCOMPLETE*' -and $null -eq $g0) "indice da TUI: * com o motivo (base INVALID), sem * no controle ($(if ($g1) { $g1.Status }))"
+        Assert-True ($null -ne $g1 -and $g1.Reasons -like '*PATH_REFERENCE_BASES_INCOMPLETE*' -and $null -ne $g0 -and $g0.Reasons -like '*AGENT_DISCOVERY_HEURISTIC*' -and $g0.Reasons -notlike '*PATH_REFERENCE_BASES_INCOMPLETE*') "indice da TUI: * com o motivo (base INVALID); no controle * so pela heuristica ($(if ($g1) { $g1.Status }))"
         $script:caseNote = "sinteticos: $($cases.Count) composicoes; integrado: controle, base INVALID, TEMP nao verificado, descoberta com lacunas; JSON, relatorio e indice da TUI"
     }
     Test-Case 'Diagnose' 'O2C: estados das bases das referencias (REPARSE_IN_PATH, UNSUPPORTED_DRIVE, estado inesperado ou nao fornecido) e referencias ambiguas sem particao entram em agent-processes; ausencia confirmada, conjunto vazio, base compartilhada e estrutura nao reconhecida nao contaminam; diagnose integrado com inventario real do sandbox (processos sinteticos)' {
@@ -7818,15 +7843,16 @@ try {
         $obs = New-Object System.Collections.Generic.List[string]; $bad = New-Object System.Collections.Generic.List[string]
         $check = { param([string]$Name, $D, [string]$Status, [string]$Want, [string]$Agents)
             $ac = & $apOf $D; $rs = @($ac.Reasons); $ag = & $pidsOf $D; $ar = $D.AgentResources
-            $okRs = $(if ($Want) { @($Want.Split(',') | Where-Object { $rs -cnotcontains $_ }).Count -eq 0 } else { $rs.Count -eq 0 })
-            $okAr = $(if ($Agents -ne '') { $true } elseif ($Status -ceq 'COMPLETE') { [bool]$ar.Complete -and $ar.Counters.WorkingSetBytes.Sum -eq 0 } else { -not $ar.Complete -and $null -eq $ar.Counters.WorkingSetBytes.Sum })
+            # Heuristic discovery (R20): AGENT_DISCOVERY_HEURISTIC is always there; the specific reasons are compared exactly.
+            $okRs = (($rs -join ',') -ceq (@(Get-AtmSortedCodes (@('AGENT_DISCOVERY_HEURISTIC') + @($Want.Split(',') | Where-Object { $_ }))) -join ','))
+            $okAr = $(if ($Agents -ne '') { $null -ne $ar.Counters.WorkingSetBytes.Sum } else { -not $ar.Complete -and $null -eq $ar.Counters.WorkingSetBytes.Sum })
             $line = "$($Name): agent-processes $($ac.Status) [$($rs -join ',')], agentes [$ag], agent-resources completo=$([bool]$ar.Complete); temp-profiles $(& $covSt $D 'temp-profiles')"
             $obs.Add($line)
             if (-not ($ac.Status -ceq $Status -and $okRs -and $ag -ceq $Agents -and $okAr)) { $bad.Add($line) } }
         # I0 control: every base read; the reference to an inventoried root makes node.exe an agent.
         $p0 = New-TestProfile 'o2c-ctl'; $r0 = New-TestRoot -ProfileInfo $p0
         $d0 = & $diag (Get-InvArgs -Profiles @($p0) -Procs (& $legOf $irows "node.exe $r0\x.js")) $irows
-        & $check 'I0 controle (base lida, referencia direta)' $d0 'COMPLETE' '' '2100'
+        & $check 'I0 controle (base lida, referencia direta)' $d0 'PARTIAL' '' '2100'
         # I1 REPARSE_IN_PATH: the TEMP of the profile is a junction; the command line names a session folder through it.
         $p1 = New-TestProfile 'o2c-rp'; $real1 = Join-Path $sandbox 'temp-real-o2c-rp'; $u1 = [guid]::NewGuid().ToString()
         [void][IO.Directory]::CreateDirectory((Join-Path $real1 ('claude\C--x\' + $u1)))
@@ -7869,7 +7895,7 @@ try {
         $ur5 = @($i5.Bases | Where-Object { $_.Status -ceq 'OK' -and -not $_.StructureRecognized }).Count
         Assert-True ($st5 -ceq 'NOT_DIRECTORY,NOT_FOUND,OK' -and $sh5 -eq 1 -and $ur5 -eq 1) "I5: estados reais da fixture [$st5], base compartilhada $sh5, estrutura nao reconhecida $ur5"
         $d5 = & $diag $ia5 $irows
-        & $check 'I5 NOT_FOUND, NOT_DIRECTORY, estrutura nao reconhecida e base compartilhada' $d5 'COMPLETE' '' ''
+        & $check 'I5 NOT_FOUND, NOT_DIRECTORY, estrutura nao reconhecida e base compartilhada' $d5 'PARTIAL' '' ''
         Assert-True ($bad.Count -eq 0) ("integrado: " + ($(if ($bad.Count) { 'FALHAS: ' + ($bad -join ' | ') + ' || ' } else { '' })) + ($obs -join ' | '))
         # An ancestor reference to an empty base or project folder (no partition to carry it) is asserted in O2D.
         # Consumers of the integrated REPARSE_IN_PATH and empty-base runs: JSON (in-memory conversion), report, TUI index.
@@ -7884,7 +7910,7 @@ try {
         Assert-True ($tEn.Contains('PATH_REFERENCE_BASES_INCOMPLETE') -and $tEn.Contains('some temporary bases were not discovered or read')) 'relatorio en-US (REPARSE_IN_PATH): codigo e texto'
         Assert-True ($tPt.Contains('PATH_REFERENCE_BASES_INCOMPLETE') -and $tPt.Contains('algumas bases temporárias não foram descobertas ou lidas')) 'relatorio pt-BR (REPARSE_IN_PATH): codigo e texto'
         $g1 = (New-AtmTuiDiagIndex -View $j1).Gap['procs']; $g3 = (New-AtmTuiDiagIndex -View $j3).Gap['procs']; $g0 = (New-AtmTuiDiagIndex -View $j0).Gap['procs']
-        Assert-True ($null -ne $g1 -and $g1.Reasons -like '*PATH_REFERENCE_BASES_INCOMPLETE*' -and $null -ne $g3 -and $g3.Reasons -like '*PATH_REFERENCE_UNVERIFIED*' -and $null -eq $g0) 'indice da TUI: * com o motivo (REPARSE_IN_PATH, base vazia), sem * no controle'
+        Assert-True ($null -ne $g1 -and $g1.Reasons -like '*PATH_REFERENCE_BASES_INCOMPLETE*' -and $null -ne $g3 -and $g3.Reasons -like '*PATH_REFERENCE_UNVERIFIED*' -and $null -ne $g0 -and $g0.Reasons -notlike '*PATH_REFERENCE_*') 'indice da TUI: * com o motivo (REPARSE_IN_PATH, base vazia); no controle * so pela heuristica'
         # Synthetic compositions on the runtime: base states (codes) and the ambiguous count as Invoke-AtmDiagnose hands them.
         $claude = @(& $b4Hints 'claude-code' @([pscustomobject]@{ ImageName = 'claude.exe'; CommandLineMarker = $null }))
         $okReg = @([pscustomobject]@{ ProviderId = 'claude-code'; Registry = [pscustomobject]@{ Readable = $true; Unparseable = 0; Entries = @() }; Error = $null })
@@ -7892,18 +7918,18 @@ try {
         $omit = 'omitido'
         # Name = rows, base states ('omitido' = not supplied), ambiguous count ('omitido' = not supplied), status, exact reasons, agents
         $cases = [ordered]@{
-            'S1 bases lidas ou ausencia confirmada (OK, NOT_FOUND, NOT_DIRECTORY)' = @($rNone, @('OK', 'NOT_FOUND', 'NOT_DIRECTORY'), 0, 'COMPLETE', '', @())
-            'S2 conjunto vazio de bases (valido)'                    = @($rNone, @(), 0, 'COMPLETE', '', @())
-            'S3 REPARSE_IN_PATH'                                     = @($rNode, @('OK', 'REPARSE_IN_PATH'), 0, 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
-            'S4 UNSUPPORTED_DRIVE'                                   = @($rNode, @('UNSUPPORTED_DRIVE'), 0, 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
-            'S5 INACCESSIBLE, INVALID, ENUMERATION_FAILED (motivo uma vez)' = @($rNode, @('INACCESSIBLE', 'INVALID', 'ENUMERATION_FAILED'), 0, 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
-            'S6 estado inesperado (conservador)'                     = @($rNode, @('ESTADO_FUTURO'), 0, 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
-            'S7 estados nao fornecidos (desconhecido, nunca completo)' = @($rNone, $omit, 0, 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @())
-            'S8 agente pela imagem + REPARSE_IN_PATH'                = @($rClaude, @('REPARSE_IN_PATH'), 0, 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE', @(400))
-            'S9 referencias ambiguas contadas, sem particao'         = @($rNode, @('OK'), 2, 'PARTIAL', 'PATH_REFERENCE_UNVERIFIED', @())
-            'S10 contagem ilegivel (conservador)'                    = @($rNode, @('OK'), 'x', 'PARTIAL', 'PATH_REFERENCE_UNVERIFIED', @())
-            'S11 contagem nao fornecida (so as particoes contam)'    = @($rNone, @('OK'), $omit, 'COMPLETE', '', @())
-            'S12 as duas lacunas + agente pela imagem'               = @($rClaude, @('UNSUPPORTED_DRIVE'), 1, 'PARTIAL', 'PATH_REFERENCE_BASES_INCOMPLETE,PATH_REFERENCE_UNVERIFIED', @(400))
+            'S1 bases lidas ou ausencia confirmada (OK, NOT_FOUND, NOT_DIRECTORY)' = @($rNone, @('OK', 'NOT_FOUND', 'NOT_DIRECTORY'), 0, 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC', @())
+            'S2 conjunto vazio de bases (valido)'                    = @($rNone, @(), 0, 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC', @())
+            'S3 REPARSE_IN_PATH'                                     = @($rNode, @('OK', 'REPARSE_IN_PATH'), 0, 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'S4 UNSUPPORTED_DRIVE'                                   = @($rNode, @('UNSUPPORTED_DRIVE'), 0, 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'S5 INACCESSIBLE, INVALID, ENUMERATION_FAILED (motivo uma vez)' = @($rNode, @('INACCESSIBLE', 'INVALID', 'ENUMERATION_FAILED'), 0, 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'S6 estado inesperado (conservador)'                     = @($rNode, @('ESTADO_FUTURO'), 0, 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'S7 estados nao fornecidos (desconhecido, nunca completo)' = @($rNone, $omit, 0, 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCE_BASES_INCOMPLETE', @())
+            'S8 agente pela imagem + REPARSE_IN_PATH'                = @($rClaude, @('REPARSE_IN_PATH'), 0, 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCE_BASES_INCOMPLETE', @(400))
+            'S9 referencias ambiguas contadas, sem particao'         = @($rNode, @('OK'), 2, 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCE_UNVERIFIED', @())
+            'S10 contagem ilegivel (conservador)'                    = @($rNode, @('OK'), 'x', 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCE_UNVERIFIED', @())
+            'S11 contagem nao fornecida (so as particoes contam)'    = @($rNone, @('OK'), $omit, 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC', @())
+            'S12 as duas lacunas + agente pela imagem'               = @($rClaude, @('UNSUPPORTED_DRIVE'), 1, 'PARTIAL', 'AGENT_DISCOVERY_HEURISTIC,PATH_REFERENCE_BASES_INCOMPLETE,PATH_REFERENCE_UNVERIFIED', @(400))
         }
         foreach ($n in $cases.Keys) {
             $v = $cases[$n]; $rows = $v[0]
@@ -7918,8 +7944,7 @@ try {
             Assert-Eq ((@($procs | ForEach-Object { (ConvertFrom-AtmProcessKey $_.Key).ProcessId }) | Sort-Object) -join ',') (@($v[5]) -join ',') "$($n): agentes preservados, nenhum inventado"
             if (@($v[5]).Count -eq 0) {
                 $t = $res.Totals
-                if ($v[3] -ceq 'COMPLETE') { Assert-True ($t.Complete -and $t.Counters.WorkingSetBytes.Sum -eq 0) "$($n): zero completo valido" }
-                else { Assert-True (-not $t.Complete -and $null -eq $t.Counters.WorkingSetBytes.Sum -and @($t.Reasons) -ccontains 'AGENT_PROCESSES_INCOMPLETE') "$($n): agent-resources nulo, nunca zero" }
+                Assert-True (-not $t.Complete -and $null -eq $t.Counters.WorkingSetBytes.Sum -and @($t.Reasons) -ccontains 'AGENT_PROCESSES_INCOMPLETE') "$($n): agent-resources nulo, nunca zero (descoberta heuristica)"
             }
         }
         # Static: Invoke-AtmDiagnose hands the base states (codes only, never a path) and the ambiguous count to the runtime.
@@ -7949,7 +7974,9 @@ try {
             $inv = ($r.Unattached -is [int]) -and $r.Unattached -ge 0 -and $r.Unattached -le ($r.Ancestor + $r.Ambiguous)
             $d = & $diag $ia $Rows; $runs[$Name] = $d
             $ac = & $apOf $d; $rs = @($ac.Reasons) -join ','; $ag = & $pidsOf $d; $ar = $d.AgentResources
-            $okAr = $(if ($Agents -ne '') { $true } elseif ($Status -ceq 'COMPLETE') { [bool]$ar.Complete -and $ar.Counters.WorkingSetBytes.Sum -eq 0 } else { -not $ar.Complete -and $null -eq $ar.Counters.WorkingSetBytes.Sum })
+            # Heuristic discovery (R20): AGENT_DISCOVERY_HEURISTIC is always there; the specific reasons are compared exactly.
+            $Reasons = @(Get-AtmSortedCodes (@('AGENT_DISCOVERY_HEURISTIC') + @($Reasons.Split(',') | Where-Object { $_ }))) -join ','
+            $okAr = $(if ($Agents -ne '') { $null -ne $ar.Counters.WorkingSetBytes.Sum } else { -not $ar.Complete -and $null -eq $ar.Counters.WorkingSetBytes.Sum })
             $line = "$($Name): References $got (esperado $Refs), agent-processes $($ac.Status) [$rs], agentes [$ag], agent-resources completo=$([bool]$ar.Complete)"
             $obs.Add($line)
             if (-not ($got -ceq $Refs -and $inv -and $ac.Status -ceq $Status -and $rs -ceq $Reasons -and $ag -ceq $Agents -and $okAr)) { $bad.Add($line) } }
@@ -7972,19 +7999,33 @@ try {
         & $case 'D5d sessao nao resolvida sob projeto vazio' $p7 "node.exe $b7\C--work-proj\$([guid]::NewGuid())\x.js" $irows '0/0/1/1' 'PARTIAL' $U ''
         # Attached: the reference has at least one partition and is never counted as lost.
         $p8 = New-TestProfile 'o2d-a1'; $b8 = Get-Base $p8; $r8 = New-TestRoot -ProfileInfo $p8
-        & $case 'D6 ancestral anexado a uma particao (projeto)' $p8 "node.exe --cwd $b8\C--work-proj" $irows '0/1/0/0' 'COMPLETE' '' '2100'
-        & $case 'D7 referencia direta valida' $p8 "node.exe $r8\x.js" $irows '1/0/0/0' 'COMPLETE' '' '2100'
+        & $case 'D6 ancestral anexado a uma particao (projeto)' $p8 "node.exe --cwd $b8\C--work-proj" $irows '0/1/0/0' 'PARTIAL' '' '2100'
+        & $case 'D7 referencia direta valida' $p8 "node.exe $r8\x.js" $irows '1/0/0/0' 'PARTIAL' '' '2100'
         & $case 'D8 ambigua com particao (nome nao resolvido sob base com projeto)' $p8 "node.exe $b8\C--zz-novo\x.js" $irows '0/0/1/0' 'PARTIAL' $U ''
-        & $case 'D9 nenhuma referencia, fontes completas (zero completo valido)' $p8 'node.exe' $irows '0/0/0/0' 'COMPLETE' '' ''
+        & $case 'D9 nenhuma referencia, entradas lidas (so a heuristica)' $p8 'node.exe' $irows '0/0/0/0' 'PARTIAL' '' ''
         $p9 = New-TestProfile 'o2d-am'; $b9 = Get-Base $p9; $null = New-TestRoot -ProfileInfo $p9; $null = New-TestRoot -ProfileInfo $p9
         [IO.File]::WriteAllBytes((Join-Path $b9 'loose.txt'), [byte[]]@(1))
-        & $case 'D10 ancestral anexado a varias particoes (projeto com duas sessoes), sem falso residual' $p9 "node.exe --cwd $b9\C--work-proj" $irows '0/1/0/0' 'COMPLETE' '' '2100'
-        & $case 'D11 ancestral a base com sessoes e arquivos soltos (varias particoes)' $p9 "node.exe --tmp $b9" $irows '0/1/0/0' 'COMPLETE' '' '2100'
+        & $case 'D10 ancestral anexado a varias particoes (projeto com duas sessoes), sem falso residual' $p9 "node.exe --cwd $b9\C--work-proj" $irows '0/1/0/0' 'PARTIAL' '' '2100'
+        & $case 'D11 ancestral a base com sessoes e arquivos soltos (varias particoes)' $p9 "node.exe --tmp $b9" $irows '0/1/0/0' 'PARTIAL' '' '2100'
         # Mixed: a direct reference that is attached and an ancestor one that is not: the agent stays, the gap is reported.
         $pa = New-TestProfile 'o2d-mx'; $ba = Get-Base $pa; $ra = New-TestRoot -ProfileInfo $pa; [void][IO.Directory]::CreateDirectory((Join-Path $ba 'C--vazio'))
         & $case 'D12 mistura representada e nao representada, agente pela referencia direta' $pa "node.exe $ra\x.js --cwd $ba\C--vazio" $irows '1/1/0/1' 'PARTIAL' $U '2100'
         & $case 'D13 agente pela imagem junto da lacuna' $p6 "node.exe --tmp $b6" $irowsC '0/1/0/1' 'PARTIAL' $U '2200'
         & $case 'D14 a mesma referencia duas vezes (unidade: ocorrencia; motivo uma vez)' $p6 "node.exe --a $b6 --b $b6" $irows '0/2/0/2' 'PARTIAL' $U ''
+        # R20 (synthetic): the session folder of D7 named in forms the matcher does not recognize (an environment variable,
+        # a relative path, an administrative share, a '..' segment that breaks the base text, a mixed long/8.3 component).
+        # Nothing is matched or counted (0/0/0/0), node.exe is not identified (D7 identifies it), and agent-processes
+        # carries exactly the heuristic limitation, as with no reference at all (D9): the limitation is declared on every
+        # run, never detected from the unrecognized form.
+        $rel8 = $r8.Substring($b8.Length); $tmp8 = Split-Path $b8
+        $r20 = [ordered]@{
+            'R20a variavel de ambiente'           = "node.exe %TEMP%\claude$rel8\x.js"
+            'R20b caminho relativo'               = "node.exe claude$rel8\x.js"
+            'R20c compartilhamento administrativo' = "node.exe \localhost\$($b8.Substring(0, 1))`$$($b8.Substring(2))$rel8\x.js"
+            'R20d segmento .. que quebra a base'  = "node.exe $tmp8\..\$(Split-Path $tmp8 -Leaf)\claude$rel8\x.js"
+            'R20e componente 8.3 misturado'       = "node.exe $($r8.Replace('\AppData\', '\APPDAT~1\'))\x.js"
+        }
+        foreach ($rn in $r20.Keys) { & $case $rn $p8 $r20[$rn] $irows '0/0/0/0' 'PARTIAL' '' '' }
         Assert-True ($bad.Count -eq 0) ("produtor e integrado: " + ($(if ($bad.Count) { 'FALHAS: ' + ($bad -join ' | ') + ' || ' } else { '' })) + ($obs -join ' | '))
         # D10: the one ancestor reference is carried by every partition of the project (two sessions), counted once.
         $ia10 = Get-InvArgs -Profiles @($p9) -Procs (& $legOf $irows "node.exe --cwd $b9\C--work-proj")
@@ -8006,25 +8047,26 @@ try {
             Set-AtmLanguage -Requested 'pt-BR'; $tPt = (Show-AtmDiagnose -Result $d6 6>&1 | Out-String) -replace '\s+', ' '
         } finally { Set-AtmLanguage -Requested $old }
         Assert-True (@(@($j6.coverage | Where-Object { $_.collector -ceq 'agent-processes' })[0].reasons) -ccontains $U -and -not $j6.agentResources.complete -and $null -eq $j6.agentResources.counters.workingSetBytes.sum) 'JSON (I6): motivo e agentResources nulo, sem zero completo'
-        Assert-True (@(@($jc.coverage | Where-Object { $_.collector -ceq 'agent-processes' })[0].reasons).Count -eq 0) 'JSON (D6 anexado): sem motivo'
+        Assert-True ((@(@($jc.coverage | Where-Object { $_.collector -ceq 'agent-processes' })[0].reasons) -join ',') -ceq 'AGENT_DISCOVERY_HEURISTIC') 'JSON (D6 anexado): so a limitacao da heuristica'
         Assert-True ($tEn.Contains($U) -and $tEn.Contains('a path reference could not be tied to one verified process')) 'relatorio en-US (I6): codigo e texto'
         Assert-True ($tPt.Contains($U) -and $tPt.Contains('uma referência de caminho não pôde ser ligada a um único processo verificado')) 'relatorio pt-BR (I6): codigo e texto'
         $g6 = (New-AtmTuiDiagIndex -View $j6).Gap['procs']; $gc = (New-AtmTuiDiagIndex -View $jc).Gap['procs']
-        Assert-True ($null -ne $g6 -and $g6.Reasons -like "*$U*" -and $null -eq $gc) 'indice da TUI: * com o motivo (I6), sem * no anexado'
+        Assert-True ($null -ne $g6 -and $g6.Reasons -like "*$U*" -and $null -ne $gc -and $gc.Reasons -notlike "*$U*") 'indice da TUI: * com o motivo (I6); no anexado * so pela heuristica'
         # Runtime contract of the field (as Invoke-AtmDiagnose hands it): only an exact 0 is complete.
         $claude = @(& $b4Hints 'claude-code' @([pscustomobject]@{ ImageName = 'claude.exe'; CommandLineMarker = $null }))
         $okReg = @([pscustomobject]@{ ProviderId = 'claude-code'; Registry = [pscustomobject]@{ Readable = $true; Unparseable = 0; Entries = @() }; Error = $null })
         $rNone = @($sys, (& $b4Row 200 4 'app.exe' $b4T0)); $rClaude = @($sys, (& $b4Row 400 4 'claude.exe' $b4T0))
         $omit = 'omitido'
+        $H = 'AGENT_DISCOVERY_HEURISTIC'
         $cases = [ordered]@{
-            'U0 zero conhecido (completo)'                  = @($rNone, 0, 'COMPLETE', '', @())
-            'U1 nao fornecido (desconhecido, nunca zero)'   = @($rNone, $omit, 'PARTIAL', $U, @())
-            'U2 nulo explicito'                             = @($rNone, $null, 'PARTIAL', $U, @())
-            'U3 nao numerico'                               = @($rNone, 'x', 'PARTIAL', $U, @())
-            'U4 negativo (inconsistente)'                   = @($rNone, -1, 'PARTIAL', $U, @())
-            'U5 fracionario (inconsistente)'                = @($rNone, '2.5', 'PARTIAL', $U, @())
-            'U6 positivo'                                   = @($rNone, 3, 'PARTIAL', $U, @())
-            'U7 positivo + agente pela imagem'              = @($rClaude, 1, 'PARTIAL', $U, @(400))
+            'U0 zero conhecido (so a heuristica)'                  = @($rNone, 0, 'PARTIAL', $H, @())
+            'U1 nao fornecido (desconhecido, nunca zero)'   = @($rNone, $omit, 'PARTIAL', "$H,$U", @())
+            'U2 nulo explicito'                             = @($rNone, $null, 'PARTIAL', "$H,$U", @())
+            'U3 nao numerico'                               = @($rNone, 'x', 'PARTIAL', "$H,$U", @())
+            'U4 negativo (inconsistente)'                   = @($rNone, -1, 'PARTIAL', "$H,$U", @())
+            'U5 fracionario (inconsistente)'                = @($rNone, '2.5', 'PARTIAL', "$H,$U", @())
+            'U6 positivo'                                   = @($rNone, 3, 'PARTIAL', "$H,$U", @())
+            'U7 positivo + agente pela imagem'              = @($rClaude, 1, 'PARTIAL', "$H,$U", @(400))
         }
         foreach ($n in $cases.Keys) {
             $v = $cases[$n]; $rows = $v[0]
@@ -8038,14 +8080,13 @@ try {
             Assert-Eq ((@($procs | ForEach-Object { (ConvertFrom-AtmProcessKey $_.Key).ProcessId }) | Sort-Object) -join ',') (@($v[4]) -join ',') "$($n): agentes preservados, nenhum inventado"
             if (@($v[4]).Count -eq 0) {
                 $t = $res.Totals
-                if ($v[2] -ceq 'COMPLETE') { Assert-True ($t.Complete -and $t.Counters.WorkingSetBytes.Sum -eq 0) "$($n): zero completo valido" }
-                else { Assert-True (-not $t.Complete -and $null -eq $t.Counters.WorkingSetBytes.Sum -and @($t.Reasons) -ccontains 'AGENT_PROCESSES_INCOMPLETE') "$($n): agent-resources nulo, nunca zero" }
+                Assert-True (-not $t.Complete -and $null -eq $t.Counters.WorkingSetBytes.Sum -and @($t.Reasons) -ccontains 'AGENT_PROCESSES_INCOMPLETE') "$($n): agent-resources nulo, nunca zero (descoberta heuristica)"
             }
         }
         # Static: Invoke-AtmDiagnose hands the count (a number only, never a path) to the runtime, missing-safe.
         $diagSrc = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Diagnose.ps1'))
         Assert-True ($diagSrc.Contains("`$rtArgs['UnattachedReferences'] = Get-AtmHintProperty -Item `$inv.References -Name 'Unattached'")) 'Invoke-AtmDiagnose repassa a contagem de referencias sem particao'
-        $script:caseNote = "produtor real + integrado: $($obs.Count) casos (ancestral a base/projeto vazio, anexado a uma e varias particoes, direta, ambigua com e sem particao, mistura, agente pela imagem, duplicacao, nenhuma referencia); produtor direto: base sem enumeracao, snapshot falho; runtime: $($cases.Count) contratos do campo; JSON, relatorio e indice da TUI"
+        $script:caseNote = "produtor real + integrado: $($obs.Count) casos (ancestral a base/projeto vazio, anexado a uma e varias particoes, direta, ambigua com e sem particao, mistura, agente pela imagem, duplicacao, nenhuma referencia, R20 sinteticos); produtor direto: base sem enumeracao, snapshot falho; runtime: $($cases.Count) contratos do campo; JSON, relatorio e indice da TUI"
     }
     Test-Case 'Particoes' 'P4-B: escala - milhares de particoes passadas do grafo aos achados em uma passada (indices, sem reconstruir o grafo)' {
         $rows = New-Object System.Collections.Generic.List[object]; $f = New-Object System.Collections.Generic.List[object]; $parts = New-Object System.Collections.Generic.List[object]
