@@ -132,6 +132,13 @@ not counted, so the totals are complete only when `agent-processes` is conclusiv
 never is. With no agent process identified the sums are `null`, never `0`; with agent processes they are the sums of
 the values read (`known` per counter), with `complete` `false`.
 
+The type and the calculation are generic: `complete` (of the totals and of each counter) is a boolean that would be
+`true` only if `agent-processes` were conclusive and every value was read. The current runtime never produces that:
+`agent-processes` always carries `AGENT_DISCOVERY_HEURISTIC` when a source was searched, so `complete` is always
+`false`, `reasons` always holds `AGENT_PROCESSES_INCOMPLETE`, and `agent-resources` is never `COMPLETE`. A sum is
+what was read from the agent processes found; it is never a total over every agent process, and `complete` `false`
+is not a reading error.
+
 `agent-processes` is never conclusive:
 * `AGENT_DISCOVERY_HEURISTIC`: always present when a source was searched (not on `NOT_OBSERVABLE`, `FAILED` or
   `TIMEOUT`). The discovery is heuristic: provider image names, session registries, and path references written in a
@@ -169,7 +176,7 @@ A reason also names each gap of a source of agent discovery:
 |---|---|---|
 | `collected` | boolean | `false` when the runtime was not observed (deadline); the other fields are then `null` or empty. |
 | `processes` | number or null | Processes counted. |
-| `complete` | boolean | Every counter of every process was read, the CPU was sampled and `agent-processes` is conclusive. |
+| `complete` | boolean | `true` only when every counter of every process was read, the CPU was sampled and `agent-processes` is conclusive. The current runtime never makes `agent-processes` conclusive (heuristic discovery), so it is always `false`. |
 | `reasons` | array | Why the totals are not complete (for example `AGENT_PROCESSES_INCOMPLETE`, `CPU_NOT_SAMPLED`, `COUNTERS_UNREADABLE`, `CPU_PROCESS_EXITED`). |
 | `cpuIntervalMs` | number or null | Interval between the two process collections of the CPU sample. |
 | `counters` | object or null | One entry per counter. |
@@ -195,7 +202,7 @@ A reason also names each gap of a source of agent discovery:
 |---|---|---|
 | `sum` | number or null | Sum of the values read; a lower bound when `complete` is `false`; `null` when none was read. |
 | `known` | number | Processes whose value was read. |
-| `complete` | boolean | Every counted process was read (and, for `cpuPercent`, the CPU was sampled). |
+| `complete` | boolean | `true` only when every counted process was read (and, for `cpuPercent`, the CPU was sampled) and `agent-processes` is conclusive; in the current runtime always `false`, for the same reason as the totals. `known` tells how many of the processes found were read. |
 
 ## graph
 
