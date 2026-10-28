@@ -1203,9 +1203,10 @@ function Get-AtmAgentRuntimeFindingsRun {
     # to a process, so the process that made it is not a candidate. Only the presence of that evidence is read: its text
     # is localized and is never parsed for a process identity.
     if (@($Partitions | Where-Object { $null -ne $_ -and @(Get-AtmHintProperty -Item $_ -Name 'AmbiguousRefs' | Where-Object { $_ }).Count -gt 0 }).Count -gt 0) { $reasons.Add('PATH_REFERENCE_UNVERIFIED') }
-    # The state of each base (codes only). temp-profiles does not count a base refused for safety (a reparse point in its
-    # path, a drive that is not fixed): it is not read, and a refusal is never proof that no agent uses it. A state not
-    # known here is a gap too, and states not supplied are unknown, never complete.
+    # The state of each base (codes only). A base refused for safety (a reparse point in its path, a drive that is not
+    # fixed) is not read, and a refusal is never proof that no agent uses it (temp-profiles reports it per profile as
+    # PROFILES_NOT_AUDITED; this check reads the states themselves). A state not known here is a gap too, and states not
+    # supplied are unknown, never complete.
     if ($null -eq $BaseStatuses -or @($BaseStatuses | Where-Object { $script:AtmBaseStatesWithoutGap -cnotcontains [string]$_ }).Count -gt 0) { $reasons.Add('PATH_REFERENCE_BASES_INCOMPLETE') }
     # The V0.1 count of ambiguous references also counts those with no partition to carry them (an empty base or project
     # folder, e.g. a session folder created after the scan). A count that is not a number is a gap.
@@ -3075,12 +3076,22 @@ function Get-AtmInventoryCoverage {
     $profiles = @($Inventory.Profiles)
     $inacc = @($Inventory.InaccessibleProfiles).Count
     $unver = @($Inventory.UnverifiedTempProfiles).Count
+    $notAudited = @(Get-AtmInventoryProfileList -Inventory $Inventory -Name 'NotAuditedProfiles')
     $reasons = @()
     if ($inacc -gt 0) { $reasons += 'PROFILES_INACCESSIBLE' }
+    if ($notAudited.Count -gt 0) { $reasons += 'PROFILES_NOT_AUDITED' }
     if ($unver -gt 0) { $reasons += 'TEMP_LOCATION_UNVERIFIED' }
     $st = $(if ($reasons.Count -gt 0) { 'PARTIAL' } else { 'COMPLETE' })
-    $help = $(if ($reasons.Count -eq 0) { 'NO' } elseif ($admin) { 'UNKNOWN' } else { 'YES' })
-    $out.Add((New-AtmCoverage -Collector 'temp-profiles' -Status $st -Reasons $reasons -ElevationWouldHelp $help -Observed ($profiles.Count - $inacc - $unver) -Expected $profiles.Count))
+    # A base not audited only because of a refusal for safety (a reparse point in its path, a drive that is not fixed) is
+    # a policy that elevation does not lift: NO. Any other state of a base not audited is unknown: UNKNOWN, never NO.
+    $naStates = @()
+    if ($notAudited.Count -gt 0) {
+        $idx = Get-AtmBaseIndex -Bases $Inventory.Bases
+        $naStates = @(foreach ($pr in $notAudited) { Get-AtmNotAuditedBaseStates -Entries $Inventory.ProfileBaseStatus[$pr.Sid + '|' + $pr.ProfilePath] -BaseIndex $idx })
+    }
+    $help = $(if ($reasons.Count -eq 0) { 'NO' } elseif ($inacc -gt 0 -or $unver -gt 0) { if ($admin) { 'UNKNOWN' } else { 'YES' } } elseif (@($naStates | Where-Object { $script:AtmPolicyRefusedBaseStates -cnotcontains $_ }).Count -gt 0) { 'UNKNOWN' } else { 'NO' })
+    # Observed: profiles with complete coverage; a profile in several lists is counted once.
+    $out.Add((New-AtmCoverage -Collector 'temp-profiles' -Status $st -Reasons $reasons -ElevationWouldHelp $help -Observed ($profiles.Count - (Get-AtmIncompleteProfileCount -Inventory $Inventory)) -Expected $profiles.Count))
     $out.Add((Get-AtmProfileDiscoveryCoverage -Inventory $Inventory -Identity $Identity))
     return $out.ToArray()
 }

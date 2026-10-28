@@ -218,9 +218,12 @@ function Get-AtmTuiTextLines {
             foreach ($u in $inv.References.Unresolved) { & $add "  $u" }
             & $add ''
             & $add (Get-AtmText 'tui.incompleteProfiles') 'Yellow'
-            if (@($inv.InaccessibleProfiles).Count -eq 0 -and @($inv.UnverifiedTempProfiles).Count -eq 0) { & $add ('  ' + (Get-AtmText 'common.none')) }
+            $notAudited = @(Get-AtmInventoryProfileList -Inventory $inv -Name 'NotAuditedProfiles')
+            if ((Get-AtmIncompleteProfileCount -Inventory $inv) -eq 0) { & $add ('  ' + (Get-AtmText 'common.none')) }
             foreach ($pr in $inv.InaccessibleProfiles) { & $add ("  {0} ({1}) {2}" -f $pr.UserName, $pr.Sid, $pr.ProfilePath) 'Yellow' }
             foreach ($pr in @($inv.UnverifiedTempProfiles)) { & $add ('  ' + (Get-AtmText 'tui.unverifiedTemp' $pr.UserName $pr.Sid $pr.EnvStatus)) 'Yellow' }
+            $idx = Get-AtmBaseIndex -Bases $inv.Bases
+            foreach ($pr in $notAudited) { & $add ('  ' + (Get-AtmText 'tui.notAudited' $pr.UserName $pr.Sid ((@(Get-AtmNotAuditedBaseStates -Entries $inv.ProfileBaseStatus[$pr.Sid + '|' + $pr.ProfilePath] -BaseIndex $idx) | Select-Object -Unique) -join ','))) 'Yellow' }
             & $add ''
             & $add (Get-AtmText 'audit.tempDirs')
             foreach ($pr in $inv.Profiles) { foreach ($b in @($inv.ProfileBaseStatus[$pr.Sid + '|' + $pr.ProfilePath])) { & $add ("  [{0}] [{1}] {2} -> {3}" -f $b.Status, $b.Provider, $pr.UserName, $b.BasePath) $(if ($b.Status -eq 'OK') { 'Gray' } elseif ($b.Status -eq 'NOT_FOUND') { 'DarkGray' } else { 'Yellow' }) } }
@@ -334,7 +337,7 @@ function Get-AtmTuiDashboardLines {
     $bytes = Get-AtmSum $parts 'Bytes'
     $audited = @($inv.Profiles | Where-Object { (Get-AtmProfileStatusLabel -Inventory $inv -ProfileInfo $_) -like 'AUDITADO*' }).Count
     $cards = @(
-        @{ T = (Get-AtmText 'dash.profiles'); L = @((Get-AtmText 'dash.discovered' @($inv.Profiles).Count), (Get-AtmText 'dash.audited' $audited), (Get-AtmText 'dash.incomplete' (@($inv.InaccessibleProfiles).Count + @($inv.UnverifiedTempProfiles).Count))); C = 'Cyan' }
+        @{ T = (Get-AtmText 'dash.profiles'); L = @((Get-AtmText 'dash.discovered' @($inv.Profiles).Count), (Get-AtmText 'dash.audited' $audited), (Get-AtmText 'dash.incomplete' (Get-AtmIncompleteProfileCount -Inventory $inv))); C = 'Cyan' }
         @{ T = (Get-AtmText 'dash.filesDirs'); L = @((Get-AtmText 'dash.files' (Get-AtmSum $parts 'Files')), (Get-AtmText 'dash.dirs' (Get-AtmSum $parts 'Dirs')), (Get-AtmText 'dash.partitions' $parts.Count)); C = 'Cyan' }
         @{ T = (Get-AtmText 'dash.space'); L = @((Get-AtmText 'dash.mbLogical' (Format-AtmMB $bytes)), (Get-AtmText 'dash.gbLogical' (Format-AtmGB $bytes)), (Get-AtmText 'dash.mbPhysical' (Format-AtmMB (Get-AtmSum $parts 'AllocatedBytesEstimate')))); C = 'Cyan' }
         @{ T = (Get-AtmText 'dash.errorsCoverage'); L = @((Get-AtmText 'dash.readErrors' (Get-AtmSum $parts 'ErrorCount')), (Get-AtmText 'dash.incompleteMeas' @($parts | Where-Object { -not $_.MeasurementComplete }).Count), (Get-AtmText 'dash.coverage' $(if ($inv.CoverageComplete) { Get-AtmText 'common.complete' } else { Get-AtmText 'common.incomplete' }))); C = $(if ($inv.CoverageComplete) { 'Green' } else { 'Yellow' }) }

@@ -618,6 +618,59 @@ function Get-AtmProfileRegistries {
 
 function Add-AtmFlag { param($Partition, [string]$Flag) if (-not $Partition.Flags.Contains($Flag)) { $Partition.Flags.Add($Flag) } }
 
+# Base states and the V0.1 coverage. Audited or confirmed absent (no folder an agent could use is there): the same table
+# as the agent runtime ($script:AtmBaseStatesWithoutGap, checked by the suite). An own entry that is inaccessible,
+# invalid or not enumerated goes to InaccessibleProfiles. A refusal for safety (a reparse point in the path, a drive that
+# is not fixed) is a policy that elevation does not lift. Any other state, known or not, is a base not audited.
+$script:AtmAuditedBaseStates = @('OK', 'NOT_FOUND', 'NOT_DIRECTORY')
+$script:AtmInaccessibleBaseStates = @('INACCESSIBLE', 'ENUMERATION_FAILED', 'INVALID')
+$script:AtmPolicyRefusedBaseStates = @('REPARSE_IN_PATH', 'UNSUPPORTED_DRIVE')
+
+function Get-AtmBaseIndex { param($Bases) $i = @{}; foreach ($b in $Bases) { if ($null -ne $b -and $b.Path) { $i[([string]$b.Path).ToLowerInvariant()] = $b } }; return $i }
+
+function Get-AtmResolvedBaseStates {
+    <#
+      The base entries of one profile (ProfileBaseStatus) with the final state of the base each one names: an alias
+      (DUPLICATE_SAME_PROFILE, SHARED_WITH_<sid>) is never proof that the base was audited, it carries the state of its
+      canonical base (CANONICAL_BASE_UNKNOWN when there is none); an own entry carries the state of its base after the
+      enumeration (OK can become ENUMERATION_FAILED). -BaseIndex: Get-AtmBaseIndex over Inventory.Bases.
+    #>
+    param($Entries, [hashtable]$BaseIndex = @{})
+    foreach ($e in $Entries) {
+        if ($null -eq $e) { continue }
+        $s = [string]$e.Status
+        $alias = ($s -ceq 'DUPLICATE_SAME_PROFILE' -or $s.StartsWith('SHARED_WITH_', [StringComparison]::Ordinal))
+        $k = $(if ($e.BasePath) { ([string]$e.BasePath).ToLowerInvariant() } else { $null })
+        $canon = $(if ($k -and $BaseIndex.ContainsKey($k)) { $BaseIndex[$k] } else { $null })
+        $r = $(if ($null -ne $canon) { [string]$canon.Status } elseif ($alias) { 'CANONICAL_BASE_UNKNOWN' } else { $s })
+        [pscustomobject]@{ Status = $s; Resolved = $r; Alias = $alias }
+    }
+}
+
+function Get-AtmNotAuditedBaseStates {
+    # The resolved states that leave a base of the profile not audited (an own inaccessible entry is not one of them: it
+    # is in InaccessibleProfiles). Empty when every base was audited or is confirmed absent.
+    param($Entries, [hashtable]$BaseIndex = @{})
+    return @(Get-AtmResolvedBaseStates -Entries $Entries -BaseIndex $BaseIndex | Where-Object { $script:AtmAuditedBaseStates -cnotcontains $_.Resolved -and ($_.Alias -or $script:AtmInaccessibleBaseStates -cnotcontains $_.Resolved) } | ForEach-Object { $_.Resolved })
+}
+
+function Get-AtmInventoryProfileList {
+    # A profile list of the inventory (InaccessibleProfiles, UnverifiedTempProfiles, NotAuditedProfiles), empty when the
+    # inventory has none (older or synthetic inventories).
+    param($Inventory, [string]$Name)
+    if ($null -eq $Inventory -or @($Inventory.PSObject.Properties.Name) -notcontains $Name) { return @() }
+    return @($Inventory.$Name | Where-Object { $null -ne $_ })
+}
+
+function Get-AtmIncompleteProfileCount {
+    # Profiles with incomplete coverage, each counted once (identity Sid|ProfilePath, the key of ProfileBaseStatus) even
+    # when it is in several lists: inaccessible, TEMP not verifiable, a base not audited.
+    param($Inventory)
+    $seen = @{}
+    foreach ($n in @('InaccessibleProfiles', 'UnverifiedTempProfiles', 'NotAuditedProfiles')) { foreach ($pr in @(Get-AtmInventoryProfileList -Inventory $Inventory -Name $n)) { $seen[[string]$pr.Sid + '|' + [string]$pr.ProfilePath] = $true } }
+    return $seen.Count
+}
+
 function Invoke-AtmInventory {
     <#
       Full read-only inventory.
@@ -831,6 +884,15 @@ function Invoke-AtmInventory {
         $unverifiedTemp += $pr
     }
 
+    # Bases not audited: refused for safety, in a state not known here, or an alias whose canonical base was not audited.
+    # Never an absence: the coverage is incomplete. A profile can also be inaccessible or have a TEMP not verifiable;
+    # it stays in each list so no reason is hidden, and counts use the union (Get-AtmIncompleteProfileCount).
+    $baseIndex = Get-AtmBaseIndex -Bases $bases
+    $notAudited = @()
+    foreach ($pr in $profiles) {
+        if (@(Get-AtmNotAuditedBaseStates -Entries $profileStatus[$pr.Sid + '|' + $pr.ProfilePath] -BaseIndex $baseIndex).Count -gt 0) { $notAudited += $pr }
+    }
+
     [pscustomobject]@{
         ToolVersion          = $script:AtmVersion
         Machine              = $env:COMPUTERNAME
@@ -851,7 +913,8 @@ function Invoke-AtmInventory {
         ProcessCoverageComplete = $procCoverageComplete
         InaccessibleProfiles = $inaccessibleProfiles
         UnverifiedTempProfiles = $unverifiedTemp
-        CoverageComplete     = $procCoverageComplete -and ($inaccessibleProfiles.Count -eq 0) -and ($unverifiedTemp.Count -eq 0)
+        NotAuditedProfiles   = $notAudited
+        CoverageComplete     = $procCoverageComplete -and ($inaccessibleProfiles.Count -eq 0) -and ($unverifiedTemp.Count -eq 0) -and ($notAudited.Count -eq 0)
         OnlyRootPath         = $OnlyRootPath
         DiscoveryNotes       = @($script:AtmDiscoveryNotes)
         DiscoveryStatus      = $discoveryStatus

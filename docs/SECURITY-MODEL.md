@@ -402,7 +402,7 @@ called by `Invoke-AtmGitCommand`):
     `PATH_REFERENCE_UNVERIFIED` is reported for an ambiguous reference under an audited base, which never makes its
     process a candidate.
   * **Base states (O2C).** A base refused because its path holds a reparse point (`REPARSE_IN_PATH`) or is not on a
-    fixed drive (`UNSUPPORTED_DRIVE`) is not inventoried and is not counted in `temp-profiles`. The diagnose reads the
+    fixed drive (`UNSUPPORTED_DRIVE`) is not inventoried (`temp-profiles` reports it as `PROFILES_NOT_AUDITED`, below). The diagnose reads the
     state of every base: any state other than read (`OK`) or confirmed absent (`NOT_FOUND`, `NOT_DIRECTORY`) gives
     `PATH_REFERENCE_BASES_INCOMPLETE`, and so does a state it does not know. The refusal itself is unchanged: such a base
     is still not followed or read.
@@ -424,8 +424,14 @@ called by `Invoke-AtmGitCommand`):
     agents found and their evidence stay, nothing is made up, and `agent-resources` never reports a complete zero
     (with no agent found its sums are `null`; with agents, the sums of what was read, not complete). Consequently the
     diagnose `coverageComplete` is always `false`. Tested on synthetic forms; a real hidden agent was not demonstrated.
-  * `temp-profiles` and the V0.1 coverage do not count a refused base either; the profile is labelled "not audited", while
-    the V0.1 coverage can read complete. Open, to be fixed before publication (separate change).
+  * **Bases not audited (V0.1 coverage).** A base refused for safety, in a state not known, or an alias whose canonical
+    base (read with its final state) was not audited makes the V0.1 coverage incomplete: `CoverageComplete` is `false`,
+    `temp-profiles` is `PARTIAL` with `PROFILES_NOT_AUDITED` (beside `PROFILES_INACCESSIBLE` and
+    `TEMP_LOCATION_UNVERIFIED` when they also apply; a profile is counted once), and a profile with an audited base and
+    a base not audited is labelled `AUDITADO_PARCIAL`, never `AUDITADO`. Elevation is reported as not helping only for a
+    refusal for safety; a state not known stays `UNKNOWN`. The refusal itself, traversal, eligibility and cleaning are
+    unchanged. Before 0.2.0 (0.1.0 and 0.1.1) such a base was not counted: the V0.1 coverage could read complete and a
+    profile with a base read and a base refused was labelled `AUDITADO`; no 0.1.x update is made for it here.
 * **Allocation** is an estimate (cluster rounding; MFT-resident files overestimated).
 * **Discovery visibility** (V0.2 P4-B: now reported, still a limit): if the `ProfilesDirectory` value of the Windows
   profile list cannot be resolved or listed, folders under it that have no profile-list entry (residual profiles) are

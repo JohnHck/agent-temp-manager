@@ -157,13 +157,15 @@ A reason also names each gap of a source of agent discovery:
 * `PATH_REFERENCE_BASES_INCOMPLETE` (O2B): references are only searched in the bases the inventory discovered and
   read. This reason is given even when no candidate was found, and when any of these holds:
   * `temp-profiles` is not conclusive: a base was inaccessible, invalid or not enumerated (`PROFILES_INACCESSIBLE`),
-    or a TEMP location could not be verified (`TEMP_LOCATION_UNVERIFIED`);
+    a base was not audited (`PROFILES_NOT_AUDITED`, below), or a TEMP location could not be verified
+    (`TEMP_LOCATION_UNVERIFIED`);
   * `profile-discovery` is not conclusive;
   * either record is missing;
   * a base is in any state other than read (`OK`) or confirmed absent (`NOT_FOUND`, `NOT_DIRECTORY`) (O2C). This
-    includes a base refused for safety, which `temp-profiles` does not count: a reparse point in its path
-    (`REPARSE_IN_PATH`) or a drive that is not fixed (`UNSUPPORTED_DRIVE`). A refusal is never proof that no agent uses
-    the base. A state not known to the runtime counts the same way, and base states that were not supplied are unknown.
+    includes a base refused for safety: a reparse point in its path (`REPARSE_IN_PATH`) or a drive that is not fixed
+    (`UNSUPPORTED_DRIVE`). A refusal is never proof that no agent uses the base. A state not known to the runtime
+    counts the same way, and base states that were not supplied are unknown. (`temp-profiles` also reports such a base,
+    per profile, as `PROFILES_NOT_AUDITED`.)
 
   An `inventory` record that is `PARTIAL` only because it finished after the deadline does not count.
 * `PATH_REFERENCE_UNVERIFIED` also when a partition has an ambiguous reference (an unresolved name, or a short-name or
@@ -285,6 +287,27 @@ ordinally. No path, command line, VM name, GUID, account or session id is in it.
 | Field | Type | Meaning |
 |---|---|---|
 | `collected` | boolean | `false` when the inventory did not run (deadline or failure); the other fields are then `null`. |
-| `coverageComplete` | boolean or null | V0.1 coverage verdict of the inventory. |
+| `coverageComplete` | boolean or null | V0.1 coverage verdict of the inventory: `true` only when the process collection is complete and no profile is inaccessible, has a TEMP location not verifiable or has a base not audited (see `temp-profiles` below). |
 | `partitions` | number or null | Number of measured partitions. |
 | `bytes` | number or null | Logical bytes of those partitions. |
+
+The coverage record `temp-profiles` (the V0.1 profiles and their TEMP bases) is `PARTIAL` with one reason per kind of
+gap, a profile being in every list that applies (no reason is hidden):
+* `PROFILES_INACCESSIBLE`: a base of the profile was inaccessible, invalid or not enumerated, or a session registry
+  could not be read;
+* `PROFILES_NOT_AUDITED`: a base of the profile was not audited: refused for safety (`REPARSE_IN_PATH`,
+  `UNSUPPORTED_DRIVE`), in a state not known, or an alias (`DUPLICATE_SAME_PROFILE`, `SHARED_WITH_<sid>`) whose
+  canonical base, read with its final state, was not audited. An alias is never proof that a base was audited; an alias
+  of a base that was read is audited. Read (`OK`) and confirmed absent (`NOT_FOUND`, `NOT_DIRECTORY`) are the only
+  states without a gap, the same table as `PATH_REFERENCE_BASES_INCOMPLETE`;
+* `TEMP_LOCATION_UNVERIFIED`: the profile environment could not be read, so only the default location was checked
+  (a profile already inaccessible is not listed here).
+
+`observed` is the number of profiles with none of these gaps and `expected` the number of profiles; a profile in
+several lists is counted once (identity: SID and profile path), and the V0.1 count of profiles with incomplete coverage
+is the same union. `elevationWouldHelp` is `NO` with no reason, and also when the only reason is `PROFILES_NOT_AUDITED`
+and every such base was refused for safety (elevation does not lift that refusal); `UNKNOWN` when a base not audited is
+in any other state; with `PROFILES_INACCESSIBLE` or `TEMP_LOCATION_UNVERIFIED`, `YES` (`UNKNOWN` for an elevated
+administrator). In the V0.1 profile list (`profiles[].status`) a profile with an audited base and a base not audited
+is `AUDITADO_PARCIAL`; with no audited base, `NAO_AUDITADO_REPARSE`, `NAO_AUDITADO_UNIDADE`, or `INACESSIVEL` for a
+state not known (no existing code is more precise, and it is never `SEM_TEMP_CLAUDE`).

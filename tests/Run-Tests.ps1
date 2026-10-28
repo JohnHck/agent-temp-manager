@@ -5179,6 +5179,130 @@ try {
         $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs) -IdentitySource $diagIdAdmin
         Assert-Eq (@($d.Coverage | Where-Object { $_.Collector -eq 'processes' })[0].ElevationWouldHelp) 'NO' 'administrador elevado: processos protegidos continuam invisiveis'
     }
+    Test-Case 'Cobertura' 'INV: base nao auditada (REPARSE_IN_PATH, UNSUPPORTED_DRIVE, estado desconhecido, alias pela base canonica) nunca da CoverageComplete, temp-profiles COMPLETE nem perfil AUDITADO; inacessivel e TEMP nao verificado juntos sem dupla contagem; ausencia confirmada e base vazia mantidas; relatorio, JSON V0.1, diagnose e TUI' {
+        # REPARSE_IN_PATH is real (a sandbox junction); UNSUPPORTED_DRIVE and a state no check produces are injected for
+        # one base path only (the chain check of every other path is the real one).
+        $origChain = ${function:Test-AtmPathChain}
+        $script:invInj = @{}
+        $invOf = { param([object[]]$Profiles)
+            $a = Get-InvArgs -Profiles $Profiles
+            & { function Test-AtmPathChain { param([string]$Path) foreach ($k in @($script:invInj.Keys)) { if ($Path.StartsWith($k, [StringComparison]::OrdinalIgnoreCase)) { return [pscustomobject]@{ Status = $script:invInj[$k]; At = $Path.Substring(0, 3); Detail = 'test' } } }; & $origChain $Path }
+                Invoke-AtmInventory @a } }
+        $addJ = { param($P, [string]$Tag)
+            $real = Join-Path $sandbox ('inv-real-' + $Tag); [void][IO.Directory]::CreateDirectory((Join-Path $real ('claude\C--x\' + [guid]::NewGuid())))
+            $j = Join-Path $P.ProfilePath ('AppData\Local\TempJ' + $Tag); New-Junction -Link $j -Target $real
+            $c = [pscustomobject]@{ TempPath = $j; Source = 'test' }; $P.TempCandidates = @($P.TempCandidates) + @($c); $c }
+        $addInj = { param($P, [string]$Tag, [string]$State)
+            $t = Join-Path $P.ProfilePath ('Temp' + $Tag); [void][IO.Directory]::CreateDirectory((Join-Path $t 'claude'))
+            $script:invInj[(Join-Path $t 'claude')] = $State
+            $P.TempCandidates = @($P.TempCandidates) + @([pscustomobject]@{ TempPath = $t; Source = 'test' }) }
+        $only = { param($P, [int]$From) $P.TempCandidates = @($P.TempCandidates)[$From..(@($P.TempCandidates).Count - 1)] }
+        $tpOf = { param($I) @(Get-AtmInventoryCoverage -Inventory $I -Identity ([pscustomobject]@{ IsElevatedAdministrator = $false }) -StartedUtc ([datetime]::UtcNow) -ElapsedMs 0 -OverDeadline $false | Where-Object { $_.Collector -ceq 'temp-profiles' })[0] }
+        $line = { param($I)
+            $tp = & $tpOf $I
+            $lb = @($I.Profiles | ForEach-Object { Get-AtmProfileStatusLabel -Inventory $I -ProfileInfo $_ }) -join '/'
+            $na = $(if (@($I.PSObject.Properties.Name) -contains 'NotAuditedProfiles') { @($I.NotAuditedProfiles).Count } else { '-' })
+            "CC=$([bool]$I.CoverageComplete) tp=$($tp.Status):$(@($tp.Reasons) -join ',') help=$($tp.ElevationWouldHelp) obs=$($tp.Observed)/$($tp.Expected) rot=$lb na=$na inacc=$(@($I.InaccessibleProfiles).Count) unver=$(@($I.UnverifiedTempProfiles).Count)" }
+        $obs = New-Object System.Collections.Generic.List[string]; $bad = New-Object System.Collections.Generic.List[string]
+        $row = { param([string]$Name, $I, [string]$Want) $got = & $line $I; $obs.Add("$($Name): $got"); if ($got -cne $Want) { $bad.Add("$($Name): esperado [$Want] obtido [$got]") } }
+
+        # M1 control: one base read, with a root.
+        $p1 = New-TestProfile 'inv-m1'; $null = New-TestRoot -ProfileInfo $p1
+        & $row 'M1 controle' (& $invOf @($p1)) 'CC=True tp=COMPLETE: help=NO obs=1/1 rot=AUDITADO na=0 inacc=0 unver=0'
+        # M2 only a refused base (junction), M3 only a drive that is not fixed (injected).
+        $p2 = New-TestProfile 'inv-m2'; $null = & $addJ $p2 'm2'; & $only $p2 1
+        & $row 'M2 so REPARSE_IN_PATH' (& $invOf @($p2)) 'CC=False tp=PARTIAL:PROFILES_NOT_AUDITED help=NO obs=0/1 rot=NAO_AUDITADO_REPARSE na=1 inacc=0 unver=0'
+        $p3 = New-TestProfile 'inv-m3'; & $addInj $p3 'm3' 'UNSUPPORTED_DRIVE'; & $only $p3 1
+        & $row 'M3 so UNSUPPORTED_DRIVE' (& $invOf @($p3)) 'CC=False tp=PARTIAL:PROFILES_NOT_AUDITED help=NO obs=0/1 rot=NAO_AUDITADO_UNIDADE na=1 inacc=0 unver=0'
+        # M4/M5 a base read next to a refused one: partial, never AUDITADO.
+        $p4 = New-TestProfile 'inv-m4'; $null = New-TestRoot -ProfileInfo $p4; $null = & $addJ $p4 'm4'
+        $i4 = & $invOf @($p4)
+        & $row 'M4 OK + REPARSE_IN_PATH' $i4 'CC=False tp=PARTIAL:PROFILES_NOT_AUDITED help=NO obs=0/1 rot=AUDITADO_PARCIAL na=1 inacc=0 unver=0'
+        $p5 = New-TestProfile 'inv-m5'; $null = New-TestRoot -ProfileInfo $p5; & $addInj $p5 'm5' 'UNSUPPORTED_DRIVE'
+        & $row 'M5 OK + UNSUPPORTED_DRIVE' (& $invOf @($p5)) 'CC=False tp=PARTIAL:PROFILES_NOT_AUDITED help=NO obs=0/1 rot=AUDITADO_PARCIAL na=1 inacc=0 unver=0'
+        # M6 every base refused.
+        $p6 = New-TestProfile 'inv-m6'; $null = & $addJ $p6 'm6'; & $addInj $p6 'm6' 'UNSUPPORTED_DRIVE'; & $only $p6 1
+        & $row 'M6 todas recusadas' (& $invOf @($p6)) 'CC=False tp=PARTIAL:PROFILES_NOT_AUDITED help=NO obs=0/1 rot=NAO_AUDITADO_REPARSE na=1 inacc=0 unver=0'
+        # M7 a state no check produces: unknown, never absence, never NO.
+        $p7 = New-TestProfile 'inv-m7'; & $addInj $p7 'm7' 'STATE_NOT_KNOWN'; & $only $p7 1
+        & $row 'M7 so estado desconhecido' (& $invOf @($p7)) 'CC=False tp=PARTIAL:PROFILES_NOT_AUDITED help=UNKNOWN obs=0/1 rot=INACESSIVEL na=1 inacc=0 unver=0'
+        $p7b = New-TestProfile 'inv-m7b'; $null = New-TestRoot -ProfileInfo $p7b; & $addInj $p7b 'm7b' 'STATE_NOT_KNOWN'
+        & $row 'M7b OK + estado desconhecido' (& $invOf @($p7b)) 'CC=False tp=PARTIAL:PROFILES_NOT_AUDITED help=UNKNOWN obs=0/1 rot=AUDITADO_PARCIAL na=1 inacc=0 unver=0'
+        # M8 one profile inaccessible (invalid TEMP) and with a refused base: both reasons, counted once.
+        $p8 = New-TestProfile 'inv-m8'; $null = New-TestRoot -ProfileInfo $p8; $null = & $addJ $p8 'm8'
+        $p8.TempCandidates = @($p8.TempCandidates) + @([pscustomobject]@{ TempPath = (Join-Path $p8.ProfilePath 'Temp|ilegivel'); Source = 'test' })
+        $i8 = & $invOf @($p8)
+        & $row 'M8 inacessivel + REPARSE_IN_PATH' $i8 'CC=False tp=PARTIAL:PROFILES_INACCESSIBLE,PROFILES_NOT_AUDITED help=YES obs=0/1 rot=AUDITADO_PARCIAL na=1 inacc=1 unver=0'
+        # M9 TEMP not verifiable (environment not loaded) and a refused base.
+        $p9 = New-TestProfile 'inv-m9'; $null = & $addJ $p9 'm9'; & $only $p9 1; $p9.Loaded = $false; $p9.EnvStatus = 'NOT_LOADED'; $p9.EnvKnown = $false
+        & $row 'M9 TEMP nao verificado + REPARSE_IN_PATH' (& $invOf @($p9)) 'CC=False tp=PARTIAL:PROFILES_NOT_AUDITED,TEMP_LOCATION_UNVERIFIED help=YES obs=0/1 rot=NAO_AUDITADO_REPARSE na=1 inacc=0 unver=1'
+        # M10 a shared base: B names A's refused base (SHARED_WITH_<A>); the alias carries the canonical state.
+        $p10a = New-TestProfile 'inv-m10a'; $c10 = & $addJ $p10a 'm10'; & $only $p10a 1
+        $p10b = New-TestProfile 'inv-m10b' -Sid 'S-1-5-21-1-2-3-7010'; $p10b.TempCandidates = @($c10)
+        $i10 = & $invOf @($p10a, $p10b)
+        Assert-True (@($i10.ProfileBaseStatus[$p10b.Sid + '|' + $p10b.ProfilePath] | Where-Object { ([string]$_.Status).StartsWith('SHARED_WITH_') }).Count -eq 1) 'M10: B e alias da base de A'
+        & $row 'M10 alias de base recusada' $i10 'CC=False tp=PARTIAL:PROFILES_NOT_AUDITED help=NO obs=0/2 rot=NAO_AUDITADO_REPARSE/NAO_AUDITADO_REPARSE na=2 inacc=0 unver=0'
+        # M11 a shared base that was read: the alias is audited through the canonical base, nothing is missing.
+        $p11a = New-TestProfile 'inv-m11a'; $null = New-TestRoot -ProfileInfo $p11a
+        $p11b = New-TestProfile 'inv-m11b' -Sid 'S-1-5-21-1-2-3-7011'; $p11b.TempCandidates = @($p11a.TempCandidates[0])
+        & $row 'M11 alias de base lida' (& $invOf @($p11a, $p11b)) 'CC=True tp=COMPLETE: help=NO obs=2/2 rot=AUDITADO/AUDITADO na=0 inacc=0 unver=0'
+        # M12 two candidates of one profile naming the same refused base (DUPLICATE_SAME_PROFILE): the profile counts once.
+        $p12 = New-TestProfile 'inv-m12'; $c12 = & $addJ $p12 'm12'; $p12.TempCandidates = @($c12, $c12)
+        $i12 = & $invOf @($p12)
+        Assert-True (@($i12.ProfileBaseStatus[$p12.Sid + '|' + $p12.ProfilePath] | Where-Object { $_.Status -ceq 'DUPLICATE_SAME_PROFILE' }).Count -eq 1) 'M12: segunda candidata e DUPLICATE_SAME_PROFILE'
+        & $row 'M12 duplicata da base recusada' $i12 'CC=False tp=PARTIAL:PROFILES_NOT_AUDITED help=NO obs=0/1 rot=NAO_AUDITADO_REPARSE na=1 inacc=0 unver=0'
+        # M14 confirmed absence (NOT_FOUND, NOT_DIRECTORY) and an empty base keep their meaning.
+        $p14 = New-TestProfile 'inv-m14a' -NoConfig; [IO.Directory]::Delete((Get-Base $p14))
+        $tf = Join-Path $p14.ProfilePath 'TempF'; [void][IO.Directory]::CreateDirectory($tf); [IO.File]::WriteAllBytes((Join-Path $tf 'claude'), [byte[]]@(1))
+        $p14.TempCandidates = @($p14.TempCandidates) + @([pscustomobject]@{ TempPath = $tf; Source = 'test' })
+        $p14e = New-TestProfile 'inv-m14b'
+        & $row 'M14 NOT_FOUND + NOT_DIRECTORY; base vazia' (& $invOf @($p14, $p14e)) 'CC=True tp=COMPLETE: help=NO obs=2/2 rot=SEM_TEMP_CLAUDE/AUDITADO na=0 inacc=0 unver=0'
+        $script:invInj = @{}
+        Assert-True ($bad.Count -eq 0) ("matriz: " + ($(if ($bad.Count) { 'FALHAS: ' + ($bad -join ' | ') + ' || ' } else { '' })) + ($obs -join ' | '))
+
+        # M13 synthetic: an alias of a canonical base whose enumeration failed after the check (state changed in phase 3).
+        $sb = @([pscustomobject]@{ Sid = 'S-A'; Profile = [pscustomobject]@{ ProfilePath = 'C:\A' }; Path = 'C:\A\T\claude'; Status = 'ENUMERATION_FAILED' })
+        $sEnt = @([pscustomobject]@{ Provider = 'claude-code'; BasePath = 'C:\A\T\claude'; Source = 'test'; Status = 'SHARED_WITH_S-A'; At = $null })
+        Assert-Eq ((@(Get-AtmNotAuditedBaseStates -Entries $sEnt -BaseIndex (Get-AtmBaseIndex -Bases $sb))) -join ',') 'ENUMERATION_FAILED' 'M13: alias com o estado final da canonica'
+        Assert-Eq ((@(Get-AtmNotAuditedBaseStates -Entries @([pscustomobject]@{ BasePath = 'C:\Z\claude'; Status = 'SHARED_WITH_S-Z' }) -BaseIndex @{})) -join ',') 'CANONICAL_BASE_UNKNOWN' 'M13: alias sem base canonica e desconhecido'
+        $sInv = [pscustomobject]@{ Profiles = @(); ProfileBaseStatus = @{ 'S-B|C:\B' = $sEnt }; Bases = $sb; Registries = @{} }
+        Assert-Eq (Get-AtmProfileStatusLabel -Inventory $sInv -ProfileInfo ([pscustomobject]@{ Sid = 'S-B'; ProfilePath = 'C:\B' })) 'INACESSIVEL' 'M13: rotulo do alias de base nao enumerada (inventario sem as listas)'
+        # P: one state table with the agent runtime (O2C).
+        Assert-Eq (@($script:AtmAuditedBaseStates) -join ',') (@($script:AtmBaseStatesWithoutGap) -join ',') 'P: estados sem lacuna iguais aos do runtime'
+
+        # Consumers of M4 (a base read + a refused one) and M8 (inaccessible + refused, one profile).
+        $old = Get-AtmLanguage
+        $cons = New-Object System.Collections.Generic.List[string]
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                $t4 = (@(Show-AtmAudit -Inventory $i4 6>&1 | ForEach-Object { [string]$_.MessageData }) -join "`n")
+                if (-not ($t4.Contains((Get-AtmText 'audit.coverage' (Get-AtmText 'audit.coverageIncompleteSee'))) -and $t4.Contains((Get-AtmText 'audit.notAuditedProfiles')) -and $t4.Contains('REPARSE_IN_PATH') -and $t4.Contains((Get-AtmStatusText 'AUDITADO_PARCIAL')))) { $cons.Add("relatorio $lang") }
+                $o4 = Invoke-HeadlessTui -Keys @((New-Key 'D1' '1'), (New-Key 'Escape'), (New-Key 'D9' '9'), (New-Key 'Escape'), (New-Key 'Q' 'q')) -InvArgs (Get-InvArgs -Profiles @($p4)) -W 160 -H 40
+                $f4 = $o4.Frames -join "`n"
+                foreach ($s in @((Get-AtmText 'dash.audited' 1), (Get-AtmText 'dash.incomplete' 1), (Get-AtmText 'dash.coverage' (Get-AtmText 'common.incomplete')), (Get-AtmText 'tui.coverageAll' (Get-AtmText 'common.incomplete')), (Get-AtmText 'tui.notAudited' $p4.UserName $p4.Sid 'REPARSE_IN_PATH'))) { if (-not ($f4 -replace '\s', '').Contains(($s -replace '\s', ''))) { $cons.Add("TUI $lang M4: '$s'") } }
+                $o8 = Invoke-HeadlessTui -Keys @((New-Key 'D1' '1'), (New-Key 'Escape'), (New-Key 'Q' 'q')) -InvArgs (Get-InvArgs -Profiles @($p8)) -W 160 -H 40
+                if (-not ($o8.Frames -join "`n").Contains((Get-AtmText 'dash.incomplete' 1))) { $cons.Add("TUI $lang M8: perfil contado uma vez") }
+                # Main menu summary: one partition, two files (2148 bytes), coverage incomplete.
+                $ms = (Get-AtmText 'tui.menuSummary' 1 2 (Format-AtmMB 2148) (Get-AtmText 'common.incomplete')) -replace '\s', ''
+                if (@($o4.Frames | Where-Object { ($_ -replace '\s', '').Contains($ms) }).Count -eq 0) { $cons.Add("TUI $lang menu: '$ms'") }
+            }
+        } finally { Set-AtmLanguage -Requested $old }
+        $j4 = (ConvertTo-AtmExportJson -Inventory $i4) | ConvertFrom-Json
+        if (-not ($j4.coverageComplete -eq $false -and @($j4.profiles)[0].status -ceq 'AUDITADO_PARCIAL')) { $cons.Add("JSON V0.1: coverageComplete $($j4.coverageComplete), status $(@($j4.profiles)[0].status)") }
+        # Integrated diagnose on M4: inventory.coverageComplete and temp-profiles (not the diagnose total, always false).
+        $d4 = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p4)) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0]) -PseudonymKey $testPseudonymKey
+        $dj = (ConvertTo-AtmDiagnoseJson -Result $d4) | ConvertFrom-Json
+        $dtp = @($dj.coverage | Where-Object { $_.collector -ceq 'temp-profiles' })[0]
+        if (-not ($dj.inventory.coverageComplete -eq $false -and $dtp.status -ceq 'PARTIAL' -and (@($dtp.reasons) -join ',') -ceq 'PROFILES_NOT_AUDITED' -and $dtp.elevationWouldHelp -ceq 'NO')) { $cons.Add("diagnose: inventory.coverageComplete $($dj.inventory.coverageComplete), temp-profiles $($dtp.status) [$(@($dtp.reasons) -join ',')] $($dtp.elevationWouldHelp)") }
+        try {
+            Set-AtmLanguage -Requested 'en-US'; $de = (Show-AtmDiagnose -Result $d4 6>&1 | Out-String) -replace '\s+', ' '; $te = (Get-AtmText 'reason.PROFILES_NOT_AUDITED')
+            Set-AtmLanguage -Requested 'pt-BR'; $dp = (Show-AtmDiagnose -Result $d4 6>&1 | Out-String) -replace '\s+', ' '; $tpt = (Get-AtmText 'reason.PROFILES_NOT_AUDITED')
+        } finally { Set-AtmLanguage -Requested $old }
+        if (-not ($de.Contains('PROFILES_NOT_AUDITED') -and $de.Contains($te) -and $dp.Contains($tpt) -and $te -cne $tpt)) { $cons.Add("relatorio do diagnose en/pt: codigo $($de.Contains('PROFILES_NOT_AUDITED')), texto en $($de.Contains($te)), texto pt $($dp.Contains($tpt)); trecho en: $(($de -split 'temp-profiles' | Select-Object -Skip 1 | Select-Object -First 1) -replace '^(.{0,300}).*$', '$1')") }
+        Assert-True ($cons.Count -eq 0) ("consumidores: " + ($cons -join ' | '))
+        $script:caseNote = "matriz $($obs.Count) cenarios + M13 sintetico + paridade; consumidores: relatorio en/pt, TUI menu/dashboard/erros en/pt, JSON V0.1, diagnose JSON e relatorio en/pt"
+    }
     Test-Case 'Diagnose' 'Coerencia de cobertura (T-3): inventario incompleto nunca aparece completo no resultado, no JSON nem no relatorio' {
         # Each row builds a real sandbox inventory; nothing is mocked except the process snapshot failure.
         $rows = @(
@@ -5186,7 +5310,8 @@ try {
             @{ Name = 'snapshot'; Collector = 'processes'; Status = 'FAILED'; Reason = 'PROCESS_SNAPSHOT_FAILED' },
             @{ Name = 'uninspectable'; Collector = 'processes'; Status = 'PARTIAL'; Reason = 'UNINSPECTABLE_PROCESSES' },
             @{ Name = 'inaccessible'; Collector = 'temp-profiles'; Status = 'PARTIAL'; Reason = 'PROFILES_INACCESSIBLE' },
-            @{ Name = 'unverified'; Collector = 'temp-profiles'; Status = 'PARTIAL'; Reason = 'TEMP_LOCATION_UNVERIFIED' })
+            @{ Name = 'unverified'; Collector = 'temp-profiles'; Status = 'PARTIAL'; Reason = 'TEMP_LOCATION_UNVERIFIED' },
+            @{ Name = 'notaudited'; Collector = 'temp-profiles'; Status = 'PARTIAL'; Reason = 'PROFILES_NOT_AUDITED' })
         $origSnapshot = ${function:Get-AtmProcessSnapshot}
         foreach ($row in $rows) {
             $n = $row.Name
@@ -5197,6 +5322,8 @@ try {
             if ($n -eq 'inaccessible') { $p.TempCandidates = @($p.TempCandidates) + @([pscustomobject]@{ TempPath = (Join-Path $p.ProfilePath 'Temp|ilegivel'); Source = 'test' }) }
             if ($n -eq 'uninspectable') { $procs = New-Procs -Extra @([pscustomobject]@{ ProcessId = 4243; Name = 'other.exe'; ParentProcessId = 1; CommandLine = $null; CreationDate = (Get-Date).AddHours(-1) }) }
             if ($n -eq 'unverified') { $p.Loaded = $false; $p.EnvStatus = 'NOT_LOADED'; $p.EnvKnown = $false }
+            # A second TEMP location behind a junction: the base is refused for safety (REPARSE_IN_PATH), never read.
+            if ($n -eq 'notaudited') { $jt = Join-Path $sandbox 'temp-real-diagcoh'; [void][IO.Directory]::CreateDirectory((Join-Path $jt 'claude')); $jl = Join-Path $p.ProfilePath 'AppData\Local\TempJ'; New-Junction -Link $jl -Target $jt; $p.TempCandidates = @($p.TempCandidates) + @([pscustomobject]@{ TempPath = $jl; Source = 'test' }) }
             if ($n -eq 'snapshot') { ${function:script:Get-AtmProcessSnapshot} = { param($Override) [pscustomobject]([ordered]@{ Failed = $true; Error = 'x'; Processes = @(); Total = 0; Readable = 0; Uninspectable = 0; UninspectableByName = @{} }) } }
             try { $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0]) -PseudonymKey $testPseudonymKey }
             finally { ${function:script:Get-AtmProcessSnapshot} = $origSnapshot }
@@ -5218,6 +5345,7 @@ try {
                 Assert-True (@($f[0].IncompleteCoverage) -ccontains $row.Collector) "$n`: achado lista $($row.Collector) como incompleto"
                 if ($n -eq 'inaccessible') { Assert-Eq @($d.Inventory.InaccessibleProfiles).Count 1 'perfil inacessivel no inventario' }
                 if ($n -eq 'unverified') { Assert-Eq @($d.Inventory.UnverifiedTempProfiles).Count 1 'TEMP nao verificavel no inventario' }
+                if ($n -eq 'notaudited') { Assert-Eq @($d.Inventory.NotAuditedProfiles).Count 1 'base nao auditada no inventario' }
             } else {
                 foreach ($c in @($d.Coverage | Where-Object { $_.Collector -ne 'process-cwd' -and $_.Collector -ne 'handles' -and $_.Collector -ne 'worktree-discovery' -and $_.Collector -notlike 'service*' -and $_.Collector -notlike 'virtual*' -and $_.Collector -notlike 'agent-*' })) { Assert-Eq $c.Status 'COMPLETE' "controle: $($c.Collector) completo" }
             }
@@ -7897,6 +8025,8 @@ try {
         $d5 = & $diag $ia5 $irows
         & $check 'I5 NOT_FOUND, NOT_DIRECTORY, estrutura nao reconhecida e base compartilhada' $d5 'PARTIAL' '' ''
         Assert-True ($bad.Count -eq 0) ("integrado: " + ($(if ($bad.Count) { 'FALHAS: ' + ($bad -join ' | ') + ' || ' } else { '' })) + ($obs -join ' | '))
+        # The V0.1 coverage of the same runs: a refused base is never complete (asserted in full in 'Cobertura :: INV').
+        Assert-True (-not $i1.CoverageComplete -and (& $covSt $d1 'temp-profiles') -ceq 'PARTIAL:PROFILES_NOT_AUDITED' -and (& $covSt $d2 'temp-profiles') -ceq 'PARTIAL:PROFILES_NOT_AUDITED' -and (& $covSt $d0 'temp-profiles') -ceq 'COMPLETE:' -and (& $covSt $d5 'temp-profiles') -ceq 'COMPLETE:') "V0.1: CoverageComplete $($i1.CoverageComplete); temp-profiles I1 $(& $covSt $d1 'temp-profiles'), I2 $(& $covSt $d2 'temp-profiles'), I0 $(& $covSt $d0 'temp-profiles'), I5 $(& $covSt $d5 'temp-profiles')"
         # An ancestor reference to an empty base or project folder (no partition to carry it) is asserted in O2D.
         # Consumers of the integrated REPARSE_IN_PATH and empty-base runs: JSON (in-memory conversion), report, TUI index.
         $old = Get-AtmLanguage
@@ -7950,7 +8080,7 @@ try {
         # Static: Invoke-AtmDiagnose hands the base states (codes only, never a path) and the ambiguous count to the runtime.
         $diagSrc = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Diagnose.ps1'))
         Assert-True ($diagSrc.Contains("`$rtArgs['BaseStatuses'] = [string[]]@(`$inv.Bases | ForEach-Object { [string]`$_.Status })") -and $diagSrc.Contains("`$rtArgs['AmbiguousReferences'] = `$inv.References.Ambiguous")) 'Invoke-AtmDiagnose repassa estados das bases e contagem de ambiguas'
-        $script:caseNote = "integrado: controle, REPARSE_IN_PATH real (juncao), UNSUPPORTED_DRIVE injetado, base vazia, projeto vazio, estados sem lacuna; sinteticos: $($cases.Count) composicoes; JSON, relatorio e indice da TUI; achado separado (observado, nao asserido): CoverageComplete V0.1 com base REPARSE_IN_PATH = $($i1.CoverageComplete), temp-profiles $(& $covSt $d1 'temp-profiles')"
+        $script:caseNote = "integrado: controle, REPARSE_IN_PATH real (juncao), UNSUPPORTED_DRIVE injetado, base vazia, projeto vazio, estados sem lacuna; sinteticos: $($cases.Count) composicoes; JSON, relatorio e indice da TUI; cobertura V0.1 asserida: REPARSE_IN_PATH e UNSUPPORTED_DRIVE dao temp-profiles PARTIAL PROFILES_NOT_AUDITED"
     }
     Test-Case 'Diagnose' 'O2D: referencias sem particao portadora (ancestral ou ambigua a base ou projeto vazio) contadas no produtor Find-AtmReferences e repassadas a agent-processes; anexadas a uma ou varias particoes, diretas e nenhuma referencia nao contaminam; campo ausente, invalido ou negativo nunca e zero' {
         # Synthetic processes over real sandbox inventories; these show the propagation, not a real hidden agent.

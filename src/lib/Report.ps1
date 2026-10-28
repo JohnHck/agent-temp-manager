@@ -57,14 +57,22 @@ function Get-AtmProfileStatusLabel {
     $unreadable = @(Get-AtmProfileRegistries -Registries $Inventory.Registries -ProfileInfo $ProfileInfo | Where-Object { -not $_.Readable }).Count
     $bases = @($Inventory.Bases | Where-Object { $_.Sid -eq $ProfileInfo.Sid -and $_.Profile.ProfilePath -eq $ProfileInfo.ProfilePath })
     $tempUnverified = (@($Inventory.PSObject.Properties.Name) -contains 'UnverifiedTempProfiles') -and (@($Inventory.UnverifiedTempProfiles) -contains $ProfileInfo)
-    if (@($bases | Where-Object { $_.Status -eq 'OK' }).Count -gt 0) {
-        if (@($sts | Where-Object { $_.Status -in @('INACCESSIBLE', 'INVALID') }).Count -gt 0 -or @($bases | Where-Object { $_.Status -eq 'ENUMERATION_FAILED' }).Count -gt 0 -or $unreadable -gt 0 -or $tempUnverified) { return 'AUDITADO_PARCIAL' }
+    # Every entry with the final state of the base it names (an alias carries its canonical base's state), and the states
+    # that leave a base not audited: refused for safety, not known here, or an alias of a base not audited.
+    $idx = Get-AtmBaseIndex -Bases $Inventory.Bases
+    $rs = @(Get-AtmResolvedBaseStates -Entries $sts -BaseIndex $idx)
+    $na = @(Get-AtmNotAuditedBaseStates -Entries $sts -BaseIndex $idx)
+    if (@($bases | Where-Object { $_.Status -eq 'OK' }).Count -gt 0 -or @($rs | Where-Object { $_.Alias -and $_.Resolved -ceq 'OK' }).Count -gt 0) {
+        if (@($sts | Where-Object { $_.Status -in @('INACCESSIBLE', 'INVALID') }).Count -gt 0 -or @($bases | Where-Object { $_.Status -eq 'ENUMERATION_FAILED' }).Count -gt 0 -or $unreadable -gt 0 -or $tempUnverified -or $na.Count -gt 0) { return 'AUDITADO_PARCIAL' }
         return 'AUDITADO'
     }
     if ($tempUnverified -and @($sts | Where-Object { $_.Status -ne 'NOT_FOUND' }).Count -eq 0) { return 'TEMP_NAO_VERIFICAVEL' }
-    if (@($sts | Where-Object { $_.Status -in @('INACCESSIBLE', 'ENUMERATION_FAILED', 'INVALID') }).Count -gt 0 -or @($bases | Where-Object { $_.Status -eq 'ENUMERATION_FAILED' }).Count -gt 0) { return 'INACESSIVEL' }
-    if (@($sts | Where-Object { $_.Status -eq 'REPARSE_IN_PATH' }).Count -gt 0) { return 'NAO_AUDITADO_REPARSE' }
-    if (@($sts | Where-Object { $_.Status -eq 'UNSUPPORTED_DRIVE' }).Count -gt 0) { return 'NAO_AUDITADO_UNIDADE' }
+    if (@($sts | Where-Object { $_.Status -in @('INACCESSIBLE', 'ENUMERATION_FAILED', 'INVALID') }).Count -gt 0 -or @($bases | Where-Object { $_.Status -eq 'ENUMERATION_FAILED' }).Count -gt 0 -or @($na | Where-Object { $script:AtmInaccessibleBaseStates -ccontains $_ }).Count -gt 0) { return 'INACESSIVEL' }
+    if (@($sts | Where-Object { $_.Status -eq 'REPARSE_IN_PATH' }).Count -gt 0 -or $na -ccontains 'REPARSE_IN_PATH') { return 'NAO_AUDITADO_REPARSE' }
+    if (@($sts | Where-Object { $_.Status -eq 'UNSUPPORTED_DRIVE' }).Count -gt 0 -or $na -ccontains 'UNSUPPORTED_DRIVE') { return 'NAO_AUDITADO_UNIDADE' }
+    # A state not known here (or an alias without a canonical base): no code states it more precisely, and it is never
+    # an absence; INACESSIVEL is the nearest existing one (the base was not audited).
+    if ($na.Count -gt 0) { return 'INACESSIVEL' }
     return 'SEM_TEMP_CLAUDE'
 }
 
@@ -179,6 +187,12 @@ function Show-AtmAudit {
     if (@($inv.UnverifiedTempProfiles).Count -gt 0) {
         Write-Host ('  ' + (Get-AtmText 'audit.unverifiedTemp')) -ForegroundColor Yellow
         foreach ($pr in $inv.UnverifiedTempProfiles) { Write-Host ("   - {0} ({1}) env={2}" -f $pr.UserName, $pr.Sid, $pr.EnvStatus) -ForegroundColor Yellow }
+    }
+    $notAudited = @(Get-AtmInventoryProfileList -Inventory $inv -Name 'NotAuditedProfiles')
+    if ($notAudited.Count -gt 0) {
+        Write-Host ('  ' + (Get-AtmText 'audit.notAuditedProfiles')) -ForegroundColor Yellow
+        $idx = Get-AtmBaseIndex -Bases $inv.Bases
+        foreach ($pr in $notAudited) { Write-Host ("   - {0} ({1}) {2}" -f $pr.UserName, $pr.Sid, ((@(Get-AtmNotAuditedBaseStates -Entries $inv.ProfileBaseStatus[$pr.Sid + '|' + $pr.ProfilePath] -BaseIndex $idx) | Select-Object -Unique) -join ',')) -ForegroundColor Yellow }
     }
     foreach ($pr in $inv.Profiles) { foreach ($n in $pr.Notes) { Write-Host ('  ' + (Get-AtmText 'audit.note' $pr.UserName $n)) } }
     foreach ($n in $inv.DiscoveryNotes) { Write-Host ('  ' + (Get-AtmText 'audit.discovery' $n)) }
@@ -340,6 +354,12 @@ function Show-AtmDiagnose {
             })
     }
     Write-AtmTable $rows
+    # Meaning of the temp-profiles reasons that have a catalog text (a base not audited is never an absence).
+    $tpCodes = @(@($r.Coverage | Where-Object { $_.Collector -ceq 'temp-profiles' } | ForEach-Object { @($_.Reasons) }) | Where-Object { Get-AtmCodeText 'reason' $_ } | Sort-Object -Unique)
+    if ($tpCodes.Count -gt 0) {
+        Write-Host ('  ' + (Get-AtmText 'diag.runtimeLegendTitle'))
+        foreach ($x in $tpCodes) { Write-Host ('    ' + (Get-AtmText 'diag.runtimeLegendLine' $x (Get-AtmCodeText 'reason' $x))) -ForegroundColor Yellow }
+    }
 
     Write-AtmHeader (Get-AtmText 'diag.findingsTitle')
     $f = @($r.Findings)
