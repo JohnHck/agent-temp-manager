@@ -737,7 +737,7 @@ function Test-AtmDiagnoseExportPath {
     $full = [IO.Path]::GetFullPath($Path)
     if ([AgentTempManager.AtmPathCheck]::IsSubstitutedDrive($full)) { return 'EXPORT_SUBSTITUTED_DRIVE' }
     # $true present, $false absent, $null unknown (refused).
-    $exists = { param([string]$P) try { $null = [IO.File]::GetAttributes($P); $true } catch [IO.FileNotFoundException] { $false } catch [IO.DirectoryNotFoundException] { $false } catch { $null } }
+    $exists = { param([string]$P) Get-AtmPathPresence -Path $P }
     $dir = [IO.Path]::GetDirectoryName($full)
     while ($dir) {
         $g = & $exists (Join-Path $dir '.git')

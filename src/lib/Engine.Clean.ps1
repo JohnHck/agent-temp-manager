@@ -252,9 +252,9 @@ function Invoke-AtmClean {
         if ($why.Count -gt 0) { $skipped.Add([pscustomobject]@{ Path = $p.Path; Reasons = $why }); continue }
         # The deleter re-checks, under its own handle pins, that the tree still matches what was just validated.
         $d = [AgentTempManager.AtmDeleter]::DeleteTree($c.Path, $c.Files, $c.Dirs, $c.Bytes, $c.NewestWriteTimeUtc.Ticks, $null)
-        $gone = $false
-        # Any other error: removal is not verified (Verified = false), never assumed.
-        try { [void][IO.File]::GetAttributes($p.Path) } catch [IO.FileNotFoundException] { $gone = $true } catch [IO.DirectoryNotFoundException] { $gone = $true } catch { $gone = $false }
+        # Only a confirmed absence verifies the removal; access denied or any other error: Verified = false, never assumed.
+        $pres = Get-AtmPathPresence $p.Path
+        $gone = ($pres -is [bool]) -and (-not $pres)
         $deleted.Add([pscustomobject]@{ Path = $p.Path; Bytes = $p.Bytes; Completed = $d.Completed; Verified = $gone; FilesDeleted = $d.FilesDeleted; DirsDeleted = $d.DirsDeleted; FilesPlanned = $d.FilesPlanned; DirsPlanned = $d.DirsPlanned; AbortReason = $d.AbortReason; FailedAt = $d.FailedAt })
         if ($LogFile) {
             $rec = [ordered]@{ utc = [datetime]::UtcNow.ToString('o'); user = $inv.Identity.Name; path = $p.Path; bytes = $p.Bytes; fingerprint = $p.Fingerprint; completed = $d.Completed; verifiedGone = $gone; abort = $d.AbortReason }

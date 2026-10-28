@@ -478,6 +478,175 @@ try {
         Assert-Eq @($i.InaccessibleProfiles).Count 1 'perfil listado como inacessivel'
         Show-AtmAudit -Inventory $i
     }
+    # ------------------------------------------------------------------ exception classification (PS 5.1 typed catch)
+    # Windows PowerShell 5.1 can run a typed catch clause for the wrong exception once a script block is compiled: the
+    # product classifies by the real type (Get-AtmFileErrorKind). Synthetic exceptions only: no ACL, no real profile.
+    Test-Case 'Excecoes' 'Classificacao pelo tipo real: acesso negado nunca e ausencia; so MethodInvocationException e desembrulhada (ate 4 niveis), causa original preservada; AggregateException e erro desconhecido nunca viram ausencia; nenhum catch tipado em src' {
+        $wrapOf = { param($E) try { [Runtime.ExceptionServices.ExceptionDispatchInfo]::Capture($E).Throw() } catch { $_.Exception } }
+        $cases = [ordered]@{ 'UnauthorizedAccessException' = 'DENIED'; 'IO.DirectoryNotFoundException' = 'NOT_FOUND'; 'IO.FileNotFoundException' = 'NOT_FOUND'; 'IO.IOException' = 'OTHER'; 'IO.PathTooLongException' = 'OTHER'; 'IO.DriveNotFoundException' = 'OTHER'; 'ArgumentException' = 'OTHER'; 'Security.SecurityException' = 'OTHER' }
+        $bad = New-Object System.Collections.Generic.List[string]
+        for ($it = 0; $it -lt 300; $it++) {
+            foreach ($t in $cases.Keys) {
+                $x = New-Object $t 'synthetic'; $w = & $wrapOf $x
+                if ($it -eq 0 -and -not ($w -is [Management.Automation.MethodInvocationException] -and [object]::ReferenceEquals($w.InnerException, $x))) { $bad.Add("wrapper $t") }
+                if ((Get-AtmFileErrorKind $x) -cne $cases[$t]) { $bad.Add("direta $t chamada $it") }
+                if ((Get-AtmFileErrorKind $w) -cne $cases[$t]) { $bad.Add("embrulhada $t chamada $it") }
+                if (-not [object]::ReferenceEquals((Get-AtmInnerException $w), $x)) { $bad.Add("causa original $t chamada $it") }
+            }
+        }
+        Assert-Eq (@($bad | Select-Object -First 5) -join ' | ') '' 'diretas e embrulhadas, 300 vezes'
+        $ua = New-Object UnauthorizedAccessException 'synthetic'
+        $mie = { param($Inner) New-Object Management.Automation.MethodInvocationException 'synthetic', $Inner }
+        Assert-Eq (Get-AtmFileErrorKind (& $mie (& $mie $ua))) 'DENIED' 'dois niveis de MethodInvocationException'
+        Assert-Eq (Get-AtmFileErrorKind (& $mie (& $mie (& $mie (& $mie (& $mie $ua)))))) 'OTHER' 'mais de 4 niveis: nao desembrulhado, nunca ausencia'
+        $agg = New-Object AggregateException 'synthetic', ([Exception[]]@((New-Object IO.DirectoryNotFoundException 'synthetic'), $ua))
+        Assert-Eq (Get-AtmFileErrorKind $agg) 'OTHER' 'AggregateException (varias causas) nao e desembrulhada'
+        Assert-True ([object]::ReferenceEquals((Get-AtmInnerException $agg), $agg)) 'AggregateException devolvida como esta'
+        Assert-Eq (Get-AtmFileErrorKind (New-Object Management.Automation.MethodInvocationException 'synthetic')) 'OTHER' 'wrapper sem causa'
+        Assert-Eq (Get-AtmFileErrorKind $null) 'OTHER' 'sem excecao'
+        $typed = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File -Filter '*.ps1' | Select-String -Pattern '\b(catch|trap)\s*\[' | ForEach-Object { "$($_.Filename):$($_.LineNumber)" })
+        Assert-Eq ($typed -join ', ') '' 'nenhum catch ou trap tipado em src'
+    }
+    Test-Case 'Excecoes' 'Processo novo, 200 chamadas sucessivas: cadeia de caminho, presenca (Clean e export), destino do export e sessoes do Claude Code nunca trocam acesso negado ou erro desconhecido por ausencia; 5 inventarios repetidos mantem INACESSIVEL (N3)' {
+        $child = Join-Path $sandbox 'exc-child.ps1'
+        [IO.File]::WriteAllText($child, @'
+param([string]$Src, [string]$Fix, [string]$Out, [int]$N = 200)
+# A fresh process (the parent's own host): the product files are loaded as shipped, then only the .NET call each consumer
+# makes is routed through Invoke-AtmTestSynthAttr, which raises a synthetic exception through a .NET method (the same
+# MethodInvocationException wrapper GetAttributes and GetFiles produce) for a component named in $synth; every other
+# path is the real call. The catch blocks under test are the product's, unchanged. Each consumer runs $N times, past
+# the point where Windows PowerShell 5.1 compiles the script block. Results go to $Out as JSON; nothing is printed.
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 2.0
+. (Join-Path $Src 'lib\Engine.Audit.ps1')
+Set-AtmLanguage -Requested 'en-US'
+Initialize-AtmNative -LibDir (Join-Path $Src 'lib')
+foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $Src 'providers') -Filter '*.ps1' -File | Sort-Object Name)) { . $f.FullName }
+. (Join-Path $Src 'lib\Engine.Clean.ps1')
+. (Join-Path $Src 'lib\Engine.Diagnose.ps1')
+. (Join-Path $Src 'lib\Report.ps1')
+$script:synth = @{ '__ua__' = 'UnauthorizedAccessException'; '__dnf__' = 'IO.DirectoryNotFoundException'; '__fnf__' = 'IO.FileNotFoundException'; '__io__' = 'IO.IOException' }
+function Invoke-AtmTestSynthAttr([string]$P) {
+    $k = $null; foreach ($seg in $P.Split([char]'\')) { if ($script:synth.ContainsKey($seg)) { $k = $script:synth[$seg] } }
+    if ($k) { [Runtime.ExceptionServices.ExceptionDispatchInfo]::Capture((New-Object $k 'synthetic')).Throw() }
+    return [IO.File]::GetAttributes($P)
+}
+function Set-AtmTestInstrumented([string]$Name, [string]$Call, [string]$With) {
+    $t = (Get-Item -LiteralPath "function:$Name").ScriptBlock.ToString()
+    if (-not $t.Contains($Call)) { throw "INSTRUMENT_POINT_MISSING:$Name" }
+    Set-Item -LiteralPath "function:script:$Name" -Value ([scriptblock]::Create($t.Replace($Call, $With)))
+}
+[void][IO.Directory]::CreateDirectory((Join-Path $Fix 'chain'))
+$Fix = Get-AtmNormalizedPath $Fix
+$sec = { param([string]$Key, [scriptblock]$Body) try { & $Body } catch { $res[$Key] = 'ERROR:' + ($_.Exception.Message -replace '[^A-Za-z_:.]', '') } }
+$hist = { param($Items) (@($Items | Group-Object | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Count)" })) -join ',' }
+$res = [ordered]@{ host = "$($PSVersionTable.PSVersion) $($PSVersionTable.PSEdition) $env:PROCESSOR_ARCHITECTURE" }
+
+# Raw runtime observation (not asserted): typed catch clauses shaped like the old code, synthetic exceptions.
+$s1 = { try { [Runtime.ExceptionServices.ExceptionDispatchInfo]::Capture((New-Object UnauthorizedAccessException 'synthetic')).Throw() } catch [IO.FileNotFoundException] { 'FNF' } catch [IO.DirectoryNotFoundException] { 'DNF' } catch [UnauthorizedAccessException] { 'UA' } catch { 'ANY' } }
+$s2 = { try { [Runtime.ExceptionServices.ExceptionDispatchInfo]::Capture((New-Object UnauthorizedAccessException 'synthetic')).Throw() } catch [IO.FileNotFoundException] { 'FNF' } catch [IO.DirectoryNotFoundException] { 'DNF' } catch { 'ANY' } }
+$res.rawS1 = & $hist @(1..$N | ForEach-Object { & $s1 })
+$res.rawS2 = & $hist @(1..$N | ForEach-Object { & $s2 })
+
+# Test-AtmPathChain: each component read.
+& $sec 'chain' {
+Set-AtmTestInstrumented 'Test-AtmPathChain' '[IO.File]::GetAttributes($cur)' 'Invoke-AtmTestSynthAttr $cur'
+foreach ($k in @('__ua__', '__dnf__', '__fnf__', '__io__')) {
+    $p = Join-Path $Fix "chain\$k\x"
+    $res["chain$k"] = & $hist @(1..$N | ForEach-Object { $c = Test-AtmPathChain $p; "$($c.Status):$($c.Detail)" })
+}
+$res.chainOk = & $hist @(1..$N | ForEach-Object { (Test-AtmPathChain (Join-Path $Fix 'chain')).Status })
+}
+
+# Get-AtmPathPresence: the post-delete verification of Clean and the repository check of the diagnose export.
+& $sec 'presence' {
+Set-AtmTestInstrumented 'Get-AtmPathPresence' '[IO.File]::GetAttributes($Path)' 'Invoke-AtmTestSynthAttr $Path'
+foreach ($k in @('__ua__', '__dnf__', '__fnf__', '__io__')) { $res["presence$k"] = & $hist @(1..$N | ForEach-Object { $v = Get-AtmPathPresence (Join-Path $Fix "presence\$k"); if ($null -eq $v) { 'null' } else { [string]$v } }) }
+$res.presenceOk = & $hist @(1..$N | ForEach-Object { [string](Get-AtmPathPresence (Join-Path $Fix 'chain')) })
+}
+
+# Diagnose export destination: an ancestor whose .git cannot be read is never taken as "no repository".
+& $sec 'export' {
+$out1 = Join-Path $Fix 'export\out'; [void][IO.Directory]::CreateDirectory($out1)
+$inv0 = [pscustomobject]@{ Bases = @() }
+$script:AtmDiagnoseExportEnabled = $true
+try {
+    $script:synth['.git'] = 'UnauthorizedAccessException'
+    $res.exportDenied = & $hist @(1..$N | ForEach-Object { [string](Test-AtmDiagnoseExportPath -Path (Join-Path $out1 'x.json') -Inventory $inv0) })
+    $script:synth.Remove('.git')
+    $res.exportPlain = & $hist @(1..$N | ForEach-Object { $v = Test-AtmDiagnoseExportPath -Path (Join-Path $out1 'x.json') -Inventory $inv0; if ($null -eq $v) { 'null' } else { $v } })
+} finally { $script:AtmDiagnoseExportEnabled = $false }
+}
+
+# Claude Code sessions folder.
+& $sec 'sessions' {
+Set-AtmTestInstrumented 'Get-AtmClaudeSessionEvidence' '$null = [IO.File]::GetAttributes($dir)' '$null = Invoke-AtmTestSynthAttr $dir'
+$me = (Get-AtmCurrentIdentity).Sid
+foreach ($k in @('__ua__', '__dnf__', '__io__')) {
+    $root = Join-Path $Fix "sess$k"; [void][IO.Directory]::CreateDirectory((Join-Path $root '.claude'))
+    $pr = [pscustomobject]@{ Sid = $me; UserName = 'TEST\sess'; ProfilePath = $root; Loaded = $true; Special = $false; Origin = 'Test'; EnvStatus = 'OK'; TempCandidates = @(); EnvValues = @{ CLAUDE_CONFIG_DIR = (Join-Path $root $k) }; EnvKnown = $true; Notes = @() }
+    $res["sess$k"] = & $hist @(1..$N | ForEach-Object { $e = Get-AtmClaudeSessionEvidence -ProfileInfo $pr -Snapshot ([pscustomobject]@{ Failed = $false; Processes = @() }); "$($e.Readable):$(@($e.Notes).Count):$((@($e.Notes) -join ';') -replace '[^A-Za-z:]', '')" })
+}
+}
+
+# Repeated inventories in this warm process (N3): a base under a denied component stays INACCESSIBLE every time, and a
+# profile whose environment was not read stays inaccessible (never only "TEMP not verified").
+& $sec 'inventory' {
+    $mk = { param($Sid, $Name, $Root, $Temp, $Env) [void][IO.Directory]::CreateDirectory($Root); [pscustomobject]@{ Sid = $Sid; UserName = "TEST\$Name"; ProfilePath = $Root; Loaded = $true; Special = $false; Origin = 'Test'; EnvStatus = $Env; TempCandidates = @([pscustomobject]@{ TempPath = $Temp; Source = 'test' }); EnvValues = @{}; EnvKnown = ($Env -ceq 'OK'); Notes = @() } }
+    $p2t = Join-Path $Fix 'inv\p2\AppData\Local\Temp'; [void][IO.Directory]::CreateDirectory((Join-Path $p2t 'claude'))
+    $ps = @((& $mk 'S-1-5-21-1-2-3-9201' 'exa' (Join-Path $Fix 'inv\p1') (Join-Path $Fix 'inv\p1\__ua__\Temp') 'OK'), (& $mk 'S-1-5-21-1-2-3-9202' 'exb' (Join-Path $Fix 'inv\p2') $p2t 'OK'), (& $mk 'S-1-5-21-1-2-3-9203' 'exc' (Join-Path $Fix 'inv\p3') (Join-Path $Fix 'inv\p3\__ua__\Temp') 'NOT_LOADED'))
+    $ia = @{ ProfilesOverride = $ps; ProcessesOverride = @([pscustomobject]@{ ProcessId = 1; Name = 'idle.exe'; ParentProcessId = 0; CommandLine = 'idle.exe'; CreationDate = (Get-Date).AddHours(-1) }); IdentityOverride = [pscustomobject]@{ Sid = 'S-1-5-21-1-2-3-9202'; Name = 'TEST\exb'; IsAdmin = $false }; NowUtc = [datetime]::UtcNow.AddDays(10); NoProgress = $true; ConfigDir = (Join-Path $Src 'config') }
+    $res.inventory = & $hist @(1..5 | ForEach-Object {
+        $i = Invoke-AtmInventory @ia
+        $tp = @(Get-AtmInventoryCoverage -Inventory $i -Identity ([pscustomobject]@{ IsElevatedAdministrator = $false }) -StartedUtc ([datetime]::UtcNow) -ElapsedMs 0 -OverDeadline $false | Where-Object { $_.Collector -ceq 'temp-profiles' })[0]
+        $b = @(foreach ($p in $ps) { @($i.ProfileBaseStatus[$p.Sid + '|' + $p.ProfilePath])[0].Status }) -join '/'
+        $l = @(foreach ($p in $ps) { Get-AtmProfileStatusLabel -Inventory $i -ProfileInfo $p }) -join '/'
+        "bases=$b rotulos=$l inacc=$(@($i.InaccessibleProfiles).Count) unver=$(@($i.UnverifiedTempProfiles).Count) CC=$([bool]$i.CoverageComplete) tp=$($tp.Status):$(@($tp.Reasons) -join '+')"
+    })
+}
+
+($res | ConvertTo-Json -Depth 3) | Set-Content -LiteralPath $Out -Encoding UTF8
+'@, (New-Object Text.UTF8Encoding $true))
+        $fix = Join-Path $sandbox 'exc-fix'; $out = Join-Path $sandbox 'exc-child.json'
+        # The child runs on this very host (powershell.exe or pwsh.exe), so each CI combination checks its own runtime.
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Fix `"$fix`" -Out `"$out`"") -TimeoutSec 300
+        Assert-True ($r.Exit -eq 0 -and (Test-Path -LiteralPath $out -PathType Leaf)) "processo filho: saida $($r.Exit) $($r.Text)"
+        $j = Get-Content -LiteralPath $out -Raw -Encoding UTF8 | ConvertFrom-Json
+        $want = [ordered]@{
+            'chain__ua__' = 'INACCESSIBLE:=200'; 'chain__dnf__' = 'NOT_FOUND:=200'; 'chain__fnf__' = 'NOT_FOUND:=200'; 'chain__io__' = 'INACCESSIBLE:IOException=200'; 'chainOk' = 'OK=200'
+            'presence__ua__' = 'null=200'; 'presence__dnf__' = 'False=200'; 'presence__fnf__' = 'False=200'; 'presence__io__' = 'null=200'; 'presenceOk' = 'True=200'
+            'exportDenied' = 'EXPORT_ANCESTOR_UNREADABLE=200'; 'exportPlain' = 'null=200'
+            'sess__ua__' = 'False:1:sessionsunreadable:UnauthorizedAccessException=200'; 'sess__dnf__' = 'True:0:=200'; 'sess__io__' = 'False:1:sessionsunreadable:IOException=200'
+            'inventory' = 'bases=INACCESSIBLE/OK/INACCESSIBLE rotulos=INACESSIVEL/AUDITADO/INACESSIVEL inacc=2 unver=0 CC=False tp=PARTIAL:PROFILES_INACCESSIBLE=5'
+        }
+        $bad = @(foreach ($k in $want.Keys) { $pp = $j.PSObject.Properties[$k]; $got = $(if ($null -ne $pp) { [string]$pp.Value } else { '<ausente>' }); if ($got -cne $want[$k]) { "$k esperado [$($want[$k])] obtido [$got]" } })
+        Assert-Eq ($bad -join ' | ') '' 'consumidores no processo novo'
+        $script:caseNote = "host $($j.host); catch tipado bruto, so observado: FNF,DNF,UA,* com acesso negado -> $($j.rawS1); FNF,DNF,* com acesso negado -> $($j.rawS2)"
+    }
+    Test-Case 'Excecoes' 'Clean: verificacao pos-exclusao so com ausencia confirmada - acesso negado ou erro desconhecido nunca dao Verified=true, mesmo apos 200 chamadas; ausencia e presenca reais mantem o sentido (sandbox, trava aberta so neste processo de teste)' {
+        $body = ${function:Get-AtmPathPresence}.ToString()
+        Assert-True ($body.Contains('[IO.File]::GetAttributes($Path)')) 'ponto de leitura de Get-AtmPathPresence'
+        $synthBody = [scriptblock]::Create($body.Replace('[IO.File]::GetAttributes($Path)', 'Invoke-AtmExcSynthAttr $Path'))
+        foreach ($kind in @('UnauthorizedAccessException', 'IO.IOException')) {
+            $p = New-TestProfile ('excclean' + ($kind -replace '\W', '')); $r1 = New-TestRoot -ProfileInfo $p
+            $res = & {
+                # Only the post-delete read of this root raises the synthetic exception; every other read is real.
+                function Invoke-AtmExcSynthAttr([string]$P) { if ([string]::Equals($P, $r1, [StringComparison]::OrdinalIgnoreCase)) { [Runtime.ExceptionServices.ExceptionDispatchInfo]::Capture((New-Object $kind 'synthetic')).Throw() }; return [IO.File]::GetAttributes($P) }
+                ${function:Get-AtmPathPresence} = $synthBody
+                $warm = @(1..200 | ForEach-Object { $v = Get-AtmPathPresence $r1; if ($null -eq $v) { 'null' } else { [string]$v } } | Sort-Object -Unique) -join ','
+                $c = Invoke-AtmClean -Entries @([pscustomobject]@{ Source = 't'; Path = $r1; Fingerprint = $null }) -PlanPresenter $presenter -ConfirmationReader ${function:Confirm-Correct} -InventoryArgs (Get-InvArgs -Profiles @($p))
+                [pscustomobject]@{ Warm = $warm; C = $c }
+            }
+            Assert-Eq $res.Warm 'null' "$($kind): 200 chamadas -> desconhecido"
+            Assert-Eq @($res.C.Deleted).Count 1 "$($kind): uma exclusao (abortado: $($res.C.Aborted))"
+            Assert-True ((@($res.C.Deleted)[0].Completed) -and -not (@($res.C.Deleted)[0].Verified)) "$($kind): Completed sem Verified"
+            Assert-True (-not [IO.Directory]::Exists($r1)) "$($kind): a raiz foi de fato removida (so a verificacao foi negada)"
+        }
+        $gone = Join-Path $sandbox 'exc-presence-gone'; $here = Join-Path $sandbox 'exc-presence-here'; [void][IO.Directory]::CreateDirectory($here)
+        Assert-Eq (@(1..200 | ForEach-Object { [string](Get-AtmPathPresence $gone) } | Sort-Object -Unique) -join ',') 'False' 'ausencia real: False'
+        Assert-Eq (@(1..200 | ForEach-Object { [string](Get-AtmPathPresence $here) } | Sort-Object -Unique) -join ',') 'True' 'presenca real: True'
+    }
     Test-Case 'Permissoes' 'Sem permissao de exclusao (deny DE/DC) -> sondagem ACCESS_DENIED, BLOQUEADO' {
         $p = New-TestProfile 'nodelete'
         $r = New-TestRoot -ProfileInfo $p -Files @{ 'a.txt' = 5 }

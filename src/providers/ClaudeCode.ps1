@@ -62,9 +62,11 @@ function Get-AtmClaudeSessionEvidence {
         try {
             $null = [IO.File]::GetAttributes($dir)
             $files = [IO.Directory]::GetFiles($dir, '*.json')
-        } catch [IO.FileNotFoundException] { continue }
-        catch [IO.DirectoryNotFoundException] { continue }
-        catch { $r.Readable = $false; $r.Notes += (Get-AtmText 'note.sessionsUnreadable' $_.Exception.GetType().Name); continue }
+        } catch {
+            # Only a confirmed absence is skipped; access denied or any other error leaves the sessions unreadable.
+            if ((Get-AtmFileErrorKind $_.Exception) -ceq 'NOT_FOUND') { continue }
+            $r.Readable = $false; $r.Notes += (Get-AtmText 'note.sessionsUnreadable' (Get-AtmInnerException $_.Exception).GetType().Name); continue
+        }
         foreach ($f in $files) {
             if (-not $f.EndsWith('.json', [StringComparison]::OrdinalIgnoreCase)) { continue }
             $o = $null

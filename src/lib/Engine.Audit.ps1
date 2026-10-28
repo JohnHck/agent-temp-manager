@@ -182,6 +182,34 @@ function Get-AtmNormalizedPath {
     } catch { return $null }
 }
 
+# Windows PowerShell 5.1 can run a typed catch clause for the wrong exception once a script block has run a few dozen
+# times (it is then compiled): an access denied caught by a DirectoryNotFoundException clause, any other error by the
+# last typed clause. Errors of file system reads are therefore caught untyped and classified here by their real type.
+function Get-AtmInnerException {
+    # The exception a .NET method raised: PowerShell wraps it in MethodInvocationException (at most 4 levels are
+    # unwrapped). Any other exception, one with several causes (AggregateException) included, is returned as it is.
+    param([Exception]$Exception)
+    $e = $Exception
+    for ($d = 0; $d -lt 4 -and $e -is [Management.Automation.MethodInvocationException] -and $null -ne $e.InnerException; $d++) { $e = $e.InnerException }
+    return $e
+}
+
+function Get-AtmFileErrorKind {
+    # NOT_FOUND (file or directory confirmed absent), DENIED (access denied) or OTHER (any other error, never an absence).
+    param([Exception]$Exception)
+    $e = Get-AtmInnerException $Exception
+    if ($e -is [IO.FileNotFoundException] -or $e -is [IO.DirectoryNotFoundException]) { return 'NOT_FOUND' }
+    if ($e -is [UnauthorizedAccessException]) { return 'DENIED' }
+    return 'OTHER'
+}
+
+function Get-AtmPathPresence {
+    # $true present, $false confirmed absent, $null not known (access denied or any other error).
+    param([string]$Path)
+    try { $null = [IO.File]::GetAttributes($Path); return $true }
+    catch { if ((Get-AtmFileErrorKind $_.Exception) -ceq 'NOT_FOUND') { return $false }; return $null }
+}
+
 function Test-AtmPathChain {
     <#
       Validates every component from the volume root down to $Path (inclusive):
@@ -202,10 +230,15 @@ function Test-AtmPathChain {
         $cur = Join-AtmPath $cur $p
         try {
             $a = [IO.File]::GetAttributes($cur)
-        } catch [IO.FileNotFoundException] { $r.Status = 'NOT_FOUND'; $r.At = $cur; return [pscustomobject]$r }
-        catch [IO.DirectoryNotFoundException] { $r.Status = 'NOT_FOUND'; $r.At = $cur; return [pscustomobject]$r }
-        catch [UnauthorizedAccessException] { $r.Status = 'INACCESSIBLE'; $r.At = $cur; return [pscustomobject]$r }
-        catch { $r.Status = 'INACCESSIBLE'; $r.At = $cur; $r.Detail = $_.Exception.GetType().Name; return [pscustomobject]$r }
+        } catch {
+            # Classified by the real type (Get-AtmFileErrorKind): only a confirmed absence is NOT_FOUND.
+            $e = Get-AtmInnerException $_.Exception
+            $k = Get-AtmFileErrorKind $e
+            $r.At = $cur
+            if ($k -ceq 'NOT_FOUND') { $r.Status = 'NOT_FOUND' }
+            else { $r.Status = 'INACCESSIBLE'; if ($k -cne 'DENIED') { $r.Detail = $e.GetType().Name } }
+            return [pscustomobject]$r
+        }
         if (($a -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $r.Status = 'REPARSE_IN_PATH'; $r.At = $cur; return [pscustomobject]$r }
     }
     return [pscustomobject]$r
@@ -886,7 +919,8 @@ function Invoke-AtmInventory {
 
     # Bases not audited: refused for safety, in a state not known here, or an alias whose canonical base was not audited.
     # Never an absence: the coverage is incomplete. A profile can also be inaccessible or have a TEMP not verifiable;
-    # it stays in each list so no reason is hidden, and counts use the union (Get-AtmIncompleteProfileCount).
+    # it stays in this list beside them (a profile already inaccessible is still not listed as TEMP not verifiable),
+    # and counts use the union (Get-AtmIncompleteProfileCount).
     $baseIndex = Get-AtmBaseIndex -Bases $bases
     $notAudited = @()
     foreach ($pr in $profiles) {

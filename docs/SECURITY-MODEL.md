@@ -427,11 +427,25 @@ called by `Invoke-AtmGitCommand`):
   * **Bases not audited (V0.1 coverage).** A base refused for safety, in a state not known, or an alias whose canonical
     base (read with its final state) was not audited makes the V0.1 coverage incomplete: `CoverageComplete` is `false`,
     `temp-profiles` is `PARTIAL` with `PROFILES_NOT_AUDITED` (beside `PROFILES_INACCESSIBLE` and
-    `TEMP_LOCATION_UNVERIFIED` when they also apply; a profile is counted once), and a profile with an audited base and
+    `TEMP_LOCATION_UNVERIFIED` when they also apply, a profile already inaccessible still not being listed as
+    `TEMP_LOCATION_UNVERIFIED`; a profile is counted once), and a profile with an audited base and
     a base not audited is labelled `AUDITADO_PARCIAL`, never `AUDITADO`. Elevation is reported as not helping only for a
     refusal for safety; a state not known stays `UNKNOWN`. The refusal itself, traversal, eligibility and cleaning are
     unchanged. Before 0.2.0 (0.1.0 and 0.1.1) such a base was not counted: the V0.1 coverage could read complete and a
     profile with a base read and a base refused was labelled `AUDITADO`; no 0.1.x update is made for it here.
+  * **Read errors (typed `catch`, Windows PowerShell 5.1).** Windows PowerShell 5.1 can run a typed `catch` clause for
+    the wrong exception once a script block has run a few dozen times (observed on 5.1.19041, x64 and x86, with
+    synthetic exceptions and no product code: an `UnauthorizedAccessException` caught by a
+    `DirectoryNotFoundException` clause, any other error by the last typed clause). File system read errors are
+    therefore caught untyped and classified by their real type (`Get-AtmFileErrorKind`; only
+    `MethodInvocationException` is unwrapped, at most 4 levels, so an exception with several causes is never taken
+    apart): only a file or directory not found is an absence; access denied and any other error are not known. This
+    covers the path chain check (an inaccessible base is never `NOT_FOUND`), the post-delete verification of a
+    cleaning (never `Verified` on a path that cannot be read), the repository check of a diagnose export destination
+    (an ancestor that cannot be read refuses the export) and the Claude Code sessions folder (unreadable, never
+    skipped). The suite checks each of them in a fresh process on its own host, past the point where the defect
+    appears, and that no typed `catch` is left in `src`. The same typed clauses are in 0.1.0 and 0.1.1 (path chain
+    check, cleaning verification, sessions folder); no 0.1.x update is made here.
 * **Allocation** is an estimate (cluster rounding; MFT-resident files overestimated).
 * **Discovery visibility** (V0.2 P4-B: now reported, still a limit): if the `ProfilesDirectory` value of the Windows
   profile list cannot be resolved or listed, folders under it that have no profile-list entry (residual profiles) are
