@@ -5278,9 +5278,9 @@ try {
                 Set-AtmLanguage -Requested $lang
                 $t4 = (@(Show-AtmAudit -Inventory $i4 6>&1 | ForEach-Object { [string]$_.MessageData }) -join "`n")
                 if (-not ($t4.Contains((Get-AtmText 'audit.coverage' (Get-AtmText 'audit.coverageIncompleteSee'))) -and $t4.Contains((Get-AtmText 'audit.notAuditedProfiles')) -and $t4.Contains('REPARSE_IN_PATH') -and $t4.Contains((Get-AtmStatusText 'AUDITADO_PARCIAL')))) { $cons.Add("relatorio $lang") }
-                $o4 = Invoke-HeadlessTui -Keys @((New-Key 'D1' '1'), (New-Key 'Escape'), (New-Key 'D9' '9'), (New-Key 'Escape'), (New-Key 'Q' 'q')) -InvArgs (Get-InvArgs -Profiles @($p4)) -W 160 -H 40
+                $o4 = Invoke-HeadlessTui -Keys @((New-Key 'D1' '1'), (New-Key 'Escape'), (New-Key 'D2' '2'), (New-Key 'Escape'), (New-Key 'D9' '9'), (New-Key 'Escape'), (New-Key 'Q' 'q')) -InvArgs (Get-InvArgs -Profiles @($p4)) -W 160 -H 40
                 $f4 = $o4.Frames -join "`n"
-                foreach ($s in @((Get-AtmText 'dash.audited' 1), (Get-AtmText 'dash.incomplete' 1), (Get-AtmText 'dash.coverage' (Get-AtmText 'common.incomplete')), (Get-AtmText 'tui.coverageAll' (Get-AtmText 'common.incomplete')), (Get-AtmText 'tui.notAudited' $p4.UserName $p4.Sid 'REPARSE_IN_PATH'))) { if (-not ($f4 -replace '\s', '').Contains(($s -replace '\s', ''))) { $cons.Add("TUI $lang M4: '$s'") } }
+                foreach ($s in @((Get-AtmText 'dash.audited' 1), (Get-AtmText 'dash.incomplete' 1), (Get-AtmText 'dash.coverage' (Get-AtmText 'common.incomplete')), (Get-AtmText 'tui.coverageAll' (Get-AtmText 'common.incomplete')), (Get-AtmText 'tui.notAudited' $p4.UserName $p4.Sid 'REPARSE_IN_PATH'), (Get-AtmStatusText 'AUDITADO_PARCIAL'))) { if (-not ($f4 -replace '\s', '').Contains(($s -replace '\s', ''))) { $cons.Add("TUI $lang M4: '$s'") } }
                 $o8 = Invoke-HeadlessTui -Keys @((New-Key 'D1' '1'), (New-Key 'Escape'), (New-Key 'Q' 'q')) -InvArgs (Get-InvArgs -Profiles @($p8)) -W 160 -H 40
                 if (-not ($o8.Frames -join "`n").Contains((Get-AtmText 'dash.incomplete' 1))) { $cons.Add("TUI $lang M8: perfil contado uma vez") }
                 # Main menu summary: one partition, two files (2148 bytes), coverage incomplete.
@@ -5301,7 +5301,7 @@ try {
         } finally { Set-AtmLanguage -Requested $old }
         if (-not ($de.Contains('PROFILES_NOT_AUDITED') -and $de.Contains($te) -and $dp.Contains($tpt) -and $te -cne $tpt)) { $cons.Add("relatorio do diagnose en/pt: codigo $($de.Contains('PROFILES_NOT_AUDITED')), texto en $($de.Contains($te)), texto pt $($dp.Contains($tpt)); trecho en: $(($de -split 'temp-profiles' | Select-Object -Skip 1 | Select-Object -First 1) -replace '^(.{0,300}).*$', '$1')") }
         Assert-True ($cons.Count -eq 0) ("consumidores: " + ($cons -join ' | '))
-        $script:caseNote = "matriz $($obs.Count) cenarios + M13 sintetico + paridade; consumidores: relatorio en/pt, TUI menu/dashboard/erros en/pt, JSON V0.1, diagnose JSON e relatorio en/pt"
+        $script:caseNote = "matriz $($obs.Count) cenarios + M13 sintetico + paridade; consumidores: relatorio en/pt, TUI menu/dashboard/usuarios/erros en/pt, JSON V0.1, diagnose JSON e relatorio en/pt"
     }
     Test-Case 'Diagnose' 'Coerencia de cobertura (T-3): inventario incompleto nunca aparece completo no resultado, no JSON nem no relatorio' {
         # Each row builds a real sandbox inventory; nothing is mocked except the process snapshot failure.
