@@ -7833,7 +7833,7 @@ try {
         $j1 = Join-Path $p1.ProfilePath 'AppData\Local\TempJ'; New-Junction -Link $j1 -Target $real1
         $p1.TempCandidates = @([pscustomobject]@{ TempPath = $j1; Source = 'test' })
         $ia1 = Get-InvArgs -Profiles @($p1) -Procs (& $legOf $irows "node.exe $j1\claude\C--x\$u1\x.js")
-        $st1 = @((Invoke-AtmInventory @ia1).Bases | ForEach-Object { $_.Status }) -join ','
+        $i1 = Invoke-AtmInventory @ia1; $st1 = @($i1.Bases | ForEach-Object { $_.Status }) -join ','
         Assert-Eq $st1 'REPARSE_IN_PATH' 'I1: estado real da base (juncao no caminho)'
         $d1 = & $diag $ia1 $irows
         & $check 'I1 base REPARSE_IN_PATH, linha legivel com referencia potencial' $d1 'PARTIAL' 'PATH_REFERENCE_BASES_INCOMPLETE' ''
@@ -7925,7 +7925,7 @@ try {
         # Static: Invoke-AtmDiagnose hands the base states (codes only, never a path) and the ambiguous count to the runtime.
         $diagSrc = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Diagnose.ps1'))
         Assert-True ($diagSrc.Contains("`$rtArgs['BaseStatuses'] = [string[]]@(`$inv.Bases | ForEach-Object { [string]`$_.Status })") -and $diagSrc.Contains("`$rtArgs['AmbiguousReferences'] = `$inv.References.Ambiguous")) 'Invoke-AtmDiagnose repassa estados das bases e contagem de ambiguas'
-        $script:caseNote = "integrado: controle, REPARSE_IN_PATH real (juncao), UNSUPPORTED_DRIVE injetado, base vazia, projeto vazio, estados sem lacuna; sinteticos: $($cases.Count) composicoes; JSON, relatorio e indice da TUI"
+        $script:caseNote = "integrado: controle, REPARSE_IN_PATH real (juncao), UNSUPPORTED_DRIVE injetado, base vazia, projeto vazio, estados sem lacuna; sinteticos: $($cases.Count) composicoes; JSON, relatorio e indice da TUI; achado separado (observado, nao asserido): CoverageComplete V0.1 com base REPARSE_IN_PATH = $($i1.CoverageComplete), temp-profiles $(& $covSt $d1 'temp-profiles')"
     }
     Test-Case 'Diagnose' 'O2D: referencias sem particao portadora (ancestral ou ambigua a base ou projeto vazio) contadas no produtor Find-AtmReferences e repassadas a agent-processes; anexadas a uma ou varias particoes, diretas e nenhuma referencia nao contaminam; campo ausente, invalido ou negativo nunca e zero' {
         # Synthetic processes over real sandbox inventories; these show the propagation, not a real hidden agent.
@@ -7967,6 +7967,9 @@ try {
         & $case 'D4 ancestral a projeto vazio (projeto\ e espaco)' $p7 "node.exe --cwd $b7\C--work-proj\ --x" $irows '0/1/0/1' 'PARTIAL' $U ''
         # Ambiguous without a partition (unresolved name under an empty base): counted once in Ambiguous and in Unattached.
         & $case 'D5 ambigua sem particao (base vazia)' $p6 "node.exe $b6\C--work-proj\$([guid]::NewGuid())\x.js" $irows '0/0/1/1' 'PARTIAL' $U ''
+        & $case 'D5b nome curto ou curinga sob base vazia' $p6 "node.exe $b6\C--wor~1\x.js" $irows '0/0/1/1' 'PARTIAL' $U ''
+        & $case 'D5c nome curto ou curinga sob projeto vazio' $p7 "node.exe $b7\C--work-proj\ab~1\x.js" $irows '0/0/1/1' 'PARTIAL' $U ''
+        & $case 'D5d sessao nao resolvida sob projeto vazio' $p7 "node.exe $b7\C--work-proj\$([guid]::NewGuid())\x.js" $irows '0/0/1/1' 'PARTIAL' $U ''
         # Attached: the reference has at least one partition and is never counted as lost.
         $p8 = New-TestProfile 'o2d-a1'; $b8 = Get-Base $p8; $r8 = New-TestRoot -ProfileInfo $p8
         & $case 'D6 ancestral anexado a uma particao (projeto)' $p8 "node.exe --cwd $b8\C--work-proj" $irows '0/1/0/0' 'COMPLETE' '' '2100'
