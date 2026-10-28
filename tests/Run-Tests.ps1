@@ -633,7 +633,9 @@ foreach ($k in @('__ua__', '__dnf__', '__io__')) {
             $res = & {
                 # Only the post-delete read of this root raises the synthetic exception; every other read is real.
                 function Invoke-AtmExcSynthAttr([string]$P) { if ([string]::Equals($P, $r1, [StringComparison]::OrdinalIgnoreCase)) { [Runtime.ExceptionServices.ExceptionDispatchInfo]::Capture((New-Object $kind 'synthetic')).Throw() }; return [IO.File]::GetAttributes($P) }
-                ${function:Get-AtmPathPresence} = $synthBody
+                # local: only this scope (and what it calls) sees the instrumented copy; ${function:...} = would replace it
+                # for the rest of the suite.
+                Set-Item -LiteralPath 'function:local:Get-AtmPathPresence' -Value $synthBody
                 $warm = @(1..200 | ForEach-Object { $v = Get-AtmPathPresence $r1; if ($null -eq $v) { 'null' } else { [string]$v } } | Sort-Object -Unique) -join ','
                 $c = Invoke-AtmClean -Entries @([pscustomobject]@{ Source = 't'; Path = $r1; Fingerprint = $null }) -PlanPresenter $presenter -ConfirmationReader ${function:Confirm-Correct} -InventoryArgs (Get-InvArgs -Profiles @($p))
                 [pscustomobject]@{ Warm = $warm; C = $c }
@@ -646,6 +648,7 @@ foreach ($k in @('__ua__', '__dnf__', '__io__')) {
         $gone = Join-Path $sandbox 'exc-presence-gone'; $here = Join-Path $sandbox 'exc-presence-here'; [void][IO.Directory]::CreateDirectory($here)
         Assert-Eq (@(1..200 | ForEach-Object { [string](Get-AtmPathPresence $gone) } | Sort-Object -Unique) -join ',') 'False' 'ausencia real: False'
         Assert-Eq (@(1..200 | ForEach-Object { [string](Get-AtmPathPresence $here) } | Sort-Object -Unique) -join ',') 'True' 'presenca real: True'
+        Assert-Eq ${function:Get-AtmPathPresence}.ToString() $body 'a copia instrumentada nao vaza para o resto do suite'
     }
     Test-Case 'Permissoes' 'Sem permissao de exclusao (deny DE/DC) -> sondagem ACCESS_DENIED, BLOQUEADO' {
         $p = New-TestProfile 'nodelete'
