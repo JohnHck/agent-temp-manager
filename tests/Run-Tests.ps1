@@ -650,6 +650,55 @@ foreach ($k in @('__ua__', '__dnf__', '__io__')) {
         Assert-Eq (@(1..200 | ForEach-Object { [string](Get-AtmPathPresence $here) } | Sort-Object -Unique) -join ',') 'True' 'presenca real: True'
         Assert-Eq ${function:Get-AtmPathPresence}.ToString() $body 'a copia instrumentada nao vaza para o resto do suite'
     }
+    # Activity evidence (session transcript) of a root: a project folder that cannot be read is never an absence.
+    Test-Case 'Excecoes' 'Evidencia de atividade ilegivel: pasta do projeto negada (ACL so na fixture do sandbox) ou erro inesperado -> TRANSCRIPTS_UNREADABLE e INVESTIGATE, nunca ELIGIBLE; repetido no mesmo processo (3 inventarios, 200 leituras)' {
+        $p = New-TestProfile 'actdenied'; $r = New-TestRoot -ProfileInfo $p
+        $rootName = Split-Path -Leaf $r
+        $proj = Join-Path $p.ProfilePath '.claude\projects'; $pd = Join-Path $proj 'C--work-proj'; [void][IO.Directory]::CreateDirectory($pd)
+        # Deny ACEs for this account on two fixture folders only, removed parent first (the folder cannot be reached
+        # while its parent still refuses listing); nothing is deleted.
+        $undo = [scriptblock]::Create("icacls '$proj' /remove:d '*$($me.Sid)' | Out-Null; icacls '$pd' /remove:d '*$($me.Sid)' | Out-Null")
+        $cleanupActions.Add($undo)
+        $row = { param($I) $x = Find-Part $I $r; $g = Test-AtmCandidate -Partition $x -Inventory $I; "$($x.Class)|$((@($x.Flags) | Sort-Object) -join ',')|$($g.Category)" }
+        $evOf = { $e = Get-AtmClaudeActivityEvidence -ProfileInfo $p -Scope 'C--work-proj' -RootName $rootName; "$($e.Readable):$($null -eq $e.LastWriteUtc)" }
+        $null = icacls $proj /deny "*$($me.Sid):(RD)" 2>&1; $null = icacls $pd /deny "*$($me.Sid):(RA,RD)" 2>&1
+        try {
+            # The condition being fixed: Directory.Exists answers false for a folder that exists but cannot be looked at.
+            Assert-True (-not [IO.Directory]::Exists($pd)) 'fixture: Directory.Exists responde false com a pasta negada'
+            $inv = @(1..3 | ForEach-Object { & $row (Inv -Profiles @($p)) } | Sort-Object -Unique)
+            Assert-Eq ($inv -join ' ; ') 'LIVENESS_UNKNOWN|TRANSCRIPTS_UNREADABLE|INVESTIGATE' 'negada: 3 inventarios'
+            Assert-Eq (@(1..200 | ForEach-Object { & $evOf } | Sort-Object -Unique) -join ',') 'False:True' 'negada: 200 leituras -> ilegivel'
+        } finally { & $undo }
+        Assert-Eq (& $evOf) 'True:True' 'acesso restaurado: pasta legivel e sem transcript'
+        # An unexpected error (synthetic IOException at the presence read of the project folder; local copy only).
+        $body = ${function:Get-AtmPathPresence}.ToString()
+        Assert-True ($body.Contains('[IO.File]::GetAttributes($Path)')) 'ponto de leitura de Get-AtmPathPresence'
+        $synthBody = [scriptblock]::Create($body.Replace('[IO.File]::GetAttributes($Path)', 'Invoke-AtmActSynthAttr $Path'))
+        $res = & {
+            function Invoke-AtmActSynthAttr([string]$P) { if ([string]::Equals($P, $pd, [StringComparison]::OrdinalIgnoreCase)) { [Runtime.ExceptionServices.ExceptionDispatchInfo]::Capture((New-Object IO.IOException 'synthetic')).Throw() }; return [IO.File]::GetAttributes($P) }
+            Set-Item -LiteralPath 'function:local:Get-AtmPathPresence' -Value $synthBody
+            [pscustomobject]@{ Ev = (@(1..200 | ForEach-Object { & $evOf } | Sort-Object -Unique) -join ','); Row = (& $row (Inv -Profiles @($p))) }
+        }
+        Assert-Eq $res.Ev 'False:True' 'erro inesperado: 200 leituras -> ilegivel'
+        Assert-Eq $res.Row 'LIVENESS_UNKNOWN|TRANSCRIPTS_UNREADABLE|INVESTIGATE' 'erro inesperado: INVESTIGATE'
+        Assert-Eq ${function:Get-AtmPathPresence}.ToString() $body 'a copia instrumentada nao vaza para o resto do suite'
+    }
+    Test-Case 'Excecoes' 'Evidencia de atividade legivel: pasta do projeto ausente, pasta sem transcript e transcript antigo mantem ORPHAN_SUSPECTED e ELIGIBLE; transcript recente da TRANSCRIPT_RECENT (INVESTIGATE)' {
+        $row = { param($P, $R) $i = Inv -Profiles @($P); $x = Find-Part $i $R; $g = Test-AtmCandidate -Partition $x -Inventory $i; $script:actWhy = (@($g.Reasons) -join '; '); "$($x.Class)|$((@($x.Flags) | Sort-Object) -join ',')|$($g.Category)" }
+        $p1 = New-TestProfile 'actabsent'; $r1 = New-TestRoot -ProfileInfo $p1
+        Assert-True (-not [IO.Directory]::Exists((Join-Path $p1.ProfilePath '.claude\projects\C--work-proj'))) 'pasta do projeto ausente'
+        Assert-Eq (& $row $p1 $r1) 'ORPHAN_SUSPECTED||ELIGIBLE' "ausencia real (motivos: $($script:actWhy))"
+        $p2 = New-TestProfile 'actempty'; $r2 = New-TestRoot -ProfileInfo $p2; [void][IO.Directory]::CreateDirectory((Join-Path $p2.ProfilePath '.claude\projects\C--work-proj'))
+        Assert-Eq (& $row $p2 $r2) 'ORPHAN_SUSPECTED||ELIGIBLE' "pasta legivel sem transcript (motivos: $($script:actWhy))"
+        $p3 = New-TestProfile 'actold'; $r3 = New-TestRoot -ProfileInfo $p3
+        $t3 = Join-Path $p3.ProfilePath ('.claude\projects\C--work-proj\' + (Split-Path -Leaf $r3) + '.jsonl'); [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($t3)); [IO.File]::WriteAllText($t3, '{}')
+        [IO.File]::SetLastWriteTimeUtc($t3, $nowFuture.AddDays(-10))
+        Assert-Eq (& $row $p3 $r3) 'ORPHAN_SUSPECTED||ELIGIBLE' "transcript antigo (motivos: $($script:actWhy))"
+        $p4 = New-TestProfile 'actrecent'; $r4 = New-TestRoot -ProfileInfo $p4
+        $t4 = Join-Path $p4.ProfilePath ('.claude\projects\C--work-proj\' + (Split-Path -Leaf $r4) + '.jsonl'); [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($t4)); [IO.File]::WriteAllText($t4, '{}')
+        [IO.File]::SetLastWriteTimeUtc($t4, $nowFuture.AddHours(-1))
+        Assert-Eq (& $row $p4 $r4) 'LIVENESS_UNKNOWN|TRANSCRIPT_RECENT|INVESTIGATE' "transcript recente (motivos: $($script:actWhy))"
+    }
     Test-Case 'Permissoes' 'Sem permissao de exclusao (deny DE/DC) -> sondagem ACCESS_DENIED, BLOQUEADO' {
         $p = New-TestProfile 'nodelete'
         $r = New-TestRoot -ProfileInfo $p -Files @{ 'a.txt' = 5 }

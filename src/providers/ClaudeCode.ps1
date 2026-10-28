@@ -122,9 +122,12 @@ function Get-AtmClaudeActivityEvidence {
             $fi = New-Object IO.FileInfo($f)
             if ($fi.Exists) {
                 if (-not $res.LastWriteUtc -or $fi.LastWriteTimeUtc -gt $res.LastWriteUtc) { $res.LastWriteUtc = $fi.LastWriteTimeUtc }
-            } elseif ([IO.Directory]::Exists($pd)) {
-                # Distinguish "absent" from "cannot look": the project directory must be listable.
-                try { [void][IO.Directory]::GetFiles($pd, ($RootName + '*')) } catch { $res.Readable = $false }
+            } else {
+                # Distinguish "absent" from "cannot look": only a project directory confirmed absent is an absence
+                # (Directory.Exists also answers false when access is denied); an existing one must be listable.
+                $pres = Get-AtmPathPresence $pd
+                if ($null -eq $pres) { $res.Readable = $false }
+                elseif ($pres) { try { [void][IO.Directory]::GetFiles($pd, ($RootName + '*')) } catch { $res.Readable = $false } }
             }
         } catch { $res.Readable = $false }
     }

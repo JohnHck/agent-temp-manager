@@ -443,8 +443,10 @@ called by `Invoke-AtmGitCommand`):
     apart): only a file or directory not found is an absence; access denied and any other error are not known. This
     covers the path chain check (an inaccessible base is never `NOT_FOUND`), the post-delete verification of a
     cleaning (never `Verified` on a path that cannot be read), the repository check of a diagnose export destination
-    (an ancestor that cannot be read refuses the export) and the Claude Code sessions folder (unreadable, never
-    skipped). The suite calls the path chain check, the presence check used by the cleaning verification and the
+    (an ancestor that cannot be read refuses the export), the Claude Code sessions folder (unreadable, never
+    skipped) and the activity evidence of a root (a project folder that exists but cannot be looked at gives
+    `TRANSCRIPTS_UNREADABLE`, so the root goes to INVESTIGATE, never ELIGIBLE; `Directory.Exists` answers false in
+    that case and is no longer used there). The suite calls the path chain check, the presence check used by the cleaning verification and the
     export check, the export destination check and the sessions folder 200 times each in a fresh process on the job's
     own host, past the point where the defect appears, and repeats the inventory there; the cleaning verification
     itself is checked in the suite process after 200 calls; and no typed `catch` is left in `src`. The same typed clauses are in 0.1.0 and 0.1.1 (path chain
