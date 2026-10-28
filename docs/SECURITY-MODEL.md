@@ -434,17 +434,20 @@ called by `Invoke-AtmGitCommand`):
     unchanged. Before 0.2.0 (0.1.0 and 0.1.1) such a base was not counted: the V0.1 coverage could read complete and a
     profile with a base read and a base refused was labelled `AUDITADO`; no 0.1.x update is made for it here.
   * **Read errors (typed `catch`, Windows PowerShell 5.1).** Windows PowerShell 5.1 can run a typed `catch` clause for
-    the wrong exception once a script block has run a few dozen times (observed on 5.1.19041, x64 and x86, with
-    synthetic exceptions and no product code: an `UnauthorizedAccessException` caught by a
-    `DirectoryNotFoundException` clause, any other error by the last typed clause). File system read errors are
+    the wrong exception once a script block has run a few dozen times (with synthetic exceptions and no product code:
+    an `UnauthorizedAccessException` caught by a `DirectoryNotFoundException` clause, any other error by the last
+    typed clause; seen on 5.1.19041 x64 and x86 and on 5.1.26100 x64 and ARM64, and not seen on PowerShell 7.6.7 and
+    7.6.8, where the suite only records it without asserting it). File system read errors are
     therefore caught untyped and classified by their real type (`Get-AtmFileErrorKind`; only
     `MethodInvocationException` is unwrapped, at most 4 levels, so an exception with several causes is never taken
     apart): only a file or directory not found is an absence; access denied and any other error are not known. This
     covers the path chain check (an inaccessible base is never `NOT_FOUND`), the post-delete verification of a
     cleaning (never `Verified` on a path that cannot be read), the repository check of a diagnose export destination
     (an ancestor that cannot be read refuses the export) and the Claude Code sessions folder (unreadable, never
-    skipped). The suite checks each of them in a fresh process on its own host, past the point where the defect
-    appears, and that no typed `catch` is left in `src`. The same typed clauses are in 0.1.0 and 0.1.1 (path chain
+    skipped). The suite calls the path chain check, the presence check used by the cleaning verification and the
+    export check, the export destination check and the sessions folder 200 times each in a fresh process on the job's
+    own host, past the point where the defect appears, and repeats the inventory there; the cleaning verification
+    itself is checked in the suite process after 200 calls; and no typed `catch` is left in `src`. The same typed clauses are in 0.1.0 and 0.1.1 (path chain
     check, cleaning verification, sessions folder); no 0.1.x update is made here.
 * **Allocation** is an estimate (cluster rounding; MFT-resident files overestimated).
 * **Discovery visibility** (V0.2 P4-B: now reported, still a limit): if the `ProfilesDirectory` value of the Windows
