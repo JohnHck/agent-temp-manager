@@ -135,7 +135,8 @@ the values read (`known` per counter), with `complete` `false`.
 The type and the calculation are generic: `complete` (of the totals and of each counter) is a boolean that would be
 `true` only if `agent-processes` were conclusive and every value was read. The current runtime never produces that:
 `agent-processes` always carries `AGENT_DISCOVERY_HEURISTIC` when a source was searched, so `complete` is always
-`false`, `reasons` always holds `AGENT_PROCESSES_INCOMPLETE`, and `agent-resources` is never `COMPLETE`. A sum is
+`false` and `agent-resources` is never `COMPLETE`; when `collected` is `true`, `reasons` always holds
+`AGENT_PROCESSES_INCOMPLETE` (when it is `false`, the runtime was not observed and `reasons` is empty). A sum is
 what was read from the agent processes found; it is never a total over every agent process, and `complete` `false`
 is not a reading error.
 
