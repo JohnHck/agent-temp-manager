@@ -1358,6 +1358,38 @@ foreach ($k in @('__ua__', '__dnf__', '__io__')) {
         foreach ($f in $o.Frames) { foreach ($ln in ($f -split "`n")) { Assert-True ($ln.Length -le 120) "linha excede largura: $($ln.Length)" } }
         Assert-True ([IO.Directory]::Exists($r1) -and [IO.Directory]::Exists($r2)) 'TUI nao alterou nada'
     }
+    Test-Case 'TUI' 'Dashboard em 120 e 160 colunas (en-US e pt-BR): os quatro cartoes inteiros dentro da largura (bordas fechadas), textos e numeros sem corte; 4 por linha so a partir de 130 colunas (inspecao do buffer)' {
+        $p = New-TestProfile 'dash120'; $null = New-TestRoot -ProfileInfo $p
+        $G = Get-AtmTuiGlyphs
+        $old = Get-AtmLanguage
+        $bad = New-Object System.Collections.Generic.List[string]
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                foreach ($w in @(120, 160)) {
+                    $o = Invoke-HeadlessTui -Keys @((New-Key 'D1' '1'), (New-Key 'Escape'), (New-Key 'Q' 'q')) -InvArgs (Get-InvArgs -Profiles @($p)) -W $w -H 40
+                    $fr = @($o.Frames | Where-Object { $_.Contains((Get-AtmText 'dash.errorsCoverage')) })
+                    if ($fr.Count -eq 0) { $bad.Add("$lang $($w): dashboard nao desenhado"); continue }
+                    $ls = @($fr[0] -split "`n")
+                    $long = @($ls | Where-Object { $_.TrimEnd().Length -gt ($w - 1) }).Count
+                    $cnt = { param($Glyph) @($ls | ForEach-Object { ([regex]::Matches($_, [regex]::Escape($Glyph))).Count } | Measure-Object -Sum).Sum }
+                    $cut = @($ls | Where-Object { $_.Contains($G.V) -and $_.Contains($G.Ell) }).Count
+                    $tops = @($ls | Where-Object { $_.Contains($G.TL) -and $_.Contains($G.TR) })
+                    $perRow = ([regex]::Matches(([string]$tops[0]), [regex]::Escape($G.TR))).Count
+                    $want = $(if ($w -ge 130) { 4 } else { 2 })
+                    $text = $fr[0]
+                    # Each label whole, with its number (any value) and unit, as the text table writes it.
+                    $pat = { param([string]$Key, [string]$Num) [regex]::Escape((Get-AtmText $Key '@@N@@')).Replace('@@N@@', $Num) }
+                    $full = @((& $pat 'dash.discovered' '\d+'), (& $pat 'dash.audited' '\d+'), (& $pat 'dash.incomplete' '\d+'), (& $pat 'dash.partitions' '\d+'), (& $pat 'dash.mbPhysical' '[\d.,]+'), (& $pat 'dash.readErrors' '\d+'), (& $pat 'dash.incompleteMeas' '\d+'), (& $pat 'dash.coverage' '\S+'))
+                    $missing = @($full | Where-Object { $text -notmatch $_ })
+                    if ($long -gt 0 -or (& $cnt $G.TR) -ne 4 -or (& $cnt $G.BR) -ne 4 -or (& $cnt $G.TL) -ne 4 -or (& $cnt $G.BL) -ne 4 -or $cut -gt 0 -or $perRow -ne $want -or $missing.Count -gt 0) {
+                        $bad.Add("$lang $($w): linhas alem da largura $long; cantos TL/TR/BL/BR $(& $cnt $G.TL)/$(& $cnt $G.TR)/$(& $cnt $G.BL)/$(& $cnt $G.BR); linhas de cartao cortadas $cut; cartoes por linha $perRow (esperado $want); textos ausentes: $($missing -join ' | ')")
+                    }
+                }
+            }
+        } finally { Set-AtmLanguage -Requested $old }
+        Assert-Eq ($bad -join ' || ') '' 'dashboard'
+    }
     Test-Case 'TUI' 'Fallback ASCII e terminal estreito (60x20)' {
         $p = New-TestProfile 'tuiascii'
         $null = New-TestRoot -ProfileInfo $p

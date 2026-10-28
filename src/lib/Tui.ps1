@@ -342,8 +342,10 @@ function Get-AtmTuiDashboardLines {
         @{ T = (Get-AtmText 'dash.space'); L = @((Get-AtmText 'dash.mbLogical' (Format-AtmMB $bytes)), (Get-AtmText 'dash.gbLogical' (Format-AtmGB $bytes)), (Get-AtmText 'dash.mbPhysical' (Format-AtmMB (Get-AtmSum $parts 'AllocatedBytesEstimate')))); C = 'Cyan' }
         @{ T = (Get-AtmText 'dash.errorsCoverage'); L = @((Get-AtmText 'dash.readErrors' (Get-AtmSum $parts 'ErrorCount')), (Get-AtmText 'dash.incompleteMeas' @($parts | Where-Object { -not $_.MeasurementComplete }).Count), (Get-AtmText 'dash.coverage' $(if ($inv.CoverageComplete) { Get-AtmText 'common.complete' } else { Get-AtmText 'common.incomplete' }))); C = $(if ($inv.CoverageComplete) { 'Green' } else { 'Yellow' }) }
     )
-    $perRow = $(if ($w -ge 110) { 4 } elseif ($w -ge 60) { 2 } else { 1 })
-    $cw = [int](($w - 2) / $perRow) - 1
+    # Four cards per row only when each keeps 27 characters of text (130 columns): below that the labels and numbers
+    # would be cut, so two per row. Floor, never rounding: a card row must end inside the width.
+    $perRow = $(if ($w -ge 130) { 4 } elseif ($w -ge 60) { 2 } else { 1 })
+    $cw = [int][math]::Floor(($w - 2) / $perRow) - 1
     $out = New-Object System.Collections.Generic.List[object]
     for ($i = 0; $i -lt $cards.Count; $i += $perRow) {
         $chunk = @($cards[$i..([math]::Min($i + $perRow, $cards.Count) - 1)])
