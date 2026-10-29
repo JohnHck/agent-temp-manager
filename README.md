@@ -3,9 +3,10 @@
 Read-only auditing and preview of the temporary directories that AI coding agents leave behind on Windows,
 across **every local user profile**, with a safety engine built for a future human-approved cleanup.
 
-> **Version 0.2.0 is a release candidate, not published (the latest published version is
-> [0.1.1](https://github.com/JohnHck/agent-temp-manager/releases/tag/v0.1.1), a security fix of 0.1.0).** Scope: audit,
-> preview, the interactive dashboard and read-only runtime diagnostics. **Real deletion is disabled.**
+> **Version 0.2.0.** Its publication is the GitHub Release `v0.2.0` only, created with the maintainer's explicit
+> approval; verify the zip against that release's `SHA256SUMS.txt` (releases:
+> [GitHub Releases](https://github.com/JohnHck/agent-temp-manager/releases)). Scope: audit, preview, the interactive
+> dashboard and read-only runtime diagnostics. **Real deletion is disabled.**
 > `agent-temp clean` runs every safety gate and shows the exact plan, then stops without deleting anything.
 > Real cleanup is planned for V0.3, after the runtime diagnostics of V0.2: see the [roadmap](docs/ROADMAP.md).
 

@@ -9202,9 +9202,9 @@ try {
         $br = [IO.File]::ReadAllText((Join-Path (Split-Path -Parent $testsDir) 'tools\Build-Release.ps1'))
         foreach ($g in @('AtmRealDeletionEnabled', 'AtmWorktreeDiagnosticsEnabled', 'AtmHandleDiagnosticsEnabled', 'AtmDiagnoseExportEnabled')) { Assert-True ($br.Contains($g)) "F-08: release confere $g no arquivo" }
     }
-    Test-Case 'Instalacao' 'FINAL-C: versao 0.2.0 coerente - fonte unica, instalador, manifesto, CLI, build, changelog e notas (release candidate, nao publicada)' {
+    Test-Case 'Instalacao' 'FINAL-C: versao 0.2.0 coerente - fonte unica, instalador, manifesto, CLI, build, changelog e notas (publicacao somente pela GitHub Release, sem alegar publicacao)' {
         $repoRoot = Split-Path -Parent $testsDir
-        Assert-Eq $script:AtmVersion '0.2.0' 'versao do release candidate na fonte'
+        Assert-Eq $script:AtmVersion '0.2.0' 'versao 0.2.0 na fonte'
         $auditSrc = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Audit.ps1'))
         Assert-Eq ([regex]::Matches($auditSrc, '\$script:AtmVersion\s*=').Count) 1 'uma unica atribuicao da versao'
         Assert-Eq (Get-AtmSourceVersion -SourceDir $srcDir) '0.2.0' 'versao lida pelo instalador e pelo build'
@@ -9217,10 +9217,14 @@ try {
         $br = [IO.File]::ReadAllText((Join-Path $repoRoot 'tools\Build-Release.ps1'))
         Assert-True ($br.Contains('$version = Get-AtmSourceVersion') -and $br.Contains('"agent-temp-manager-$version"') -and $br.Contains('$script:AtmVersion = ''$version''')) 'build: nome do arquivo e versao conferida no arquivo vem da fonte'
         $cl = [IO.File]::ReadAllText((Join-Path $repoRoot 'CHANGELOG.md'))
-        Assert-True ($cl -match '(?m)^## 0\.2\.0 \(release candidate, not published\)' -and $cl -match '(?m)^## 0\.1\.0\r?$' -and $cl.IndexOf('## 0.2.0') -lt $cl.IndexOf('## 0.1.0')) 'changelog: 0.2.0 marcada como nao publicada, 0.1.0 preservada'
+        Assert-True ($cl -match '(?m)^## 0\.2\.0\r?$' -and $cl -match '(?m)^## 0\.1\.0\r?$' -and $cl.IndexOf('## 0.2.0') -lt $cl.IndexOf('## 0.1.0') -and $cl -match 'GitHub Release `v0\.2\.0`' -and $cl -notmatch 'release candidate, not published') 'changelog: entrada 0.2.0 final (publicacao so pela GitHub Release v0.2.0), 0.1.0 preservada, sem o texto de release candidate'
         $en = [IO.File]::ReadAllText((Join-Path $repoRoot 'docs\release\V0.2.0-RELEASE-NOTES.md'))
         $pt = [IO.File]::ReadAllText((Join-Path $repoRoot 'docs\release\V0.2.0-RELEASE-NOTES.pt-BR.md'))
-        Assert-True ($en -match 'release candidate, NOT published' -and $pt -match 'release candidate, N.O publicada') 'notas: release candidate nao publicada (en, pt-BR)'
+        # Final text: publication is the GitHub Release only; the notes never claim it happened nor keep the old status.
+        Assert-True ($en -match '(?m)^# Agent Temp Manager 0\.2\.0: release notes\r?$' -and $en.Contains('Publication of this version is the GitHub Release `v0.2.0`, created only with the maintainer''s explicit approval') -and $en -notmatch 'release candidate, NOT published') 'notas en-US: publicacao somente pela GitHub Release, sem o status de release candidate'
+        Assert-True ($pt -match '(?m)^# Agent Temp Manager 0\.2\.0: notas de vers.o\r?$' -and $pt -match 'A publica..o desta vers.o . a GitHub Release `v0\.2\.0`, criada somente com a aprova..o expl.cita do mantenedor' -and $pt -notmatch 'release candidate, N.O publicada') 'notas pt-BR: publicacao somente pela GitHub Release, sem o status de release candidate'
+        foreach ($doc in @('README.md', 'docs\USAGE.md', 'docs\DIAGNOSE-SCHEMA.md')) { Assert-True (-not ([IO.File]::ReadAllText((Join-Path $repoRoot $doc)) -match '(?i)release candidate[^.\n]{0,20}not published|not published[^.\n]{0,40}release candidate|is \*\*not published\*\*')) "$($doc): sem o texto de release candidate nao publicada" }
+        foreach ($s in @('ORPHAN_SUSPECTED', 'EXCLUSAO_REAL_DESABILITADA_V0_1')) { Assert-True ($en.Contains($s) -and $pt.Contains($s)) "notas: $s continua documentado" }
         foreach ($g in @('AtmRealDeletionEnabled', 'AtmWorktreeDiagnosticsEnabled', 'AtmHandleDiagnosticsEnabled', 'AtmDiagnoseExportEnabled')) {
             Assert-True ($en.Contains("$g = `$false") -and $pt.Contains("$g = `$false")) "notas: trava $g listada como fechada"
         }

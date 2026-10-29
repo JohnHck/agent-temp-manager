@@ -74,8 +74,8 @@ review). Eligible paths are printed as allowlist lines `path|fingerprint`.
 
 ## Diagnose (read-only, V0.2)
 
-V0.2 is prepared as release candidate 0.2.0 and is **not published** yet: until then `diagnose` exists only in
-development and release-candidate copies, and its output may still change.
+`diagnose` is part of version 0.2.0 (published only as the GitHub Release `v0.2.0`). It is read-only and reports the
+coverage of every observation; its output may change in later versions.
 
 ```powershell
 agent-temp diagnose

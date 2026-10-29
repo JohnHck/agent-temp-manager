@@ -1,10 +1,9 @@
 # Changelog
 
-## 0.2.0 (release candidate, not published)
+## 0.2.0
 
-Prepared on the release-candidate branch (FINAL-C); published only with the maintainer's explicit authorization
-(tag `v0.2.0` and GitHub Release). Details, limits and open decisions:
-[docs/release/V0.2.0-RELEASE-NOTES.md](docs/release/V0.2.0-RELEASE-NOTES.md).
+Published only as the GitHub Release `v0.2.0` (tag `v0.2.0`), created with the maintainer's explicit authorization.
+Details, limits and open decisions: [docs/release/V0.2.0-RELEASE-NOTES.md](docs/release/V0.2.0-RELEASE-NOTES.md).
 
 * `agent-temp diagnose` and TUI area **D**: read-only runtime diagnostics with coverage per collector (process
   identity, agent processes and sessions from evidence, resource totals per verified tree, provider-declared Windows
@@ -24,6 +23,14 @@ Prepared on the release-candidate branch (FINAL-C); published only with the main
 * Installation: `verify` and the installer bootstrap run no unverified code (R-B5); update and rollback never destroy
   the only intact installation (R-B6); the staged copy is verified against the source manifest (F-07); the post-install
   verify runs `cmd.exe` from System32 (F-13); the release build refuses an archive unless all four gates are `$false`.
+* Audit coverage (PR #57): a `TEMP` base that is not audited makes the coverage incomplete (`PROFILES_NOT_AUDITED`)
+  and a profile with a base read and a base not audited is `AUDITADO_PARCIAL`.
+* Read errors (PR #58, PR #59): in the path chain check, the Claude Code sessions folder, the activity evidence of a
+  root and, behind closed gates, the post-delete verification and the export destination check, an access denied or an
+  unexpected error is no longer taken for a confirmed absence (Windows PowerShell 5.1 could run a typed `catch` clause
+  for the wrong exception); an unreadable project folder now leaves a root to investigate, never eligible.
+* TUI (PR #59, PR #60): the dashboard puts four cards on a row only from 130 columns; the busy screen of R, D and U
+  replaces the previous screen; keys typed while they run are discarded.
 * Behaviour changes since 0.1.0 (stricter `audit -ExportJson` creation and protected DACL, network or device paths from
   other users' environment refused, control characters shown as `?`, `verify` exit code `5` for a missing library):
   listed with the gate that approved each one in the release notes.
