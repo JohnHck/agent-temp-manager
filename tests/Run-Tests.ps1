@@ -8619,6 +8619,87 @@ try {
         Assert-True ($iss.Contains((Get-AtmText 'tui.diag.typeCov')) -and $iss.Contains((Get-AtmText 'tui.diag.typeFind'))) '9 (A): pendencias com coberturas e achados UNKNOWN'
         Assert-Eq @($st.Diag.Index.Issues | Where-Object { $_.T -ceq 'cov' }).Count @($st.Diag.Index.Coverage | Where-Object { $script:AtmConclusiveCoverage -cnotcontains [string]$_.status }).Count 'nenhum coletor incompleto ocultado'
     }
+    Test-Case 'TUI' 'Transicao para R e D no console (escritor real sobre um console virtual): carregamento e atualizacoes sem menu, opcoes ou totais da tela anterior; tela de destino inteira; falha sem mistura de telas; teclas digitadas durante a operacao descartadas (en-US e pt-BR, 120 e 160 colunas)' {
+        $p = New-TestProfile 'tuitrans'; $null = New-TestRoot -ProfileInfo $p
+        $ia = Get-InvArgs -Profiles @($p); $inv0 = Inv -Profiles @($p)
+        $bad = New-Object System.Collections.Generic.List[string]
+        $st = ${function:Start-AtmTui}.ToString()
+        if (-not $st.Contains('Write-AtmTuiFrameToConsole -Frame $frame -Width $tuiState.Width -Height $tuiState.Height')) { $bad.Add('renderer padrao sem a altura da janela') }
+        $hasH = (Get-Command Write-AtmTuiFrameToConsole).Parameters.ContainsKey('Height')
+        $hasFlush = (Get-Command Start-AtmTui).Parameters.ContainsKey('KeyFlush')
+        $script:trObj = $tdRes
+        $old = Get-AtmLanguage
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                $marks = @(Get-AtmTuiMenuItems | ForEach-Object { "[$($_.Key)] $($_.Label)" })
+                $usersTitle = @(Get-AtmTuiMenuItems | Where-Object { $_.Key -ceq '2' })[0].Screen.Title
+                $working = Get-AtmText 'tui.working'; $busyNote = Get-AtmText 'tui.readOnlyBusy'
+                foreach ($w in @(120, 160)) {
+                    $h = 30
+                    foreach ($op in @('R', 'D', 'Dfail')) {
+                        $tag = "$lang $w $op"; $script:trW = $w; $script:trH = $h; $script:trHasH = $hasH; $script:trWorking = $working
+                        $script:vc = @{ Rows = [string[]]@(1..$h | ForEach-Object { ' ' * $w }); R = 0; C = 0; H = $h }
+                        $script:snaps = New-Object System.Collections.Generic.List[object]
+                        $script:typeahead = New-Object System.Collections.Generic.Queue[object]; $script:injected = $false; $script:flushes = 0
+                        $script:scripted = New-Object System.Collections.Generic.Queue[object]
+                        $opKey = $(if ($op -ceq 'R') { New-Key 'R' 'r' } else { New-Key 'D' 'd' })
+                        $after = $(if ($op -ceq 'D') { @((New-Key 'Escape'), (New-Key 'D2' '2'), (New-Key 'Escape'), (New-Key 'Q' 'q')) } else { @((New-Key 'D2' '2'), (New-Key 'Escape'), (New-Key 'Q' 'q')) })
+                        foreach ($k in @(@($opKey) + $after)) { $script:scripted.Enqueue($k) }
+                        $runner = $(if ($op -ceq 'Dfail') { { param($a) & $a.InventoryArgs.ProgressCallback 50 'x'; throw [IO.IOException]::new('synthetic') } } else { { param($a) & $a.InventoryArgs.ProgressCallback 50 'x'; $script:trObj } })
+                        & {
+                            # Virtual console: rows overwritten where the cursor is; the cursor goes home before each frame.
+                            function Write-Host { param([Parameter(Position = 0)]$Object = '', [switch]$NoNewline, $ForegroundColor, $BackgroundColor)
+                                $s = [string]$Object; $v = $script:vc
+                                if ($s.Length -gt 0 -and $v.R -lt $v.H) { $row = $v.Rows[$v.R].PadRight($v.C + $s.Length); $v.Rows[$v.R] = $row.Substring(0, $v.C) + $s + $row.Substring($v.C + $s.Length); $v.C += $s.Length }
+                                if (-not $NoNewline) { $v.R++; $v.C = 0 }
+                            }
+                            function Clear-Host { }
+                            $rd = { param($frame)
+                                $script:vc.R = 0; $script:vc.C = 0
+                                $wa = @{ Frame = $frame; Width = $script:trW }; if ($script:trHasH) { $wa['Height'] = $script:trH }
+                                Write-AtmTuiFrameToConsole @wa
+                                $scr = @($script:vc.Rows); $txt = $scr -join "`n"
+                                $script:snaps.Add([pscustomobject]@{ Lines = @($frame).Count; Rows = $scr; Text = $txt; Busy = $scr[0].Contains($script:trWorking) })
+                                # A key typed while the work runs (here: Q, which would quit).
+                                if (-not $script:injected -and $scr[0].Contains($script:trWorking)) { $script:typeahead.Enqueue((New-Key 'Q' 'q')); $script:injected = $true }
+                            }
+                            $ta = @{ InventoryArgs = $ia; Inventory = $inv0; Renderer = $rd; Width = $w; Height = $h; LineReader = { param($x) '' }
+                                KeySource = { if ($script:typeahead.Count -gt 0) { $script:typeahead.Dequeue() } elseif ($script:scripted.Count -gt 0) { $script:scripted.Dequeue() } else { $null } }
+                                DiagnoseRunner = $runner; DiagnoseArgs = @{ InventoryArgs = @{} } }
+                            if ($hasFlush) { $ta['KeyFlush'] = { $script:flushes++; $script:typeahead.Clear() } }
+                            $null = Start-AtmTui @ta
+                        }
+                        $sn = $script:snaps.ToArray()
+                        $first = -1; for ($i = 0; $i -lt $sn.Count; $i++) { if ($sn[$i].Busy) { $first = $i; break } }
+                        if ($first -lt 1) { $bad.Add("$($tag): nenhum quadro de carregamento"); continue }
+                        $busy = @($sn | Where-Object { $_.Busy })
+                        $endAt = $first; while ($endAt + 1 -lt $sn.Count -and $sn[$endAt + 1].Busy) { $endAt++ }
+                        $menu0 = $sn[$first - 1]; $dest = $(if ($endAt + 1 -lt $sn.Count) { $sn[$endAt + 1] } else { $null })
+                        if (@($marks | Where-Object { -not $menu0.Text.Contains($_) }).Count -gt 0) { $bad.Add("$($tag): menu inicial incompleto") }
+                        $i = 0
+                        foreach ($b in $busy) {
+                            $i++
+                            $left = @($marks | Where-Object { $b.Text.Contains($_) })
+                            $tail = 0; if ($b.Lines -lt $h) { $tail = @($b.Rows[$b.Lines..($h - 1)] | Where-Object { $_.Trim().Length -gt 0 }).Count }
+                            if ($left.Count -gt 0 -or $tail -gt 0 -or -not $b.Text.Contains($busyNote)) { $bad.Add("$($tag) carregamento $($i): opcoes do menu visiveis $($left.Count); linhas restantes da tela anterior $tail; aviso somente leitura $($b.Text.Contains($busyNote))") }
+                        }
+                        $startText = $(if ($op -ceq 'R') { Get-AtmText 'tui.auditStarting' } else { Get-AtmText 'tui.diag.running' })
+                        if (-not (($sn[$first].Text -replace '\s', '').Contains(($startText -replace '\s', '')))) { $bad.Add("$($tag): primeiro quadro sem o texto da operacao") }
+                        if ($busy.Count -lt 2 -or -not ($busy[-1].Text -match '\d+%')) { $bad.Add("$($tag): sem atualizacao de progresso ($($busy.Count) quadros)") }
+                        if ($null -eq $dest -or $dest.Text.Contains($busyNote)) { $bad.Add("$($tag): tela de destino ausente ou misturada ao carregamento") }
+                        else {
+                            $msgOk = $(switch ($op) { 'R' { (($dest.Text -replace '\s', '').Contains(((Get-AtmText 'tui.reaudited') -replace '\s', ''))) -and @($marks | Where-Object { -not $dest.Text.Contains($_) }).Count -eq 0 } 'D' { ($dest.Text -replace '\s', '').Contains(((Get-AtmText 'tui.diag.title') -replace '\s', '')) } 'Dfail' { (($dest.Text -replace '\s', '').Contains('EXCEPTION_IOEXCEPTION')) -and @($marks | Where-Object { -not $dest.Text.Contains($_) }).Count -eq 0 } })
+                            if (-not $msgOk) { $bad.Add("$($tag): tela de destino incompleta") }
+                        }
+                        $users = @($sn | Select-Object -Skip ($endAt + 1) | Where-Object { $_.Rows[0].Contains($usersTitle) }).Count
+                        if ($script:flushes -lt 1 -or $users -eq 0) { $bad.Add("$($tag): tecla digitada durante a operacao nao descartada (descartes $($script:flushes); tela de usuarios depois: $users)") }
+                    }
+                }
+            }
+        } finally { Set-AtmLanguage -Requested $old }
+        Assert-Eq (@($bad | Select-Object -First 8) -join ' || ') '' "transicoes ($($bad.Count) problemas)"
+    }
     Test-Case 'TUI' 'P5-A: falha do diagnose com mensagem segura, resultado anterior preservado como desatualizado, nenhuma repeticao automatica' {
         $p = New-TestProfile 'p5a-fail'
         $script:tdRuns = 0

@@ -491,8 +491,11 @@ function Get-AtmTuiFrame {
 }
 
 function Write-AtmTuiFrameToConsole {
-    param($Frame, [int]$Width)
+    param($Frame, [int]$Width, [int]$Height = 0)
     try { [Console]::SetCursorPosition(0, 0) } catch { Clear-Host }
+    # Every row of the window is written: a frame shorter than the one before (the busy screen of R or D drawn over
+    # the menu) must not leave the previous screen's rows visible below it. Overwritten in place, never cleared.
+    $rows = [math]::Max(@($Frame).Count, $Height)
     $n = 0
     foreach ($line in $Frame) {
         $len = 0
@@ -505,7 +508,12 @@ function Write-AtmTuiFrameToConsole {
         }
         if ($len -lt $Width - 1) { Write-Host (' ' * ($Width - 1 - $len)) -NoNewline }
         $n++
-        if ($n -lt $Frame.Count) { Write-Host '' }
+        if ($n -lt $rows) { Write-Host '' }
+    }
+    while ($n -lt $rows) {
+        Write-Host (' ' * ($Width - 1)) -NoNewline
+        $n++
+        if ($n -lt $rows) { Write-Host '' }
     }
 }
 
@@ -820,6 +828,8 @@ function Invoke-AtmTuiAudit {
     # Dynamic scoping (no GetNewClosure: closures cannot see script-scope functions).
     $tuiAuditState = $State
     $cb = { param($pct, $msg) & $tuiAuditState.Draw (Get-AtmTuiBusyFrame -State $tuiAuditState -Text $msg -Percent $pct) }
+    # Drawn before the inventory starts (its first progress call comes after its own setup).
+    & $State.Draw (Get-AtmTuiBusyFrame -State $State -Text (Get-AtmText 'tui.auditStarting'))
     $a = @{} + $State.InventoryArgs
     $a['ProgressCallback'] = $cb
     $a['NoProgress'] = $false
@@ -872,7 +882,7 @@ function Start-AtmTui {
       -DiagnoseRunner: scriptblock(args) -> diagnose result (tests; default Invoke-AtmDiagnose)
     #>
     param([hashtable]$InventoryArgs = @{}, [scriptblock]$KeySource, [scriptblock]$Renderer, [scriptblock]$LineReader, [switch]$Ascii, [int]$Width = 0, [int]$Height = 0, $Inventory,
-        [hashtable]$DiagnoseArgs = $null, [scriptblock]$DiagnoseRunner = $null)
+        [hashtable]$DiagnoseArgs = $null, [scriptblock]$DiagnoseRunner = $null, [scriptblock]$KeyFlush = $null)
     $headless = [bool]$Renderer
     $useAscii = $Ascii -or -not (Test-AtmTuiUnicodeDefault)
     # Callbacks below rely on dynamic scoping with tui-prefixed names (no GetNewClosure: such closures
@@ -892,7 +902,9 @@ function Start-AtmTui {
     }
     if (-not $KeySource) { $KeySource = { [Console]::ReadKey($true) } }
     if (-not $LineReader) { $LineReader = { param($prompt) Read-Host $prompt } }
-    if (-not $Renderer) { $Renderer = { param($frame) Write-AtmTuiFrameToConsole -Frame $frame -Width $tuiState.Width } }
+    if (-not $Renderer) { $Renderer = { param($frame) Write-AtmTuiFrameToConsole -Frame $frame -Width $tuiState.Width -Height $tuiState.Height } }
+    # Keys typed while R, D or U run are discarded when the work ends: a menu key pressed meanwhile must not run then.
+    if (-not $KeyFlush) { $KeyFlush = $(if ($headless) { { } } else { { try { while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) } } catch { $null = $_ } } }) }
     $tuiRenderer = $Renderer
     $tuiAscii = $useAscii
     $tuiState.Draw = { param($frame) $tuiState.Frames++; & $tuiRenderer @($frame | ForEach-Object { $ln = $_; if ($tuiAscii) { $ln = @($ln | ForEach-Object { [pscustomobject]@{ Text = (ConvertTo-AtmAscii $_.Text); Fg = $_.Fg; Bg = $_.Bg } }) }; ,(Limit-AtmTuiLine -Line $ln -Width ($tuiState.Width - 1)) }) }
@@ -979,16 +991,17 @@ function Start-AtmTui {
             if ($push) {
                 switch ($push.Name) {
                     'quit' { return $state }
-                    'reaudit' { Invoke-AtmTuiAudit -State $state; $state.Message = (Get-AtmText 'tui.reaudited') }
+                    'reaudit' { Invoke-AtmTuiAudit -State $state; & $KeyFlush; $state.Message = (Get-AtmText 'tui.reaudited') }
                     'diagrefresh' {
-                        if (Invoke-AtmTuiDiagnose -State $state) { $state.Message = (Get-AtmText 'tui.diag.refreshed') }
+                        $okU = Invoke-AtmTuiDiagnose -State $state; & $KeyFlush
+                        if ($okU) { $state.Message = (Get-AtmText 'tui.diag.refreshed') }
                         while ($state.Stack.Count -gt 1 -and $state.Stack[$state.Stack.Count - 1].Name -cne 'diag') { $state.Stack.RemoveAt($state.Stack.Count - 1) }
                         if ($state.Stack.Count -gt 1) { $state.Stack[$state.Stack.Count - 1].Sel = 0; $state.Stack[$state.Stack.Count - 1].Top = 0 }
                     }
                     'diag' {
                         # Entering the area runs the diagnose only when there is no result yet (explicit action).
                         $ok = ($null -ne $state.Diag -and $null -ne $state.Diag.View)
-                        if (-not $ok) { $ok = Invoke-AtmTuiDiagnose -State $state }
+                        if (-not $ok) { $ok = Invoke-AtmTuiDiagnose -State $state; & $KeyFlush }
                         if ($ok) { $state.Stack.Add(@{ Name = 'diag'; Title = $push.Title; Sel = 0; Top = 0; Count = 0; Filter = $null }) }
                     }
                     # Cursor visibility is cosmetic; consoles without it are fine.
