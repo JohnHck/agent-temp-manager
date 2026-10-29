@@ -159,6 +159,47 @@ function Invoke-AtmPreview {
     return $rows.ToArray()
 }
 
+# T1 (F-04): the clean log. A NEW file per run (never an existing name, never appended to), created relative to the
+# pinned folder and written only through the handle kept for the run (AtmCleanLog in Native.cs): JSON Lines, UTF-8
+# without BOM, one record per line, each one flushed before the next step. Required whenever real deletion is enabled;
+# with the release gate closed (every shipped copy) it is neither required, created nor opened. One record per root:
+# the log never lists the files of a tree, and nothing can be undone from it.
+$script:AtmCleanLogSchema = 'atm.cleanlog/1'
+
+function Open-AtmCleanLog {
+    <#
+      Pins the folder of -Path (folder policy of AtmCleanLog.Pin), applies the audited-directories rule inside the pinned
+      window and creates the file. Returns Log (open) or Code, and Created: a file was created and may remain after a
+      refusal; it is never removed.
+    #>
+    param([string]$Path, $Inventory, [string]$ProcessUserSid)
+    $out = [ordered]@{ Log = $null; Code = $null; Created = $false }
+    if (Test-AtmAllowListPathSyntax $Path) { $out.Code = 'LOG_DESTINATION_NOT_ALLOWED'; return [pscustomobject]$out }
+    $log = [AgentTempManager.AtmCleanLog]::Pin([IO.Path]::GetDirectoryName($Path), $ProcessUserSid)
+    $keep = $false
+    try {
+        if ($null -ne $log.Error) { $out.Code = 'LOG_PIN_' + $log.Error; return [pscustomobject]$out }
+        if (-not (Test-AtmOutputPathOutsideBases -Path $Path -Inventory $Inventory)) { $out.Code = 'LOG_DESTINATION_NOT_ALLOWED'; return [pscustomobject]$out }
+        $code = $log.Create([IO.Path]::GetFileName($Path))
+        $out.Created = [bool]$log.Created
+        if ($null -ne $code) { $out.Code = 'LOG_CREATE_' + $code; return [pscustomobject]$out }
+        $out.Log = $log
+        $keep = $true
+        return [pscustomobject]$out
+    } finally { if (-not $keep) { $log.Dispose() } }
+}
+
+function Write-AtmCleanLogRecord {
+    # One record: one JSON line, written and flushed by -Log. Returns $null, or the code of the failure.
+    param($Log, [hashtable]$State, [string]$Type, [System.Collections.IDictionary]$Fields = @{})
+    $State.RecSeq++
+    $rec = [ordered]@{ schema = $script:AtmCleanLogSchema; type = $Type; runId = $State.RunId; recSeq = $State.RecSeq; utc = [datetime]::UtcNow.ToString('o') }
+    foreach ($k in $Fields.Keys) { $rec[$k] = $Fields[$k] }
+    $line = $null
+    try { $line = ConvertTo-Json -InputObject $rec -Compress -Depth 5 } catch { return 'LOG_RECORD_INVALID' }
+    try { return $Log.AppendLine($line) } catch { return ('LOG_WRITE_' + $_.Exception.GetBaseException().GetType().Name) }
+}
+
 function Invoke-AtmClean {
     <#
       Fail-closed assisted deletion. The engine owns every safety decision; callers only provide:
@@ -166,7 +207,17 @@ function Invoke-AtmClean {
                             (including "NADA FOI APAGADO AINDA"). Without it nothing proceeds.
         -ConfirmationReader scriptblock(phrase) returning the text typed by the operator. The phrase is
                             generated here; anything but an exact ordinal match aborts.
+        -LogFile            T1: a NEW file outside the audited directories. Required once real deletion is enabled
+                            (LOG_REQUIRED otherwise); with the release gate closed it is neither required, created nor
+                            opened, and the plan-only flow is unchanged.
       -InventoryArgs is splatted into every Invoke-AtmInventory call (tests / CLI self markers).
+      -DeleteTreeImpl, -PathPresenceImpl and -LogWriter are test seams, never passed by the CLI: a stand-in deleter (it
+      deletes nothing), a stand-in presence check and an object with AppendLine/Close/Dispose. They are reached only past
+      the release gate, so they cannot make a run with the gate closed delete or log anything.
+      Aborted: the run ended before any call to the deleter. StoppedBy: it ended after at least one call; anything but a
+      complete, verified deletion (a refusal, a partial deletion, an exception, a verification that is not conclusive) or
+      a log failure stops the run before the next root. LogErrors lists every log failure (Stage, OpId, Code) without
+      replacing the main code.
       Returns arrays only (no live collections).
     #>
     [CmdletBinding()]
@@ -177,17 +228,23 @@ function Invoke-AtmClean {
         [scriptblock]$ConfirmationReader,
         [hashtable]$InventoryArgs = @{},
         [scriptblock]$BeforeDeleteHook,
-        [string]$LogFile
+        [string]$LogFile,
+        [scriptblock]$DeleteTreeImpl,
+        [scriptblock]$PathPresenceImpl,
+        $LogWriter
     )
     $rejected = New-Object System.Collections.Generic.List[object]
     $verified = New-Object System.Collections.Generic.List[object]
     $deleted = New-Object System.Collections.Generic.List[object]
     $skipped = New-Object System.Collections.Generic.List[object]
-    $state = @{ Confirmed = $false; Aborted = $null; Post = $null; Phrase = $null }
+    $logErrors = New-Object System.Collections.Generic.List[object]
+    $state = @{ Confirmed = $false; Aborted = $null; Stopped = $null; Post = $null; Phrase = $null; RunId = $null; RecSeq = 0; LogCreated = $false }
     $finish = {
         [pscustomobject]@{
             Requested = @($Entries).Count; Rejected = $rejected.ToArray(); Verified = $verified.ToArray(); Phrase = $state.Phrase
             Confirmed = $state.Confirmed; Deleted = $deleted.ToArray(); Skipped = $skipped.ToArray(); PostInventory = $state.Post; Aborted = $state.Aborted
+            StoppedBy = $state.Stopped; RunId = $state.RunId; LogFile = $(if ($state.RunId) { $LogFile } else { $null }); LogCreated = $state.LogCreated
+            LogErrors = $logErrors.ToArray()
         }
     }
     if (@($Entries).Count -eq 0) { $state.Aborted = 'ALLOWLIST_VAZIA'; return (& $finish) }
@@ -226,47 +283,118 @@ function Invoke-AtmClean {
         $state.Aborted = 'EXCLUSAO_REAL_DESABILITADA_V0_1'
         return (& $finish)
     }
-    $typed = & $ConfirmationReader $state.Phrase
-    if (-not ($typed -is [string]) -or -not [string]::Equals($typed, $state.Phrase, [StringComparison]::Ordinal)) {
-        $state.Aborted = 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE'
-        return (& $finish)
-    }
-    $state.Confirmed = $true
+    # T1: past the release gate every run is logged in a new file, created and started before the confirmation, so the
+    # operator never confirms a run that cannot be recorded.
+    if (-not $LogFile -and $null -eq $LogWriter) { $state.Aborted = 'LOG_REQUIRED'; return (& $finish) }
+    $state.RunId = [guid]::NewGuid().ToString()
+    # The first failure of a run: before any call to the deleter it is an abort, after one it is a stop.
+    $halt = { param([string]$Code) if ($deleted.Count -gt 0) { $state.Stopped = $Code } else { $state.Aborted = $Code } }
+    $logFail = { param([string]$Stage, [string]$OpId, [string]$Code) $logErrors.Add([pscustomobject]@{ Stage = $Stage; OpId = $OpId; Code = $Code }) }
+    $log = $LogWriter
+    try {
+        if ($null -eq $log) {
+            $opened = Open-AtmCleanLog -Path $LogFile -Inventory $inv -ProcessUserSid (Get-AtmCurrentIdentity).Sid
+            $state.LogCreated = [bool]$opened.Created
+            if ($null -eq $opened.Log) { & $logFail 'open' $null $opened.Code; $state.Aborted = 'LOG_OPEN_FAILED'; return (& $finish) }
+            $log = $opened.Log
+        }
+        $plan = New-Object System.Collections.Generic.List[object]
+        foreach ($p in $verified) { $plan.Add([pscustomobject]@{ OpId = ('{0}:{1}' -f $state.RunId, ($plan.Count + 1)); Part = $p }) }
+        $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'run-start' -Fields ([ordered]@{ tool = $script:AtmVersion; user = $inv.Identity.Name; sid = $inv.Identity.Sid; elevated = [bool]$inv.Identity.IsAdmin; planned = $plan.Count })
+        $stage = 'run-start'
+        if ($null -eq $lc) {
+            $stage = 'plan'
+            foreach ($item in $plan) {
+                $p = $item.Part
+                $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'plan' -Fields ([ordered]@{ opId = $item.OpId; path = $p.Path; fingerprint = $p.Fingerprint; files = $p.Files; dirs = $p.Dirs; bytes = $p.Bytes })
+                if ($null -ne $lc) { break }
+            }
+        }
+        if ($null -ne $lc) { & $logFail $stage $null $lc; $state.Aborted = 'LOG_WRITE_FAILED'; return (& $finish) }
 
-    # 18-19: per-path revalidation immediately before deleting; only still-eligible paths are deleted.
-    foreach ($p in $verified) {
-        if ($BeforeDeleteHook) { & $BeforeDeleteHook $p }
-        $args2 = @{} + $InventoryArgs
-        $args2['OnlyRootPath'] = $p.Path
-        $args2['NoProgress'] = $true
-        $re = Invoke-AtmInventory @args2
-        $cur = @($re.Partitions | Where-Object { [string]::Equals($_.Path, $p.Path, [StringComparison]::OrdinalIgnoreCase) -and $_.Kind -ne 'NotScanned' -and $_.Kind -ne 'BaseLooseFiles' })
-        $why = @()
-        if ($cur.Count -ne 1) { $why += 'DESAPARECEU_OU_AMBIGUO_NA_REVALIDACAO' }
+        $typed = & $ConfirmationReader $state.Phrase
+        $accepted = (($typed -is [string]) -and [string]::Equals($typed, $state.Phrase, [StringComparison]::Ordinal))
+        $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'confirmation' -Fields ([ordered]@{ accepted = $accepted })
+        if ($null -ne $lc) { & $logFail 'confirmation' $null $lc }
+        if (-not $accepted) { $state.Aborted = 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE' }
+        elseif ($null -ne $lc) { $state.Aborted = 'LOG_WRITE_FAILED' }
         else {
-            $c = $cur[0]
-            if ($c.Fingerprint -ne $p.Fingerprint) { $why += "ALTERADO_APOS_CONFIRMACAO (fingerprint $($p.Fingerprint) -> $($c.Fingerprint))" }
-            $g = Test-AtmCandidate -Partition $c -Inventory $re -IncludeOtherUsers:$IncludeOtherUsers -ForClean
-            if ($g.Category -ne 'ELIGIBLE') { $why += $g.Reasons }
-        }
-        if ($why.Count -gt 0) { $skipped.Add([pscustomobject]@{ Path = $p.Path; Reasons = $why }); continue }
-        # The deleter re-checks, under its own handle pins, that the tree still matches what was just validated.
-        $d = [AgentTempManager.AtmDeleter]::DeleteTree($c.Path, $c.Files, $c.Dirs, $c.Bytes, $c.NewestWriteTimeUtc.Ticks, $null)
-        # Only a confirmed absence verifies the removal; access denied or any other error: Verified = false, never assumed.
-        $pres = Get-AtmPathPresence $p.Path
-        $gone = ($pres -is [bool]) -and (-not $pres)
-        $deleted.Add([pscustomobject]@{ Path = $p.Path; Bytes = $p.Bytes; Completed = $d.Completed; Verified = $gone; FilesDeleted = $d.FilesDeleted; DirsDeleted = $d.DirsDeleted; FilesPlanned = $d.FilesPlanned; DirsPlanned = $d.DirsPlanned; AbortReason = $d.AbortReason; FailedAt = $d.FailedAt })
-        if ($LogFile) {
-            $rec = [ordered]@{ utc = [datetime]::UtcNow.ToString('o'); user = $inv.Identity.Name; path = $p.Path; bytes = $p.Bytes; fingerprint = $p.Fingerprint; completed = $d.Completed; verifiedGone = $gone; abort = $d.AbortReason }
-            Add-Content -LiteralPath $LogFile -Value ($rec | ConvertTo-Json -Compress) -Encoding UTF8
-        }
-    }
+            $state.Confirmed = $true
+            # 18-19: per-path revalidation immediately before deleting; only still-eligible paths are deleted.
+            foreach ($item in $plan) {
+                $p = $item.Part
+                if ($BeforeDeleteHook) { & $BeforeDeleteHook $p }
+                $args2 = @{} + $InventoryArgs
+                $args2['OnlyRootPath'] = $p.Path
+                $args2['NoProgress'] = $true
+                $re = Invoke-AtmInventory @args2
+                $cur = @($re.Partitions | Where-Object { [string]::Equals($_.Path, $p.Path, [StringComparison]::OrdinalIgnoreCase) -and $_.Kind -ne 'NotScanned' -and $_.Kind -ne 'BaseLooseFiles' })
+                $why = @()
+                if ($cur.Count -ne 1) { $why += 'DESAPARECEU_OU_AMBIGUO_NA_REVALIDACAO' }
+                else {
+                    $c = $cur[0]
+                    if ($c.Fingerprint -ne $p.Fingerprint) { $why += "ALTERADO_APOS_CONFIRMACAO (fingerprint $($p.Fingerprint) -> $($c.Fingerprint))" }
+                    $g = Test-AtmCandidate -Partition $c -Inventory $re -IncludeOtherUsers:$IncludeOtherUsers -ForClean
+                    if ($g.Category -ne 'ELIGIBLE') { $why += $g.Reasons }
+                }
+                if ($why.Count -gt 0) {
+                    $skipped.Add([pscustomobject]@{ Path = $p.Path; Reasons = $why })
+                    $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'skip' -Fields ([ordered]@{ opId = $item.OpId; path = $p.Path; reasons = @($why) })
+                    if ($null -ne $lc) { & $logFail 'skip' $item.OpId $lc; & $halt 'LOG_WRITE_FAILED'; break }
+                    continue
+                }
+                # The intent is written and flushed BEFORE the deleter is called; without it that root is never started.
+                $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'intent' -Fields ([ordered]@{ opId = $item.OpId; path = $c.Path; fingerprint = $c.Fingerprint; files = $c.Files; dirs = $c.Dirs; bytes = $c.Bytes })
+                if ($null -ne $lc) { & $logFail 'intent' $item.OpId $lc; & $halt 'LOG_INTENT_FAILED'; break }
+                # The deleter re-checks, under its own handle pins, that the tree still matches what was just validated.
+                # An exception leaves the state of that root unknown: none, part or all of it may have been deleted.
+                $d = $null; $exType = $null
+                try {
+                    if ($DeleteTreeImpl) { $d = & $DeleteTreeImpl $c }
+                    else { $d = [AgentTempManager.AtmDeleter]::DeleteTree($c.Path, $c.Files, $c.Dirs, $c.Bytes, $c.NewestWriteTimeUtc.Ticks, $null) }
+                    if ($null -eq $d) { throw [InvalidOperationException]::new('DELETER_NO_RESULT') }
+                } catch { $d = $null; $exType = $_.Exception.GetBaseException().GetType().Name }
+                # Only a confirmed absence verifies the removal; access denied or any other error: not verified, never assumed.
+                $gone = $false; $vs = 'UNKNOWN'
+                if ($null -eq $exType) {
+                    $pres = $(if ($PathPresenceImpl) { & $PathPresenceImpl $p.Path } else { Get-AtmPathPresence $p.Path })
+                    if ($pres -is [bool]) { $gone = -not $pres; $vs = $(if ($pres) { 'PRESENT' } else { 'GONE' }) }
+                }
+                # REFUSED: nothing deleted (the deleter's own counts). PARTIAL: some entries deleted, not all.
+                # VERIFICATION_FAILED: the deleter completed but the absence could not be confirmed.
+                $outcome = $(if ($null -ne $exType) { 'EXCEPTION' }
+                    elseif (-not $d.Completed) { $(if ([long]$d.FilesDeleted -gt 0 -or [long]$d.DirsDeleted -gt 0) { 'PARTIAL' } else { 'REFUSED' }) }
+                    elseif ($gone) { 'COMPLETE' }
+                    else { 'VERIFICATION_FAILED' })
+                $known = ($null -ne $d)
+                $row = [pscustomobject]@{ OpId = $item.OpId; Path = $p.Path; Bytes = $p.Bytes; Outcome = $outcome; Completed = ($known -and [bool]$d.Completed); Verified = $gone; VerifiedState = $vs
+                    Attempted = $(if ($known) { [bool]$d.Attempted } else { $null }); FilesDeleted = $(if ($known) { $d.FilesDeleted } else { $null }); DirsDeleted = $(if ($known) { $d.DirsDeleted } else { $null })
+                    FilesPlanned = $(if ($known) { $d.FilesPlanned } else { $null }); DirsPlanned = $(if ($known) { $d.DirsPlanned } else { $null })
+                    AbortReason = $(if ($known) { $d.AbortReason } else { $null }); FailedAt = $(if ($known) { $d.FailedAt } else { $null }); ExceptionType = $exType }
+                $deleted.Add($row)
+                $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'result' -Fields ([ordered]@{ opId = $row.OpId; path = $row.Path; outcome = $outcome; attempted = $row.Attempted; completed = $row.Completed
+                        filesDeleted = $row.FilesDeleted; dirsDeleted = $row.DirsDeleted; filesPlanned = $row.FilesPlanned; dirsPlanned = $row.DirsPlanned; abortReason = $row.AbortReason; failedAt = $row.FailedAt
+                        verifiedGone = $(if ($vs -ceq 'UNKNOWN') { 'UNKNOWN' } else { $gone }); exceptionType = $exType })
+                if ($null -ne $lc) { & $logFail 'result' $row.OpId $lc; & $halt 'LOG_RESULT_FAILED'; break }
+                # Anything but a complete, verified deletion stops the run before the next root.
+                if ($outcome -cne 'COMPLETE') { & $halt ('STOPPED_AFTER_' + $outcome); break }
+            }
 
-    # 20: post-clean read-only audit.
-    $post = @{} + $InventoryArgs
-    $post['NoProgress'] = $true
-    $state.Post = Invoke-AtmInventory @post
-    return (& $finish)
+            # 20: post-clean read-only audit.
+            $post = @{} + $InventoryArgs
+            $post['NoProgress'] = $true
+            $state.Post = Invoke-AtmInventory @post
+        }
+        # run-end only while the log has not failed (after a failure it writes nothing more). Neither a failed run-end
+        # nor a failed close replaces the main code; with none, they make the run incomplete.
+        if ($logErrors.Count -eq 0) {
+            $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'run-end' -Fields ([ordered]@{ results = $deleted.Count; complete = @($deleted | Where-Object { $_.Outcome -ceq 'COMPLETE' }).Count; skipped = $skipped.Count; stoppedBy = $(if ($state.Stopped) { $state.Stopped } else { $state.Aborted }) })
+            if ($null -ne $lc) { & $logFail 'run-end' $null $lc; if (-not $state.Aborted -and -not $state.Stopped) { & $halt 'LOG_END_FAILED' } }
+        }
+        $cc = $log.Close()
+        if ($null -ne $cc) { & $logFail 'close' $null $cc; if (-not $state.Aborted -and -not $state.Stopped) { & $halt 'LOG_CLOSE_FAILED' } }
+        return (& $finish)
+    } finally { if ($null -ne $log) { try { $log.Dispose() } catch { $null = $_ } } }
 }
 
 function Test-AtmOutputPathOutsideBases {

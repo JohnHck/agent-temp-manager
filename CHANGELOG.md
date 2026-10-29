@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+* V0.3 T1 (F-04, not closed until released): `clean -LogFile` becomes a new file per run, required once real deletion
+  is enabled; written through a handle kept for the run (append-only, flushed per record, JSON Lines). Per-root
+  `intent` before the deletion and `result` after it; a refusal, a partial deletion, an exception, an inconclusive
+  verification or a log failure stops the run (exit code `3`). With the deletion gate closed (every copy) the plan-only
+  flow is unchanged. Details and limits: docs/USAGE.md, "Clean log".
+
 ## 0.2.0
 
 Published only as the GitHub Release `v0.2.0` (tag `v0.2.0`), created with the maintainer's explicit authorization.

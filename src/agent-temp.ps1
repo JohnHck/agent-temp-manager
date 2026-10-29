@@ -287,7 +287,8 @@ try {
                 Write-Host (Get-AtmText 'cli.postAudit') -ForegroundColor Cyan
                 Show-AtmAudit -Inventory $res.PostInventory
             }
-            exit $(if ($res.Aborted) { 3 } else { 0 })
+            # A run stopped after a deletion (T1) is never reported as a success.
+            exit $(if ($res.Aborted -or $res.StoppedBy) { 3 } else { 0 })
         }
         'version' {
             Initialize-AtmNative -LibDir (Join-Path $here 'lib')

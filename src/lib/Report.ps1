@@ -306,20 +306,29 @@ function Show-AtmCleanPlan {
 function Show-AtmCleanResult {
     param($Result)
     Write-AtmHeader (Get-AtmText 'clean.resultHeader')
+    # T1: log failures are always shown with the operation they belong to; none of them undoes anything.
+    $logLines = { foreach ($e in @($Result.LogErrors)) { Write-Host ('  ' + (Get-AtmText 'clean.logError' $e.Stage $(if ($e.OpId) { $e.OpId } else { '-' }) $e.Code)) -ForegroundColor Red } }
     if ($Result.Aborted) {
+        # Aborted: the deleter was never called in this run.
         Write-Host ('  ' + (Get-AtmText 'clean.aborted' $Result.Aborted)) -ForegroundColor Yellow
         if ($Result.Aborted -eq 'EXCLUSAO_REAL_DESABILITADA_V0_1') { Write-Host ('  ' + (Get-AtmText 'clean.gateMsg' @($Result.Verified).Count)) -ForegroundColor Yellow }
         if ($Result.Aborted -eq 'NENHUM_CAMINHO_ELEGIVEL') { Write-AtmTable (@($Result.Rejected) | ForEach-Object { New-AtmRow ([ordered]@{ 'col.origin' = $_.Source; 'col.path' = $_.Path; 'col.reasons' = (@($_.Reasons) -join ' ; ') }) }) }
+        if ($Result.Aborted -eq 'LOG_REQUIRED') { Write-Host ('  ' + (Get-AtmText 'clean.logRequired')) -ForegroundColor Yellow }
+        & $logLines
+        if ($Result.LogCreated) { Write-Host ('  ' + (Get-AtmText 'clean.logKept' $Result.LogFile)) -ForegroundColor Yellow }
         Write-Host ('  ' + (Get-AtmText 'clean.nothing')) -ForegroundColor Green
         return
     }
-    Write-AtmTable (@($Result.Deleted) | ForEach-Object { New-AtmRow ([ordered]@{ 'col.path' = $_.Path; 'col.mb' = (Format-AtmMB $_.Bytes); 'col.done' = $_.Completed; 'col.verified' = $_.Verified; 'col.files' = "$($_.FilesDeleted)/$($_.FilesPlanned)"; 'col.dirs' = "$($_.DirsDeleted)/$($_.DirsPlanned)"; 'col.interruption' = $_.AbortReason }) })
+    Write-AtmTable (@($Result.Deleted) | ForEach-Object { New-AtmRow ([ordered]@{ 'col.path' = $_.Path; 'col.outcome' = $_.Outcome; 'col.mb' = (Format-AtmMB $_.Bytes); 'col.done' = $_.Completed; 'col.verified' = $_.Verified; 'col.files' = "$($_.FilesDeleted)/$($_.FilesPlanned)"; 'col.dirs' = "$($_.DirsDeleted)/$($_.DirsPlanned)"; 'col.interruption' = $(if ($_.ExceptionType) { $_.ExceptionType } else { $_.AbortReason }) }) })
     if (@($Result.Skipped).Count -gt 0) {
         Write-Host ('  ' + (Get-AtmText 'clean.skipped')) -ForegroundColor Yellow
         Write-AtmTable (@($Result.Skipped) | ForEach-Object { New-AtmRow ([ordered]@{ 'col.path' = $_.Path; 'col.reasons' = (@($_.Reasons) -join ' ; ') }) })
     }
+    if ($Result.StoppedBy) { Write-Host ('  ' + (Get-AtmText 'clean.stopped' $Result.StoppedBy)) -ForegroundColor Red }
+    & $logLines
     $ok = @($Result.Deleted | Where-Object { $_.Completed -and $_.Verified })
     Write-Host ('  ' + (Get-AtmText 'clean.deleted' $ok.Count (Format-AtmMB (Get-AtmSum $ok 'Bytes'))))
+    if ($Result.LogFile) { Write-Host ('  ' + (Get-AtmText 'clean.logFile' $Result.LogFile $Result.RunId)) }
 }
 
 # ---------------------------------------------------------------------------------------------

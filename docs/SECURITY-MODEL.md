@@ -251,8 +251,19 @@ called by `Invoke-AtmGitCommand`):
   written to it and nothing is deleted automatically (files are removed only inside test fixtures); (3) success: the
   file was created, verified through its handle and written. Every refusal fails closed. Residuals: the X-01 limits
   (volume root not pinned; a refusal after the creation can leave a file) and the reads by textual path after earlier
-  checks (F-01 residual) are listed in release/V0.2-SECURITY-AUDIT. `clean -LogFile` still appends by name (F-04,
-  latent while the deletion gate is closed; proposal recorded).
+  checks (F-01 residual) are listed in release/V0.2-SECURITY-AUDIT. `clean -LogFile` (F-04): the published 0.2.0
+  still appends by name (latent while the deletion gate is closed); V0.3 T1 replaces it, unreleased (next item).
+* **Clean log (V0.3 T1, F-04; unreleased; reached only past the deletion gate):** one new file per run, created
+  relative to the pinned folder (`OBJ_DONT_REPARSE`, `FILE_CREATE`, reparse points refused, protected DACL: owner,
+  SYSTEM, Administrators) and kept open for the run: append-only access, write-through, shared for reading only. Before
+  each record the handle is checked again (plain file, one link, same volume, final path as created); each record is
+  flushed. A folder outside the policy (owner, or any other account able to add or delete entries or change its
+  permissions) is refused and never changed. Order: log and plan records, then the confirmation (recorded), then per
+  root: revalidation, `intent` flushed, deleter, `result` flushed. Anything but a complete, verified deletion, or any log
+  failure, stops the run; `run-end` and close failures never replace the main reason. Limits: a flush does not
+  guarantee durability across a power loss or a disk cache; an `intent` without a `result` is an unknown outcome; the
+  folder is pinned only for the run; nothing is undone (no rollback). Test seams (stand-in deleter, presence check and
+  writer) exist only in `Invoke-AtmClean`, past the gate, and no other file references them (static test).
 * **TUI diagnostics area (P5-A, ADR-0009):** presentation only. It runs `Invoke-AtmDiagnose` on an explicit action
   (entering the area without a result, or `U`) and renders the diagnose JSON export of that result: no collector,
   Git, Restart Manager, registry or file access of its own, no state change, no gate opened (static test); the

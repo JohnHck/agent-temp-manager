@@ -840,6 +840,302 @@ namespace AgentTempManager
         }
     }
 
+    // T1 (F-04): the clean log. One NEW file per run, created like AtmSafeCreate.CreateNew (relative to the pinned folder
+    // handle, OBJ_DONT_REPARSE, FILE_OPEN_REPARSE_POINT, FILE_CREATE: never an existing name, never through a reparse
+    // point; protected DACL: owner, SYSTEM, Administrators) but kept open for the whole run, so its name is never resolved
+    // again. Access: FILE_APPEND_DATA without FILE_WRITE_DATA (every write goes to the end of the file), write-through,
+    // shared for reading only (no other handle can write, rename or delete it while the run lasts). Each record is one
+    // WriteFile of one UTF-8 line (LF) after the handle is checked again (plain file, one link, same volume, final path as
+    // created), then FlushFileBuffers; the first failure stops the log and nothing is written after it. The folder, pinned
+    // with its ancestors by AtmSafeCreate.Pin, must be owned by the process user, SYSTEM, Administrators or TrustedInstaller
+    // and must not let any other principal add or delete entries or change its permissions or owner. Nothing is ever
+    // fixed: no ACL is changed and no file is removed; a refusal once the file exists starts with CREATED_ and the file
+    // stays where it is.
+    public sealed class AtmCleanLog : IDisposable
+    {
+        const uint FILE_APPEND_DATA = 0x0004, FILE_READ_ATTRIBUTES = 0x0080, READ_CONTROL = 0x00020000, SYNCHRONIZE = 0x00100000;
+        const uint FILE_SHARE_READ = 1, FILE_SHARE_WRITE = 2;
+        const uint OBJ_CASE_INSENSITIVE = 0x40, OBJ_DONT_REPARSE = 0x1000;
+        const uint FILE_CREATE = 2;
+        const uint FILE_WRITE_THROUGH = 0x2, FILE_SYNCHRONOUS_IO_NONALERT = 0x20, FILE_NON_DIRECTORY_FILE = 0x40, FILE_OPEN_REPARSE_POINT = 0x00200000;
+        const uint FILE_ATTRIBUTE_NORMAL = 0x80;
+        const uint ATTR_DIRECTORY = 0x10, ATTR_REPARSE = 0x400;
+        const int SE_FILE_OBJECT = 1;
+        const uint OWNER_SECURITY_INFORMATION = 1, DACL_SECURITY_INFORMATION = 4;
+        const ushort SE_DACL_PROTECTED = 0x1000;
+        const byte INHERIT_ONLY_ACE = 0x08;
+        // Folder: add a file or a subfolder, delete a child, delete, change permissions or owner (and the generic forms).
+        const int FolderChangeRights = 0x2 | 0x4 | 0x40 | 0x10000 | 0x40000 | 0x80000 | 0x10000000 | 0x40000000;
+        // File: write, append, write extended attributes or attributes, delete, change permissions or owner (and the generic forms).
+        const int FileChangeRights = 0x2 | 0x4 | 0x10 | 0x100 | 0x10000 | 0x40000 | 0x80000 | 0x10000000 | 0x40000000;
+        const string SystemSid = "S-1-5-18", AdministratorsSid = "S-1-5-32-544", OwnerRightsSid = "S-1-3-4", CreatorOwnerSid = "S-1-3-0";
+        const string TrustedInstallerSid = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+        // One record (its UTF-8 bytes and the LF) is at most this long; a longer one is refused and stops the log.
+        public const int MaxRecordBytes = 65536;
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct UNICODE_STRING { public ushort Length; public ushort MaximumLength; public IntPtr Buffer; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct OBJECT_ATTRIBUTES { public int Length; public IntPtr RootDirectory; public IntPtr ObjectName; public uint Attributes; public IntPtr SecurityDescriptor; public IntPtr SecurityQualityOfService; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct IO_STATUS_BLOCK { public IntPtr Status; public IntPtr Information; }
+
+        [DllImport("ntdll.dll")]
+        static extern int NtCreateFile(out IntPtr fileHandle, uint desiredAccess, ref OBJECT_ATTRIBUTES objectAttributes, out IO_STATUS_BLOCK ioStatusBlock, IntPtr allocationSize, uint fileAttributes, uint shareAccess, uint createDisposition, uint createOptions, IntPtr eaBuffer, uint eaLength);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string sddl, uint revision, out IntPtr securityDescriptor, out uint size);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern bool ConvertSidToStringSidW(IntPtr sid, out IntPtr stringSid);
+
+        [DllImport("advapi32.dll")]
+        static extern uint GetSecurityInfo(SafeFileHandle handle, int objectType, uint securityInfo, out IntPtr owner, IntPtr group, out IntPtr dacl, IntPtr sacl, out IntPtr securityDescriptor);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        static extern bool GetSecurityDescriptorControl(IntPtr securityDescriptor, out ushort control, out uint revision);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        static extern bool GetAce(IntPtr acl, int index, out IntPtr ace);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool WriteFile(SafeFileHandle file, byte[] buffer, uint count, out uint written, IntPtr overlapped);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool FlushFileBuffers(SafeFileHandle file);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool CloseHandle(IntPtr handle);
+
+        [DllImport("kernel32.dll")]
+        static extern IntPtr LocalFree(IntPtr mem);
+
+        AtmSafeCreateSession session;
+        SafeFileHandle file;
+        string userSid;
+        string expected;
+        bool stopped;
+        // Refusal of Pin or Create, or the first failure of a write.
+        public string Error;
+        // A file was created; after a refusal it may remain (empty or partly written) and is never removed.
+        public bool Created;
+        public string FilePath { get { return expected; } }
+        public bool IsOpen { get { return !stopped && file != null && !file.IsClosed && !file.IsInvalid; } }
+
+        AtmCleanLog() { }
+
+        // Pins the folder that will hold the log (AtmSafeCreate.Pin: ancestors and folder pinned without FILE_SHARE_DELETE;
+        // reparse points, redirection, substituted and non-fixed drives refused) and applies the folder policy.
+        // processUserSid: the user SID of this process's token. Check Error; always Dispose.
+        public static AtmCleanLog Pin(string folder, string processUserSid)
+        {
+            AtmCleanLog log = new AtmCleanLog();
+            try
+            {
+                if (string.IsNullOrEmpty(processUserSid) || !processUserSid.StartsWith("S-1-", StringComparison.Ordinal)) { log.Stop("PROCESS_USER_UNKNOWN"); return log; }
+                log.userSid = processUserSid;
+                log.session = AtmSafeCreate.Pin(folder);
+                if (!log.session.IsPinned) { log.Stop(log.session.Error ?? "NOT_PINNED"); return log; }
+                string why = log.CheckFolder();
+                if (why != null) log.Stop(why);
+            }
+            catch (Exception ex) { log.Stop("PIN_" + ex.GetType().Name); }
+            return log;
+        }
+
+        // Creates fileName in the pinned folder and keeps it open. Returns null on success, otherwise a code; a code that
+        // starts with CREATED_ means the file exists: it is kept as it is, never written to and never removed.
+        public string Create(string fileName)
+        {
+            if (Error != null) return Error;
+            if (session == null || !session.IsPinned) return Stop("NOT_PINNED");
+            if (Created || file != null) return Stop("ALREADY_CREATED");
+            if (!AtmSafeCreate.ValidName(fileName)) return Stop("FILE_NAME_INVALID");
+            if (!AtmDeleter.StillPlainDirectory(session.Parent)) return Stop("PARENT_CHANGED");
+            IntPtr sd = IntPtr.Zero, namePtr = IntPtr.Zero, objName = IntPtr.Zero, raw = IntPtr.Zero;
+            bool parentRef = false;
+            try
+            {
+                uint sdSize;
+                if (!ConvertStringSecurityDescriptorToSecurityDescriptorW("D:P(A;;FA;;;OW)(A;;FA;;;SY)(A;;FA;;;BA)", 1, out sd, out sdSize)) return Stop("SECURITY_DESCRIPTOR_FAILED");
+                namePtr = Marshal.StringToHGlobalUni(fileName);
+                UNICODE_STRING us = new UNICODE_STRING();
+                us.Length = (ushort)(fileName.Length * 2); us.MaximumLength = (ushort)(fileName.Length * 2); us.Buffer = namePtr;
+                objName = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UNICODE_STRING)));
+                Marshal.StructureToPtr(us, objName, false);
+                session.Parent.DangerousAddRef(ref parentRef);
+                OBJECT_ATTRIBUTES oa = new OBJECT_ATTRIBUTES();
+                oa.Length = Marshal.SizeOf(typeof(OBJECT_ATTRIBUTES));
+                oa.RootDirectory = session.Parent.DangerousGetHandle();
+                oa.ObjectName = objName;
+                oa.Attributes = OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE;
+                oa.SecurityDescriptor = sd;
+                IO_STATUS_BLOCK io;
+                int st = NtCreateFile(out raw, FILE_APPEND_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE, ref oa, out io, IntPtr.Zero, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_CREATE, FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT | FILE_WRITE_THROUGH, IntPtr.Zero, 0);
+                if (st != 0)
+                {
+                    // Name already taken (a file, a directory, a junction, a symbolic link or a hard link): never reused.
+                    if (st == unchecked((int)0xC0000035) || st == unchecked((int)0xC00000BA)) return Stop("EXISTS");
+                    if (st == unchecked((int)0xC0000022)) return Stop("ACCESS_DENIED");
+                    if (st == unchecked((int)0xC000050B) || st == unchecked((int)0xC0000280)) return Stop("REPARSE_REFUSED");
+                    return Stop("NTSTATUS_0x" + st.ToString("X8"));
+                }
+                file = new SafeFileHandle(raw, true);
+                raw = IntPtr.Zero;
+                Created = true;
+                expected = session.ParentPath + "\\" + fileName;
+                // Verified through the handle before the first byte: where it is, what it is, and who can change it.
+                string why = CheckFile();
+                if (why == null) why = CheckSecurity(file, new string[] { userSid, AdministratorsSid }, new string[] { userSid, SystemSid, AdministratorsSid, OwnerRightsSid }, FileChangeRights, true, "");
+                if (why == null && !AtmDeleter.StillPlainDirectory(session.Parent)) why = "PARENT_CHANGED";
+                if (why != null) return Stop("CREATED_" + why);
+                return null;
+            }
+            catch (Exception ex) { return Stop((Created ? "CREATED_" : "CREATE_") + ex.GetType().Name); }
+            finally
+            {
+                if (raw != IntPtr.Zero) { SafeFileHandle tmp = new SafeFileHandle(raw, true); tmp.Dispose(); }
+                if (parentRef) session.Parent.DangerousRelease();
+                if (objName != IntPtr.Zero) Marshal.FreeHGlobal(objName);
+                if (namePtr != IntPtr.Zero) Marshal.FreeHGlobal(namePtr);
+                if (sd != IntPtr.Zero) LocalFree(sd);
+            }
+        }
+
+        // Writes one record (one line; the LF is added here) through the handle, then flushes it. Returns null when the
+        // record was written and FlushFileBuffers succeeded, otherwise a code; after the first failure nothing is written.
+        public string AppendLine(string line)
+        {
+            if (stopped) return "LOG_STOPPED";
+            if (file == null || file.IsClosed || file.IsInvalid) return Stop("LOG_NOT_OPEN");
+            if (line == null || line.IndexOf('\n') >= 0 || line.IndexOf('\r') >= 0) return Stop("LOG_RECORD_INVALID");
+            byte[] body;
+            try { body = new UTF8Encoding(false, true).GetBytes(line + "\n"); }
+            catch (Exception) { return Stop("LOG_RECORD_INVALID"); }
+            if (body.Length > MaxRecordBytes) return Stop("LOG_RECORD_TOO_LARGE");
+            string why = CheckFile();
+            if (why != null) return Stop("LOG_INTEGRITY_" + why);
+            uint written;
+            if (!WriteFile(file, body, (uint)body.Length, out written, IntPtr.Zero)) return Stop("LOG_WRITE_FAILED_WIN32_" + Marshal.GetLastWin32Error());
+            if (written != (uint)body.Length) return Stop("LOG_WRITE_INCOMPLETE");
+            if (!FlushFileBuffers(file)) return Stop("LOG_FLUSH_FAILED_WIN32_" + Marshal.GetLastWin32Error());
+            return null;
+        }
+
+        // Closes the file (a failed close is reported, not hidden) and releases the pins. Returns null or a code.
+        public string Close()
+        {
+            string code = null;
+            stopped = true;
+            if (file != null)
+            {
+                if (!file.IsClosed && !file.IsInvalid)
+                {
+                    bool ok = CloseHandle(file.DangerousGetHandle());
+                    int e = Marshal.GetLastWin32Error();
+                    file.SetHandleAsInvalid();
+                    if (!ok) code = "LOG_CLOSE_FAILED_WIN32_" + e;
+                }
+                file.Dispose();
+                file = null;
+            }
+            if (session != null) { session.Dispose(); session = null; }
+            return code;
+        }
+
+        public void Dispose()
+        {
+            stopped = true;
+            if (file != null) { file.Dispose(); file = null; }
+            if (session != null) { session.Dispose(); session = null; }
+        }
+
+        // Records the first refusal or failure; the log never writes after it.
+        string Stop(string code) { if (Error == null) Error = code; stopped = true; return code; }
+
+        string CheckFile()
+        {
+            AtmDeleter.BY_HANDLE_FILE_INFORMATION fi;
+            if (!AtmDeleter.GetFileInformationByHandle(file, out fi)) return "NO_INFO";
+            if ((fi.FileAttributes & (ATTR_REPARSE | ATTR_DIRECTORY)) != 0) return "NOT_PLAIN";
+            if (fi.VolumeSerialNumber != session.VolumeSerial) return "OTHER_VOLUME";
+            if (fi.NumberOfLinks != 1) return "LINK_COUNT";
+            string fp = AtmDeleter.FinalPath(file);
+            if (fp == null || !string.Equals(fp, expected, StringComparison.OrdinalIgnoreCase)) return "ELSEWHERE";
+            return null;
+        }
+
+        string CheckFolder()
+        {
+            AtmDeleter.BY_HANDLE_FILE_INFORMATION pinned, again;
+            if (!AtmDeleter.GetFileInformationByHandle(session.Parent, out pinned)) return "PARENT_NO_INFO";
+            // The pinned handle has no READ_CONTROL (AtmSafeCreate.Pin is shared with the export): a second handle reads the
+            // security of the same folder, proved to be the same object by its volume and file index.
+            string why;
+            SafeFileHandle sec = AtmDeleter.OpenChecked(session.ParentPath, true, READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE, out why, out again);
+            if (sec == null) return "PARENT_SECURITY_" + Code(why);
+            using (sec)
+            {
+                if (again.VolumeSerialNumber != pinned.VolumeSerialNumber || again.FileIndexHigh != pinned.FileIndexHigh || again.FileIndexLow != pinned.FileIndexLow) return "PARENT_CHANGED";
+                return CheckSecurity(sec, new string[] { userSid, SystemSid, AdministratorsSid, TrustedInstallerSid },
+                    new string[] { userSid, SystemSid, AdministratorsSid, TrustedInstallerSid, CreatorOwnerSid, OwnerRightsSid }, FolderChangeRights, false, "PARENT_");
+            }
+        }
+
+        // Owner and DACL read through the handle. null when acceptable, otherwise a code: an owner outside 'owners', a null
+        // DACL, an unprotected DACL when 'requireProtected', an entry of a kind not read here, or an allow entry that applies
+        // to the object itself and grants any of 'rights' to a principal outside 'writers'.
+        static string CheckSecurity(SafeFileHandle h, string[] owners, string[] writers, int rights, bool requireProtected, string prefix)
+        {
+            IntPtr owner, dacl, sd = IntPtr.Zero;
+            if (GetSecurityInfo(h, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, out owner, IntPtr.Zero, out dacl, IntPtr.Zero, out sd) != 0) return prefix + "SECURITY_UNREADABLE";
+            try
+            {
+                string o = SidString(owner);
+                if (o == null) return prefix + "OWNER_UNREADABLE";
+                if (Array.IndexOf(owners, o) < 0) return prefix + "OWNER_NOT_ALLOWED";
+                if (dacl == IntPtr.Zero) return prefix + "DACL_NULL";
+                if (requireProtected)
+                {
+                    ushort control; uint revision;
+                    if (!GetSecurityDescriptorControl(sd, out control, out revision) || (control & SE_DACL_PROTECTED) == 0) return prefix + "DACL_NOT_PROTECTED";
+                }
+                int count = Marshal.ReadInt16(dacl, 4) & 0xFFFF;   // ACL.AceCount
+                for (int i = 0; i < count; i++)
+                {
+                    IntPtr ace;
+                    if (!GetAce(dacl, i, out ace)) return prefix + "DACL_UNREADABLE";
+                    byte type = Marshal.ReadByte(ace, 0), flags = Marshal.ReadByte(ace, 1);
+                    if (type == 1 || type == 10) continue;            // deny entries only take rights away
+                    if (type != 0 && type != 9) return prefix + "ACE_UNSUPPORTED";
+                    if ((flags & INHERIT_ONLY_ACE) != 0) continue;    // applies to children only, never to this object
+                    if ((Marshal.ReadInt32(ace, 4) & rights) == 0) continue;
+                    string s = SidString(new IntPtr(ace.ToInt64() + 8));
+                    if (s == null || Array.IndexOf(writers, s) < 0) return prefix + "THIRD_PARTY_WRITE";
+                }
+                return null;
+            }
+            finally { if (sd != IntPtr.Zero) LocalFree(sd); }
+        }
+
+        static string SidString(IntPtr sid)
+        {
+            if (sid == IntPtr.Zero) return null;
+            IntPtr s;
+            if (!ConvertSidToStringSidW(sid, out s)) return null;
+            try { return Marshal.PtrToStringUni(s); } finally { LocalFree(s); }
+        }
+
+        static string Code(string why)
+        {
+            if (why == null) return "UNKNOWN";
+            int i = why.IndexOf(':');
+            return i > 0 ? why.Substring(0, i) : why;
+        }
+    }
+
     public static class AtmPathCheck
     {
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]

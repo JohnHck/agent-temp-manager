@@ -212,10 +212,40 @@ the behaviour of a future release in which deletion is explicitly authorized.
 
 Administrator-only switch: `-IncludeOtherUsers`. Incomplete process coverage cannot be overridden.
 
+### Clean log (`-LogFile`; V0.3 T1, unreleased)
+
+With the deletion gate closed (every published copy, 0.2.0 included) `-LogFile` keeps the plan-only behaviour: the
+destination is only checked against the audited directories, and no log is required, created or opened.
+
+In a future release in which real deletion is explicitly enabled:
+
+* `-LogFile` is **required** and names a **new** file. An existing name (file, folder or link) is refused; nothing is
+  ever appended to an existing file; no destination is chosen automatically. The folder must be owned by you, SYSTEM,
+  Administrators or TrustedInstaller, and no other account may add or delete entries in it or change its permissions or
+  owner; otherwise the run is refused and the folder's ACL is not changed.
+* The log is created and its first records are written **before** the confirmation is requested: a run that cannot be
+  logged never asks for confirmation.
+* Format: JSON Lines, UTF-8 without BOM, LF, at most 64 KiB per record. Every record has `schema` (`atm.cleanlog/1`),
+  `type`, `runId`, `recSeq` and `utc`. Types: `run-start`, `plan` (one per root, with its `opId`), `confirmation`
+  (accepted or not), `skip` (preserved at the final revalidation), `intent`, `result`, `run-end`. One record per root:
+  the log never lists the files of a tree.
+* Before a root is deleted its `intent` is written and flushed; if that fails, the root is never started. After the
+  deleter returns, `result` records the outcome: `COMPLETE` (deleted, absence confirmed), `REFUSED` (nothing deleted),
+  `PARTIAL` (some entries deleted), `EXCEPTION` (state unknown) or `VERIFICATION_FAILED` (absence not confirmed).
+* Anything but `COMPLETE`, and any log failure, stops the run before the next root (exit code `3`; the console shows
+  the reason and, for a log failure, the operation it belongs to). Nothing is retried or continued automatically.
+* An `intent` without a `result` (power loss, the process ended during the deletion) means the outcome of that root is
+  **unknown**: none, part or all of it may have been deleted. Check the path itself.
+* Nothing can be undone from the log; there is no rollback. Each record is written through and flushed
+  (`FlushFileBuffers`) before the next step, but whether it survives a power loss depends on the disk and its cache: the
+  last record can be missing or incomplete.
+* A log file created before a refusal or a failure is kept as it is; it is never deleted.
+
 ## Exit codes
 
 `0` ok (for `diagnose`, partial coverage included) · `1` unknown command · `2` invalid clean invocation, or a refused
-`-PseudonymKeyFile` · `3` clean aborted (nothing deleted) ·
+`-PseudonymKeyFile` · `3` clean aborted (nothing deleted) or, only with deletion enabled (not in any published copy),
+stopped before completing (Clean log, above) ·
 `4` no manifest (source checkout, `verify` only) · `5` integrity mismatch (a listed file missing, altered or
 unreadable, a missing or unreadable `providers` directory, an unlisted library or provider, an unreadable or
 invalid manifest, or an installed copy without one; nothing is loaded) · `6` TUI needs an interactive console · `10` unexpected error,
