@@ -2072,6 +2072,13 @@ exit 0
         }
         Assert-True ($shippedDeletionGate -eq $false -and $script:AtmWorktreeDiagnosticsEnabled -eq $false -and $script:AtmHandleDiagnosticsEnabled -eq $false -and $script:AtmDiagnoseExportEnabled -eq $false) 'travas distribuidas fechadas'
     }
+    Test-Case 'Evidencia de execucao (B2-1)' 'Texto do motivo independente da cultura: horario em formato invariante mesmo com outro separador de hora na cultura atual' {
+        $ref = New-AtmRuntimeRefusal -Code 'RUNTIME_TIMEOUT' -Decision 'INVESTIGATE' -Collector 'process-snapshot' -Evidence 'DEADLINE_EXCEEDED' -Relation 'COVERAGE' -Nature 'COVERAGE' -ObservedUtc (New-Object DateTime 2026, 10, 30, 1, 2, 3, ([DateTimeKind]::Utc)) -Coverage 'TIMEOUT'
+        $ci = [Globalization.CultureInfo]::InvariantCulture.Clone(); $ci.DateTimeFormat.TimeSeparator = '.'; $ci.DateTimeFormat.DateSeparator = '/'
+        $prevCi = [Threading.Thread]::CurrentThread.CurrentCulture
+        try { [Threading.Thread]::CurrentThread.CurrentCulture = $ci; $txt = Format-AtmRuntimeRefusal $ref } finally { [Threading.Thread]::CurrentThread.CurrentCulture = $prevCi }
+        Assert-True ($txt.Contains('2026-10-30 01:02:03Z')) "horario invariante ($txt)"
+    }
 
     # ------------------------------------------------------------------ read-only guarantee
     Test-Case 'Somente leitura' 'audit + preview nao alteram nada no sandbox' {

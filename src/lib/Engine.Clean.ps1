@@ -99,7 +99,8 @@ function Get-AtmCleanRuntimeEvidence {
 function Format-AtmRuntimeRefusal {
     # Text of one runtime refusal: its code, what it means, and where it comes from (never "unused" or "safe").
     param($Refusal)
-    $when = $(if ($null -ne $Refusal.ObservedUtc) { ([datetime]$Refusal.ObservedUtc).ToString('yyyy-MM-dd HH:mm:ss') + 'Z' } else { '-' })
+    # Invariant culture: in a custom format ':' is the culture's time separator, so the text would vary by culture.
+    $when = $(if ($null -ne $Refusal.ObservedUtc) { ([datetime]$Refusal.ObservedUtc).ToString('yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture) + 'Z' } else { '-' })
     $detail = $(if ($Refusal.Detail) { ' - ' + $Refusal.Detail } else { '' })
     return (Get-AtmText 'runtime.reason' $Refusal.Code (Get-AtmText ('runtime.code.' + $Refusal.Code)) $(if ($Refusal.Collector) { $Refusal.Collector } else { '-' }) $(if ($Refusal.Relation) { $Refusal.Relation } else { '-' }) (Get-AtmText ('runtime.nature.' + $Refusal.Nature)) $(if ($Refusal.Coverage) { $Refusal.Coverage } else { '-' }) $when $detail)
 }

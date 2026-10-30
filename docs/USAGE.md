@@ -87,7 +87,8 @@ never make a path eligible. With the deletion gate closed they are shown too.
   `RUNTIME_TIMEOUT` (not finished before the deadline) and `RUNTIME_NOT_COLLECTED`.
 * Each reason says which collector and evidence it comes from, the relation to the root, whether it is direct, derived,
   ambiguous or a coverage gap, when it was observed and the coverage status. The reasons found before stay first.
-* Printed once, not per root: what was not observed for any root (the open-file and worktree collectors, closed in every
+* Printed once by `preview` and by the plan (the TUI preview lists only each root's reasons; a clean started from the TUI
+  prints the plan with them), not per root: what was not observed for any root (the open-file and worktree collectors, closed in every
   copy, and process working directories, deferred), what was observed with no relation to any root (services and
   virtual machines: they only appear inside a reason when the process that hosts them is itself related to the root),
   and what was incomplete for the whole run.
