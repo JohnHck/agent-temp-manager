@@ -2557,7 +2557,7 @@ exit 0
                 $want = $(if ($step -ceq 'confirm') { 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE' } elseif ($ans) { 'DECLARATION_DECLINED' } else { 'DECLARATION_CANCELLED' })
                 $recs = Get-TestCleanLogRecords $w
                 $conf = @($recs | Where-Object { $_.type -ceq 'confirmation' })[0]
-                Assert-True ($c.Aborted -ceq $want -and $d.Calls.Count -eq 0 -and -not $c.Confirmed -and $c.RefusedAt.Step -ceq ($step -replace '#\d$', '')) "$step / [$ans]: $($c.Aborted) (chamadas $($d.Calls.Count))"
+                Assert-True ($c.Aborted -ceq $want -and $d.Calls.Count -eq 0 -and -not $c.Confirmed -and $c.RefusedAt.Step -ceq ($step -replace '#\d$', '') -and @($c.Declarations).Count -eq 0) "$step / [$ans]: $($c.Aborted) (chamadas $($d.Calls.Count))"
                 Assert-True ((@($recs | ForEach-Object { $_.type }) -join ',') -ceq 'run-start,plan,plan,confirmation,run-end' -and $conf.accepted -eq $false -and $conf.refusal -ceq $want -and $conf.step -ceq ($step -replace '#\d$', '')) "$step / [$ans]: nenhuma declaracao gravada, recusa registrada"
                 Assert-True (Test-TestT1RootsIntact $f) "$step / [$ans]: nada apagado"
             }
@@ -2572,6 +2572,7 @@ exit 0
         $d0 = New-TestCleanDeleter
         $c0 = Invoke-AtmClean -Entries $f.Entries -PlanPresenter $presenter -ConfirmationReader $op0.Reader -InventoryArgs $ia -LogWriter (New-TestCleanLogWriter) -DeleteTreeImpl $d0.Delete -PathPresenceImpl $d0.Present
         $otherRun = $c0.Phrase
+        Assert-True ($c0.Aborted -ceq 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE' -and $d0.Calls.Count -eq 0) "execucao de referencia recusada sem chamadas ($($c0.Aborted))"
         $variants = @(
             @{ Tag = 'outra execucao'; Answer = { param($ph) $otherRun }.GetNewClosure() },
             @{ Tag = 'quantidade errada'; Answer = { param($ph) $ph -replace '^APAGAR 2 ', 'APAGAR 1 ' } },

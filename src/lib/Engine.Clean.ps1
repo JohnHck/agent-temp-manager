@@ -468,6 +468,8 @@ function Invoke-AtmCleanCore {
             if ($fc.Code) { $refusal = [pscustomobject]@{ Code = 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE'; Step = 'confirm'; OpId = $null; Path = $null } }
         }
         if ($null -ne $refusal) {
+            # Nothing was recorded as declared: the answers given before the refusal are not kept in the result either.
+            $declarations.Clear()
             $state.RefusedAt = $refusal
             $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'confirmation' -Fields ([ordered]@{ accepted = $false; planId = $state.PlanId; step = $refusal.Step; opId = $refusal.OpId; refusal = $refusal.Code; interaction = $interactionRec })
             if ($null -ne $lc) { & $logFail 'confirmation' $null $lc }

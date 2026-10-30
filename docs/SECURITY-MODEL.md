@@ -310,7 +310,9 @@ called by `Invoke-AtmGitCommand`):
   decision (shared helpers `Get-AtmContentDecisions`, `Get-AtmPreservationBasis`, `Test-AtmTypedPhrase`); then one phrase
   bound to the plan id (SHA-256 of the run id and every root's path and statistics) and the exact count. Declarations and
   confirmation are written and flushed before any `intent`; a fresh plan check before execution refuses any change
-  (`PLAN_CHANGED_BEFORE_EXECUTION`) instead of adjusting the plan; the per-root revalidation is unchanged. With the gate
+  (`PLAN_CHANGED_BEFORE_EXECUTION`) instead of adjusting the plan; the per-root revalidation is unchanged, so the
+  confirmed set is not all-or-nothing: a root refused by its revalidation after the plan check is skipped and the run
+  continues, and a non-complete outcome stops the run. With the gate
   closed the plan-only flow is unchanged (no question, console or log). No AUT-1 record is read. Limits: declarations
   are not verified; the console is not proof of presence; the identity is the process's; the plan id rests on
   statistics (a write that keeps them all is not seen); the users/sessions/elevation matrix is not tested.

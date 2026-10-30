@@ -266,10 +266,14 @@ no question, no console requirement and no log. Past the gate, after the B8 lock
    failure stops the run (`LOG_WRITE_FAILED`) before any `intent`.
 6. **Plan check:** a fresh inventory, the same gates and fresh runtime evidence, root by root against the plan. If any
    root is missing, its statistics changed or it is no longer eligible, nothing is executed
-   (`PLAN_CHANGED_BEFORE_EXECUTION`, record `plan-check`); the plan is never reduced, extended or updated under the old
-   confirmation. Statistics only: a write that keeps every statistic is not seen.
-7. **Unchanged after that:** the revalidation immediately before each root, the `intent` before the deleter, the
-   `result` after it. The declarations never replace the revalidation.
+   (`PLAN_CHANGED_BEFORE_EXECUTION`, record `plan-check`): a change during the questions is never absorbed by reducing,
+   extending or updating the plan under the old confirmation. Statistics only: a write that keeps every statistic is
+   not seen.
+7. **Unchanged after that (T1):** the revalidation immediately before each root, the `intent` before the deleter, the
+   `result` after it. The declarations never replace the revalidation. **The confirmed set is not executed
+   all-or-nothing:** a root whose revalidation refuses after the plan check is skipped (`skip` record) and the run goes
+   on with the others; any outcome other than a complete, verified deletion stops the run, leaving the later roots
+   untouched.
 
 Log order of a run: `run-start`, `plan`…, `declaration`…, `confirmation`, `plan-check`, then `intent`/`result` or `skip`
 per root, `run-end`. Synthetic example of two roots:
