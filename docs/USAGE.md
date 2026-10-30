@@ -289,7 +289,10 @@ its own revalidation).
 6. The record is a new file (never an existing one; an unsafe folder is refused and not changed) holding one JSON line,
    schema `atm.discard-authorization/2`: identifiers (authorization, plan), `processIdentity` (the account the process
    ran as, `identifiesRespondent: false`), `interaction`, root, association, what was presented, the technical result
-   with its semantic signature, `declarations` (received from you: `status: ALL_PHRASES_TYPED`, the content decision),
+   with its semantic signature and `processCoverage` (B1 apart: `observed` is the process coverage of that inventory,
+   `COMPLETE`, `INCOMPLETE` or `FAILED`; `gate` is what the B1 gate did in that evaluation: `BLOCKED`, `PASSED`, or
+   `NOT_EVALUATED` when an earlier gate, such as `ACTIVE_EVIDENCE` or `RECENT`, refused first, which is never an
+   approval of B1), `declarations` (received from you: `status: ALL_PHRASES_TYPED`, the content decision),
    `preservation` (`basis`, `verifiedByTool: false`, `evidence: null`), the revalidation and the limits. No conversation
    or file content. Processes running as you can change it afterwards: it is not tamper-proof.
 7. **Recording succeeded only when the command says so** (exit code `0`): the line was written and flushed and the file
@@ -309,8 +312,8 @@ Synthetic example (paths, SIDs and ids shortened):
  "root":{"path":"C:\\Users\\alice\\AppData\\Local\\Temp\\claude\\C--work-proj\\0d0b…","provider":"claude-code","profileSid":"S-1-5-21-…","sessionId":"0d0b…","kind":"SessionRoot"},
  "association":{"kind":"NAME_CONVENTION_CORROBORATED","transcriptLastWriteUtc":"…","basis":"ROOT_NAME_EQUALS_SESSION_ID"},
  "presented":{"files":2,"dirs":1,"bytes":2148,"fingerprint":"B34D2D015552A3BE","ageHours":120,"class":"ORPHAN_SUSPECTED","flags":[],"sessionRegistry":null,…},
- "technical":{"category":"BLOCKED","runtimeCodes":[],"processCoverageBlock":true,"recentBlock":false,
-   "reasonSignature":["COVERAGE:INCOMPLETE","GATE:COBERTURA_DE_PROCESSOS_INCOMPLETA"],"reasons":["COBERTURA_DE_PROCESSOS_INCOMPLETA (<n> …)"]},
+ "technical":{"category":"BLOCKED","runtimeCodes":[],"processCoverage":{"observed":"INCOMPLETE","gate":"BLOCKED"},"recentBlock":false,
+   "reasonSignature":["B1_GATE:BLOCKED","COVERAGE:INCOMPLETE","GATE:COBERTURA_DE_PROCESSOS_INCOMPLETA"],"reasons":["COBERTURA_DE_PROCESSOS_INCOMPLETA (<n> …)"]},
  "declarations":{"declaredBy":"OPERATOR","status":"ALL_PHRASES_TYPED","taskCompleted":true,"contentDecision":"NOTHING_NEEDED","discardAuthorized":true,"taskDescription":null},
  "preservation":{"basis":"NOTHING_NEEDED_DISCARD_ACCEPTED","verifiedByTool":false,"evidence":null},
  "revalidation":{"planRevalidated":true,"compared":"STATISTICS_FINGERPRINT_AND_SEMANTIC_REASONS"},

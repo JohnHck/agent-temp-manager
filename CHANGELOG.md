@@ -22,7 +22,8 @@
   (B1, RECENT included) is recorded apart. Schema `atm.discard-authorization/2`: two separate content declarations
   ("results preserved" or "nothing needed"), neither verified by the product (`TOOL_VERIFIED` reserved, never
   emitted); the process identity, not the respondent; the caller and its console requirement as reported, the console
-  observed by the engine in that call; the justification revalidated in a stable semantic form (runtime refusals carry the process keys they come from, field
+  observed by the engine in that call; B1 recorded apart as the coverage observed and the gate's state (`BLOCKED`, `PASSED`,
+  `NOT_EVALUATED`); the justification revalidated in a stable semantic form (runtime refusals carry the process keys they come from, field
   `Sources`, so the same code from another process is a change); success only when the line is written, flushed and
   the file closed (a file kept after a failure, even with a complete line, is not a recorded authorization). Details and
   limits: docs/USAGE.md, "Discard authorization".

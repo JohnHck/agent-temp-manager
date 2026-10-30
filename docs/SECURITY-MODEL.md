@@ -282,7 +282,9 @@ called by `Invoke-AtmGitCommand`):
   The association is the naming convention (root name = session id) corroborated by a transcript of the same id; the
   task and the content decision are the operator's declarations. `preservation.basis` never takes `TOOL_VERIFIED`:
   that value is reserved for a verification by the product, which does not exist; a typed phrase, a manifest path or an
-  external report never produces it. The identity recorded is the process's (`identifiesRespondent: false`); the
+  external report never produces it. B1 is recorded apart (`technical.processCoverage`): the coverage observed and
+  the B1 gate's state in that evaluation (`BLOCKED`, `PASSED`, or `NOT_EVALUATED` when an earlier gate returned first;
+  the gate only reports it, its order and behaviour are unchanged). The identity recorded is the process's (`identifiesRespondent: false`); the
   interaction block keeps the caller and its console requirement as reported (not verified) and the engine's own console
   observation in that call; a caller requiring a console when none is observed is refused before any question.
   The revalidation's semantic form includes the process keys (`pid@creationTicksUtc`, field `Sources` of each runtime

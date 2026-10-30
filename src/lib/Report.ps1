@@ -339,7 +339,9 @@ function Show-AtmDiscardPresentation {
     Write-AtmHeader (Get-AtmText 'auth.technicalHeader')
     Write-Host ('  ' + (Get-AtmText 'auth.technical' $pr.Technical.Category)) -ForegroundColor $(if ($pr.Technical.Category -eq 'BLOCKED') { 'Red' } elseif ($pr.Technical.Category -eq 'INVESTIGATE') { 'Yellow' } else { 'Gray' })
     foreach ($r in @($pr.Technical.Reasons)) { Write-Host ('    - ' + $r) }
-    if ($pr.Technical.ProcessCoverageBlock) { Write-Host ('  ' + (Get-AtmText 'auth.b1Note')) -ForegroundColor Yellow }
+    $pc = $pr.Technical.ProcessCoverage
+    if ($pc.Gate -ceq 'BLOCKED') { Write-Host ('  ' + (Get-AtmText 'auth.b1Note')) -ForegroundColor Yellow }
+    elseif ($pc.Gate -ceq 'NOT_EVALUATED' -and $pc.Observed -cne 'COMPLETE') { Write-Host ('  ' + (Get-AtmText 'auth.b1NotEvaluated' $pc.Observed)) -ForegroundColor Yellow }
     if ($pr.Technical.RecentBlock) { Write-Host ('  ' + (Get-AtmText 'auth.recentNote')) -ForegroundColor Yellow }
     Show-AtmRuntimeNotices -Runtime $pr.Runtime
     Write-AtmHeader (Get-AtmText 'auth.limitsHeader')

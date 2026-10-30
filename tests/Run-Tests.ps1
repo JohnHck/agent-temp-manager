@@ -2136,7 +2136,8 @@ exit 0
             Assert-True ($rec.preservation.basis -ceq 'OPERATOR_DECLARED' -and $rec.preservation.verifiedByTool -eq $false -and $null -eq $rec.preservation.evidence -and $res.RecordState -ceq 'COMPLETE' -and $res.ContentDecision -ceq 'RESULTS_PRESERVED') "$($k): preservacao declarada, nao verificada pelo produto; gravacao concluida"
             Assert-True (-not $rec.PSObject.Properties['confirmation'] -and -not $rec.PSObject.Properties['operator'] -and -not $raw.Contains('ACCEPTED')) "$($k): nenhum campo ACCEPTED nem 'operator' (schema /1)"
             Assert-True ($rec.presented.files -eq 2 -and $rec.presented.bytes -eq 2148 -and $rec.presented.fingerprint -ceq (Find-Part (Inv -Profiles @($p) -Procs $procs) $r).Fingerprint -and $null -ne $rec.presented.ageHours) "$($k): o que foi apresentado"
-            Assert-True ($rec.technical.category -ceq 'BLOCKED' -and $(if ($k -ceq 'recent') { $rec.technical.recentBlock } else { $rec.technical.processCoverageBlock })) "$($k): bloqueio tecnico registrado ($($rec.technical.category))"
+            Assert-True ($rec.technical.category -ceq 'BLOCKED' -and $(if ($k -ceq 'recent') { $rec.technical.recentBlock -and $rec.technical.processCoverage.gate -ceq 'NOT_EVALUATED' } else { $rec.technical.processCoverage.gate -ceq 'BLOCKED' -and $rec.technical.processCoverage.observed -ceq 'INCOMPLETE' })) "$($k): bloqueio tecnico registrado ($($rec.technical.category), B1 $($rec.technical.processCoverage.gate))"
+            Assert-True (-not $rec.technical.PSObject.Properties['processCoverageBlock']) "$($k): sem o booleano ambiguo"
             Assert-True (@($rec.limitations) -contains 'NOT_A_DELETION_CREDENTIAL' -and @($rec.limitations) -contains 'STATISTICS_NOT_CONTENT' -and @($rec.limitations) -contains 'RECORD_ALTERABLE_BY_SAME_IDENTITY') "$($k): limites registrados"
             Assert-True ($rec.declarations.taskDescription.Length -eq 200 -and -not $rec.declarations.taskDescription.Contains("`t") -and -not $raw.Contains('ATM-AUT1-TRANSCRIPT-CONTENT')) "$($k): descricao como dado limitado; nenhum conteudo de transcricao"
             $after = Test-AtmCandidate -Partition (Find-Part (Inv -Profiles @($p) -Procs $procs) $r) -Inventory (Inv -Profiles @($p) -Procs $procs)
@@ -2417,7 +2418,7 @@ exit 0
         $ia2 = Get-InvArgs -Profiles @($p) -Procs (New-Procs -Extra @((New-TestRuntimeProc 820 'secret.exe' $null), (New-TestRuntimeProc 821 'secret2.exe' $null)))
         $a = Get-AtmDiscardPresentation -Path $r -InventoryArgs $ia1
         $b = Get-AtmDiscardPresentation -Path $r -InventoryArgs $ia2
-        Assert-True ($a.Technical.ProcessCoverageBlock -and $b.Technical.ProcessCoverageBlock -and (@($a.Technical.Reasons) -join '|') -cne (@($b.Technical.Reasons) -join '|')) 'o texto dos motivos difere (contagem de processos nao inspecionaveis)'
+        Assert-True ($a.Technical.ProcessCoverage.Gate -ceq 'BLOCKED' -and $b.Technical.ProcessCoverage.Gate -ceq 'BLOCKED' -and (@($a.Technical.Reasons) -join '|') -cne (@($b.Technical.Reasons) -join '|')) 'o texto dos motivos difere (contagem de processos nao inspecionaveis)'
         Assert-Eq (@(Compare-AtmDiscardPresentation -Before $a -After $b) -join ',') '' 'coleta equivalente: nenhuma divergencia'
         Assert-Eq (@(Compare-AtmDiscardPresentation -Before $a -After (Get-AtmDiscardPresentation -Path $r -InventoryArgs $ia1)) -join ',') '' 'nova coleta igual: nenhuma divergencia'
         $file = Join-Path $dir 'sem.jsonl'
@@ -2428,6 +2429,43 @@ exit 0
         $c = Get-AtmDiscardPresentation -Path $r -InventoryArgs $ia1
         Assert-True ($c.Technical.Category -ceq $a.Technical.Category -and (@($c.Technical.RuntimeCodes) -join ',') -ceq (@($a.Technical.RuntimeCodes) -join ',') -and $c.Partition.Fingerprint -ceq $a.Partition.Fingerprint) "mesma categoria ($($c.Technical.Category)), mesmos codigos e estatisticas: so o motivo mudou"
         Assert-True ([IO.File]::Exists((Join-Path $r 'sub\b.bin'))) 'nada apagado'
+    }
+    Test-Case 'Autorizacao de descarte (AUT-1)' 'Estado do gate B1 separado da cobertura observada: retorno antecipado por ACTIVE_EVIDENCE e por RECENT = NOT_EVALUATED (com cobertura incompleta observada); B1 avaliado bloqueando = BLOCKED; avaliado passando = PASSED; categoria e motivos iguais aos dos gates; gate inalterado' {
+        $secret = { New-Procs -Extra @((New-TestRuntimeProc 840 'secret.exe' $null)) }
+        $created = (Get-Date).AddMinutes(-40)
+        $pa = New-TestProfile 'authb1act'; $ra = New-TestRoot -ProfileInfo $pa; $null = New-TestTranscript -ProfileInfo $pa -Root $ra
+        $pr = New-TestProfile 'authb1rec'; $rr = New-TestRoot -ProfileInfo $pr; $null = New-TestTranscript -ProfileInfo $pr -Root $rr
+        [IO.File]::SetLastWriteTimeUtc((Join-Path $rr 'a.txt'), $nowFuture.AddHours(-3))
+        $pb = New-TestProfile 'authb1blk'; $rb = New-TestRoot -ProfileInfo $pb; $null = New-TestTranscript -ProfileInfo $pb -Root $rb
+        $pp = New-TestProfile 'authb1ok'; $rp = New-TestRoot -ProfileInfo $pp; $null = New-TestTranscript -ProfileInfo $pp -Root $rp
+        $cases = @(
+            @{ Tag = 'ACTIVE_EVIDENCE + cobertura incompleta'; Root = $ra; Profile = $pa; Procs = (New-Procs -Extra @((New-TestRuntimeProc 841 'tool.exe' "tool.exe $ra\a.txt" $created), (New-TestRuntimeProc 840 'secret.exe' $null))); Observed = 'INCOMPLETE'; Gate = 'NOT_EVALUATED' },
+            @{ Tag = 'RECENT + cobertura incompleta'; Root = $rr; Profile = $pr; Procs = (& $secret); Observed = 'INCOMPLETE'; Gate = 'NOT_EVALUATED' },
+            @{ Tag = 'B1 avaliado bloqueando'; Root = $rb; Profile = $pb; Procs = (& $secret); Observed = 'INCOMPLETE'; Gate = 'BLOCKED' },
+            @{ Tag = 'B1 avaliado passando'; Root = $rp; Profile = $pp; Procs = (New-Procs); Observed = 'COMPLETE'; Gate = 'PASSED' })
+        foreach ($c in $cases) {
+            $ia = Get-InvArgs -Profiles @($c.Profile) -Procs $c.Procs
+            $inv = Inv -Profiles @($c.Profile) -Procs $c.Procs
+            $g0 = Get-AtmCandidateGate -Partition (Find-Part $inv $c.Root) -Inventory $inv -ForClean
+            $pres = Get-AtmDiscardPresentation -Path $c.Root -InventoryArgs $ia
+            $b1Reason = @(@($pres.Technical.Reasons) | Where-Object { [string]$_ -like 'COBERTURA_DE_PROCESSOS_INCOMPLETA*' }).Count -gt 0
+            Assert-True ($pres.Technical.ProcessCoverage.Observed -ceq $c.Observed -and $pres.Technical.ProcessCoverage.Gate -ceq $c.Gate) "$($c.Tag): observado $($pres.Technical.ProcessCoverage.Observed), gate $($pres.Technical.ProcessCoverage.Gate)"
+            Assert-True ($b1Reason -eq ($c.Gate -ceq 'BLOCKED')) "$($c.Tag): motivo B1 presente so quando o gate bloqueou"
+            $n = @($g0.Reasons).Count
+            $head = $(if ($n) { @(@($pres.Technical.Reasons)[0..($n - 1)]) } else { @() })
+            Assert-True ($g0.ProcessCoverageGate -ceq $c.Gate -and (@($g0.Reasons) -join '|') -ceq (@($head) -join '|')) "$($c.Tag): os motivos dos gates sao os mesmos do gate direto"
+            Assert-True (@($pres.Technical.ReasonSignature) -contains ('B1_GATE:' + $c.Gate) -and @($pres.Technical.ReasonSignature) -contains ('COVERAGE:' + $c.Observed)) "$($c.Tag): assinatura com o estado do gate e a cobertura"
+            if ($c.Gate -ceq 'NOT_EVALUATED') {
+                Assert-True ($pres.Technical.Category -ceq 'BLOCKED') "$($c.Tag): continua BLOCKED (o retorno antecipado nao aprova B1)"
+                $txt = (@(Show-AtmDiscardPresentation -Presentation $pres 6>&1 | ForEach-Object { [string]$_.MessageData }) -join "`n")
+                Assert-True ($txt.Contains((Get-AtmText 'auth.b1NotEvaluated' 'INCOMPLETE')) -and -not $txt.Contains((Get-AtmText 'auth.b1Note'))) "$($c.Tag): console diz que B1 nao foi avaliado"
+            }
+            if ($c.Gate -ceq 'PASSED') { Assert-True (-not $b1Reason) "$($c.Tag): PASSED so com cobertura completa e o gate alcancado" }
+        }
+        # The gate's B1 block is unchanged (only the returned data gained the state).
+        $clean = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Clean.ps1'))
+        Assert-True ($clean.Contains('if (-not $Inventory.ProcessCoverageComplete) {') -and $clean.Contains("if (`$p.Class -in @('ACTIVE_EVIDENCE', 'RECENT')) { `$reasons.Add((Get-AtmText 'reason.class' `$p.Class)) }")) 'gates B1 e RECENT inalterados'
+        Assert-True ($shippedDeletionGate -eq $false) 'trava de exclusao fechada'
     }
     Test-Case 'Autorizacao de descarte (AUT-1)' 'Estatico: console interativo exigido antes de registrar; leitura so por Read-Host na CLI; sem parametro que dispense a interacao; autorizacao nunca chama exclusao; schema gravado em um unico lugar; travas fechadas' {
         $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))

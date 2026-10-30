@@ -128,7 +128,8 @@ function Test-AtmCandidate {
     $rank = @{ 'ELIGIBLE' = 0; 'INVESTIGATE' = 1; 'BLOCKED' = 2 }
     $cat = $g.Category
     foreach ($r in $refs) { if ($rank[$r.Decision] -gt $rank[$cat]) { $cat = $r.Decision } }
-    return [pscustomobject]@{ Category = $cat; Reasons = @(@($g.Reasons) + @($refs | ForEach-Object { Format-AtmRuntimeRefusal $_ })); Requirements = $g.Requirements; Probe = $g.Probe; RuntimeReasons = $refs }
+    return [pscustomobject]@{ Category = $cat; Reasons = @(@($g.Reasons) + @($refs | ForEach-Object { Format-AtmRuntimeRefusal $_ })); Requirements = $g.Requirements; Probe = $g.Probe; RuntimeReasons = $refs
+        ProcessCoverageGate = $g.ProcessCoverageGate }
 }
 
 function Get-AtmCandidateGate {
@@ -141,15 +142,17 @@ function Get-AtmCandidateGate {
     $probe = $null
     $id = $Inventory.Identity
 
+    # ProcessCoverageGate: what happened to the B1 gate in THIS evaluation (data only; no gate changes): NOT_EVALUATED
+    # when an earlier gate returned first, otherwise BLOCKED or PASSED.
     if ($p.Class -in @('ACTIVE_EVIDENCE', 'RECENT')) { $reasons.Add((Get-AtmText 'reason.class' $p.Class)) }
     foreach ($f in $p.Flags) { if ($script:AtmHardFlags -contains $f) { $reasons.Add($f) } }
-    if ($reasons.Count -gt 0) { return [pscustomobject]@{ Category = 'BLOCKED'; Reasons = $reasons.ToArray(); Requirements = @(); Probe = $null } }
+    if ($reasons.Count -gt 0) { return [pscustomobject]@{ Category = 'BLOCKED'; Reasons = $reasons.ToArray(); Requirements = @(); Probe = $null; ProcessCoverageGate = 'NOT_EVALUATED' } }
 
     $soft = @($p.Flags | Where-Object { $script:AtmSoftFlags -contains $_ })
     if ($soft.Count -gt 0 -or $p.Class -ne 'ORPHAN_SUSPECTED') {
         foreach ($s in $soft) { $reasons.Add($s) }
         if ($p.Class -ne 'ORPHAN_SUSPECTED') { $reasons.Add((Get-AtmText 'reason.class' $p.Class)) }
-        return [pscustomobject]@{ Category = 'INVESTIGATE'; Reasons = $reasons.ToArray(); Requirements = @(); Probe = $null }
+        return [pscustomobject]@{ Category = 'INVESTIGATE'; Reasons = $reasons.ToArray(); Requirements = @(); Probe = $null; ProcessCoverageGate = 'NOT_EVALUATED' }
     }
 
     # Ownership / authorization
@@ -192,7 +195,8 @@ function Get-AtmCandidateGate {
         }
     }
     $cat = $(if ($reasons.Count -gt 0) { 'BLOCKED' } else { 'ELIGIBLE' })
-    return [pscustomobject]@{ Category = $cat; Reasons = $reasons.ToArray(); Requirements = $reqs.ToArray(); Probe = $probe }
+    # Reached here: the B1 gate above was evaluated; its result is the condition it tested.
+    return [pscustomobject]@{ Category = $cat; Reasons = $reasons.ToArray(); Requirements = $reqs.ToArray(); Probe = $probe; ProcessCoverageGate = $(if (-not $Inventory.ProcessCoverageComplete) { 'BLOCKED' } else { 'PASSED' }) }
 }
 
 function Invoke-AtmPreview {
@@ -546,7 +550,8 @@ function Get-AtmDiscardReasonSignature {
           another process behind the same code is a different signature. Never its time, nor its detail text
           (localized). A refusal whose collector gives no process key (coverage gaps, an unverified session) is compared
           by its other fields only;
-        * the process coverage state (COMPLETE, INCOMPLETE, FAILED), not its counts.
+        * the process coverage state (COMPLETE, INCOMPLETE, FAILED), not its counts, and what the B1 gate did
+          (NOT_EVALUATED, BLOCKED, PASSED).
       The class, flags, association, session registry and statistics are compared on their own.
     #>
     param($Gate, $Inventory)
@@ -565,6 +570,7 @@ function Get-AtmDiscardReasonSignature {
         $sig.Add('RUNTIME:' + (@([string]$x.Code, [string]$x.Decision, (& $sorted ([string]$x.Collector)), (& $sorted ([string]$x.Evidence)), (& $sorted ([string]$x.Relation)), [string]$x.Nature, [string]$x.Coverage, $src) -join '|'))
     }
     $sig.Add('COVERAGE:' + $(if ($Inventory.Snapshot.Failed) { 'FAILED' } elseif ($Inventory.ProcessCoverageComplete) { 'COMPLETE' } else { 'INCOMPLETE' }))
+    $sig.Add('B1_GATE:' + [string]$Gate.ProcessCoverageGate)
     return , @($sig | Sort-Object -Unique)
 }
 
@@ -602,7 +608,10 @@ function Get-AtmDiscardPresentation {
         Facts = [pscustomobject]@{ Files = [long]$p.Files; Dirs = [long]$p.Dirs; Bytes = [long]$p.Bytes; NewestWriteUtc = $p.NewestWriteTimeUtc; CreationUtc = $p.CreationTimeUtc; Fingerprint = $p.Fingerprint
             AgeHours = $(if ($p.NewestWriteTimeUtc) { [Math]::Round(($inv.NowUtc - $p.NewestWriteTimeUtc).TotalHours, 1) } else { $null }); Class = $p.Class; Flags = @($p.Flags) }
         Technical = [pscustomobject]@{ Category = $g.Category; Reasons = @($g.Reasons); RuntimeCodes = @(@($g.RuntimeReasons) | ForEach-Object { $_.Code } | Sort-Object -Unique)
-            ProcessCoverageBlock = (@($g.Reasons | Where-Object { [string]$_ -like 'COBERTURA_DE_PROCESSOS_INCOMPLETA*' }).Count -gt 0); RecentBlock = ($p.Class -eq 'RECENT')
+            # B1 apart: the coverage observed by this inventory, and what the B1 gate did in this evaluation
+            # (NOT_EVALUATED when an earlier gate returned first: never an approval of B1).
+            ProcessCoverage = [pscustomobject]@{ Observed = $(if ($inv.Snapshot.Failed) { 'FAILED' } elseif ($inv.ProcessCoverageComplete) { 'COMPLETE' } else { 'INCOMPLETE' }); Gate = [string]$g.ProcessCoverageGate }
+            RecentBlock = ($p.Class -eq 'RECENT')
             ReasonSignature = (Get-AtmDiscardReasonSignature -Gate $g -Inventory $inv) }
         Limitations = @($script:AtmDiscardLimitations)
     }
@@ -709,7 +718,7 @@ function Invoke-AtmDiscardAuthorization {
         association = [ordered]@{ kind = $pres.Association.Kind; transcriptLastWriteUtc = (& $iso $pres.Association.TranscriptLastWriteUtc); basis = 'ROOT_NAME_EQUALS_SESSION_ID' }
         presented = [ordered]@{ files = $pres.Facts.Files; dirs = $pres.Facts.Dirs; bytes = $pres.Facts.Bytes; newestWriteUtc = (& $iso $pres.Facts.NewestWriteUtc); creationUtc = (& $iso $pres.Facts.CreationUtc)
             fingerprint = $pres.Facts.Fingerprint; ageHours = $pres.Facts.AgeHours; class = $pres.Facts.Class; flags = @($pres.Facts.Flags); sessionRegistry = $pres.SessionRegistry }
-        technical = [ordered]@{ category = $pres.Technical.Category; runtimeCodes = @($pres.Technical.RuntimeCodes); processCoverageBlock = $pres.Technical.ProcessCoverageBlock; recentBlock = $pres.Technical.RecentBlock
+        technical = [ordered]@{ category = $pres.Technical.Category; runtimeCodes = @($pres.Technical.RuntimeCodes); processCoverage = [ordered]@{ observed = $pres.Technical.ProcessCoverage.Observed; gate = $pres.Technical.ProcessCoverage.Gate }; recentBlock = $pres.Technical.RecentBlock
             reasonSignature = @($pres.Technical.ReasonSignature); reasons = @($pres.Technical.Reasons) }
         # Received from the operator: every phrase was typed as required. A declaration, not an observed fact, not a
         # recording result and not a permission.
