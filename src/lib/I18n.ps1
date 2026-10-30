@@ -316,6 +316,7 @@ $script:AtmMessages = @{
         'tuiclean.enterPanel' = 'Enter to return to the dashboard'
         'tuiclean.yesWord' = 'YES'
         'tuiclean.askOthers' = 'Include OTHER users'' profiles? Type {0} to include'
+        'tuiclean.askLog' = 'Clean log, required: a NEW file outside the audited directories (Enter = none: the run is refused)'
 
         'err.providerMember' = 'Invalid provider: member ''{0}'' missing.'
         'err.providerId' = 'Invalid provider: Id ''{0}''.'
@@ -1078,6 +1079,7 @@ $script:AtmMessages = @{
         'tuiclean.enterPanel' = 'Enter para voltar ao painel'
         'tuiclean.yesWord' = 'SIM'
         'tuiclean.askOthers' = 'Incluir perfis de OUTROS usuários? Digite {0} para incluir'
+        'tuiclean.askLog' = 'Log da limpeza, obrigatório: um arquivo NOVO fora dos diretórios auditados (Enter = nenhum: a execução é recusada)'
 
         'err.providerMember' = 'Provider inválido: membro ''{0}'' ausente.'
         'err.providerId' = 'Provider inválido: Id ''{0}''.'

@@ -1752,21 +1752,29 @@ exit 0
     Test-Case 'TUI' 'Limpeza pela TUI usa o motor: allowlist, plano, frase; cancelamentos nao apagam' {
         # Both prompt flows, whatever the session: an administrator is also asked whether to include other users
         # (answered with an empty line = no), which shifts every later answer by one line.
+        # T1: with deletion enabled (this process only) the TUI also asks for a new log file right before the engine.
+        $logDir = New-TestCleanLogDir 'tui'
+        if (-not $logDir) { return }
         foreach ($asAdmin in @($false, $true)) {
             $p = New-TestProfile ('tuiclean' + [int]$asAdmin)
             $r = New-TestRoot -ProfileInfo $p
             $ia = Get-InvArgs -Profiles @($p) -Identity ([pscustomobject]@{ Sid = $testOwnerSid; Name = $me.Name; IsAdmin = $asAdmin })
             $others = @(if ($asAdmin) { '' })
+            $log = { param([string]$Tag) Join-Path $logDir ("{0}-{1}.jsonl" -f $Tag, [int]$asAdmin) }
             $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines @('', '', '')
             Assert-True ([IO.Directory]::Exists($r)) "cancelado: preservado (admin=$asAdmin)"
-            $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines (@('', $r) + $others + @('APAGAR 1 caminhos', ''))
+            $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines (@('', $r) + $others + @((& $log 'wrong'), 'APAGAR 1 caminhos', ''))
             Assert-True ([IO.Directory]::Exists($r)) "frase errada: preservado (admin=$asAdmin)"
             Assert-Eq $o.State.LastClean.Aborted 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE' "motor abortou (admin=$asAdmin)"
-            $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines (@('', "$(Get-Base $p)") + $others + @(''))
+            Assert-True ([IO.File]::Exists((& $log 'wrong'))) "log da execucao rejeitada criado (admin=$asAdmin)"
+            $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines (@('', $r) + $others + @('', ''))
+            Assert-True ([IO.Directory]::Exists($r) -and $o.State.LastClean.Aborted -ceq 'LOG_REQUIRED') "sem log: recusado antes da confirmacao, preservado (admin=$asAdmin; $($o.State.LastClean.Aborted))"
+            $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines (@('', "$(Get-Base $p)") + $others + @((& $log 'base'), ''))
             Assert-Eq $o.State.LastClean.Aborted 'NENHUM_CAMINHO_ELEGIVEL' "base recusada pelo motor (admin=$asAdmin)"
-            $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines (@('', $r) + $others + @('APAGAR 1 CAMINHOS', ''))
+            $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines (@('', $r) + $others + @((& $log 'ok'), 'APAGAR 1 CAMINHOS', ''))
             Assert-True (-not [IO.Directory]::Exists($r)) "confirmado: excluido pelo motor (admin=$asAdmin)"
             Assert-True ($null -ne $o.State.LastClean.PostInventory) "auditoria posterior (admin=$asAdmin)"
+            Assert-Eq (@((Read-TestCleanLogFile (& $log 'ok')).Records | ForEach-Object { $_.type }) -join ',') 'run-start,plan,confirmation,intent,result,run-end' "log da exclusao pela TUI (admin=$asAdmin)"
         }
     }
     Test-Case 'Camadas' 'TUI e relatorio nunca chamam APIs de exclusao; motor de auditoria nao exclui nem imprime' {

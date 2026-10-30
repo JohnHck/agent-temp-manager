@@ -862,9 +862,13 @@ function Invoke-AtmTuiClean {
     }
     $presenter = { param($v, $r, $i) Show-AtmCleanPlan -Verified $v -Rejected $r -Inventory $i }
     $reader = { param($phrase) Write-Host ''; Write-Host (Get-AtmText 'cli.typePhrase' $phrase) -ForegroundColor Yellow; & $tuiRead (Get-AtmText 'cli.confirmPrompt') }
+    # T1: only with real deletion enabled (never in a distributed copy) the engine requires a new log file; the TUI asks
+    # for it and never picks one. An empty answer passes none and the engine refuses the run (LOG_REQUIRED).
+    $logFile = $null
+    if ($script:AtmRealDeletionEnabled) { $logFile = & $tuiRead (Get-AtmText 'tuiclean.askLog') }
     $a = @{} + $State.InventoryArgs
     $a['NoProgress'] = $true
-    $res = Invoke-AtmClean -Entries $entries -IncludeOtherUsers:$other -PlanPresenter $presenter -ConfirmationReader $reader -InventoryArgs $a
+    $res = Invoke-AtmClean -Entries $entries -IncludeOtherUsers:$other -PlanPresenter $presenter -ConfirmationReader $reader -InventoryArgs $a -LogFile $logFile
     Show-AtmCleanResult -Result $res
     $State.LastClean = $res
     if ($res.PostInventory) { $State.Inventory = $res.PostInventory; $State.Preview = $null }

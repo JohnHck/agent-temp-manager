@@ -222,7 +222,8 @@ In a future release in which real deletion is explicitly enabled:
 * `-LogFile` is **required** and names a **new** file. An existing name (file, folder or link) is refused; nothing is
   ever appended to an existing file; no destination is chosen automatically. The folder must be owned by you, SYSTEM,
   Administrators or TrustedInstaller, and no other account may add or delete entries in it or change its permissions or
-  owner; otherwise the run is refused and the folder's ACL is not changed.
+  owner; otherwise the run is refused and the folder's ACL is not changed. The TUI cleaning screen asks for this file
+  in that case (an empty answer: the run is refused with `LOG_REQUIRED`); with the gate closed it asks nothing new.
 * The log is created and its first records are written **before** the confirmation is requested: a run that cannot be
   logged never asks for confirmation.
 * Format: JSON Lines, UTF-8 without BOM, LF, at most 64 KiB per record. Every record has `schema` (`atm.cleanlog/1`),
