@@ -2297,40 +2297,55 @@ exit 0
         Assert-Eq $lit 1 'TOOL_VERIFIED so na lista reservada: nenhum codigo o emite'
         Assert-True ([IO.File]::Exists((Join-Path $r 'sub\b.bin'))) 'nada apagado'
     }
-    Test-Case 'Autorizacao de descarte (AUT-1)' 'Falha no fechamento depois da linha completa (resultado simulado do escritor): sem sucesso, aviso de arquivo remanescente incompleto ou indeterminado, arquivo preservado, nada promovido nem apagado' {
-        # Simulated: Open-AtmCleanLog is replaced in this scope only by a wrapper around the real one: the real writer
-        # creates the file, writes and flushes the line and closes the file; the wrapper then reports a close failure.
-        $dir = New-TestCleanLogDir 'auth-close'
+    Test-Case 'Autorizacao de descarte (AUT-1)' 'Falhas do escritor depois da criacao (resultado simulado): escrita, descarga e fechamento - sem sucesso, aviso de arquivo remanescente incompleto ou indeterminado, arquivo preservado, nada promovido nem apagado' {
+        # Simulated: Open-AtmCleanLog is replaced in this scope only by a wrapper around the real one; the real writer
+        # creates the file. write: nothing is written and the write is reported failed. flush: the real writer writes and
+        # flushes the line, then a flush failure is reported (as when FlushFileBuffers fails after WriteFile). close: the
+        # real writer writes, flushes and closes, then a close failure is reported. No real failure is provoked.
+        $dir = New-TestCleanLogDir 'auth-wfail'
         if (-not $dir) { return }
-        $p = New-TestProfile 'authclose'
+        $p = New-TestProfile 'authwfail'
         $r = New-TestRoot -ProfileInfo $p
         $null = New-TestTranscript -ProfileInfo $p -Root $r
         $ia = Get-InvArgs -Profiles @($p)
         $b = @(Invoke-AtmPreview -Inventory (Inv -Profiles @($p)) -InventoryArgs $ia | ForEach-Object { "$($_.Partition.Name)=$($_.Gate.Category)" }) -join ','
-        $file = Join-Path $dir 'close.jsonl'
         $realOpen = ${function:Open-AtmCleanLog}
-        $op = New-TestAuthOperator
-        $res = & {
-            Set-Item -LiteralPath 'function:local:Open-AtmCleanLog' -Value {
-                param([string]$Path, $Inventory, [string]$ProcessUserSid)
-                $o = & $realOpen -Path $Path -Inventory $Inventory -ProcessUserSid $ProcessUserSid
-                if ($null -eq $o.Log) { return $o }
-                $w = [pscustomobject]@{ Inner = $o.Log }
-                $w | Add-Member -MemberType ScriptMethod -Name AppendLine -Value { param([string]$Line) $this.Inner.AppendLine($Line) }
-                $w | Add-Member -MemberType ScriptMethod -Name Close -Value { $null = $this.Inner.Close(); 'LOG_CLOSE_FAILED_SIMULATED' }
-                $w | Add-Member -MemberType ScriptMethod -Name Dispose -Value { $this.Inner.Dispose() }
-                [pscustomobject]@{ Log = $w; Code = $null; Created = $o.Created }
-            }
-            Invoke-AtmDiscardAuthorization -Path $r -InventoryArgs $ia -RecordFile $file -Presenter $op.Presenter -Reader $op.Reader
-        }
-        Assert-True (-not $res.Accepted -and $res.Refused -ceq 'AUTH_RECORD_FAILED' -and $res.Detail -ceq 'LOG_CLOSE_FAILED_SIMULATED' -and $null -eq $res.AuthorizationId) "sem sucesso: $($res.Refused) $($res.Detail)"
-        Assert-True ($res.RecordCreated -and $res.RecordState -ceq 'INCOMPLETE_OR_UNDETERMINED' -and [IO.File]::Exists($file)) "arquivo remanescente preservado ($($res.RecordState))"
-        $left = @([IO.File]::ReadAllLines($file) | Where-Object { $_ })
-        $lrec = $left[0] | ConvertFrom-Json
-        Assert-True ($left.Count -eq 1 -and $lrec.declarations.status -ceq 'ALL_PHRASES_TYPED' -and @($lrec.limitations) -contains 'RECORD_LINE_MAY_REMAIN_AFTER_FAILURE') 'limite demonstrado: uma linha completa permanece, e ela mesma diz que nao prova a gravacao'
-        $txt = (@(Show-AtmDiscardResult -Result $res 6>&1 | ForEach-Object { [string]$_.MessageData }) -join "`n")
         $acceptedHead = (Get-AtmText 'auth.accepted' 'X' 'Y' 'Z').Substring(0, 20)
-        Assert-True ($txt.Contains((Get-AtmText 'auth.recordKept' $file)) -and -not $txt.Contains($acceptedHead) -and $txt.Contains((Get-AtmText 'auth.nothingDeleted'))) 'console: arquivo mantido, registro nao concluido, nunca aceito'
+        foreach ($mode in @(@{ Fail = 'write'; Code = 'LOG_WRITE_FAILED_SIMULATED'; Lines = 0 }, @{ Fail = 'flush'; Code = 'LOG_FLUSH_FAILED_SIMULATED'; Lines = 1 }, @{ Fail = 'close'; Code = 'LOG_CLOSE_FAILED_SIMULATED'; Lines = 1 })) {
+            $file = Join-Path $dir ($mode.Fail + '.jsonl')
+            $op = New-TestAuthOperator
+            $res = & {
+                Set-Item -LiteralPath 'function:local:Open-AtmCleanLog' -Value {
+                    param([string]$Path, $Inventory, [string]$ProcessUserSid)
+                    $o = & $realOpen -Path $Path -Inventory $Inventory -ProcessUserSid $ProcessUserSid
+                    if ($null -eq $o.Log) { return $o }
+                    $w = [pscustomobject]@{ Inner = $o.Log; Fail = $mode.Fail; Code = $mode.Code }
+                    $w | Add-Member -MemberType ScriptMethod -Name AppendLine -Value {
+                        param([string]$Line)
+                        if ($this.Fail -ceq 'write') { return $this.Code }
+                        $c = $this.Inner.AppendLine($Line)
+                        if ($null -ne $c) { return $c }
+                        if ($this.Fail -ceq 'flush') { return $this.Code }
+                        return $null
+                    }
+                    $w | Add-Member -MemberType ScriptMethod -Name Close -Value { $c = $this.Inner.Close(); if ($null -ne $c) { return $c }; if ($this.Fail -ceq 'close') { return $this.Code }; return $null }
+                    $w | Add-Member -MemberType ScriptMethod -Name Dispose -Value { $this.Inner.Dispose() }
+                    [pscustomobject]@{ Log = $w; Code = $null; Created = $o.Created }
+                }
+                Invoke-AtmDiscardAuthorization -Path $r -InventoryArgs $ia -RecordFile $file -Presenter $op.Presenter -Reader $op.Reader
+            }
+            $k = $mode.Fail
+            Assert-True (-not $res.Accepted -and $res.Refused -ceq 'AUTH_RECORD_FAILED' -and $res.Detail -ceq $mode.Code -and $null -eq $res.AuthorizationId) "$($k): sem sucesso ($($res.Refused) $($res.Detail))"
+            Assert-True ($res.RecordCreated -and $res.RecordState -ceq 'INCOMPLETE_OR_UNDETERMINED' -and [IO.File]::Exists($file)) "$($k): arquivo remanescente preservado ($($res.RecordState))"
+            $left = @([IO.File]::ReadAllLines($file) | Where-Object { $_ })
+            Assert-Eq $left.Count $mode.Lines "$($k): linhas que permaneceram"
+            if ($left.Count -eq 1) {
+                $lrec = $left[0] | ConvertFrom-Json
+                Assert-True ($lrec.declarations.status -ceq 'ALL_PHRASES_TYPED' -and @($lrec.limitations) -contains 'RECORD_LINE_MAY_REMAIN_AFTER_FAILURE') "$($k): uma linha completa permanece, e ela mesma diz que nao prova a gravacao"
+            }
+            $txt = (@(Show-AtmDiscardResult -Result $res 6>&1 | ForEach-Object { [string]$_.MessageData }) -join "`n")
+            Assert-True ($txt.Contains((Get-AtmText 'auth.recordKept' $file)) -and $txt.Contains($mode.Code) -and -not $txt.Contains($acceptedHead) -and $txt.Contains((Get-AtmText 'auth.nothingDeleted'))) "$($k): console: arquivo mantido, registro nao concluido, nunca aceito"
+        }
         $a = @(Invoke-AtmPreview -Inventory (Inv -Profiles @($p)) -InventoryArgs $ia | ForEach-Object { "$($_.Partition.Name)=$($_.Gate.Category)" }) -join ','
         Assert-Eq $a $b 'nada promovido: preview identico'
         Assert-Eq ${function:Open-AtmCleanLog}.ToString().Contains('AtmCleanLog]::Pin') $true 'o substituto nao vaza para o resto da suite'
@@ -2377,7 +2392,22 @@ exit 0
         $clean = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Clean.ps1'))
         Assert-True (-not $clean.Contains('interactiveConsoleRequiredByCli') -and -not $clean.Contains("result = 'ACCEPTED'")) 'nenhuma constante de interacao nem ACCEPTED no registro'
     }
-    Test-Case 'Autorizacao de descarte (AUT-1)' 'Revalidacao semantica dos motivos: coleta equivalente (contagens e pseudonimos novos) nao diverge; motivo novo com mesma categoria e mesmos codigos (escrita concedida a terceiros na raiz durante as perguntas) exige novo plano' {
+    Test-Case 'Autorizacao de descarte (AUT-1)' 'Revalidacao semantica dos motivos: coleta equivalente (contagens novas, mesmo processo) nao diverge; mesmo codigo vindo de outro processo diverge; motivo novo com mesma categoria e mesmos codigos (escrita concedida a terceiros na raiz) exige novo plano' {
+        # The same runtime code from another process: the stable process key (pid@creationTicksUtc) differs.
+        $pu = New-TestProfile 'authsemuse'
+        $ru = New-TestRoot -ProfileInfo $pu
+        $null = New-TestTranscript -ProfileInfo $pu -Root $ru
+        $created = (Get-Date).AddMinutes(-40)
+        $iaA = Get-InvArgs -Profiles @($pu) -Procs (New-Procs -Extra @((New-TestRuntimeProc 830 'tool.exe' "tool.exe $ru\a.txt" $created)))
+        $iaB = Get-InvArgs -Profiles @($pu) -Procs (New-Procs -Extra @((New-TestRuntimeProc 831 'tool.exe' "tool.exe $ru\a.txt" $created)))
+        $u1 = Get-AtmDiscardPresentation -Path $ru -InventoryArgs $iaA
+        $u1b = Get-AtmDiscardPresentation -Path $ru -InventoryArgs $iaA
+        $u2 = Get-AtmDiscardPresentation -Path $ru -InventoryArgs $iaB
+        Assert-True (@($u1.Technical.RuntimeCodes) -contains 'RUNTIME_USE_OBSERVED' -and (@($u1.Technical.RuntimeCodes) -join ',') -ceq (@($u2.Technical.RuntimeCodes) -join ',') -and $u1.Technical.Category -ceq $u2.Technical.Category) "mesmo codigo e categoria nos dois ($(@($u1.Technical.RuntimeCodes) -join ','))"
+        $useSrc = (@(@(@($u1.Gate.RuntimeReasons) | Where-Object { $_.Code -ceq 'RUNTIME_USE_OBSERVED' })[0].Sources) -join ',')
+        Assert-True ($useSrc -match '^830@\d+$') "a recusa traz a chave estavel do processo ($useSrc)"
+        Assert-Eq (@(Compare-AtmDiscardPresentation -Before $u1 -After $u1b) -join ',') '' 'mesmo processo, nova coleta: nenhuma divergencia'
+        Assert-Eq (@(Compare-AtmDiscardPresentation -Before $u1 -After $u2) -join ',') 'TECHNICAL_REASONS' 'mesmo codigo vindo de outro processo: divergencia'
         $dir = New-TestCleanLogDir 'auth-sem'
         if (-not $dir) { return }
         $p = New-TestProfile 'authsem'

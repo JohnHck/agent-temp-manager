@@ -277,9 +277,12 @@ its own revalidation).
    creation, fingerprint, class, flags, association, session registry, technical result (category and runtime codes)
    and the **justification** in a stable semantic form: the gate reasons as given (principal, path, status), without the
    counts that vary between collections (processes not inspectable, items found by the lock probe); each runtime refusal
-   by code, decision, collector, evidence, relation, nature and coverage (never its time, nor its detail, whose sources
-   are pseudonyms new in every collection, so another process using the root under a refusal code already present is
-   not a divergence); the process coverage state. An equivalent new collection does not refuse;
+   by code, decision, collector, evidence, relation, nature, coverage and **sources**, the process keys
+   (`pid@creationTicksUtc`) the evidence comes from, so the same code from another process is a divergence (never its
+   time, nor its localized detail text); the process coverage state. Not compared: a refusal whose collector gives no
+   process key (coverage gaps, an unverified session) beyond its other fields, and the V0.1 evidence lines of the
+   inventory (localized text; the references they show are the ones the runtime refusals carry by process key when
+   the runtime collection observes them). An equivalent new collection does not refuse;
    new evidence or a changed justification refuses (`AUTH_PLAN_CHANGED`, `TECHNICAL_REASONS`); present it again. The
    comparison uses statistics: a write that keeps them all (same size and modification time) is not detected, equal
    statistics do not prove equal content, and read-only use is not seen.

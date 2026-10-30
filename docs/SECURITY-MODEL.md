@@ -285,9 +285,11 @@ called by `Invoke-AtmGitCommand`):
   external report never produces it. The identity recorded is the process's (`identifiesRespondent: false`); the
   interaction block keeps the caller and its console requirement as reported (not verified) and the engine's own console
   observation in that call; a caller requiring a console when none is observed is refused before any question.
-  The revalidation's semantic form leaves out the detail of runtime refusals (pseudonyms new in every collection), so
-  another process using the root under a refusal code already present is not a divergence (the root is already refused
-  by that code). Recording succeeded only when the command returns success (line written, flushed, file closed); after a
+  The revalidation's semantic form includes the process keys (`pid@creationTicksUtc`, field `Sources` of each runtime
+  refusal), so the same refusal code from another process is a divergence; it leaves out times and localized text.
+  Gaps: a refusal without a process key (coverage gaps, an unverified session) is compared by its other fields only,
+  and the V0.1 evidence lines are not compared (their references reach the comparison only through runtime refusals);
+  not every new relevant evidence is guaranteed to be detected. Recording succeeded only when the command returns success (line written, flushed, file closed); after a
   failure past the creation the file is kept as it is, never reopened or removed, and may hold a complete line: neither
   the line nor the file proves a recording, and the format provides no atomicity or authenticity. Limits: statistics are
   compared, not content (a write that keeps every statistic is not detected); read-only use is not observed; the record

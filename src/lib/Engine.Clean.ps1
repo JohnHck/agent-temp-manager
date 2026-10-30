@@ -541,8 +541,11 @@ function Get-AtmDiscardReasonSignature {
         * V0.1 gate reasons as given (principal, path and status are part of the reason), except the counts that vary
           between collections: process coverage keeps only its code (its state is below), and the lock probe's
           in-use and access-denied reasons keep only their codes;
-        * each runtime refusal as code|decision|collector|evidence|relation|nature|coverage, list fields sorted (never
-          its time, nor its detail: the sources there are pseudonyms of the run, new in every collection);
+        * each runtime refusal as code|decision|collector|evidence|relation|nature|coverage|sources, list fields sorted:
+          sources are the process keys (pid@creationTicksUtc) the evidence comes from, stable for the same process, so
+          another process behind the same code is a different signature. Never its time, nor its detail text
+          (localized). A refusal whose collector gives no process key (coverage gaps, an unverified session) is compared
+          by its other fields only;
         * the process coverage state (COMPLETE, INCOMPLETE, FAILED), not its counts.
       The class, flags, association, session registry and statistics are compared on their own.
     #>
@@ -557,7 +560,10 @@ function Get-AtmDiscardReasonSignature {
         elseif ($t -cmatch '^(EM_USO|ACESSO_NEGADO_PARA_EXCLUSAO):') { $t = $Matches[1] }
         $sig.Add('GATE:' + $t)
     }
-    foreach ($x in $rt) { $sig.Add('RUNTIME:' + (@([string]$x.Code, [string]$x.Decision, (& $sorted ([string]$x.Collector)), (& $sorted ([string]$x.Evidence)), (& $sorted ([string]$x.Relation)), [string]$x.Nature, [string]$x.Coverage) -join '|')) }
+    foreach ($x in $rt) {
+        $src = $(if ($x.PSObject.Properties['Sources']) { (@($x.Sources) | Where-Object { $_ } | Sort-Object -Unique) -join ',' } else { '' })
+        $sig.Add('RUNTIME:' + (@([string]$x.Code, [string]$x.Decision, (& $sorted ([string]$x.Collector)), (& $sorted ([string]$x.Evidence)), (& $sorted ([string]$x.Relation)), [string]$x.Nature, [string]$x.Coverage, $src) -join '|'))
+    }
     $sig.Add('COVERAGE:' + $(if ($Inventory.Snapshot.Failed) { 'FAILED' } elseif ($Inventory.ProcessCoverageComplete) { 'COMPLETE' } else { 'INCOMPLETE' }))
     return , @($sig | Sort-Object -Unique)
 }

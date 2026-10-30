@@ -4356,12 +4356,15 @@ $script:AtmRuntimeStructural = @{ 'handles' = 'HANDLE_SECURITY_GATE_CLOSED'; 'pr
 function New-AtmRuntimeRefusal {
     # One refusal and its provenance: the collector and evidence code it comes from, the relation to the partition and
     # its nature (DIRECT, DERIVED, AMBIGUOUS, or COVERAGE for a gap), when it was observed and the coverage status.
-    param([string]$Code, [string]$Decision, [string]$Collector, [string]$Evidence, [string]$Relation, [string]$Nature, $ObservedUtc, [string]$Coverage, [string]$Detail)
+    # Sources: the process keys (pid@creationTicksUtc) the evidence comes from, sorted, when the collector gives them
+    # (the same keys the detail text shows); stable across collections for the same process.
+    param([string]$Code, [string]$Decision, [string]$Collector, [string]$Evidence, [string]$Relation, [string]$Nature, $ObservedUtc, [string]$Coverage, [string]$Detail, [string[]]$Sources = @())
     if ($script:AtmRuntimeRefusalCodes -cnotcontains $Code) { throw (Get-AtmText 'err.diagFinding' "runtime refusal '$Code'") }
     if (@('BLOCKED', 'INVESTIGATE') -cnotcontains $Decision) { throw (Get-AtmText 'err.diagFinding' "runtime decision '$Decision'") }
     if ($script:AtmRuntimeNatures -cnotcontains $Nature) { throw (Get-AtmText 'err.diagFinding' "runtime nature '$Nature'") }
     [pscustomobject]@{ Code = $Code; Decision = $Decision; Collector = $Collector; Evidence = $Evidence; Relation = $Relation; Nature = $Nature
-        ObservedUtc = $(if ($null -ne $ObservedUtc) { ([datetime]$ObservedUtc).ToUniversalTime() } else { $null }); Coverage = $Coverage; Detail = $(if ($Detail) { $Detail } else { $null }) }
+        ObservedUtc = $(if ($null -ne $ObservedUtc) { ([datetime]$ObservedUtc).ToUniversalTime() } else { $null }); Coverage = $Coverage; Detail = $(if ($Detail) { $Detail } else { $null })
+        Sources = @(@($Sources) | Where-Object { $_ } | Sort-Object -Unique) }
 }
 
 function Get-AtmRuntimeRefusals {
@@ -4421,6 +4424,7 @@ function Get-AtmRuntimeRefusals {
                 return $null
             }
             $srcText = { param($Edges) @(foreach ($x in @($Edges | ForEach-Object { [string]$_.From } | Select-Object -Unique)) { $x + $(if ($via.ContainsKey($x)) { ' (' + $via[$x] + ')' } else { '' }) }) -join ', ' }
+            $srcKeys = { param($Edges) , @($Edges | ForEach-Object { [string]$_.From } | Select-Object -Unique) }
             foreach ($part in @($Inventory.Partitions | Where-Object { $null -ne $_ -and $_.Kind -ne 'NotScanned' })) {
                 $rs = New-Object System.Collections.Generic.List[object]
                 $pk = ConvertTo-AtmPartitionKey -Pseudonymizer $pz -Provider ([string]$part.Provider) -Path ([string]$part.Path)
@@ -4439,14 +4443,14 @@ function Get-AtmRuntimeRefusals {
                     if ($dep -ceq 'DEPENDENCY_OBSERVED') {
                         $de = & $byStrength 'DIRECT'
                         $roots = @($sm.Roots)
-                        $rs.Add((New-AtmRuntimeRefusal -Code 'RUNTIME_USE_OBSERVED' -Decision 'BLOCKED' -Collector (& $colOf $de) -Evidence (& $evOf $de) -Relation (& $relOf $de) -Nature 'DIRECT' -ObservedUtc $obs -Coverage $graphCov `
+                        $rs.Add((New-AtmRuntimeRefusal -Code 'RUNTIME_USE_OBSERVED' -Decision 'BLOCKED' -Collector (& $colOf $de) -Evidence (& $evOf $de) -Relation (& $relOf $de) -Nature 'DIRECT' -ObservedUtc $obs -Coverage $graphCov -Sources (& $srcKeys $de) `
                                     -Detail ((Get-AtmText 'runtime.detail.sources' (& $srcText $de)) + $(if ($roots.Count) { '; ' + (Get-AtmText 'runtime.detail.agentRoots' ($roots -join ', ')) } else { '' }))))
                     } elseif ($dep -ceq 'ANCESTOR_REFERENCE') {
                         $ae = & $byStrength 'ANCESTOR'
-                        $rs.Add((New-AtmRuntimeRefusal -Code 'RUNTIME_ANCESTOR_REFERENCE' -Decision 'INVESTIGATE' -Collector (& $colOf $ae) -Evidence (& $evOf $ae) -Relation (& $relOf $ae) -Nature 'DERIVED' -ObservedUtc $obs -Coverage $graphCov -Detail (Get-AtmText 'runtime.detail.sources' (& $srcText $ae))))
+                        $rs.Add((New-AtmRuntimeRefusal -Code 'RUNTIME_ANCESTOR_REFERENCE' -Decision 'INVESTIGATE' -Collector (& $colOf $ae) -Evidence (& $evOf $ae) -Relation (& $relOf $ae) -Nature 'DERIVED' -ObservedUtc $obs -Coverage $graphCov -Sources (& $srcKeys $ae) -Detail (Get-AtmText 'runtime.detail.sources' (& $srcText $ae))))
                     } elseif ($dep -ceq 'DEPENDENCY_AMBIGUOUS') {
                         $me = & $byStrength 'AMBIGUOUS'
-                        $rs.Add((New-AtmRuntimeRefusal -Code 'RUNTIME_ASSOCIATION_AMBIGUOUS' -Decision 'INVESTIGATE' -Collector (& $colOf $me) -Evidence (@(@(& $evOf $me) + @($sm.Reasons) | Where-Object { $_ }) -join ',') -Relation (& $relOf $me) -Nature 'AMBIGUOUS' -ObservedUtc $obs -Coverage $graphCov -Detail (Get-AtmText 'runtime.detail.sources' (& $srcText $me))))
+                        $rs.Add((New-AtmRuntimeRefusal -Code 'RUNTIME_ASSOCIATION_AMBIGUOUS' -Decision 'INVESTIGATE' -Collector (& $colOf $me) -Evidence (@(@(& $evOf $me) + @($sm.Reasons) | Where-Object { $_ }) -join ',') -Relation (& $relOf $me) -Nature 'AMBIGUOUS' -ObservedUtc $obs -Coverage $graphCov -Sources (& $srcKeys $me) -Detail (Get-AtmText 'runtime.detail.sources' (& $srcText $me))))
                     } elseif ($dep -ceq 'UNKNOWN') {
                         # COVERAGE_INCOMPLETE alone is not attributable to this partition (the collectors it depends on
                         # are checked below); the other reasons are about this partition's own evidence.
@@ -4472,7 +4476,7 @@ function Get-AtmRuntimeRefusals {
                             $rs.Add((New-AtmRuntimeRefusal -Code 'RUNTIME_SESSION_UNVERIFIED' -Decision 'INVESTIGATE' -Collector ('sessions-' + $prov) -Evidence $conflict[0] -Relation 'SESSION_OF_ROOT' -Nature 'AMBIGUOUS' -ObservedUtc $sObs -Coverage $sCov))
                         } elseif ([string]$sf.RequestedState -ceq 'LIVE') {
                             $pkey = @($sf.Evidence | Where-Object { $_.Code -ceq 'SESSION_PROCESS_KEY' } | ForEach-Object { [string]$_.Detail })
-                            $rs.Add((New-AtmRuntimeRefusal -Code 'RUNTIME_SESSION_LIVE' -Decision 'BLOCKED' -Collector ('sessions-' + $prov) -Evidence 'SESSION_PROCESS_KEY' -Relation 'RUNS_SESSION' -Nature 'DIRECT' -ObservedUtc $sObs -Coverage $sCov -Detail (Get-AtmText 'runtime.detail.sources' (@($pkey) -join ', '))))
+                            $rs.Add((New-AtmRuntimeRefusal -Code 'RUNTIME_SESSION_LIVE' -Decision 'BLOCKED' -Collector ('sessions-' + $prov) -Evidence 'SESSION_PROCESS_KEY' -Relation 'RUNS_SESSION' -Nature 'DIRECT' -ObservedUtc $sObs -Coverage $sCov -Sources @($pkey) -Detail (Get-AtmText 'runtime.detail.sources' (@($pkey) -join ', '))))
                         } elseif (@('IDENTITY_UNVERIFIED', 'UNKNOWN') -ccontains [string]$sf.RequestedState) {
                             $rs.Add((New-AtmRuntimeRefusal -Code 'RUNTIME_SESSION_UNVERIFIED' -Decision 'INVESTIGATE' -Collector ('sessions-' + $prov) -Evidence 'SESSION_PROCESS' -Relation 'SESSION_OF_ROOT' -Nature 'AMBIGUOUS' -ObservedUtc $sObs -Coverage $sCov -Detail (@($sReason) -join ',')))
                         }
