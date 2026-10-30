@@ -7,6 +7,11 @@
   `intent` before the deletion and `result` after it; a refusal, a partial deletion, an exception, an inconclusive
   verification or a log failure stops the run (exit code `3`). With the deletion gate closed (every copy) the plan-only
   flow is unchanged. Details and limits: docs/USAGE.md, "Clean log".
+* V0.3 B8: one clean run at a time per machine once real deletion is enabled: the named mutex
+  `Global\AgentTempManager.Clean`, taken without waiting before the first inventory and released last; a lock that is
+  not available, an abandoned lock (a previous run may have been interrupted) or a nested run refuses to start (exit
+  code `3`). It excludes only cooperating clean runs; a local account can block it (denial of service). With the gate
+  closed nothing changes. Details and limits: docs/USAGE.md, "One clean at a time".
 
 ## 0.2.0
 

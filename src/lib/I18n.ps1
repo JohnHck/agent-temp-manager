@@ -131,6 +131,10 @@ $script:AtmMessages = @{
         'clean.logFile' = 'Log: {0} (run {1}). One record per root: it does not list files, and nothing can be undone from it.'
         'clean.logRequired' = 'Real deletion requires -LogFile with a new file (never an existing one) outside the audited directories.'
         'col.outcome' = 'Outcome'
+        'clean.lockUnavailable' = 'The clean lock (Global\AgentTempManager.Clean) is not available ({0}): another clean run holds it, or another process holds or blocks that object. Nothing was started: no inventory, plan or log. This does not prove that a clean is running. Wait and try again; never end processes to free it.'
+        'clean.lockAbandoned' = 'The previous holder of the clean lock ended without releasing it: a previous clean run may have been interrupted, and its outcome must be checked (if it had a log, an intent without a result is an unknown outcome). This run stopped before any inventory, plan or log and released the lock. This is not a recovery and nothing records it. A new attempt starts from scratch, with a new inventory and new revalidations.'
+        'clean.lockNested' = 'A clean run is already in progress in this process; a nested run is refused. Nothing was started.'
+        'clean.lockReleaseFailed' = 'The clean lock could not be released ({0}); the system releases it when this process ends.'
 
         'cli.progressActivity' = 'agent-temp (read-only)'
         'cli.tuiNeedsConsole' = 'The interactive dashboard needs an interactive console (no redirected input/output, ConsoleHost).'
@@ -894,6 +898,10 @@ $script:AtmMessages = @{
         'clean.logFile' = 'Log: {0} (execução {1}). Um registro por raiz: não lista arquivos, e nada pode ser desfeito a partir dele.'
         'clean.logRequired' = 'A exclusão real exige -LogFile com um arquivo novo (nunca um existente) fora dos diretórios auditados.'
         'col.outcome' = 'Desfecho'
+        'clean.lockUnavailable' = 'O bloqueio da limpeza (Global\AgentTempManager.Clean) não está disponível ({0}): outra execução de limpeza o mantém, ou outro processo mantém ou bloqueia esse objeto. Nada foi iniciado: nenhum inventário, plano ou log. Isso não prova que uma limpeza esteja em andamento. Aguarde e tente de novo; nunca encerre processos para liberá-lo.'
+        'clean.lockAbandoned' = 'O detentor anterior do bloqueio da limpeza terminou sem liberá-lo: uma execução anterior pode ter sido interrompida, e o resultado dela precisa ser conferido (se ela tinha log, um intent sem result é desfecho desconhecido). Esta execução parou antes de qualquer inventário, plano ou log e liberou o bloqueio. Isto não é uma recuperação e nada fica registrado. Uma nova tentativa começa do zero, com inventário e revalidações novos.'
+        'clean.lockNested' = 'Uma execução de limpeza já está em andamento neste processo; a execução aninhada é recusada. Nada foi iniciado.'
+        'clean.lockReleaseFailed' = 'O bloqueio da limpeza não pôde ser liberado ({0}); o sistema o libera quando este processo terminar.'
 
         'cli.progressActivity' = 'agent-temp (somente leitura)'
         'cli.tuiNeedsConsole' = 'O painel interativo requer um console interativo (entrada/saída não redirecionadas, ConsoleHost).'

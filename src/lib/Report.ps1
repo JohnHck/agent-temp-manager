@@ -307,13 +307,20 @@ function Show-AtmCleanResult {
     param($Result)
     Write-AtmHeader (Get-AtmText 'clean.resultHeader')
     # T1: log failures are always shown with the operation they belong to; none of them undoes anything.
-    $logLines = { foreach ($e in @($Result.LogErrors)) { Write-Host ('  ' + (Get-AtmText 'clean.logError' $e.Stage $(if ($e.OpId) { $e.OpId } else { '-' }) $e.Code)) -ForegroundColor Red } }
+    $logLines = {
+        foreach ($e in @($Result.LogErrors)) { Write-Host ('  ' + (Get-AtmText 'clean.logError' $e.Stage $(if ($e.OpId) { $e.OpId } else { '-' }) $e.Code)) -ForegroundColor Red }
+        if ($Result.LockReleaseError) { Write-Host ('  ' + (Get-AtmText 'clean.lockReleaseFailed' $Result.LockReleaseError)) -ForegroundColor Red }
+    }
     if ($Result.Aborted) {
         # Aborted: the deleter was never called in this run.
         Write-Host ('  ' + (Get-AtmText 'clean.aborted' $Result.Aborted)) -ForegroundColor Yellow
         if ($Result.Aborted -eq 'EXCLUSAO_REAL_DESABILITADA_V0_1') { Write-Host ('  ' + (Get-AtmText 'clean.gateMsg' @($Result.Verified).Count)) -ForegroundColor Yellow }
         if ($Result.Aborted -eq 'NENHUM_CAMINHO_ELEGIVEL') { Write-AtmTable (@($Result.Rejected) | ForEach-Object { New-AtmRow ([ordered]@{ 'col.origin' = $_.Source; 'col.path' = $_.Path; 'col.reasons' = (@($_.Reasons) -join ' ; ') }) }) }
         if ($Result.Aborted -eq 'LOG_REQUIRED') { Write-Host ('  ' + (Get-AtmText 'clean.logRequired')) -ForegroundColor Yellow }
+        # B8: the lock refusals never claim that another clean is running; an abandoned lock is not a recovery.
+        if ($Result.Aborted -eq 'CLEAN_LOCK_ABANDONED') { Write-Host ('  ' + (Get-AtmText 'clean.lockAbandoned')) -ForegroundColor Yellow }
+        elseif ($Result.Aborted -eq 'CLEAN_LOCK_NESTED') { Write-Host ('  ' + (Get-AtmText 'clean.lockNested')) -ForegroundColor Yellow }
+        elseif ([string]$Result.Aborted -like 'CLEAN_LOCK_*') { Write-Host ('  ' + (Get-AtmText 'clean.lockUnavailable' $Result.Aborted)) -ForegroundColor Yellow }
         & $logLines
         # LogCreated: the writer reported the file as created (CREATED_* refusals included); it stays where it is.
         if ($Result.LogCreated) { Write-Host ('  ' + (Get-AtmText 'clean.logKept' $Result.LogFile)) -ForegroundColor Yellow }

@@ -242,6 +242,29 @@ In a future release in which real deletion is explicitly enabled:
   last record can be missing or incomplete.
 * A log file created before a refusal or a failure is kept as it is; it is never deleted.
 
+### One clean at a time (V0.3 B8, unreleased)
+
+With the deletion gate closed (every published copy) nothing changes: no lock is taken.
+
+In a future release in which real deletion is enabled, one clean run at a time per machine (every user, session and
+elevation level) holds the named kernel mutex `Global\AgentTempManager.Clean`:
+
+* It is taken without waiting, before the first inventory, and held through the plan, the confirmation and the
+  deletions; it is released last, after the log is closed, on every path (refusal, failure, exception).
+* When it is not available the run starts nothing (no inventory, plan or log) and ends with exit code `3`
+  (`CLEAN_LOCK_BUSY`, `_DENIED`, `_TYPE_MISMATCH`, `_POLICY_*`, `_ERROR_*`). The message never claims that another clean
+  is running: another process may hold the name or block it (see the limits below). Wait and try again; never end
+  processes to free it.
+* `CLEAN_LOCK_ABANDONED`: the previous holder ended without releasing it, so a previous run may have been interrupted
+  and its outcome must be checked (in its log, if it had one: an `intent` without a `result` is an unknown outcome).
+  This run stops before any inventory and releases the lock; nothing records the event and nothing is recovered. A new
+  attempt starts from scratch.
+* `CLEAN_LOCK_NESTED`: a clean run is already in progress in the same process.
+* Limits: it excludes only cooperating clean runs; it does not stop other processes (agents, the user, other tools)
+  from changing the trees, which stays with the revalidation and the deleter. Any local account can create that name
+  first or keep it, which refuses every clean run (denial of service; never two runs at once). The automated tests run
+  two processes of the same identity; other users, sessions and elevation levels are not tested.
+
 ## Exit codes
 
 `0` ok (for `diagnose`, partial coverage included) · `1` unknown command · `2` invalid clean invocation, or a refused

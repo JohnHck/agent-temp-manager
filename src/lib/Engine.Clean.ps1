@@ -200,25 +200,21 @@ function Write-AtmCleanLogRecord {
     try { return $Log.AppendLine($line) } catch { return ('LOG_WRITE_' + $_.Exception.GetBaseException().GetType().Name) }
 }
 
+# B8: machine-wide mutual exclusion of clean runs past the release gate (AtmCleanLock in Native.cs). Fixed name, never
+# changed between versions (copies of different versions stay mutually exclusive). Only the test suite replaces it, with
+# a Global\AgentTempManager.Test.<hex> name inside its own process; the CLI and the TUI never do.
+$script:AtmCleanLockName = 'Global\AgentTempManager.Clean'
+
 function Invoke-AtmClean {
     <#
-      Fail-closed assisted deletion. The engine owns every safety decision; callers only provide:
-        -PlanPresenter      scriptblock(verified, rejected, inventory) that MUST display the exact plan
-                            (including "NADA FOI APAGADO AINDA"). Without it nothing proceeds.
-        -ConfirmationReader scriptblock(phrase) returning the text typed by the operator. The phrase is
-                            generated here; anything but an exact ordinal match aborts.
-        -LogFile            T1: a NEW file outside the audited directories. Required once real deletion is enabled
-                            (LOG_REQUIRED otherwise); with the release gate closed it is neither required, created nor
-                            opened, and the plan-only flow is unchanged.
-      -InventoryArgs is splatted into every Invoke-AtmInventory call (tests / CLI self markers).
-      -DeleteTreeImpl, -PathPresenceImpl and -LogWriter are test seams, never passed by the CLI: a stand-in deleter (it
-      deletes nothing), a stand-in presence check and an object with AppendLine/Close/Dispose. They are reached only past
-      the release gate, so they cannot make a run with the gate closed delete or log anything.
-      Aborted: the run ended before any call to the deleter. StoppedBy: it ended after at least one call; anything but a
-      complete, verified deletion (a refusal, a partial deletion, an exception, a verification that is not conclusive) or
-      a log failure stops the run before the next root. LogErrors lists every log failure (Stage, OpId, Code) without
-      replacing the main code.
-      Returns arrays only (no live collections).
+      Entry point of clean (CLI and TUI). With the release gate closed (every distributed copy) it runs the plan-only flow
+      of Invoke-AtmCleanCore unchanged and never touches the lock. Past the gate it first takes the clean lock without
+      waiting, before any inventory, and holds it through the plan, the confirmation and the deletions; it is released
+      last, after the log is closed. A refusal (CLEAN_LOCK_BUSY, _DENIED, _TYPE_MISMATCH, _POLICY_*, _NESTED,
+      _NAME_INVALID, _ERROR_*) starts nothing: no inventory, plan or log. CLEAN_LOCK_ABANDONED: the previous holder ended
+      without releasing it (a run may have been interrupted); the ownership received is released and this run stops
+      before any inventory; a new attempt starts from scratch. A failed release never replaces the main code; with none it
+      makes the run incomplete (LOCK_RELEASE_FAILED). Parameters: as Invoke-AtmCleanCore.
     #>
     [CmdletBinding()]
     param(
@@ -233,6 +229,60 @@ function Invoke-AtmClean {
         [scriptblock]$PathPresenceImpl,
         $LogWriter
     )
+    if (-not $script:AtmRealDeletionEnabled) { return (Invoke-AtmCleanCore @PSBoundParameters) }
+    $lock = [AgentTempManager.AtmCleanLock]::TryAcquire($script:AtmCleanLockName)
+    if (-not $lock.Acquired) { return (Invoke-AtmCleanCore @PSBoundParameters -RefusedBy ('CLEAN_LOCK_' + $lock.Status) -LockReleaseError $lock.ReleaseError) }
+    $res = $null
+    try {
+        $res = Invoke-AtmCleanCore @PSBoundParameters
+        return $res
+    } finally {
+        # The same object the caller receives: a release failure is added to it, never replacing the main code.
+        $rc = $lock.Release()
+        if ($null -ne $rc -and $null -ne $res) {
+            $res.LockReleaseError = $rc
+            if (-not $res.Aborted -and -not $res.StoppedBy) { if (@($res.Deleted).Count -gt 0) { $res.StoppedBy = 'LOCK_RELEASE_FAILED' } else { $res.Aborted = 'LOCK_RELEASE_FAILED' } }
+        }
+    }
+}
+
+function Invoke-AtmCleanCore {
+    <#
+      Fail-closed assisted deletion, called only by Invoke-AtmClean (which owns the B8 lock). The engine owns every safety
+      decision; callers only provide:
+        -PlanPresenter      scriptblock(verified, rejected, inventory) that MUST display the exact plan
+                            (including "NADA FOI APAGADO AINDA"). Without it nothing proceeds.
+        -ConfirmationReader scriptblock(phrase) returning the text typed by the operator. The phrase is
+                            generated here; anything but an exact ordinal match aborts.
+        -LogFile            T1: a NEW file outside the audited directories. Required once real deletion is enabled
+                            (LOG_REQUIRED otherwise); with the release gate closed it is neither required, created nor
+                            opened, and the plan-only flow is unchanged.
+      -InventoryArgs is splatted into every Invoke-AtmInventory call (tests / CLI self markers).
+      -DeleteTreeImpl, -PathPresenceImpl and -LogWriter are test seams, never passed by the CLI: a stand-in deleter (it
+      deletes nothing), a stand-in presence check and an object with AppendLine/Close/Dispose. They are reached only past
+      the release gate, so they cannot make a run with the gate closed delete or log anything.
+      Aborted: the run ended before any call to the deleter. StoppedBy: it ended after at least one call; anything but a
+      complete, verified deletion (a refusal, a partial deletion, an exception, a verification that is not conclusive) or
+      a log failure stops the run before the next root. LogErrors lists every log failure (Stage, OpId, Code) without
+      replacing the main code. -RefusedBy and -LockReleaseError (from Invoke-AtmClean only): the lock was not acquired;
+      the result is returned at once with that code, before anything else.
+      Returns arrays only (no live collections).
+    #>
+    [CmdletBinding()]
+    param(
+        [object[]]$Entries,
+        [switch]$IncludeOtherUsers,
+        [scriptblock]$PlanPresenter,
+        [scriptblock]$ConfirmationReader,
+        [hashtable]$InventoryArgs = @{},
+        [scriptblock]$BeforeDeleteHook,
+        [string]$LogFile,
+        [scriptblock]$DeleteTreeImpl,
+        [scriptblock]$PathPresenceImpl,
+        $LogWriter,
+        [string]$RefusedBy,
+        [string]$LockReleaseError
+    )
     $rejected = New-Object System.Collections.Generic.List[object]
     $verified = New-Object System.Collections.Generic.List[object]
     $deleted = New-Object System.Collections.Generic.List[object]
@@ -244,9 +294,10 @@ function Invoke-AtmClean {
             Requested = @($Entries).Count; Rejected = $rejected.ToArray(); Verified = $verified.ToArray(); Phrase = $state.Phrase
             Confirmed = $state.Confirmed; Deleted = $deleted.ToArray(); Skipped = $skipped.ToArray(); PostInventory = $state.Post; Aborted = $state.Aborted
             StoppedBy = $state.Stopped; RunId = $state.RunId; LogFile = $(if ($state.RunId) { $LogFile } else { $null }); LogCreated = $state.LogCreated
-            LogErrors = $logErrors.ToArray()
+            LogErrors = $logErrors.ToArray(); LockReleaseError = $(if ($LockReleaseError) { $LockReleaseError } else { $null })
         }
     }
+    if ($RefusedBy) { $state.Aborted = $RefusedBy; return (& $finish) }
     if (@($Entries).Count -eq 0) { $state.Aborted = 'ALLOWLIST_VAZIA'; return (& $finish) }
     if (-not $PlanPresenter -or -not $ConfirmationReader) { $state.Aborted = 'SEM_APRESENTACAO_OU_CONFIRMACAO'; return (& $finish) }
 

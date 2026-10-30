@@ -271,6 +271,22 @@ called by `Invoke-AtmGitCommand`):
   change made before the check, never one made between the check and the write; after the run the same identity can
   change or delete the log. Test seams (stand-in deleter, presence check and
   writer) exist only in `Invoke-AtmClean`, past the gate, and no other file references them (static test).
+* **Clean lock (V0.3 B8; unreleased; past the deletion gate only):** `Invoke-AtmClean` takes the named kernel mutex
+  `Global\AgentTempManager.Clean` (`AtmCleanLock`, Native.cs) without waiting, before the first inventory, and releases it
+  last, after the log, in a `finally`, once and only by the owner thread; a nested acquisition in the same process is
+  refused without touching the outer one. The name is fixed (no local, per-user or random fallback; the suite uses its
+  own `Global\AgentTempManager.Test.<hex>` names, never the product name). `CreateMutexExW` creates or opens the name
+  atomically; the descriptor (protected DACL: SYSTEM and Administrators, Authenticated Users only `SYNCHRONIZE` and
+  `READ_CONTROL`; Medium mandatory label so elevated and non-elevated runs share it) applies only when the call creates
+  the object, and the DACL and label of the object behind the handle, created or existing, are checked against that
+  policy and never changed; ownership is decided only by the zero-timeout wait, which is atomic. Requested rights:
+  `SYNCHRONIZE` and `READ_CONTROL`. An existing object of another type, a denied access or a policy mismatch is a
+  refusal. An abandoned mutex (`WAIT_ABANDONED`) is released at once and the run stops (`CLEAN_LOCK_ABANDONED`). Limits:
+  only cooperating clean runs are excluded; other processes can still change the trees; any local account can create
+  or hold the name first, which refuses every clean run (denial of service, documented, its acceptance left to the
+  future deletion gate); a release that cannot be done stays reserved in the process (fail closed) and the system
+  releases the mutex when the thread ends. The automated tests cover two processes of the same identity; other users,
+  sessions and elevation levels are operator-only and NOT TESTED.
 * **TUI diagnostics area (P5-A, ADR-0009):** presentation only. It runs `Invoke-AtmDiagnose` on an explicit action
   (entering the area without a result, or `U`) and renders the diagnose JSON export of that result: no collector,
   Git, Restart Manager, registry or file access of its own, no state change, no gate opened (static test); the

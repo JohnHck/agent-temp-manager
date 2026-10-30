@@ -1136,6 +1136,231 @@ namespace AgentTempManager
         }
     }
 
+    // B8: machine-wide mutual exclusion of clean runs past the release gate. One named kernel mutex in the Global
+    // namespace (every session, user and elevation level), fixed name, never a local, per-user or random fallback.
+    // CreateMutexExW is an atomic create-or-open of that name: the security descriptor below is applied only when this
+    // call creates the object; an existing object (ERROR_ALREADY_EXISTS) keeps its own security, which is never changed
+    // here. Either way the object's DACL and integrity label are read back through the handle and must match the policy:
+    // allow entries only for SYSTEM and Administrators (any rights) and Authenticated Users (SYNCHRONIZE and READ_CONTROL
+    // at most), and a Medium mandatory label, so elevated and non-elevated runs open the same object. Ownership is
+    // decided only by WaitForSingleObject with a zero timeout, which is atomic: whoever created the object, at most one
+    // caller owns it. Requested rights: SYNCHRONIZE (wait and release) and READ_CONTROL (read the policy). A wait that
+    // reports the mutex abandoned (its previous owner ended without releasing it) gives ABANDONED: the ownership just
+    // received is released at once and the caller does not proceed. The mutex is recursive for its owner thread, so a
+    // process-wide reservation refuses a nested acquisition (NESTED) without touching the outer one. Release is done once,
+    // only by the owner thread; when it cannot be done the reservation stays (fail closed) and the system releases the
+    // mutex when the thread ends. Mutual exclusion holds only between cooperating callers: another process may hold the
+    // name (BUSY), deny access (DENIED) or use it for another object type (TYPE_MISMATCH), which is a refusal (denial of
+    // service), never two clean runs at once.
+    public sealed class AtmCleanLock : IDisposable
+    {
+        public const string ProductName = "Global\\AgentTempManager.Clean";
+        // Test harness names only: Global\AgentTempManager.Test.<32 lowercase hex>.
+        const string TestPrefix = "Global\\AgentTempManager.Test.";
+        const uint SYNCHRONIZE = 0x00100000, READ_CONTROL = 0x00020000;
+        const int OthersMaxRights = 0x00120000;
+        const uint WAIT_OBJECT_0 = 0, WAIT_ABANDONED = 0x80, WAIT_TIMEOUT = 0x102;
+        const int ERROR_ACCESS_DENIED = 5, ERROR_INVALID_HANDLE = 6, ERROR_ALREADY_EXISTS = 183;
+        const int SE_KERNEL_OBJECT = 6;
+        const uint DACL_SECURITY_INFORMATION = 4, LABEL_SECURITY_INFORMATION = 0x10;
+        const byte ACCESS_ALLOWED_ACE_TYPE = 0, ACCESS_DENIED_ACE_TYPE = 1, SYSTEM_MANDATORY_LABEL_ACE_TYPE = 0x11;
+        const int SYSTEM_MANDATORY_LABEL_NO_WRITE_UP = 1;
+        const string SystemSid = "S-1-5-18", AdministratorsSid = "S-1-5-32-544", AuthenticatedUsersSid = "S-1-5-11", MediumLabelSid = "S-1-16-8192";
+        const string Sddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x00120000;;;AU)S:(ML;;NW;;;ME)";
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct SECURITY_ATTRIBUTES { public int nLength; public IntPtr lpSecurityDescriptor; public int bInheritHandle; }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern SafeWaitHandle CreateMutexExW(ref SECURITY_ATTRIBUTES attributes, string name, uint flags, uint desiredAccess);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern uint WaitForSingleObject(SafeWaitHandle handle, uint milliseconds);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool ReleaseMutex(SafeWaitHandle handle);
+
+        [DllImport("kernel32.dll")]
+        static extern uint GetCurrentThreadId();
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string sddl, uint revision, out IntPtr securityDescriptor, out uint size);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern bool ConvertSidToStringSidW(IntPtr sid, out IntPtr stringSid);
+
+        [DllImport("advapi32.dll")]
+        static extern uint GetSecurityInfo(SafeWaitHandle handle, int objectType, uint securityInfo, IntPtr owner, IntPtr group, out IntPtr dacl, out IntPtr sacl, out IntPtr securityDescriptor);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        static extern bool GetAce(IntPtr acl, int index, out IntPtr ace);
+
+        [DllImport("kernel32.dll")]
+        static extern IntPtr LocalFree(IntPtr mem);
+
+        // 1 while a lock is held in this process, or while its release could not be confirmed (fail closed).
+        static int reserved;
+
+        SafeWaitHandle handle;
+        bool owned;
+        uint ownerThread;
+        // ACQUIRED, ABANDONED, BUSY, NESTED, DENIED, TYPE_MISMATCH, NAME_INVALID, POLICY_*, ERROR_*, WAIT_FAILED_*.
+        public string Status;
+        public bool Acquired;
+        // This call created the object (otherwise it opened an existing one).
+        public bool Created;
+        // A release that failed (ABANDONED path or Release); null when none was needed or it succeeded.
+        public string ReleaseError;
+        public static bool IsHeld { get { return System.Threading.Interlocked.CompareExchange(ref reserved, 0, 0) != 0; } }
+
+        AtmCleanLock() { }
+
+        public static bool ValidName(string name)
+        {
+            if (string.Equals(name, ProductName, StringComparison.Ordinal)) return true;
+            if (name == null || !name.StartsWith(TestPrefix, StringComparison.Ordinal) || name.Length != TestPrefix.Length + 32) return false;
+            for (int i = TestPrefix.Length; i < name.Length; i++) { char c = name[i]; if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false; }
+            return true;
+        }
+
+        // Never waits. Acquired is true only for ACQUIRED; every other status is a refusal and holds nothing.
+        public static AtmCleanLock TryAcquire(string name)
+        {
+            AtmCleanLock l = new AtmCleanLock();
+            if (!ValidName(name)) { l.Status = "NAME_INVALID"; return l; }
+            if (System.Threading.Interlocked.CompareExchange(ref reserved, 1, 0) != 0) { l.Status = "NESTED"; return l; }
+            bool keepReservation = false;
+            IntPtr sd = IntPtr.Zero;
+            try
+            {
+                uint size;
+                if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(Sddl, 1, out sd, out size)) { l.Status = "ERROR_SECURITY_DESCRIPTOR_" + Marshal.GetLastWin32Error(); return l; }
+                SECURITY_ATTRIBUTES sa = new SECURITY_ATTRIBUTES();
+                sa.nLength = Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES));
+                sa.lpSecurityDescriptor = sd;
+                sa.bInheritHandle = 0;
+                l.handle = CreateMutexExW(ref sa, name, 0, SYNCHRONIZE | READ_CONTROL);
+                int err = Marshal.GetLastWin32Error();
+                if (l.handle.IsInvalid)
+                {
+                    l.Status = err == ERROR_ACCESS_DENIED ? "DENIED" : err == ERROR_INVALID_HANDLE ? "TYPE_MISMATCH" : "ERROR_" + err;
+                    return l;
+                }
+                l.Created = (err != ERROR_ALREADY_EXISTS);
+                string why = CheckPolicy(l.handle);
+                if (why != null) { l.Status = why; return l; }
+                uint w = WaitForSingleObject(l.handle, 0);
+                if (w == WAIT_OBJECT_0)
+                {
+                    l.owned = true; l.ownerThread = GetCurrentThreadId(); l.Acquired = true; l.Status = "ACQUIRED";
+                    keepReservation = true;
+                    return l;
+                }
+                if (w == WAIT_ABANDONED)
+                {
+                    // Received the ownership of an abandoned mutex: released at once; the caller stops.
+                    l.owned = true; l.ownerThread = GetCurrentThreadId();
+                    l.ReleaseError = l.ReleaseOwned();
+                    l.Status = "ABANDONED";
+                    return l;
+                }
+                l.Status = w == WAIT_TIMEOUT ? "BUSY" : "WAIT_FAILED_" + Marshal.GetLastWin32Error();
+                return l;
+            }
+            catch (Exception ex) { l.Status = "ERROR_" + ex.GetType().Name; return l; }
+            finally
+            {
+                if (sd != IntPtr.Zero) LocalFree(sd);
+                if (!keepReservation)
+                {
+                    if (l.owned && l.ReleaseError == null) l.ReleaseError = l.ReleaseOwned();
+                    bool stuck = (l.ReleaseError != null);
+                    l.Close();
+                    if (!stuck) System.Threading.Interlocked.Exchange(ref reserved, 0);
+                }
+            }
+        }
+
+        // Releases an acquired lock once and closes the handle. null when released (or nothing was held), otherwise a
+        // code; the handle is closed in every case, and nothing is released twice.
+        public string Release()
+        {
+            string code = null;
+            if (owned) code = ReleaseOwned();
+            Close();
+            return code;
+        }
+
+        public void Dispose()
+        {
+            if (owned) ReleaseOwned();
+            Close();
+        }
+
+        // Only the owner thread can release a mutex. On success the process reservation ends; on failure it stays, so
+        // no later acquisition in this process can re-enter the still-owned mutex (fail closed).
+        string ReleaseOwned()
+        {
+            owned = false;
+            Acquired = false;
+            if (GetCurrentThreadId() != ownerThread) return "LOCK_RELEASE_WRONG_THREAD";
+            if (!ReleaseMutex(handle)) return "LOCK_RELEASE_FAILED_WIN32_" + Marshal.GetLastWin32Error();
+            System.Threading.Interlocked.Exchange(ref reserved, 0);
+            return null;
+        }
+
+        void Close()
+        {
+            if (handle != null) { handle.Dispose(); handle = null; }
+        }
+
+        // Policy of the object behind the handle (created or existing). null when it matches, otherwise POLICY_*.
+        static string CheckPolicy(SafeWaitHandle h)
+        {
+            IntPtr dacl, sacl, sd = IntPtr.Zero;
+            uint r = GetSecurityInfo(h, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION, IntPtr.Zero, IntPtr.Zero, out dacl, out sacl, out sd);
+            if (r != 0) return "POLICY_UNREADABLE_" + r;
+            try
+            {
+                if (dacl == IntPtr.Zero) return "POLICY_DACL_NULL";
+                int count = Marshal.ReadInt16(dacl, 4) & 0xFFFF;   // ACL.AceCount
+                for (int i = 0; i < count; i++)
+                {
+                    IntPtr ace;
+                    if (!GetAce(dacl, i, out ace)) return "POLICY_DACL_UNREADABLE";
+                    byte type = Marshal.ReadByte(ace, 0);
+                    if (type == ACCESS_DENIED_ACE_TYPE) return "POLICY_DACL_DENY_ENTRY";
+                    if (type != ACCESS_ALLOWED_ACE_TYPE) return "POLICY_DACL_ENTRY_TYPE";
+                    string s = SidString(new IntPtr(ace.ToInt64() + 8));
+                    if (s == SystemSid || s == AdministratorsSid) continue;
+                    if (s == AuthenticatedUsersSid && (Marshal.ReadInt32(ace, 4) & ~OthersMaxRights) == 0) continue;
+                    return "POLICY_DACL_ENTRY";
+                }
+                if (sacl == IntPtr.Zero) return "POLICY_LABEL_MISSING";
+                int labels = 0;
+                int scount = Marshal.ReadInt16(sacl, 4) & 0xFFFF;
+                for (int i = 0; i < scount; i++)
+                {
+                    IntPtr ace;
+                    if (!GetAce(sacl, i, out ace)) return "POLICY_LABEL_UNREADABLE";
+                    if (Marshal.ReadByte(ace, 0) != SYSTEM_MANDATORY_LABEL_ACE_TYPE) continue;
+                    labels++;
+                    if (SidString(new IntPtr(ace.ToInt64() + 8)) != MediumLabelSid || (Marshal.ReadInt32(ace, 4) & SYSTEM_MANDATORY_LABEL_NO_WRITE_UP) == 0) return "POLICY_LABEL";
+                }
+                if (labels != 1) return labels == 0 ? "POLICY_LABEL_MISSING" : "POLICY_LABEL";
+                return null;
+            }
+            finally { if (sd != IntPtr.Zero) LocalFree(sd); }
+        }
+
+        static string SidString(IntPtr sid)
+        {
+            IntPtr s;
+            if (!ConvertSidToStringSidW(sid, out s)) return null;
+            try { return Marshal.PtrToStringUni(s); } finally { LocalFree(s); }
+        }
+    }
+
     public static class AtmPathCheck
     {
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]

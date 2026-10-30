@@ -35,6 +35,10 @@ $cfgDir = Join-Path $srcDir 'config'
 # deletion path can be exercised against the isolated sandbox; dedicated tests restore and verify the default.
 $shippedDeletionGate = $script:AtmRealDeletionEnabled
 $script:AtmRealDeletionEnabled = $true
+# B8: the suite never takes the product lock name, so a real clean on this machine never blocks it and it never blocks a
+# real clean: a test name of its own, only inside this process (dedicated tests check the shipped constant).
+$shippedCleanLockName = $script:AtmCleanLockName
+$script:AtmCleanLockName = 'Global\AgentTempManager.Test.' + [guid]::NewGuid().ToString('N')
 
 $me = Get-AtmCurrentIdentity
 $results = New-Object System.Collections.Generic.List[object]
@@ -392,6 +396,90 @@ function New-TestT1Fixture {
     [pscustomobject]@{ Profile = $p; Roots = $roots; Entries = @($roots | ForEach-Object { [pscustomobject]@{ Source = 't'; Path = $_; Fingerprint = $null } }) }
 }
 function Test-TestT1RootsIntact { param($Fixture) return (@($Fixture.Roots | Where-Object { -not [IO.File]::Exists((Join-Path $_ 'a.txt')) -or -not [IO.File]::Exists((Join-Path $_ 'sub\b.bin')) }).Count -eq 0) }
+# B8: test-only kernel object helpers (never used by the product): an observer handle that keeps a named mutex alive
+# without owning it, a mutex with default security and an event (incompatible objects under a test name), and the
+# security descriptor (DACL and label) of a named mutex as SDDL.
+function Initialize-AtmTestMutex {
+    if (-not ('AtmTestMutex' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices; using Microsoft.Win32.SafeHandles;
+public static class AtmTestMutex {
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern SafeWaitHandle OpenMutexW(uint access, bool inherit, string name);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern SafeWaitHandle CreateMutexW(IntPtr sa, bool owner, string name);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern SafeWaitHandle CreateEventW(IntPtr sa, bool manual, bool initial, string name);
+  [DllImport("advapi32.dll")] static extern uint GetSecurityInfo(SafeWaitHandle h, int t, uint si, IntPtr o, IntPtr g, IntPtr d, IntPtr s, out IntPtr sd);
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool ConvertSecurityDescriptorToStringSecurityDescriptorW(IntPtr sd, uint rev, uint si, out IntPtr str, out uint len);
+  [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr p);
+  public static SafeWaitHandle OpenSync(string name) { return OpenMutexW(0x00100000, false, name); }
+  public static SafeWaitHandle CreateDefault(string name) { return CreateMutexW(IntPtr.Zero, false, name); }
+  public static SafeWaitHandle CreateNamedEvent(string name) { return CreateEventW(IntPtr.Zero, true, false, name); }
+  public static string GetSddl(string name) {
+    using (SafeWaitHandle h = OpenMutexW(0x00020000, false, name)) {
+      if (h.IsInvalid) return "OPEN_FAIL " + Marshal.GetLastWin32Error();
+      IntPtr sd; uint r = GetSecurityInfo(h, 6, 0x14, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out sd);
+      if (r != 0) return "READ_FAIL " + r;
+      try {
+        IntPtr s; uint len;
+        if (!ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, 1, 0x14, out s, out len)) return "CONVERT_FAIL " + Marshal.GetLastWin32Error();
+        try { return Marshal.PtrToStringUni(s); } finally { LocalFree(s); }
+      } finally { LocalFree(sd); }
+    }
+  }
+}
+'@
+    }
+}
+$script:lockHolderCount = 0
+function New-TestLockName { return ('Global\AgentTempManager.Test.' + [guid]::NewGuid().ToString('N')) }
+# B8: a child process (the parent's own host) that takes a lock name and holds it until GoFile appears (or its own
+# deadline), then releases it (Mode release) or ends itself without releasing it (Mode abandon: Environment.Exit, the
+# mutex is abandoned). It is never stopped from outside: the parent only waits for it to end.
+function Start-TestLockHolder {
+    param([string]$Name, [ValidateSet('release', 'abandon')][string]$Mode, [switch]$GoNow)
+    $script:lockHolderCount++
+    $dir = Join-Path $sandbox ('lock-holder-' + $script:lockHolderCount)
+    [void][IO.Directory]::CreateDirectory($dir)
+    $child = Join-Path $sandbox 'lock-holder.ps1'
+    if (-not (Test-Path -LiteralPath $child)) {
+        [IO.File]::WriteAllText($child, @'
+param([string]$Src, [string]$Name, [string]$HeldFile, [string]$GoFile, [string]$Mode, [int]$TimeoutSec = 120)
+$ErrorActionPreference = 'Stop'
+. (Join-Path $Src 'lib\Engine.Audit.ps1')
+Initialize-AtmNative -LibDir (Join-Path $Src 'lib')
+$l = [AgentTempManager.AtmCleanLock]::TryAcquire($Name)
+[IO.File]::WriteAllText($HeldFile + '.tmp', [string]$l.Status); [IO.File]::Move($HeldFile + '.tmp', $HeldFile)
+if (-not $l.Acquired) { exit 2 }
+$sw = [Diagnostics.Stopwatch]::StartNew()
+while (-not (Test-Path -LiteralPath $GoFile) -and $sw.Elapsed.TotalSeconds -lt $TimeoutSec) { Start-Sleep -Milliseconds 100 }
+if ($Mode -ceq 'abandon') { [Environment]::Exit(0) }
+$rc = $l.Release()
+exit $(if ($null -eq $rc) { 0 } else { 3 })
+'@, (New-Object Text.UTF8Encoding $true))
+    }
+    $held = Join-Path $dir 'held.txt'; $go = Join-Path $dir 'go.txt'
+    if ($GoNow) { [IO.File]::WriteAllText($go, 'go') }
+    $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    $p = Start-AtmTestHelperProcess -File $shell -Arguments ("-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Name `"$Name`" -HeldFile `"$held`" -GoFile `"$go`" -Mode $Mode")
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while (-not (Test-Path -LiteralPath $held) -and -not $p.HasExited -and $sw.Elapsed.TotalSeconds -lt 180) { Start-Sleep -Milliseconds 200 }
+    $status = $(if (Test-Path -LiteralPath $held) { [IO.File]::ReadAllText($held) } else { '<sem sinal>' })
+    return [pscustomobject]@{ Process = $p; Status = $status; GoFile = $go }
+}
+function Stop-TestLockHolderByGo {
+    # Lets the holder end by itself (go file) and waits for it; never terminates it.
+    param($Holder)
+    [IO.File]::WriteAllText($Holder.GoFile, 'go')
+    $null = $Holder.Process.WaitForExit(120000)
+    return [pscustomobject]@{ Exited = $Holder.Process.HasExited; Exit = $(if ($Holder.Process.HasExited) { $Holder.Process.ExitCode } else { $null }) }
+}
+function New-TestCleanCounter {
+    # Counts the calls a refused run must never make: inventory (local override, this scope only), presenter, reader.
+    $k = @{ Inv = 0; Pres = 0; Read = 0 }
+    $k.Presenter = { param($v, $r, $i) $k.Pres++ }.GetNewClosure()
+    $k.Reader = { param($x) $k.Read++; $x }.GetNewClosure()
+    $k.Inventory = { $k.Inv++; throw 'INVENTORY_CALLED' }.GetNewClosure()
+    return $k
+}
 function New-TestCleanLogDir {
     # A new folder under the sandbox for real clean logs; its files stay until the sandbox goes. When the log's folder
     # policy refuses it on a sandbox this run could not give a single-owner ACL (a standard session on a machine whose
@@ -1470,7 +1558,7 @@ foreach ($k in @('__ua__', '__dnf__', '__io__')) {
         $path = Join-Path $dir 'intr.jsonl'
         $child = Join-Path $sandbox 't1-interrupt-child.ps1'
         [IO.File]::WriteAllText($child, @'
-param([string]$Src, [string]$ProfileRoot, [string]$Temp, [string]$Sid, [string]$Name, [string]$IsAdmin, [string]$Root, [string]$LogFile, [string]$NowTicks)
+param([string]$Src, [string]$ProfileRoot, [string]$Temp, [string]$Sid, [string]$Name, [string]$IsAdmin, [string]$Root, [string]$LogFile, [string]$NowTicks, [string]$LockName)
 # A fresh process: the product files as shipped, the deletion gate opened in THIS process only (as the suite does), and a
 # stand-in deleter that deletes nothing and ends the process itself (Environment.Exit) after the intent was written.
 $ErrorActionPreference = 'Stop'
@@ -1480,6 +1568,8 @@ Initialize-AtmNative -LibDir (Join-Path $Src 'lib')
 foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $Src 'providers') -Filter '*.ps1' -File | Sort-Object Name)) { . $f.FullName }
 . (Join-Path $Src 'lib\Engine.Clean.ps1')
 $script:AtmRealDeletionEnabled = $true
+# B8: a test lock name of its own (this child ends inside the run, so it abandons that mutex), never the product name.
+$script:AtmCleanLockName = $LockName
 $prof = [pscustomobject]@{ Sid = $Sid; UserName = 'TEST\t1intr'; ProfilePath = $ProfileRoot; Loaded = $true; Special = $false; Origin = 'Test'; EnvStatus = 'OK'
     TempCandidates = @([pscustomobject]@{ TempPath = $Temp; Source = 'test' }); EnvValues = @{}; EnvKnown = $true; Notes = @() }
 $ia = @{ ProfilesOverride = @($prof); ProcessesOverride = @([pscustomobject]@{ ProcessId = 1; Name = 'idle.exe'; ParentProcessId = 0; CommandLine = 'idle.exe'; CreationDate = (Get-Date).AddHours(-1) })
@@ -1490,7 +1580,7 @@ exit 0
 '@, (New-Object Text.UTF8Encoding $true))
         $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
         $tp = $f.Profile.TempCandidates[0].TempPath
-        $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -ProfileRoot `"$($f.Profile.ProfilePath)`" -Temp `"$tp`" -Sid `"$($testIdentity.Sid)`" -Name `"$($testIdentity.Name)`" -IsAdmin `"$($testIdentity.IsAdmin)`" -Root `"$($f.Roots[0])`" -LogFile `"$path`" -NowTicks `"$($nowFuture.Ticks)`"") -TimeoutSec 300
+        $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -ProfileRoot `"$($f.Profile.ProfilePath)`" -Temp `"$tp`" -Sid `"$($testIdentity.Sid)`" -Name `"$($testIdentity.Name)`" -IsAdmin `"$($testIdentity.IsAdmin)`" -Root `"$($f.Roots[0])`" -LogFile `"$path`" -NowTicks `"$($nowFuture.Ticks)`" -LockName `"$(New-TestLockName)`"") -TimeoutSec 300
         Assert-True ($r.Exit -eq 7 -and -not $r.TimedOut) "o filho saiu sozinho dentro do deleter simulado (saida $($r.Exit) $($r.Text))"
         $rd = Read-TestCleanLogFile $path
         $types = @($rd.Records | ForEach-Object { $_.type })
@@ -1514,6 +1604,216 @@ exit 0
         foreach ($pat in @('DeleteFile', 'DeleteTree', 'DELETE_ON_CLOSE', 'FileDispositionInformation', 'SetFileInformationByHandle', 'SetSecurityInfo', 'SetNamedSecurityInfo')) { Assert-True (-not $cls.Contains($pat)) "escritor nunca remove arquivo nem altera ACL ($pat)" }
         Assert-True ($cls.Contains('if (written != (uint)body.Length) return Stop("LOG_WRITE_INCOMPLETE")') -and $cls.Contains('new UTF8Encoding(false, true).GetBytes(line + "\n")') -and $cls.Contains('if (body.Length > MaxRecordBytes)')) 'escrita parcial detectada; limite contado nos bytes UTF-8 da linha com o LF'
         Assert-True ([IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1')).Contains('exit $(if ($res.Aborted -or $res.StoppedBy) { 3 } else { 0 })')) 'CLI: parada depois de uma exclusao sai com 3'
+    }
+
+    # ------------------------------------------------------------------ clean lock (B8)
+    # Test lock names only (Global\AgentTempManager.Test.<hex>; the suite's own name, or a new one per case); the stand-in
+    # deleter everywhere; child processes always end by themselves. Same identity only: other users, sessions and
+    # elevation levels are operator-only (last case, NAO_TESTADO).
+    Test-Case 'Clean lock (B8)' 'Segunda execucao recusada antes do inventario e de qualquer log enquanto outro processo (mesma identidade) mantem o lock; execucao seguinte permitida depois da liberacao' {
+        $n = New-TestLockName
+        $f = New-TestT1Fixture 'b8busy' 1
+        $prev = $script:AtmCleanLockName
+        $script:AtmCleanLockName = $n
+        try {
+            $h = Start-TestLockHolder -Name $n -Mode release
+            Assert-Eq $h.Status 'ACQUIRED' 'o processo filho criou e adquiriu o lock de teste'
+            $k = New-TestCleanCounter
+            $w = New-TestCleanLogWriter
+            $d = New-TestCleanDeleter -Writer $w
+            $logPath = Join-Path $sandbox 'b8-busy-nao-criado.jsonl'
+            $c = & {
+                Set-Item -LiteralPath 'function:local:Invoke-AtmInventory' -Value $k.Inventory
+                Invoke-AtmClean -Entries $f.Entries -PlanPresenter $k.Presenter -ConfirmationReader $k.Reader -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -LogFile $logPath -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+            }
+            Assert-True ($c.Aborted -ceq 'CLEAN_LOCK_BUSY' -and $null -eq $c.RunId) "recusado ($($c.Aborted))"
+            Assert-True ($k.Inv -eq 0 -and $k.Pres -eq 0 -and $k.Read -eq 0 -and $d.Calls.Count -eq 0 -and -not (Test-Path -LiteralPath $logPath)) "nada iniciado: inventario $($k.Inv), plano $($k.Pres), confirmacao $($k.Read), deleter $($d.Calls.Count), log"
+            Assert-True (-not [AgentTempManager.AtmCleanLock]::IsHeld) 'nada mantido neste processo'
+            $txt = (@(Show-AtmCleanResult -Result $c 6>&1 | ForEach-Object { [string]$_.MessageData }) -join "`n")
+            Assert-True ($txt.Contains((Get-AtmText 'clean.lockUnavailable' 'CLEAN_LOCK_BUSY')) -and $txt.Contains((Get-AtmText 'clean.nothing'))) 'mensagem de lock indisponivel'
+            $end = Stop-TestLockHolderByGo $h
+            Assert-True ($end.Exited -and $end.Exit -eq 0) "o filho liberou e terminou sozinho (saida $($end.Exit))"
+            $w2 = New-TestCleanLogWriter
+            $d2 = New-TestCleanDeleter -Writer $w2
+            $c2 = Invoke-AtmClean -Entries $f.Entries -PlanPresenter $presenter -ConfirmationReader ${function:Confirm-Correct} -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -LogWriter $w2 -DeleteTreeImpl $d2.Delete -PathPresenceImpl $d2.Present
+            Assert-True ($null -eq $c2.Aborted -and $null -eq $c2.StoppedBy -and $d2.Calls.Count -eq 1 -and $null -eq $c2.LockReleaseError) "execucao seguinte completa ($($c2.Aborted) $($c2.StoppedBy))"
+            Assert-True (-not [AgentTempManager.AtmCleanLock]::IsHeld) 'liberado ao final'
+        } finally { $script:AtmCleanLockName = $prev }
+        Assert-True (Test-TestT1RootsIntact $f) 'nada apagado'
+    }
+    Test-Case 'Clean lock (B8)' 'Liberacao em todos os caminhos: confirmacao rejeitada, falhas do log, desfechos do deleter simulado e excecao inesperada; confirmado por outro processo ao final' {
+        $n = New-TestLockName
+        $prev = $script:AtmCleanLockName
+        $script:AtmCleanLockName = $n
+        try {
+            $runs = @(
+                @{ Tag = 'rejeitada'; Reader = { param($x) 'nao' }; Writer = (New-TestCleanLogWriter); Results = @(); Presence = $false; Want = 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE' },
+                @{ Tag = 'run-start'; Reader = ${function:Confirm-Correct}; Writer = (New-TestCleanLogWriter -FailOn 'run-start'); Results = @(); Presence = $false; Want = 'LOG_WRITE_FAILED' },
+                @{ Tag = 'intent'; Reader = ${function:Confirm-Correct}; Writer = (New-TestCleanLogWriter -FailOn 'intent'); Results = @(); Presence = $false; Want = 'LOG_INTENT_FAILED' },
+                @{ Tag = 'excecao do deleter'; Reader = ${function:Confirm-Correct}; Writer = (New-TestCleanLogWriter); Results = @('THROW'); Presence = $false; Want = 'STOPPED_AFTER_EXCEPTION' },
+                @{ Tag = 'recusa'; Reader = ${function:Confirm-Correct}; Writer = (New-TestCleanLogWriter); Results = @('REFUSED'); Presence = $true; Want = 'STOPPED_AFTER_REFUSED' },
+                @{ Tag = 'fechamento'; Reader = ${function:Confirm-Correct}; Writer = (New-TestCleanLogWriter -CloseCode 'LOG_CLOSE_FAILED_WIN32_6'); Results = @(); Presence = $false; Want = 'LOG_CLOSE_FAILED' })
+            foreach ($run in $runs) {
+                $f = New-TestT1Fixture ('b8rel' + [guid]::NewGuid().ToString('N').Substring(0, 6)) 1
+                $d = New-TestCleanDeleter -Writer $run.Writer -Results $run.Results -Presence $run.Presence
+                $c = Invoke-AtmClean -Entries $f.Entries -PlanPresenter $presenter -ConfirmationReader $run.Reader -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -LogWriter $run.Writer -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+                $code = $(if ($c.Aborted) { $c.Aborted } else { $c.StoppedBy })
+                Assert-True ($code -ceq $run.Want -and $null -eq $c.LockReleaseError) "$($run.Tag): $code"
+                Assert-True (-not [AgentTempManager.AtmCleanLock]::IsHeld) "$($run.Tag): lock liberado"
+                Assert-True (Test-TestT1RootsIntact $f) "$($run.Tag): nada apagado"
+            }
+            # An unexpected exception after the acquisition (the presenter throws): the lock is still released.
+            $f = New-TestT1Fixture 'b8throw' 1
+            $d = New-TestCleanDeleter
+            $threw = $false
+            try { $null = Invoke-AtmClean -Entries $f.Entries -PlanPresenter { param($v, $r, $i) throw 'PRESENTER_FAILED' } -ConfirmationReader ${function:Confirm-Correct} -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -LogWriter (New-TestCleanLogWriter) -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present } catch { $threw = $true }
+            Assert-True ($threw -and $d.Calls.Count -eq 0 -and -not [AgentTempManager.AtmCleanLock]::IsHeld) 'excecao inesperada: propagada, lock liberado'
+            # Another process confirms the kernel ownership was released (not only this process's reservation).
+            $h = Start-TestLockHolder -Name $n -Mode release -GoNow
+            $end = Stop-TestLockHolderByGo $h
+            Assert-True ($h.Status -ceq 'ACQUIRED' -and $end.Exited -and $end.Exit -eq 0) "outro processo adquire em seguida ($($h.Status), saida $($end.Exit))"
+        } finally { $script:AtmCleanLockName = $prev }
+    }
+    Test-Case 'Clean lock (B8)' 'Aninhamento na mesma thread recusado (CLEAN_LOCK_NESTED) sem liberar o lock da execucao externa' {
+        # The presenter runs inside the engine and reaches these variables (and the suite's functions) by dynamic scope;
+        # the b8* names avoid the engine's own variable names.
+        $b8Fix = New-TestT1Fixture 'b8nest' 1
+        $b8Inner = @{ Result = $null; HeldAfter = $null; Pres = $null }
+        $b8Del = New-TestCleanDeleter
+        $nestedPresenter = {
+            param($v, $r, $i)
+            $b8k = New-TestCleanCounter
+            $b8Inner.Result = Invoke-AtmClean -Entries $b8Fix.Entries -PlanPresenter $b8k.Presenter -ConfirmationReader $b8k.Reader -InventoryArgs (Get-InvArgs -Profiles @($b8Fix.Profile)) -LogWriter (New-TestCleanLogWriter) -DeleteTreeImpl $b8Del.Delete -PathPresenceImpl $b8Del.Present
+            $b8Inner.Pres = $b8k.Pres
+            $b8Inner.HeldAfter = [AgentTempManager.AtmCleanLock]::IsHeld
+        }
+        $c = Invoke-AtmClean -Entries $b8Fix.Entries -PlanPresenter $nestedPresenter -ConfirmationReader ${function:Confirm-Correct} -InventoryArgs (Get-InvArgs -Profiles @($b8Fix.Profile)) -LogWriter (New-TestCleanLogWriter) -DeleteTreeImpl $b8Del.Delete -PathPresenceImpl $b8Del.Present
+        Assert-True ($null -ne $b8Inner.Result -and $b8Inner.Result.Aborted -ceq 'CLEAN_LOCK_NESTED' -and $b8Inner.Pres -eq 0) "interna recusada ($(if ($b8Inner.Result) { $b8Inner.Result.Aborted }))"
+        Assert-True ($b8Inner.HeldAfter -eq $true) 'o lock externo continua mantido depois da recusa interna'
+        Assert-True ($null -eq $c.Aborted -and $null -eq $c.StoppedBy -and $b8Del.Calls.Count -eq 1 -and $null -eq $c.LockReleaseError) "externa completa ($($c.Aborted) $($c.StoppedBy))"
+        Assert-True (-not [AgentTempManager.AtmCleanLock]::IsHeld) 'liberado ao final'
+        Assert-True (Test-TestT1RootsIntact $b8Fix) 'nada apagado'
+    }
+    Test-Case 'Clean lock (B8)' 'Abandono por saida voluntaria de processo filho: CLEAN_LOCK_ABANDONED sem inventario, plano, log nem deleter, posse liberada; nova tentativa comeca do zero' {
+        Initialize-AtmTestMutex
+        $n = New-TestLockName
+        $f = New-TestT1Fixture 'b8aband' 1
+        $prev = $script:AtmCleanLockName
+        $script:AtmCleanLockName = $n
+        $obs = $null
+        try {
+            $h = Start-TestLockHolder -Name $n -Mode abandon
+            Assert-Eq $h.Status 'ACQUIRED' 'o filho adquiriu'
+            # An observer handle (not an owner) keeps the object alive after the child ends, so its abandoned state remains.
+            $obs = [AtmTestMutex]::OpenSync($n)
+            Assert-True (-not $obs.IsInvalid) 'handle observador aberto'
+            $end = Stop-TestLockHolderByGo $h
+            Assert-True ($end.Exited -and $end.Exit -eq 0) "o filho terminou sozinho sem liberar (saida $($end.Exit))"
+            $k = New-TestCleanCounter
+            $w = New-TestCleanLogWriter
+            $d = New-TestCleanDeleter -Writer $w
+            $c = & {
+                Set-Item -LiteralPath 'function:local:Invoke-AtmInventory' -Value $k.Inventory
+                Invoke-AtmClean -Entries $f.Entries -PlanPresenter $k.Presenter -ConfirmationReader $k.Reader -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -LogWriter $w -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+            }
+            Assert-True ($c.Aborted -ceq 'CLEAN_LOCK_ABANDONED' -and $null -eq $c.LockReleaseError -and $null -eq $c.RunId) "abandono ($($c.Aborted) [$($c.LockReleaseError)])"
+            Assert-True ($k.Inv -eq 0 -and $k.Pres -eq 0 -and $k.Read -eq 0 -and $d.Calls.Count -eq 0 -and $w.Lines.Count -eq 0) 'nada iniciado'
+            Assert-True (-not [AgentTempManager.AtmCleanLock]::IsHeld) 'posse recebida liberada'
+            $txt = (@(Show-AtmCleanResult -Result $c 6>&1 | ForEach-Object { [string]$_.MessageData }) -join "`n")
+            Assert-True ($txt.Contains((Get-AtmText 'clean.lockAbandoned'))) 'mensagem de abandono'
+            $w2 = New-TestCleanLogWriter
+            $d2 = New-TestCleanDeleter -Writer $w2
+            $c2 = Invoke-AtmClean -Entries $f.Entries -PlanPresenter $presenter -ConfirmationReader ${function:Confirm-Correct} -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -LogWriter $w2 -DeleteTreeImpl $d2.Delete -PathPresenceImpl $d2.Present
+            Assert-True ($null -eq $c2.Aborted -and $null -eq $c2.StoppedBy -and $d2.Calls.Count -eq 1 -and @(Get-TestCleanLogRecords $w2)[0].type -ceq 'run-start') "nova tentativa do zero ($($c2.Aborted) $($c2.StoppedBy))"
+        } finally {
+            if ($null -ne $obs) { $obs.Dispose() }
+            $script:AtmCleanLockName = $prev
+        }
+        Assert-True (Test-TestT1RootsIntact $f) 'nada apagado'
+    }
+    Test-Case 'Clean lock (B8)' 'Objeto preexistente incompativel (mutex com seguranca padrao, evento com o nome) e nome fora do padrao: recusados antes do inventario, sem alterar o objeto' {
+        Initialize-AtmTestMutex
+        $f = New-TestT1Fixture 'b8compat' 1
+        $prev = $script:AtmCleanLockName
+        try {
+            foreach ($kind in @('mutex', 'event', 'name')) {
+                $n = $(if ($kind -ceq 'name') { 'Local\AgentTempManager.Clean' } else { New-TestLockName })
+                $obj = $(if ($kind -ceq 'mutex') { [AtmTestMutex]::CreateDefault($n) } elseif ($kind -ceq 'event') { [AtmTestMutex]::CreateNamedEvent($n) } else { $null })
+                try {
+                    $before = $(if ($kind -ceq 'mutex') { [AtmTestMutex]::GetSddl($n) } else { $null })
+                    $script:AtmCleanLockName = $n
+                    $k = New-TestCleanCounter
+                    $d = New-TestCleanDeleter
+                    $c = & {
+                        Set-Item -LiteralPath 'function:local:Invoke-AtmInventory' -Value $k.Inventory
+                        Invoke-AtmClean -Entries $f.Entries -PlanPresenter $k.Presenter -ConfirmationReader $k.Reader -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -LogWriter (New-TestCleanLogWriter) -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+                    }
+                    $want = @{ mutex = 'CLEAN_LOCK_POLICY_'; event = 'CLEAN_LOCK_TYPE_MISMATCH'; name = 'CLEAN_LOCK_NAME_INVALID' }[$kind]
+                    Assert-True ([string]$c.Aborted -clike "$want*" -and $k.Inv -eq 0 -and $k.Pres -eq 0 -and $d.Calls.Count -eq 0) "$($kind): $($c.Aborted)"
+                    Assert-True (-not [AgentTempManager.AtmCleanLock]::IsHeld) "$($kind): nada mantido"
+                    if ($kind -ceq 'mutex') { Assert-Eq ([AtmTestMutex]::GetSddl($n)) $before 'seguranca do objeto preexistente inalterada' }
+                } finally { if ($null -ne $obj) { $obj.Dispose() } }
+            }
+        } finally { $script:AtmCleanLockName = $prev }
+        foreach ($bad in @('Global\AgentTempManager.Clean2', 'Global\AgentTempManager.Test.XYZ', ('Global\AgentTempManager.Test.' + [guid]::NewGuid().ToString('N').ToUpperInvariant()), 'Local\AgentTempManager.Clean', 'AgentTempManager.Clean', '')) {
+            Assert-True (-not [AgentTempManager.AtmCleanLock]::ValidName($bad)) "nome recusado: [$bad]"
+        }
+        Assert-True ([AgentTempManager.AtmCleanLock]::ValidName('Global\AgentTempManager.Clean') -and [AgentTempManager.AtmCleanLock]::ValidName($script:AtmCleanLockName)) 'nome de produto e nome de teste da suite aceitos'
+        Assert-True (Test-TestT1RootsIntact $f) 'nada apagado'
+    }
+    Test-Case 'Clean lock (B8)' 'Trava fechada: nenhuma aquisicao (um nome invalido nao e nem consultado) e fluxo de plano inalterado' {
+        $f = New-TestT1Fixture 'b8gate' 1
+        $seen = @{ HeldInPlan = $null }
+        $prev = $script:AtmCleanLockName
+        $script:AtmCleanLockName = 'Local\nao-consultado'
+        $script:AtmRealDeletionEnabled = $false
+        try {
+            $c = Invoke-AtmClean -Entries $f.Entries -PlanPresenter ({ param($v, $r, $i) $seen.HeldInPlan = [AgentTempManager.AtmCleanLock]::IsHeld }.GetNewClosure()) -ConfirmationReader ${function:Confirm-Correct} -InventoryArgs (Get-InvArgs -Profiles @($f.Profile))
+        } finally { $script:AtmRealDeletionEnabled = $true; $script:AtmCleanLockName = $prev }
+        Assert-True ($c.Aborted -ceq 'EXCLUSAO_REAL_DESABILITADA_V0_1' -and @($c.Verified).Count -eq 1 -and $null -eq $c.LockReleaseError) "so o plano ($($c.Aborted))"
+        Assert-True ($seen.HeldInPlan -eq $false) 'nenhum lock durante o plano'
+        Assert-True (Test-TestT1RootsIntact $f) 'nada apagado'
+    }
+    Test-Case 'Clean lock (B8)' 'Descritor do objeto criado: DACL protegida (SYSTEM, Administradores, Authenticated Users so SYNCHRONIZE e READ_CONTROL) e rotulo Medium, lidos pelo handle; liberacao dupla sem efeito' {
+        Initialize-AtmTestMutex
+        $n = New-TestLockName
+        $l = [AgentTempManager.AtmCleanLock]::TryAcquire($n)
+        try {
+            Assert-True ($l.Acquired -and $l.Created -and $l.Status -ceq 'ACQUIRED') "criado e adquirido ($($l.Status))"
+            $sddl = [AtmTestMutex]::GetSddl($n)
+            Assert-True ($sddl -match '^D:P' -and $sddl.Contains('(A;;0x120000;;;AU)') -and $sddl -match '\(A;;0x1f0001;;;SY\)' -and $sddl -match '\(A;;0x1f0001;;;BA\)' -and $sddl -match 'S:[A-Z]*\(ML;;NW;;;ME\)$') "descritor: $sddl"
+            Assert-Eq ([regex]::Matches($sddl, '\(A;').Count) 3 'exatamente tres entradas de permissao'
+        } finally {
+            Assert-Eq ($l.Release()) $null 'liberado'
+            Assert-Eq ($l.Release()) $null 'segunda liberacao sem efeito'
+            $l.Dispose()
+        }
+        Assert-True (-not [AgentTempManager.AtmCleanLock]::IsHeld) 'nada mantido'
+    }
+    Test-Case 'Clean lock (B8)' 'Estatico: nome fixo do produto em uma unica atribuicao; a suite nunca o usa; aquisicao so com a trava aberta e antes do nucleo; liberacao no finally; nucleo e nome so no motor; sem alterar seguranca de objeto nem encerrar processos' {
+        $clean = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Clean.ps1'))
+        Assert-Eq $shippedCleanLockName 'Global\AgentTempManager.Clean' 'constante distribuida'
+        Assert-Eq ([regex]::Matches($clean, '\$script:AtmCleanLockName\s*=').Count) 1 'uma unica atribuicao no motor'
+        Assert-True ($script:AtmCleanLockName -cmatch '^Global\\AgentTempManager\.Test\.[0-9a-f]{32}$') 'a suite usa nome de teste proprio'
+        foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Name -ne 'Engine.Clean.ps1' -and $_.Name -ne 'Native.cs' })) {
+            $txt = [IO.File]::ReadAllText($fi.FullName)
+            foreach ($pat in @('AtmCleanLockName', 'Invoke-AtmCleanCore', 'AtmCleanLock]', 'RefusedBy')) { Assert-True (-not $txt.Contains($pat)) "$($fi.Name) usa $pat" }
+        }
+        $w = $clean.Substring($clean.IndexOf('function Invoke-AtmClean {'))
+        $w = $w.Substring(0, $w.IndexOf('function Invoke-AtmCleanCore'))
+        $iGate = $w.IndexOf('if (-not $script:AtmRealDeletionEnabled) { return (Invoke-AtmCleanCore @PSBoundParameters) }'); $iAcq = $w.IndexOf('[AgentTempManager.AtmCleanLock]::TryAcquire($script:AtmCleanLockName)')
+        $iCore = $w.IndexOf('$res = Invoke-AtmCleanCore @PSBoundParameters'); $iFin = $w.IndexOf('} finally {'); $iRel = $w.IndexOf('$rc = $lock.Release()')
+        Assert-True ($iGate -gt 0 -and $iAcq -gt $iGate -and $iCore -gt $iAcq -and $iFin -gt $iCore -and $iRel -gt $iFin) "ordem: trava $iGate, aquisicao $iAcq, nucleo $iCore, finally $iFin, liberacao $iRel"
+        Assert-True (-not $w.Contains('Invoke-AtmInventory')) 'o wrapper nao inventaria antes do lock'
+        $ncs = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Native.cs'))
+        $cls = $ncs.Substring($ncs.IndexOf('public sealed class AtmCleanLock'))
+        $cls = $cls.Substring(0, $cls.IndexOf('public static class AtmPathCheck'))
+        foreach ($pat in @('SetSecurityInfo', 'SetKernelObjectSecurity', 'SetNamedSecurityInfo', 'TerminateProcess', 'OpenProcess', 'Local\\', 'Guid.NewGuid', 'Environment.UserName')) { Assert-True (-not $cls.Contains($pat)) "AtmCleanLock nao usa $pat" }
+        Assert-True ($cls.Contains('WaitForSingleObject(l.handle, 0)') -and $cls.Contains('CreateMutexExW(ref sa, name, 0, SYNCHRONIZE | READ_CONTROL)')) 'sem espera; direitos minimos'
+    }
+    Test-Case 'Clean lock (B8)' 'Matriz entre usuarios, sessoes e niveis de elevacao (operator-only): NAO_TESTADO' {
+        $script:caseSkipped = $true
+        $script:caseNote = 'dois usuarios, sessoes console/RDP, processo elevado e nao elevado e pre-criacao por usuario comum dependem do operador; a suite cobre so processos da mesma identidade'
     }
 
     # ------------------------------------------------------------------ read-only guarantee
