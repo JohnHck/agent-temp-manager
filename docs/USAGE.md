@@ -72,6 +72,35 @@ agent-temp preview
 Paths are grouped into **A. blocked**, **B. needs investigation**, **C. technically eligible** (for human
 review). Eligible paths are printed as allowlist lines `path|fingerprint`.
 
+### Runtime evidence in preview and plan (V0.3 B2-1, unreleased)
+
+`preview`, the plan of `clean` and the TUI preview also run the read-only V0.2 collectors once (the same ones as
+`diagnose`, over the inventory just taken, without CPU sampling) and add reasons to refuse. They never remove one and
+never make a path eligible. With the deletion gate closed they are shown too.
+
+* **Blocked:** `RUNTIME_USE_OBSERVED` (a verified process is directly related to the root; its key, the service or VM it
+  hosts when there is one, and the agent processes above it are shown) and `RUNTIME_SESSION_LIVE` (the agent session
+  whose id is the root's own name is running, with an exact process identity).
+* **Needs investigation:** `RUNTIME_ASSOCIATION_AMBIGUOUS` (the process or holder could not be verified),
+  `RUNTIME_ANCESTOR_REFERENCE` (a process names a parent folder), `RUNTIME_SESSION_UNVERIFIED`, `RUNTIME_KEY_COLLISION`,
+  `RUNTIME_OBSERVATION_INCOMPLETE` (a collector this root depends on failed, or a reference could not be read),
+  `RUNTIME_TIMEOUT` (not finished before the deadline) and `RUNTIME_NOT_COLLECTED`.
+* Each reason says which collector and evidence it comes from, the relation to the root, whether it is direct, derived,
+  ambiguous or a coverage gap, when it was observed and the coverage status. The reasons found before stay first.
+* Printed once, not per root: what was not observed for any root (the open-file and worktree collectors, closed in every
+  copy, and process working directories, deferred), what was observed with no relation to any root (services and
+  virtual machines: they only appear inside a reason when the process that hosts them is itself related to the root),
+  and what was incomplete for the whole run.
+* No runtime reason for a root is **not** evidence that it is unused.
+* Before each deletion the root's revalidation runs the collectors again; the plan's evidence is never reused.
+* Time: the collectors run under a deadline of 60 s, checked between collectors; it does not interrupt one that already
+  started. What is actually bounded: each CIM query by its own timeout (processes 30 s, services 30 s, each of the up to
+  five virtualization queries 30 s) and the dependency correlation by 30 s (checked every 256 steps). The file-system
+  inventory before them has no bound. A run is therefore normally short, but nothing guarantees a total maximum, and it is
+  repeated for each root at revalidation.
+* Output: the preview and plan rows keep their fields; a gate also has `RuntimeReasons` (the same reasons with their
+  provenance) and a preview row has `Runtime` (the run). The diagnose command and its JSON schema do not change.
+
 ## Diagnose (read-only, V0.2)
 
 `diagnose` is part of version 0.2.0 (published only as the GitHub Release `v0.2.0`). It is read-only and reports the

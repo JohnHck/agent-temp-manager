@@ -12,6 +12,10 @@
   not available, an abandoned lock (a previous run may have been interrupted) or a nested run refuses to start (exit
   code `3`). It excludes only cooperating clean runs; a local account can block it (denial of service). With the gate
   closed nothing changes. Details and limits: docs/USAGE.md, "One clean at a time".
+* V0.3 B2-1: preview, the clean plan (also with the deletion gate closed) and each root's revalidation add reasons from
+  the read-only V0.2 collectors: observed use or a live session of the root blocks; ambiguous relations, unverified
+  sessions and failed or timed-out collection need investigation. Nothing is ever made eligible by it, and no
+  evidence is not evidence of non-use. Details and the time limits: docs/USAGE.md, "Runtime evidence in preview and plan".
 
 ## 0.2.0
 

@@ -131,7 +131,7 @@ function Get-AtmTuiPreviewRows {
     param($State)
     if ($null -eq $State.Preview) {
         & $State.Draw (Get-AtmTuiBusyFrame -State $State -Text (Get-AtmText 'tui.computingPreview'))
-        $State.Preview = @(Invoke-AtmPreview -Inventory $State.Inventory)
+        $State.Preview = @(Invoke-AtmPreview -Inventory $State.Inventory -InventoryArgs $State.InventoryArgs)
     }
     return $State.Preview
 }

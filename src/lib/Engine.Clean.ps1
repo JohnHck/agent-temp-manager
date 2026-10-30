@@ -80,12 +80,58 @@ function Get-AtmAclProblems {
     return $problems.ToArray()
 }
 
+# B2-1: runtime evidence of the V0.2 collectors (Get-AtmRuntimeRefusals, Engine.Diagnose.ps1) as additional refusals.
+# Test seam, single assignment: the suite replaces the service and virtualization sources (and may set a deadline) inside
+# its own process so that no test depends on the runner's services or Hyper-V; the CLI and the TUI never set it.
+$script:AtmRuntimeEvidenceSources = $null
+
+function Get-AtmCleanRuntimeEvidence {
+    # One run of the runtime collectors over an inventory already taken (the preview's, the plan's or one root's
+    # revalidation inventory). Never reused for another inventory: a revalidation takes its own.
+    param($Inventory, [hashtable]$InventoryArgs = @{})
+    $a = @{ Inventory = $Inventory; InventoryArgs = $InventoryArgs }
+    if ($null -ne $script:AtmRuntimeEvidenceSources) {
+        foreach ($k in @('ServiceSource', 'VirtualizationSource', 'ProcessSource', 'DeadlineSeconds', 'Providers')) { if ($script:AtmRuntimeEvidenceSources.ContainsKey($k)) { $a[$k] = $script:AtmRuntimeEvidenceSources[$k] } }
+    }
+    return (Get-AtmRuntimeRefusals @a)
+}
+
+function Format-AtmRuntimeRefusal {
+    # Text of one runtime refusal: its code, what it means, and where it comes from (never "unused" or "safe").
+    param($Refusal)
+    $when = $(if ($null -ne $Refusal.ObservedUtc) { ([datetime]$Refusal.ObservedUtc).ToString('yyyy-MM-dd HH:mm:ss') + 'Z' } else { '-' })
+    $detail = $(if ($Refusal.Detail) { ' - ' + $Refusal.Detail } else { '' })
+    return (Get-AtmText 'runtime.reason' $Refusal.Code (Get-AtmText ('runtime.code.' + $Refusal.Code)) $(if ($Refusal.Collector) { $Refusal.Collector } else { '-' }) $(if ($Refusal.Relation) { $Refusal.Relation } else { '-' }) (Get-AtmText ('runtime.nature.' + $Refusal.Nature)) $(if ($Refusal.Coverage) { $Refusal.Coverage } else { '-' }) $when $detail)
+}
+
 function Test-AtmCandidate {
     <#
       Gates applied (in order) to one inventoried partition. Returns Category:
-        BLOCKED | INVESTIGATE | ELIGIBLE, plus Reasons and Requirements.
+        BLOCKED | INVESTIGATE | ELIGIBLE, plus Reasons, Requirements and RuntimeReasons.
       ELIGIBLE means "technically eligible for a human decision"; clean re-runs this immediately before deleting.
+      -RuntimeEvidence (B2-1, Get-AtmCleanRuntimeEvidence): after every gate below, its refusals for this partition are
+      added: the category can only stay or become stricter (BLOCKED > INVESTIGATE > ELIGIBLE), the reasons already
+      found stay first and in order, and the class of the partition is never changed. No refusal is not evidence of
+      non-use. Preview and clean always pass it; without it (direct calls) only the gates below apply.
     #>
+    [CmdletBinding()]
+    param($Partition, $Inventory, [switch]$IncludeOtherUsers, [switch]$SkipLockProbe, [switch]$ForClean, $RuntimeEvidence = $null)
+    $g = Get-AtmCandidateGate -Partition $Partition -Inventory $Inventory -IncludeOtherUsers:$IncludeOtherUsers -SkipLockProbe:$SkipLockProbe -ForClean:$ForClean
+    $refs = @()
+    if ($null -ne $RuntimeEvidence) {
+        $k = ([string]$Partition.Path).ToLowerInvariant()
+        if ($RuntimeEvidence.Failed) { $refs = @(New-AtmRuntimeRefusal -Code 'RUNTIME_NOT_COLLECTED' -Decision 'INVESTIGATE' -Collector 'runtime' -Evidence ([string]$RuntimeEvidence.Failed) -Relation 'COVERAGE' -Nature 'COVERAGE' -ObservedUtc $RuntimeEvidence.StartedUtc -Coverage 'FAILED') }
+        elseif ($RuntimeEvidence.ByPath.ContainsKey($k)) { $refs = @($RuntimeEvidence.ByPath[$k]) }
+        else { $refs = @(New-AtmRuntimeRefusal -Code 'RUNTIME_NOT_COLLECTED' -Decision 'INVESTIGATE' -Collector 'runtime' -Evidence 'PARTITION_NOT_IN_RUN' -Relation 'COVERAGE' -Nature 'COVERAGE' -ObservedUtc $RuntimeEvidence.StartedUtc -Coverage 'NOT_OBSERVABLE') }
+    }
+    $rank = @{ 'ELIGIBLE' = 0; 'INVESTIGATE' = 1; 'BLOCKED' = 2 }
+    $cat = $g.Category
+    foreach ($r in $refs) { if ($rank[$r.Decision] -gt $rank[$cat]) { $cat = $r.Decision } }
+    return [pscustomobject]@{ Category = $cat; Reasons = @(@($g.Reasons) + @($refs | ForEach-Object { Format-AtmRuntimeRefusal $_ })); Requirements = $g.Requirements; Probe = $g.Probe; RuntimeReasons = $refs }
+}
+
+function Get-AtmCandidateGate {
+    # The V0.1 gates of Test-AtmCandidate (unchanged), in order.
     [CmdletBinding()]
     param($Partition, $Inventory, [switch]$IncludeOtherUsers, [switch]$SkipLockProbe, [switch]$ForClean)
     $p = $Partition
@@ -149,12 +195,15 @@ function Test-AtmCandidate {
 }
 
 function Invoke-AtmPreview {
-    param($Inventory, [switch]$IncludeOtherUsers)
+    # B2-1: one runtime collection for the whole preview (never one per partition); each row carries it (Runtime) so the
+    # report can show, once, what was not observed for any partition. -InventoryArgs: the arguments of -Inventory.
+    param($Inventory, [switch]$IncludeOtherUsers, [hashtable]$InventoryArgs = @{})
+    $rt = Get-AtmCleanRuntimeEvidence -Inventory $Inventory -InventoryArgs $InventoryArgs
     $rows = New-Object System.Collections.Generic.List[object]
     foreach ($p in $Inventory.Partitions) {
         if ($p.Kind -eq 'NotScanned') { continue }
-        $g = Test-AtmCandidate -Partition $p -Inventory $Inventory -IncludeOtherUsers:$IncludeOtherUsers
-        $rows.Add([pscustomobject]@{ Partition = $p; Gate = $g })
+        $g = Test-AtmCandidate -Partition $p -Inventory $Inventory -IncludeOtherUsers:$IncludeOtherUsers -RuntimeEvidence $rt
+        $rows.Add([pscustomobject]@{ Partition = $p; Gate = $g; Runtime = $rt })
     }
     return $rows.ToArray()
 }
@@ -310,6 +359,9 @@ function Invoke-AtmCleanCore {
     $seen = @{}
     $ia = @{} + $InventoryArgs
     $inv = Invoke-AtmInventory @ia
+    # B2-1: one runtime collection for the plan, attached to the inventory the presenter receives (run notices).
+    $rt = Get-AtmCleanRuntimeEvidence -Inventory $inv -InventoryArgs $ia
+    $inv | Add-Member -NotePropertyName RuntimeEvidence -NotePropertyValue $rt
     foreach ($e in $syntaxOk) {
         $k = $e.Path.ToLowerInvariant()
         if ($seen.ContainsKey($k)) { $rejected.Add([pscustomobject]@{ Path = $e.Path; Source = $e.Source; Reasons = @('DUPLICADO_NA_ALLOWLIST') }); continue }
@@ -318,7 +370,7 @@ function Invoke-AtmCleanCore {
         if ($m.Count -ne 1) { $rejected.Add([pscustomobject]@{ Path = $e.Path; Source = $e.Source; Reasons = @('FORA_DAS_ROOTS_PERMITIDAS (' + (Get-AtmText 'reason.notRoot') + ')') }); continue }
         $p = $m[0]
         if (-not [string]::Equals($p.Path, $e.Path, [StringComparison]::Ordinal)) { $rejected.Add([pscustomobject]@{ Path = $e.Path; Source = $e.Source; Reasons = @('CAIXA_DIVERGENTE (' + (Get-AtmText 'reason.useExactly' $p.Path) + ')') }); continue }
-        $g = Test-AtmCandidate -Partition $p -Inventory $inv -IncludeOtherUsers:$IncludeOtherUsers -ForClean
+        $g = Test-AtmCandidate -Partition $p -Inventory $inv -IncludeOtherUsers:$IncludeOtherUsers -ForClean -RuntimeEvidence $rt
         $reasons = @($g.Reasons)
         if ($e.Fingerprint -and $e.Fingerprint -ne $p.Fingerprint) { $reasons += "ALTERADO_DESDE_O_PREVIEW (fingerprint $($e.Fingerprint) -> $($p.Fingerprint))" }
         if ($g.Category -ne 'ELIGIBLE' -or $reasons.Count -gt 0) { $rejected.Add([pscustomobject]@{ Path = $e.Path; Source = $e.Source; Reasons = $reasons }); continue }
@@ -379,13 +431,15 @@ function Invoke-AtmCleanCore {
                 $args2['OnlyRootPath'] = $p.Path
                 $args2['NoProgress'] = $true
                 $re = Invoke-AtmInventory @args2
+                # B2-1: fresh runtime evidence for this root, never the plan's (evidence may appear in between).
+                $rtRe = Get-AtmCleanRuntimeEvidence -Inventory $re -InventoryArgs $args2
                 $cur = @($re.Partitions | Where-Object { [string]::Equals($_.Path, $p.Path, [StringComparison]::OrdinalIgnoreCase) -and $_.Kind -ne 'NotScanned' -and $_.Kind -ne 'BaseLooseFiles' })
                 $why = @()
                 if ($cur.Count -ne 1) { $why += 'DESAPARECEU_OU_AMBIGUO_NA_REVALIDACAO' }
                 else {
                     $c = $cur[0]
                     if ($c.Fingerprint -ne $p.Fingerprint) { $why += "ALTERADO_APOS_CONFIRMACAO (fingerprint $($p.Fingerprint) -> $($c.Fingerprint))" }
-                    $g = Test-AtmCandidate -Partition $c -Inventory $re -IncludeOtherUsers:$IncludeOtherUsers -ForClean
+                    $g = Test-AtmCandidate -Partition $c -Inventory $re -IncludeOtherUsers:$IncludeOtherUsers -ForClean -RuntimeEvidence $rtRe
                     if ($g.Category -ne 'ELIGIBLE') { $why += $g.Reasons }
                 }
                 if ($why.Count -gt 0) {

@@ -271,6 +271,19 @@ called by `Invoke-AtmGitCommand`):
   change made before the check, never one made between the check and the write; after the run the same identity can
   change or delete the log. Test seams (stand-in deleter, presence check and
   writer) exist only in `Invoke-AtmClean`, past the gate, and no other file references them (static test).
+* **Runtime evidence as refusals (V0.3 B2-1; unreleased):** preview, the clean plan and each root's revalidation run the
+  V0.2 collectors once over the inventory just taken (`Get-AtmRuntimeRefusals`, Engine.Diagnose.ps1; the clean engine
+  only consumes its refusals and never reads the dependency correlation itself). A refusal can only keep or raise a
+  category (BLOCKED > INVESTIGATE > ELIGIBLE); the V0.1 gates, B1 (process coverage) included, are unchanged and run
+  first; the class of a partition is never changed. Blocking needs positive evidence tied to the root: a DIRECT edge
+  from a verified process (`REFERENCES_PATH`; `HOLDS_HANDLE_IN` and `WORKING_DIRECTORY_IN` never occur in a shipped
+  copy) or the LIVE session whose id is the root's name. Ambiguous or derived relations, unverified sessions, key
+  collisions, unreadable references, correlation limits and a dependent collector that FAILED or timed out are
+  INVESTIGATE. Services and virtual machines have no edge to a partition, so they never refuse a root by themselves.
+  Gaps that are the same for every root are run notices. What B2-1 adds over V0.1 is narrow: V0.1 already blocks direct
+  references and live sessions; B2-1 adds verified identities and provenance, a stricter session check, and refusals
+  for failed or timed-out collection. **It adds reasons to refuse; it does not demonstrate non-use and does not resolve
+  the authorization of real deletion.**
 * **Clean lock (V0.3 B8; unreleased; past the deletion gate only):** `Invoke-AtmClean` takes the named kernel mutex
   `Global\AgentTempManager.Clean` (`AtmCleanLock`, Native.cs) without waiting, before the first inventory, and releases it
   last, after the log, in a `finally`, once and only by the owner thread; a nested acquisition in the same process is

@@ -4327,6 +4327,173 @@ function Add-AtmFindingEvidence {
     return New-AtmFinding -Kind $Finding.Kind -Key $Finding.Key -State $Finding.RequestedState -Evidence (@($Finding.Evidence) + @($Evidence)) -Coverage (@($Finding.Coverage) + @($Coverage)) -Provider $Finding.Provider
 }
 
+# ---------------------------------------------------------------------------------------------
+# Runtime refusals of temporary partitions (V0.3 B2-1). One run of the collectors of this file over an inventory the
+# caller already took (Invoke-AtmDiagnoseRun -Inventory; no CPU sample), mapped to refusals per partition. A refusal
+# only ever adds a reason to refuse: positive evidence of use (a DIRECT edge from a verified process, or the LIVE
+# session whose session id is the partition's own name) is BLOCKED; an ambiguous or ancestor relation, an unverified
+# session identity, a key collision, an unreadable reference, a dependency limit, or a collector this partition depends
+# on that FAILED or timed out is INVESTIGATE. Nothing here says that a partition is unused: no refusal is not evidence
+# of non-use. The only edges that reach a temporary partition are REFERENCES_PATH, HOLDS_HANDLE_IN and
+# WORKING_DIRECTORY_IN; services and virtual machines have none (HOSTS_SERVICE ends at a service, ATTRIBUTED_TO at a
+# provider), so they never refuse a partition by themselves: a service or VM worker process only appears as the
+# provenance of a process edge. Gaps that are the same for every partition (a closed gate, a deferred collector, a
+# partial registry or process list, the V0.1 process coverage) are run notices, never attached to a partition. Keys are
+# computed with the run's own ephemeral pseudonymizer, closed before returning; no key leaves this function.
+# ---------------------------------------------------------------------------------------------
+
+$script:AtmRuntimeRefusalCodes = @('RUNTIME_USE_OBSERVED', 'RUNTIME_SESSION_LIVE', 'RUNTIME_ASSOCIATION_AMBIGUOUS', 'RUNTIME_ANCESTOR_REFERENCE', 'RUNTIME_SESSION_UNVERIFIED',
+    'RUNTIME_KEY_COLLISION', 'RUNTIME_OBSERVATION_INCOMPLETE', 'RUNTIME_TIMEOUT', 'RUNTIME_NOT_COLLECTED')
+$script:AtmRuntimeNatures = @('DIRECT', 'DERIVED', 'AMBIGUOUS', 'COVERAGE')
+$script:AtmRuntimeNoticeKinds = @('STRUCTURAL', 'NOT_PERTINENT', 'NOT_ATTRIBUTABLE')
+# Deadline of the run, checked between collectors (it interrupts nothing that already started; docs/USAGE).
+$script:AtmRuntimeDefaultDeadlineSeconds = 60
+# Collectors with no edge to a temporary partition: never a refusal of one (run notice only).
+$script:AtmRuntimeNotPertinent = @('services', 'service-properties', 'virtualization-platform', 'virtual-machines', 'virtualization-processes', 'agent-resources', 'process-resources')
+# Not observed in any shipped copy (gate closed, collector deferred): reason code by collector.
+$script:AtmRuntimeStructural = @{ 'handles' = 'HANDLE_SECURITY_GATE_CLOSED'; 'process-cwd' = 'WORKING_DIRECTORY_DEFERRED'; 'worktree-discovery' = 'WORKTREE_DIAGNOSTICS_GATE_CLOSED' }
+
+function New-AtmRuntimeRefusal {
+    # One refusal and its provenance: the collector and evidence code it comes from, the relation to the partition and
+    # its nature (DIRECT, DERIVED, AMBIGUOUS, or COVERAGE for a gap), when it was observed and the coverage status.
+    param([string]$Code, [string]$Decision, [string]$Collector, [string]$Evidence, [string]$Relation, [string]$Nature, $ObservedUtc, [string]$Coverage, [string]$Detail)
+    if ($script:AtmRuntimeRefusalCodes -cnotcontains $Code) { throw (Get-AtmText 'err.diagFinding' "runtime refusal '$Code'") }
+    if (@('BLOCKED', 'INVESTIGATE') -cnotcontains $Decision) { throw (Get-AtmText 'err.diagFinding' "runtime decision '$Decision'") }
+    if ($script:AtmRuntimeNatures -cnotcontains $Nature) { throw (Get-AtmText 'err.diagFinding' "runtime nature '$Nature'") }
+    [pscustomobject]@{ Code = $Code; Decision = $Decision; Collector = $Collector; Evidence = $Evidence; Relation = $Relation; Nature = $Nature
+        ObservedUtc = $(if ($null -ne $ObservedUtc) { ([datetime]$ObservedUtc).ToUniversalTime() } else { $null }); Coverage = $Coverage; Detail = $(if ($Detail) { $Detail } else { $null }) }
+}
+
+function Get-AtmRuntimeRefusals {
+    <#
+      -Inventory: the caller's V0.1 inventory (required). -InventoryArgs: the arguments it was taken with (a
+      ProcessesOverride there also feeds the process collection, as in Invoke-AtmDiagnose). -DeadlineSeconds: deadline
+      of the run. -ServiceSource / -VirtualizationSource / -ProcessSource / -Providers: test overrides. Returns StartedUtc,
+      FinishedUtc, DeadlineSeconds, Failed (the exception type code when the run threw; the consumer then refuses every
+      partition with RUNTIME_NOT_COLLECTED), ByPath (lower-case partition path -> refusals, in memory only), Notices
+      (Kind, Collector, Status, Reasons) and Coverage (collector, status, reasons, start, elapsed).
+    #>
+    param($Inventory, [hashtable]$InventoryArgs = @{}, [int]$DeadlineSeconds = $script:AtmRuntimeDefaultDeadlineSeconds, [scriptblock]$ServiceSource = $null,
+        [scriptblock]$VirtualizationSource = $null, [scriptblock]$ProcessSource = $null, $Providers = $null)
+    if ($null -eq $Inventory) { throw (Get-AtmText 'err.diagFinding' 'runtime refusals without an inventory') }
+    if ($DeadlineSeconds -lt 0) { throw (Get-AtmText 'err.diagDeadline' $DeadlineSeconds) }
+    $out = [ordered]@{ StartedUtc = [datetime]::UtcNow; FinishedUtc = $null; DeadlineSeconds = $DeadlineSeconds; Failed = $null; ByPath = @{}; Notices = @(); Coverage = @() }
+    $pz = New-AtmPseudonymizer
+    try {
+        $d = $null
+        # A run that throws refuses every partition (RUNTIME_NOT_COLLECTED): only the exception type is kept.
+        try {
+            $d = Invoke-AtmDiagnoseRun -InventoryArgs $InventoryArgs -Inventory $Inventory -IdentitySource $null -Providers $Providers -DeadlineSeconds $DeadlineSeconds -ProcessSource $ProcessSource `
+                -CpuSampleMs 0 -SelfPid $PID -SelfCreationUtc $null -Pseudonymizer $pz -PartitionKeyFunction $null -ServiceSource $ServiceSource -VirtualizationSource $VirtualizationSource
+        } catch { $out.Failed = ConvertTo-AtmExceptionCode $_.Exception.GetBaseException().GetType().Name }
+        if ($null -ne $d) {
+            # Worst record per collector (one non-conclusive record is enough).
+            $covBy = @{}
+            foreach ($c in @($d.Coverage | Where-Object { $null -ne $_ })) {
+                $ck = [string]$c.Collector
+                if (-not $covBy.ContainsKey($ck) -or ($script:AtmConclusiveCoverage -ccontains [string]$covBy[$ck].Status -and $script:AtmConclusiveCoverage -cnotcontains [string]$c.Status)) { $covBy[$ck] = $c }
+            }
+            $out.Coverage = @(foreach ($c in @($d.Coverage)) { [pscustomobject]@{ Collector = [string]$c.Collector; Status = [string]$c.Status; Reasons = @($c.Reasons); StartedUtc = $c.StartedUtc; ElapsedMs = $c.ElapsedMs } })
+            $sum = @{}; foreach ($sm in @($d.Graph.Summaries)) { $sum[[string]$sm.Kind + '|' + [string]$sm.Key] = $sm }
+            $fin = @{}; foreach ($f in @($d.Findings)) { $fk = [string]$f.Kind + '|' + [string]$f.Key; if (-not $fin.ContainsKey($fk)) { $fin[$fk] = $f } }
+            $inc = @{}
+            foreach ($e in @($d.Graph.Edges)) {
+                if ([string]$e.ToKind -cne 'TempPartition' -or @('REFERENCES_PATH', 'HOLDS_HANDLE_IN', 'WORKING_DIRECTORY_IN') -cnotcontains [string]$e.Relation) { continue }
+                if (-not $inc.ContainsKey([string]$e.To)) { $inc[[string]$e.To] = New-Object System.Collections.Generic.List[object] }
+                $inc[[string]$e.To].Add($e)
+            }
+            # Provenance of a source process: a service it hosts or a VM it runs as worker, both verified by the run.
+            $via = @{}
+            foreach ($f in @($d.Findings)) {
+                $vc = $(if ($f.Kind -ceq 'Service') { 'SERVICE_PROCESS_VERIFIED' } elseif ($f.Kind -ceq 'VirtualMachine') { 'VM_WORKER_VERIFIED' } else { $null })
+                if ($null -eq $vc) { continue }
+                foreach ($ev in @($f.Evidence)) { if ($ev.Code -ceq $vc -and $ev.Detail) { $via[[string]$ev.Detail] = $(if ($f.Kind -ceq 'Service') { 'SERVICE' } else { 'VIRTUAL_MACHINE' }) } }
+            }
+            $graphCov = $(if ($covBy.ContainsKey('dependency-graph')) { [string]$covBy['dependency-graph'].Status } else { 'NOT_OBSERVABLE' })
+            # A collector this partition depends on that FAILED or timed out (PARTIAL and NOT_OBSERVABLE are not
+            # attributable to one partition: run notices).
+            $gapOf = {
+                param([string]$Collector)
+                if (-not $covBy.ContainsKey($Collector)) { return $null }
+                $gc = $covBy[$Collector]
+                if ([string]$gc.Status -ceq 'TIMEOUT') { return (New-AtmRuntimeRefusal -Code 'RUNTIME_TIMEOUT' -Decision 'INVESTIGATE' -Collector $Collector -Evidence 'DEADLINE_EXCEEDED' -Relation 'COVERAGE' -Nature 'COVERAGE' -ObservedUtc $gc.StartedUtc -Coverage 'TIMEOUT' -Detail (@($gc.Reasons) -join ',')) }
+                if ([string]$gc.Status -ceq 'FAILED') { return (New-AtmRuntimeRefusal -Code 'RUNTIME_OBSERVATION_INCOMPLETE' -Decision 'INVESTIGATE' -Collector $Collector -Evidence 'COLLECTOR_FAILED' -Relation 'COVERAGE' -Nature 'COVERAGE' -ObservedUtc $gc.StartedUtc -Coverage 'FAILED' -Detail (@($gc.Reasons) -join ',')) }
+                return $null
+            }
+            $srcText = { param($Edges) @(foreach ($x in @($Edges | ForEach-Object { [string]$_.From } | Select-Object -Unique)) { $x + $(if ($via.ContainsKey($x)) { ' (' + $via[$x] + ')' } else { '' }) }) -join ', ' }
+            foreach ($part in @($Inventory.Partitions | Where-Object { $null -ne $_ -and $_.Kind -ne 'NotScanned' })) {
+                $rs = New-Object System.Collections.Generic.List[object]
+                $pk = ConvertTo-AtmPartitionKey -Pseudonymizer $pz -Provider ([string]$part.Provider) -Path ([string]$part.Path)
+                $pf = $fin['TempPartition|' + $pk]
+                $obs = $(if ($null -ne $pf -and @($pf.Evidence).Count -gt 0) { @($pf.Evidence)[0].ObservedUtc } else { $d.StartedUtc })
+                $sm = $sum['TempPartition|' + $pk]
+                $edges = $(if ($inc.ContainsKey($pk)) { $inc[$pk].ToArray() } else { @() })
+                if ($null -eq $sm) {
+                    $rs.Add((New-AtmRuntimeRefusal -Code 'RUNTIME_NOT_COLLECTED' -Decision 'INVESTIGATE' -Collector 'dependency-graph' -Evidence 'NO_SUMMARY' -Relation 'COVERAGE' -Nature 'COVERAGE' -ObservedUtc $obs -Coverage $graphCov))
+                } else {
+                    $dep = [string]$sm.Dependency
+                    $byStrength = { param([string]$S) return , @($edges | Where-Object { [string]$_.Strength -ceq $S }) }
+                    $relOf = { param($E) (@($E | ForEach-Object { [string]$_.Relation } | Select-Object -Unique) -join ',') }
+                    $evOf = { param($E) (@($E | ForEach-Object { @($_.Evidence) } | ForEach-Object { [string]$_.Code } | Select-Object -Unique) -join ',') }
+                    $colOf = { param($E) (@($E | ForEach-Object { @($_.Evidence) } | ForEach-Object { [string]$_.Collector } | Select-Object -Unique) -join ',') }
+                    if ($dep -ceq 'DEPENDENCY_OBSERVED') {
+                        $de = & $byStrength 'DIRECT'
+                        $roots = @($sm.Roots)
+                        $rs.Add((New-AtmRuntimeRefusal -Code 'RUNTIME_USE_OBSERVED' -Decision 'BLOCKED' -Collector (& $colOf $de) -Evidence (& $evOf $de) -Relation (& $relOf $de) -Nature 'DIRECT' -ObservedUtc $obs -Coverage $graphCov `
+                                    -Detail ((Get-AtmText 'runtime.detail.sources' (& $srcText $de)) + $(if ($roots.Count) { '; ' + (Get-AtmText 'runtime.detail.agentRoots' ($roots -join ', ')) } else { '' }))))
+                    } elseif ($dep -ceq 'ANCESTOR_REFERENCE') {
+                        $ae = & $byStrength 'ANCESTOR'
+                        $rs.Add((New-AtmRuntimeRefusal -Code 'RUNTIME_ANCESTOR_REFERENCE' -Decision 'INVESTIGATE' -Collector (& $colOf $ae) -Evidence (& $evOf $ae) -Relation (& $relOf $ae) -Nature 'DERIVED' -ObservedUtc $obs -Coverage $graphCov -Detail (Get-AtmText 'runtime.detail.sources' (& $srcText $ae))))
+                    } elseif ($dep -ceq 'DEPENDENCY_AMBIGUOUS') {
+                        $me = & $byStrength 'AMBIGUOUS'
+                        $rs.Add((New-AtmRuntimeRefusal -Code 'RUNTIME_ASSOCIATION_AMBIGUOUS' -Decision 'INVESTIGATE' -Collector (& $colOf $me) -Evidence (@(@(& $evOf $me) + @($sm.Reasons) | Where-Object { $_ }) -join ',') -Relation (& $relOf $me) -Nature 'AMBIGUOUS' -ObservedUtc $obs -Coverage $graphCov -Detail (Get-AtmText 'runtime.detail.sources' (& $srcText $me))))
+                    } elseif ($dep -ceq 'UNKNOWN') {
+                        # COVERAGE_INCOMPLETE alone is not attributable to this partition (the collectors it depends on
+                        # are checked below); the other reasons are about this partition's own evidence.
+                        foreach ($why in @($sm.Reasons)) {
+                            if ($why -ceq 'KEY_COLLISION') { $rs.Add((New-AtmRuntimeRefusal -Code 'RUNTIME_KEY_COLLISION' -Decision 'INVESTIGATE' -Collector 'dependency-graph' -Evidence 'KEY_COLLISION' -Relation 'COVERAGE' -Nature 'COVERAGE' -ObservedUtc $obs -Coverage $graphCov)) }
+                            elseif ($why -ceq 'REFERENCE_UNREADABLE' -or $why -ceq 'GRAPH_LIMIT' -or $why -ceq 'HOLDERS_CAPPED') { $rs.Add((New-AtmRuntimeRefusal -Code 'RUNTIME_OBSERVATION_INCOMPLETE' -Decision 'INVESTIGATE' -Collector 'dependency-graph' -Evidence $why -Relation 'COVERAGE' -Nature 'COVERAGE' -ObservedUtc $obs -Coverage $graphCov -Detail $(if ($covBy.ContainsKey('dependency-graph')) { @($covBy['dependency-graph'].Reasons) -join ',' } else { $null }))) }
+                        }
+                    }
+                }
+                foreach ($dc in @('process-snapshot', 'handles', 'process-cwd')) { $g0 = & $gapOf $dc; if ($null -ne $g0) { $rs.Add($g0) } }
+                if ([string]$part.Kind -ceq 'SessionRoot') {
+                    $prov = ([string]$part.Provider).ToLowerInvariant()
+                    $g1 = & $gapOf ('sessions-' + $prov); if ($null -ne $g1) { $rs.Add($g1) }
+                    $sk = ConvertTo-AtmSessionKey -Pseudonymizer $pz -Provider $prov -ProfileSid ([string]$part.Sid) -ProfilePath ([string]$part.ProfilePath) -SessionId ([string]$part.Name)
+                    $sf = $fin['AgentSession|' + $sk]
+                    if ($null -ne $sf) {
+                        $codes = @($sf.Evidence | ForEach-Object { [string]$_.Code })
+                        $sObs = $(if (@($sf.Evidence).Count -gt 0) { @($sf.Evidence)[0].ObservedUtc } else { $obs })
+                        $sCov = (@($sf.Coverage | ForEach-Object { '{0}:{1}' -f $_.Collector, $_.Status }) -join ',')
+                        $sReason = @($sf.Evidence | Where-Object { $_.Code -ceq 'SESSION_PROCESS' } | ForEach-Object { [string]$_.Detail })
+                        $conflict = @($codes | Where-Object { $_ -ceq 'SESSION_KEY_COLLISION' -or $_ -ceq 'SESSION_ENTRIES_CONFLICT' })
+                        if ($conflict.Count -gt 0) {
+                            $rs.Add((New-AtmRuntimeRefusal -Code 'RUNTIME_SESSION_UNVERIFIED' -Decision 'INVESTIGATE' -Collector ('sessions-' + $prov) -Evidence $conflict[0] -Relation 'SESSION_OF_ROOT' -Nature 'AMBIGUOUS' -ObservedUtc $sObs -Coverage $sCov))
+                        } elseif ([string]$sf.RequestedState -ceq 'LIVE') {
+                            $pkey = @($sf.Evidence | Where-Object { $_.Code -ceq 'SESSION_PROCESS_KEY' } | ForEach-Object { [string]$_.Detail })
+                            $rs.Add((New-AtmRuntimeRefusal -Code 'RUNTIME_SESSION_LIVE' -Decision 'BLOCKED' -Collector ('sessions-' + $prov) -Evidence 'SESSION_PROCESS_KEY' -Relation 'RUNS_SESSION' -Nature 'DIRECT' -ObservedUtc $sObs -Coverage $sCov -Detail (Get-AtmText 'runtime.detail.sources' (@($pkey) -join ', '))))
+                        } elseif (@('IDENTITY_UNVERIFIED', 'UNKNOWN') -ccontains [string]$sf.RequestedState) {
+                            $rs.Add((New-AtmRuntimeRefusal -Code 'RUNTIME_SESSION_UNVERIFIED' -Decision 'INVESTIGATE' -Collector ('sessions-' + $prov) -Evidence 'SESSION_PROCESS' -Relation 'SESSION_OF_ROOT' -Nature 'AMBIGUOUS' -ObservedUtc $sObs -Coverage $sCov -Detail (@($sReason) -join ',')))
+                        }
+                        # PID_REUSED and SESSION_PROCESS_NOT_FOUND add no refusal; they never make a partition eligible.
+                    }
+                }
+                $out.ByPath[([string]$part.Path).ToLowerInvariant()] = $rs.ToArray()
+            }
+            $notices = New-Object System.Collections.Generic.List[object]
+            foreach ($c in @($d.Coverage | Where-Object { $null -ne $_ -and $script:AtmConclusiveCoverage -cnotcontains [string]$_.Status })) {
+                $cn = [string]$c.Collector
+                $kind = $(if ($script:AtmRuntimeStructural.ContainsKey($cn) -and @($c.Reasons) -ccontains $script:AtmRuntimeStructural[$cn]) { 'STRUCTURAL' } elseif ($script:AtmRuntimeNotPertinent -ccontains $cn -or $cn.StartsWith('provider-', [StringComparison]::Ordinal)) { 'NOT_PERTINENT' } else { 'NOT_ATTRIBUTABLE' })
+                $notices.Add([pscustomobject]@{ Kind = $kind; Collector = $cn; Status = [string]$c.Status; Reasons = @($c.Reasons) })
+            }
+            $out.Notices = $notices.ToArray()
+        }
+    } finally { Close-AtmPseudonymizer $pz }
+    $out.FinishedUtc = [datetime]::UtcNow
+    return [pscustomobject]$out
+}
+
 function Invoke-AtmDiagnose {
     <#
       Read-only diagnose run. Never calls the clean engine, never requests elevation.
@@ -4360,7 +4527,10 @@ function Invoke-AtmDiagnoseRun {
     # The body of Invoke-AtmDiagnose, with its pseudonymizer (parameters already checked there).
     param([hashtable]$InventoryArgs, [scriptblock]$IdentitySource, $Providers, [int]$DeadlineSeconds, [scriptblock]$ProcessSource, [int]$CpuSampleMs, $SelfPid, $SelfCreationUtc,
         $Pseudonymizer, [scriptblock]$PartitionKeyFunction, [string[]]$RepositoryPaths = @(), [scriptblock]$HandleQuery = $null, [scriptblock]$ServiceSource = $null,
-        [scriptblock]$VirtualizationSource = $null)
+        [scriptblock]$VirtualizationSource = $null, $Inventory = $null)
+    # -Inventory (V0.3 B2-1, Get-AtmRuntimeRefusals only): a V0.1 inventory the caller already took, used instead of
+    # taking another one, so the findings describe the same partitions; its coverage is read from it. Without it (the
+    # diagnose command and every other caller) nothing changes.
     $started = [datetime]::UtcNow
     $deadline = $started.AddSeconds($DeadlineSeconds)
     $coverage = New-Object System.Collections.Generic.List[object]
@@ -4400,7 +4570,14 @@ function Invoke-AtmDiagnoseRun {
 
     # V0.1 temporary-directory inventory (read-only) and the coverage it implies.
     $inv = $null
-    if ([datetime]::UtcNow -ge $deadline) {
+    if ($null -ne $Inventory) {
+        $inv = $Inventory
+        $invStarted = $inv.StartedUtc
+        $invMs = [long][Math]::Max(0, ($inv.FinishedUtc - $inv.StartedUtc).TotalMilliseconds)
+        $invCov = @(Get-AtmInventoryCoverage -Inventory $inv -Identity $identity -StartedUtc $invStarted -ElapsedMs $invMs -OverDeadline $false)
+        foreach ($c in $invCov) { $coverage.Add($c) }
+        foreach ($f in @(Get-AtmPartitionFindings -Partitions @($inv.Partitions) -InventoryCoverage @($invCov | Where-Object { $_.Collector -cne 'profile-discovery' }) -Pseudonymizer $Pseudonymizer -KeyFunction $PartitionKeyFunction)) { $findings.Add($f) }
+    } elseif ([datetime]::UtcNow -ge $deadline) {
         foreach ($c in @('inventory', 'processes', 'temp-profiles', 'profile-discovery')) { $coverage.Add((New-AtmDeadlineCoverage $c)) }
     } else {
         $ia = @{} + $InventoryArgs

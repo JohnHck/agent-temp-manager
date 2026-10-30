@@ -257,8 +257,28 @@ function Show-AtmPathDetail {
     Write-AtmTable (@($rows) | Sort-Object Sort -Descending | ForEach-Object { $_.Row })
 }
 
+function Show-AtmRuntimeNotices {
+    # B2-1: once per preview or plan, what the runtime evidence did not observe for any partition (closed gates, deferred
+    # collectors), what it observed with no relation to any partition (services, virtual machines), and what was
+    # incomplete for the run without being attributable to one partition. Never "unused" or "safe to delete".
+    param($Runtime)
+    if ($null -eq $Runtime) { return }
+    $ms = $(if ($null -ne $Runtime.FinishedUtc) { [long]($Runtime.FinishedUtc - $Runtime.StartedUtc).TotalMilliseconds } else { 0 })
+    Write-Host ('  ' + (Get-AtmText 'runtime.collected' (Format-AtmTime $Runtime.StartedUtc) $ms $Runtime.DeadlineSeconds)) -ForegroundColor Cyan
+    if ($Runtime.Failed) { Write-Host ('  ' + (Get-AtmText 'runtime.failed' $Runtime.Failed)) -ForegroundColor Yellow }
+    foreach ($kind in @('STRUCTURAL', 'NOT_PERTINENT', 'NOT_ATTRIBUTABLE')) {
+        $ns = @(@($Runtime.Notices) | Where-Object { $null -ne $_ -and $_.Kind -ceq $kind })
+        if ($ns.Count -eq 0) { continue }
+        $txt = (@($ns | ForEach-Object { '{0} {1}{2}' -f $_.Collector, $_.Status, $(if (@($_.Reasons).Count -gt 0) { ' (' + (@($_.Reasons) -join ',') + ')' } else { '' }) }) -join '; ')
+        Write-Host ('  ' + (Get-AtmText ('runtime.notice.' + $kind) $txt)) -ForegroundColor DarkYellow
+    }
+    Write-Host ('  ' + (Get-AtmText 'runtime.noEvidenceIsNotUnused')) -ForegroundColor Yellow
+}
+
 function Show-AtmPreview {
     param($Inventory, $Rows, [string]$User, [string]$Project, [string]$Root)
+    $rt = @(@($Rows) | Where-Object { $null -ne $_ -and $_.PSObject.Properties['Runtime'] -and $null -ne $_.Runtime } | Select-Object -First 1)
+    if ($rt.Count -gt 0) { Show-AtmRuntimeNotices -Runtime $rt[0].Runtime }
     $sel = @(Select-AtmPartitions -Inventory $Inventory -User $User -Project $Project -Root $Root)
     $selPaths = @{}
     foreach ($p in $sel) { $selPaths[$p.Path + '|' + $p.Kind + '|' + $p.Name] = $true }
@@ -291,6 +311,7 @@ function Show-AtmPreview {
 
 function Show-AtmCleanPlan {
     param($Verified, $Rejected, $Inventory)
+    if ($null -ne $Inventory -and $Inventory.PSObject.Properties['RuntimeEvidence']) { Show-AtmRuntimeNotices -Runtime $Inventory.RuntimeEvidence }
     Write-AtmHeader (Get-AtmText 'clean.rejectedHeader')
     Write-AtmTable (@($Rejected) | ForEach-Object { New-AtmRow ([ordered]@{ 'col.origin' = $_.Source; 'col.path' = $_.Path; 'col.reasons' = (@($_.Reasons) -join ' ; ') }) })
     Write-AtmHeader (Get-AtmText 'clean.approvedHeader')

@@ -217,7 +217,7 @@ try {
         }
         'preview' {
             $inv = Invoke-AtmInventory @cliInvArgs
-            $rows = Invoke-AtmPreview -Inventory $inv -IncludeOtherUsers:$IncludeOtherUsers
+            $rows = Invoke-AtmPreview -Inventory $inv -IncludeOtherUsers:$IncludeOtherUsers -InventoryArgs $cliInvArgs
             Show-AtmPreview -Inventory $inv -Rows $rows -User $User -Project $Project -Root $Root
             exit 0
         }

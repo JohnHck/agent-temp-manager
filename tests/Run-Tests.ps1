@@ -39,6 +39,10 @@ $script:AtmRealDeletionEnabled = $true
 # real clean: a test name of its own, only inside this process (dedicated tests check the shipped constant).
 $shippedCleanLockName = $script:AtmCleanLockName
 $script:AtmCleanLockName = 'Global\AgentTempManager.Test.' + [guid]::NewGuid().ToString('N')
+# B2-1: the runtime evidence of preview and clean never queries this runner's services or Hyper-V (deterministic, fast):
+# empty service and virtualization sources, only inside this process (dedicated tests check the shipped $null).
+$shippedRuntimeSources = $script:AtmRuntimeEvidenceSources
+$script:AtmRuntimeEvidenceSources = @{ ServiceSource = { param($Names) @() }; VirtualizationSource = { param($Op) @() } }
 
 $me = Get-AtmCurrentIdentity
 $results = New-Object System.Collections.Generic.List[object]
@@ -480,6 +484,22 @@ function New-TestCleanCounter {
     $k.Inventory = { $k.Inv++; throw 'INVENTORY_CALLED' }.GetNewClosure()
     return $k
 }
+# B2-1 helpers: a V0.1-shaped process row (the same rows feed the V0.1 snapshot and the V0.2 collection), a time at the
+# CIM resolution (1 microsecond, so a recorded session start can match exactly), a session registry entry of a test
+# profile, and the preview row of one path.
+function New-TestRuntimeProc {
+    param([int]$ProcId, [string]$Name, [string]$CommandLine, $Created = (Get-Date).AddMinutes(-30), [int]$Parent = 1)
+    return [pscustomobject]@{ ProcessId = $ProcId; Name = $Name; ParentProcessId = $Parent; CommandLine = $CommandLine; CreationDate = $Created }
+}
+function ConvertTo-TestMicroUtc { param([datetime]$Value) return (New-Object DateTime (([long]($Value.ToUniversalTime().Ticks / 10)) * 10), ([DateTimeKind]::Utc)) }
+function Write-TestSessionFile {
+    param($ProfileInfo, [string]$SessionId, [int]$ProcId, $ProcStartUtc = $null, [string]$File = 'b2s.json')
+    $o = [ordered]@{ pid = $ProcId; sessionId = $SessionId; cwd = 'C:\work\proj' }
+    if ($null -ne $ProcStartUtc) { $o['procStart'] = [string]([datetime]$ProcStartUtc).ToFileTimeUtc() }
+    [IO.File]::WriteAllText((Join-Path $ProfileInfo.ProfilePath ('.claude\sessions\' + $File)), ($o | ConvertTo-Json -Compress))
+}
+function Get-TestPreviewRow { param($Rows, [string]$Path) return @(@($Rows) | Where-Object { [string]::Equals($_.Partition.Path, $Path, [StringComparison]::OrdinalIgnoreCase) -and $_.Partition.Kind -ne 'BaseLooseFiles' })[0] }
+function Get-TestRuntimeCodes { param($Gate) return (@(@($Gate.RuntimeReasons) | ForEach-Object { $_.Code } | Sort-Object -Unique) -join ',') }
 function New-TestCleanLogDir {
     # A new folder under the sandbox for real clean logs; its files stay until the sandbox goes. When the log's folder
     # policy refuses it on a sandbox this run could not give a single-owner ACL (a standard session on a machine whose
@@ -1567,9 +1587,12 @@ Set-StrictMode -Version 2.0
 Initialize-AtmNative -LibDir (Join-Path $Src 'lib')
 foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $Src 'providers') -Filter '*.ps1' -File | Sort-Object Name)) { . $f.FullName }
 . (Join-Path $Src 'lib\Engine.Clean.ps1')
+. (Join-Path $Src 'lib\Engine.Diagnose.ps1')
 $script:AtmRealDeletionEnabled = $true
 # B8: a test lock name of its own (this child ends inside the run, so it abandons that mutex), never the product name.
 $script:AtmCleanLockName = $LockName
+# B2-1: as the suite, no query of this runner's services or Hyper-V.
+$script:AtmRuntimeEvidenceSources = @{ ServiceSource = { param($Names) @() }; VirtualizationSource = { param($Op) @() } }
 $prof = [pscustomobject]@{ Sid = $Sid; UserName = 'TEST\t1intr'; ProfilePath = $ProfileRoot; Loaded = $true; Special = $false; Origin = 'Test'; EnvStatus = 'OK'
     TempCandidates = @([pscustomobject]@{ TempPath = $Temp; Source = 'test' }); EnvValues = @{}; EnvKnown = $true; Notes = @() }
 $ia = @{ ProfilesOverride = @($prof); ProcessesOverride = @([pscustomobject]@{ ProcessId = 1; Name = 'idle.exe'; ParentProcessId = 0; CommandLine = 'idle.exe'; CreationDate = (Get-Date).AddHours(-1) })
@@ -1852,6 +1875,202 @@ exit 0
     Test-Case 'Clean lock (B8)' 'Matriz entre usuarios, sessoes e niveis de elevacao (operator-only): NAO_TESTADO' {
         $script:caseSkipped = $true
         $script:caseNote = 'dois usuarios, sessoes console/RDP, processo elevado e nao elevado e pre-criacao por usuario comum dependem do operador; a suite cobre so processos da mesma identidade'
+    }
+
+    # ------------------------------------------------------------------ runtime evidence (B2-1)
+    # Synthetic process rows (the same rows feed the V0.1 snapshot and the V0.2 collection), the suite's empty service and
+    # virtualization sources unless a case sets its own, the stand-in deleter wherever clean runs.
+    Test-Case 'Evidencia de execucao (B2-1)' 'Relacao direta: processo verificado com referencia direta -> BLOCKED com RUNTIME_USE_OBSERVED e proveniencia completa; motivos V0.1 primeiro e inalterados; classe inalterada; clean recusa sem chamar o deleter' {
+        $p = New-TestProfile 'b2direct'
+        $r = New-TestRoot -ProfileInfo $p
+        $procs = New-Procs -Extra @((New-TestRuntimeProc 801 'node.exe' "node $r\x.js"))
+        $inv = Inv -Profiles @($p) -Procs $procs
+        $base = Test-AtmCandidate -Partition (Find-Part $inv $r) -Inventory $inv
+        $row = Get-TestPreviewRow (Invoke-AtmPreview -Inventory $inv -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs)) $r
+        $g = $row.Gate
+        Assert-True ($g.Category -ceq 'BLOCKED' -and $row.Partition.Class -ceq 'ACTIVE_EVIDENCE') "categoria e classe ($($g.Category) $($row.Partition.Class))"
+        Assert-Eq ((@($g.Reasons)[0..(@($base.Reasons).Count - 1)]) -join '|') (@($base.Reasons) -join '|') 'motivos anteriores primeiro e inalterados'
+        $u = @($g.RuntimeReasons | Where-Object { $_.Code -ceq 'RUNTIME_USE_OBSERVED' })
+        Assert-Eq $u.Count 1 "um motivo de uso observado ($(Get-TestRuntimeCodes $g))"
+        $x = $u[0]
+        Assert-True ($x.Decision -ceq 'BLOCKED' -and $x.Nature -ceq 'DIRECT' -and $x.Relation -ceq 'REFERENCES_PATH' -and $x.Collector -ceq 'inventory' -and $x.Evidence -ceq 'PATH_REFERENCE_DIRECT' -and $x.Coverage -ceq 'COMPLETE' -and $null -ne $x.ObservedUtc -and [string]$x.Detail -match '801@') "proveniencia: $($x.Decision) $($x.Nature) $($x.Relation) $($x.Collector) $($x.Evidence) $($x.Coverage) $($x.Detail)"
+        Assert-True (@($g.Reasons | Where-Object { $_ -like 'RUNTIME_USE_OBSERVED:*' }).Count -eq 1) 'motivo visivel no texto do preview'
+        $d = New-TestCleanDeleter
+        $c = Invoke-AtmClean -Entries @([pscustomobject]@{ Source = 't'; Path = $r; Fingerprint = $null }) -PlanPresenter $presenter -ConfirmationReader ${function:Confirm-Correct} -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs) -LogWriter (New-TestCleanLogWriter) -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+        Assert-True ($c.Aborted -ceq 'NENHUM_CAMINHO_ELEGIVEL' -and $d.Calls.Count -eq 0 -and ((@($c.Rejected)[0].Reasons -join ' ') -match 'RUNTIME_USE_OBSERVED')) "clean: recusado com o motivo, deleter nunca chamado ($($c.Aborted))"
+        Assert-True ([IO.File]::Exists((Join-Path $r 'sub\b.bin'))) 'nada apagado'
+    }
+    Test-Case 'Evidencia de execucao (B2-1)' 'Sessao da propria raiz: viva com identidade exata -> RUNTIME_SESSION_LIVE BLOCKED; sem hora registrada -> RUNTIME_SESSION_UNVERIFIED INVESTIGATE; PID reutilizado -> nenhum motivo e nenhuma promocao' {
+        $t = ConvertTo-TestMicroUtc ((Get-Date).AddMinutes(-20))
+        $cases = @(
+            @{ Tag = 'viva'; Start = $t; Want = 'RUNTIME_SESSION_LIVE'; Cat = 'BLOCKED' },
+            @{ Tag = 'sem hora'; Start = $null; Want = 'RUNTIME_SESSION_UNVERIFIED'; Cat = 'INVESTIGATE' },
+            @{ Tag = 'pid reutilizado'; Start = $t.AddHours(-1); Want = ''; Cat = $null })
+        foreach ($k in $cases) {
+            $p = New-TestProfile ('b2sess' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+            $r = New-TestRoot -ProfileInfo $p
+            $procs = New-Procs -Extra @((New-TestRuntimeProc 802 'claude.exe' 'claude' $t))
+            Write-TestSessionFile -ProfileInfo $p -SessionId (Split-Path $r -Leaf) -ProcId 802 -ProcStartUtc $k.Start
+            $inv = Inv -Profiles @($p) -Procs $procs
+            $base = Test-AtmCandidate -Partition (Find-Part $inv $r) -Inventory $inv
+            $g = (Get-TestPreviewRow (Invoke-AtmPreview -Inventory $inv -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs)) $r).Gate
+            $codes = Get-TestRuntimeCodes $g
+            Assert-Eq $codes $k.Want "$($k.Tag): motivos de execucao"
+            $want = $(if ($k.Cat) { $k.Cat } else { $base.Category })
+            Assert-Eq $g.Category $want "$($k.Tag): categoria (antes $($base.Category))"
+            if ($k.Want) {
+                $x = @($g.RuntimeReasons)[0]
+                Assert-True ($x.Collector -ceq 'sessions-claude-code' -and $x.Nature -ceq $(if ($k.Cat -ceq 'BLOCKED') { 'DIRECT' } else { 'AMBIGUOUS' }) -and $null -ne $x.ObservedUtc -and $x.Coverage -like '*sessions-claude-code:*') "$($k.Tag): proveniencia ($($x.Collector) $($x.Nature) $($x.Coverage))"
+            } else { Assert-Eq (@($g.Reasons) -join '|') (@($base.Reasons) -join '|') "$($k.Tag): motivos iguais aos anteriores" }
+        }
+    }
+    Test-Case 'Evidencia de execucao (B2-1)' 'Ligacao ambigua ou derivada: referencia de processo sem identidade verificavel -> RUNTIME_ASSOCIATION_AMBIGUOUS; referencia a pasta acima da raiz -> RUNTIME_ANCESTOR_REFERENCE; ambas INVESTIGATE, nunca uso' {
+        $p = New-TestProfile 'b2amb'
+        $r1 = New-TestRoot -ProfileInfo $p -Slug 'C--amb-one'; $r2 = New-TestRoot -ProfileInfo $p -Slug 'C--amb-two'
+        $procs = New-Procs -Extra @((New-TestRuntimeProc 803 'node.exe' "node $r1\y.js" $null), (New-TestRuntimeProc 804 'node.exe' "node $([IO.Path]::GetDirectoryName($r2))"))
+        $inv = Inv -Profiles @($p) -Procs $procs
+        $rows = Invoke-AtmPreview -Inventory $inv -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs)
+        $g1 = (Get-TestPreviewRow $rows $r1).Gate; $g2 = (Get-TestPreviewRow $rows $r2).Gate
+        $a = @($g1.RuntimeReasons | Where-Object { $_.Code -ceq 'RUNTIME_ASSOCIATION_AMBIGUOUS' })
+        Assert-True ($a.Count -eq 1 -and $a[0].Decision -ceq 'INVESTIGATE' -and $a[0].Nature -ceq 'AMBIGUOUS' -and @($g1.RuntimeReasons | Where-Object { $_.Code -ceq 'RUNTIME_USE_OBSERVED' }).Count -eq 0) "identidade nao verificada: ambigua, nunca uso ($(Get-TestRuntimeCodes $g1))"
+        $n = @($g2.RuntimeReasons | Where-Object { $_.Code -ceq 'RUNTIME_ANCESTOR_REFERENCE' })
+        Assert-True ($n.Count -eq 1 -and $n[0].Decision -ceq 'INVESTIGATE' -and $n[0].Nature -ceq 'DERIVED' -and $g2.Category -ceq 'INVESTIGATE') "ancestral: derivada, investigar ($(Get-TestRuntimeCodes $g2) $($g2.Category))"
+        Assert-True ($g1.Category -ne 'ELIGIBLE') 'nenhuma das duas elegivel'
+    }
+    Test-Case 'Evidencia de execucao (B2-1)' 'Servico e VM: processo de servico ou de VM com referencia direta a raiz -> uso observado com a proveniencia SERVICE ou VIRTUAL_MACHINE; servico ou VM sem relacao -> nenhum motivo por raiz (a raiz elegivel continua ELEGIVEL)' {
+        $p = New-TestProfile 'b2svc'
+        $rs = New-TestRoot -ProfileInfo $p -Slug 'C--svc-a'; $rv = New-TestRoot -ProfileInfo $p -Slug 'C--svc-b'; $rf = New-TestRoot -ProfileInfo $p -Slug 'C--svc-c'
+        $procs = New-Procs -Extra @((New-TestRuntimeProc 805 'svc.exe' "svc.exe $rs\s.db"), (New-TestRuntimeProc 806 'vmwp.exe' "vmwp.exe $rv\v.vhdx"), (New-TestRuntimeProc 807 'other.exe' 'other.exe --idle'))
+        $fakeSvc = [pscustomobject]@{ Id = 'fake-svc'; DisplayName = 'F'; ContractVersion = 2; Capabilities = @('runtime'); GetServiceHints = { @([pscustomobject]@{ Name = 'B2LinkedSvc' }, [pscustomobject]@{ Name = 'B2FreeSvc' }) } }
+        $svcRows = @(
+            [pscustomobject]@{ Name = 'B2LinkedSvc'; State = 'Running'; StartMode = 'Auto'; DelayedAutoStart = $false; StartName = 'LocalSystem'; ProcessId = 805; PathName = 'C:\Windows\System32\svc.exe' },
+            [pscustomobject]@{ Name = 'B2FreeSvc'; State = 'Running'; StartMode = 'Auto'; DelayedAutoStart = $false; StartName = 'LocalSystem'; ProcessId = 807; PathName = 'C:\Windows\System32\other.exe' })
+        $vm = [pscustomobject]@{ Name = '11111111-2222-3333-4444-555555555555'; Caption = 'Virtual Machine'; Description = 'Microsoft Virtual Computer System'; ElementName = 'b2-vm'; EnabledState = 2; ProcessID = 806 }
+        $hostRow = [pscustomobject]@{ Name = 'B2-HOST'; Caption = 'Hosting Computer System'; Description = 'Microsoft Hosting Computer System'; ElementName = 'B2-HOST'; EnabledState = 2; ProcessID = $null }
+        $vt = @{ Hypervisor = @([pscustomobject]@{ HypervisorPresent = $true }); NamespaceRoot = @([pscustomobject]@{ Name = 'virtualization' }); NamespaceV2 = @([pscustomobject]@{ Name = 'v2' }); Vmms = @([pscustomobject]@{ Name = 'vmms'; State = 'Running' }); Vms = @($hostRow, $vm) }
+        $prev = $script:AtmRuntimeEvidenceSources
+        $script:AtmRuntimeEvidenceSources = @{ Providers = @((Get-AtmProviders | Where-Object { $_.Id -ceq 'claude-code' }), $fakeSvc); ServiceSource = ({ param($Names) $svcRows }.GetNewClosure()); VirtualizationSource = ({ param($Op) @($vt[$Op]) }.GetNewClosure()) }
+        try {
+            $inv = Inv -Profiles @($p) -Procs $procs
+            $rows = Invoke-AtmPreview -Inventory $inv -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs)
+        } finally { $script:AtmRuntimeEvidenceSources = $prev }
+        $us = @((Get-TestPreviewRow $rows $rs).Gate.RuntimeReasons | Where-Object { $_.Code -ceq 'RUNTIME_USE_OBSERVED' })
+        Assert-True ($us.Count -eq 1 -and [string]$us[0].Detail -match '805@\d+ \(SERVICE\)') "servico com referencia: uso observado com proveniencia ($(if ($us.Count) { $us[0].Detail }))"
+        $uv = @((Get-TestPreviewRow $rows $rv).Gate.RuntimeReasons | Where-Object { $_.Code -ceq 'RUNTIME_USE_OBSERVED' })
+        Assert-True ($uv.Count -eq 1 -and [string]$uv[0].Detail -match '806@\d+ \(VIRTUAL_MACHINE\)') "VM com referencia: uso observado com proveniencia ($(if ($uv.Count) { $uv[0].Detail }))"
+        $gf = (Get-TestPreviewRow $rows $rf).Gate
+        $bf = Test-AtmCandidate -Partition (Find-Part $inv $rf) -Inventory $inv
+        Assert-True (@($gf.RuntimeReasons).Count -eq 0 -and $gf.Category -ceq $bf.Category -and $bf.Category -ceq 'ELIGIBLE') "servico em execucao e VM sem relacao: nenhum motivo por raiz ($(Get-TestRuntimeCodes $gf); $($gf.Category))"
+    }
+    Test-Case 'Evidencia de execucao (B2-1)' 'Evidencia positiva com cobertura parcial: processo ilegivel (B1 intacto) e referencia direta de outro -> uso observado mantido; raiz sem referencia segue bloqueada pela cobertura de processos, sem motivo de execucao inventado' {
+        $p = New-TestProfile 'b2partial'
+        $r1 = New-TestRoot -ProfileInfo $p -Slug 'C--part-a'; $r2 = New-TestRoot -ProfileInfo $p -Slug 'C--part-b'
+        $procs = New-Procs -Extra @((New-TestRuntimeProc 808 'secret.exe' $null), (New-TestRuntimeProc 809 'node.exe' "node $r1\z.js"))
+        $inv = Inv -Profiles @($p) -Procs $procs
+        $rows = Invoke-AtmPreview -Inventory $inv -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs)
+        $g1 = (Get-TestPreviewRow $rows $r1).Gate; $g2 = (Get-TestPreviewRow $rows $r2).Gate
+        Assert-True ($g1.Category -ceq 'BLOCKED' -and @($g1.RuntimeReasons | Where-Object { $_.Code -ceq 'RUNTIME_USE_OBSERVED' }).Count -eq 1) "uso observado com cobertura parcial ($(Get-TestRuntimeCodes $g1))"
+        Assert-True ($g2.Category -ceq 'BLOCKED' -and ((@($g2.Reasons) -join ' ') -match 'COBERTURA_DE_PROCESSOS_INCOMPLETA') -and @($g2.RuntimeReasons).Count -eq 0) "B1 mantido; nenhum motivo de execucao inventado ($(Get-TestRuntimeCodes $g2))"
+        $nt = @(@((Get-TestPreviewRow $rows $r2).Runtime.Notices) | Where-Object { $_.Kind -ceq 'NOT_ATTRIBUTABLE' -and $_.Collector -ceq 'processes' })
+        Assert-Eq $nt.Count 1 'lacuna de processos como aviso da execucao, nao de uma raiz'
+    }
+    Test-Case 'Evidencia de execucao (B2-1)' 'Ausencia de evidencia nunca promove: raiz sem evidencia (so lacunas estruturais) mantem exatamente categoria e motivos; nenhuma raiz antes BLOCKED ou INVESTIGATE vira ELEGIVEL; avisos estruturais uma vez' {
+        $p = New-TestProfile 'b2none'
+        $re = New-TestRoot -ProfileInfo $p -Slug 'C--none-a'; $rr = New-TestRoot -ProfileInfo $p -Slug 'C--none-b'; $ra = New-TestRoot -ProfileInfo $p -Slug 'C--none-c'
+        [IO.File]::SetLastWriteTimeUtc((Join-Path $rr 'a.txt'), $nowFuture.AddHours(-3))
+        $procs = New-Procs -Extra @((New-TestRuntimeProc 810 'node.exe' "node $([IO.Path]::GetDirectoryName($ra))"))
+        $inv = Inv -Profiles @($p) -Procs $procs
+        $rows = Invoke-AtmPreview -Inventory $inv -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs)
+        $rank = @{ 'ELIGIBLE' = 0; 'INVESTIGATE' = 1; 'BLOCKED' = 2 }
+        foreach ($row in $rows) {
+            $b = Test-AtmCandidate -Partition $row.Partition -Inventory $inv
+            Assert-True ($rank[$row.Gate.Category] -ge $rank[$b.Category]) "nunca promove: $($row.Partition.Name) $($b.Category) -> $($row.Gate.Category)"
+        }
+        $ge = (Get-TestPreviewRow $rows $re).Gate; $be = Test-AtmCandidate -Partition (Find-Part $inv $re) -Inventory $inv
+        Assert-True ($be.Category -ceq 'ELIGIBLE' -and $ge.Category -ceq 'ELIGIBLE' -and (@($ge.Reasons) -join '|') -ceq (@($be.Reasons) -join '|') -and @($ge.RuntimeReasons).Count -eq 0) "sem evidencia: categoria e motivos exatamente iguais ($($ge.Category))"
+        $st = @(@((Get-TestPreviewRow $rows $re).Runtime.Notices) | Where-Object { $_.Kind -ceq 'STRUCTURAL' } | ForEach-Object { $_.Collector } | Sort-Object)
+        Assert-Eq ($st -join ',') 'handles,process-cwd,worktree-discovery' 'lacunas estruturais como aviso da execucao'
+        $txt = (@(Show-AtmPreview -Inventory $inv -Rows $rows 6>&1 | ForEach-Object { [string]$_.MessageData }) -join "`n")
+        Assert-True ($txt.Contains((Get-AtmText 'runtime.noEvidenceIsNotUnused')) -and ([regex]::Matches($txt, [regex]::Escape((Get-AtmText 'runtime.notice.STRUCTURAL' 'x').Split(':')[0])).Count -eq 1)) 'preview: aviso uma vez e frase de que ausencia nao e desuso'
+    }
+    Test-Case 'Evidencia de execucao (B2-1)' 'Falha, TIMEOUT e NOT_OBSERVABLE: execucao que lanca -> RUNTIME_NOT_COLLECTED em toda raiz; prazo 0 -> RUNTIME_TIMEOUT (nunca uso); NOT_OBSERVABLE estrutural -> so aviso' {
+        $p = New-TestProfile 'b2fail'
+        $r = New-TestRoot -ProfileInfo $p
+        $ia = Get-InvArgs -Profiles @($p)
+        $inv = Inv -Profiles @($p)
+        $rowsF = & {
+            Set-Item -LiteralPath 'function:local:Invoke-AtmDiagnoseRun' -Value { throw (New-Object InvalidOperationException 'synthetic') }
+            Invoke-AtmPreview -Inventory $inv -InventoryArgs $ia
+        }
+        $gF = (Get-TestPreviewRow $rowsF $r).Gate
+        Assert-True ($gF.Category -ceq 'INVESTIGATE' -and (Get-TestRuntimeCodes $gF) -ceq 'RUNTIME_NOT_COLLECTED' -and @($gF.RuntimeReasons)[0].Evidence -ceq 'EXCEPTION_INVALIDOPERATIONEXCEPTION') "falha: investigar ($(Get-TestRuntimeCodes $gF) $($gF.Category))"
+        $prev = $script:AtmRuntimeEvidenceSources
+        $script:AtmRuntimeEvidenceSources = @{} + $prev; $script:AtmRuntimeEvidenceSources['DeadlineSeconds'] = 0
+        try { $rowsT = Invoke-AtmPreview -Inventory $inv -InventoryArgs $ia } finally { $script:AtmRuntimeEvidenceSources = $prev }
+        $gT = (Get-TestPreviewRow $rowsT $r).Gate
+        $codesT = Get-TestRuntimeCodes $gT
+        Assert-True ($gT.Category -ceq 'INVESTIGATE' -and $codesT.Contains('RUNTIME_TIMEOUT') -and -not $codesT.Contains('RUNTIME_USE_OBSERVED') -and -not $codesT.Contains('RUNTIME_SESSION_LIVE')) "prazo: investigar por tempo, nunca uso ($codesT)"
+        $rowsN = Invoke-AtmPreview -Inventory $inv -InventoryArgs $ia
+        $gN = (Get-TestPreviewRow $rowsN $r).Gate
+        Assert-True ($gN.Category -ceq 'ELIGIBLE' -and @($gN.RuntimeReasons).Count -eq 0 -and @(@((Get-TestPreviewRow $rowsN $r).Runtime.Notices) | Where-Object { $_.Collector -ceq 'handles' -and $_.Status -ceq 'NOT_OBSERVABLE' -and $_.Kind -ceq 'STRUCTURAL' }).Count -eq 1) "NOT_OBSERVABLE estrutural: aviso, nenhuma recusa ($($gN.Category))"
+        Assert-True ([IO.File]::Exists((Join-Path $r 'sub\b.bin'))) 'nada apagado'
+    }
+    Test-Case 'Evidencia de execucao (B2-1)' 'Evidencia que surge entre o plano e a revalidacao: sessao viva registrada antes da exclusao -> raiz preservada na revalidacao com RUNTIME_SESSION_LIVE, deleter simulado nunca chamado' {
+        # The hook runs inside the engine and reaches these variables and the suite's functions by dynamic scope (the
+        # b2* names avoid the engine's own variable names).
+        $b2p = New-TestProfile 'b2late'
+        $r = New-TestRoot -ProfileInfo $b2p
+        $b2t = ConvertTo-TestMicroUtc ((Get-Date).AddMinutes(-15))
+        $procs = New-Procs -Extra @((New-TestRuntimeProc 811 'claude.exe' 'claude' $b2t))
+        $hook = { param($part) Write-TestSessionFile -ProfileInfo $b2p -SessionId (Split-Path $part.Path -Leaf) -ProcId 811 -ProcStartUtc $b2t -File 'b2late.json' }
+        $w = New-TestCleanLogWriter
+        $d = New-TestCleanDeleter -Writer $w
+        $c = Invoke-AtmClean -Entries @([pscustomobject]@{ Source = 't'; Path = $r; Fingerprint = $null }) -PlanPresenter $presenter -ConfirmationReader ${function:Confirm-Correct} -InventoryArgs (Get-InvArgs -Profiles @($b2p) -Procs $procs) -BeforeDeleteHook $hook -LogWriter $w -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+        Assert-True (@($c.Verified).Count -eq 1) 'no plano a raiz era elegivel (sem sessao registrada)'
+        Assert-True ($d.Calls.Count -eq 0 -and @($c.Deleted).Count -eq 0 -and @($c.Skipped).Count -eq 1 -and ((@($c.Skipped)[0].Reasons -join ' ') -match 'RUNTIME_SESSION_LIVE')) "revalidacao: preservada com a evidencia nova ($((@($c.Skipped)[0].Reasons) -join ' ; '))"
+        Assert-True ([IO.File]::Exists((Join-Path $r 'sub\b.bin'))) 'nada apagado'
+    }
+    Test-Case 'Evidencia de execucao (B2-1)' 'Custo: preview com quatro raizes faz uma unica coleta (uma colecao de processos); clean faz uma no plano e uma por raiz na revalidacao' {
+        $p = New-TestProfile 'b2cost'
+        $roots = @(1..4 | ForEach-Object { New-TestRoot -ProfileInfo $p -Slug ('C--cost-' + $_) })
+        $ia = Get-InvArgs -Profiles @($p)
+        $inv = Inv -Profiles @($p)
+        $cnt = @{ Runs = 0; Collections = 0 }
+        $origRuns = ${function:Get-AtmRuntimeRefusals}; $origColl = ${function:Get-AtmProcessCollection}
+        $res = & {
+            Set-Item -LiteralPath 'function:local:Get-AtmRuntimeRefusals' -Value { param($Inventory, [hashtable]$InventoryArgs = @{}, [int]$DeadlineSeconds = 60, [scriptblock]$ServiceSource = $null, [scriptblock]$VirtualizationSource = $null, [scriptblock]$ProcessSource = $null, $Providers = $null) $cnt.Runs++; & $origRuns @PSBoundParameters }
+            Set-Item -LiteralPath 'function:local:Get-AtmProcessCollection' -Value { param([scriptblock]$Source, [int]$MaxRecords = 65536, [int]$TimeoutSec = 30, $Deadline = $null) $cnt.Collections++; & $origColl @PSBoundParameters }
+            $rows = Invoke-AtmPreview -Inventory $inv -InventoryArgs $ia
+            $afterPreview = @{ Runs = $cnt.Runs; Collections = $cnt.Collections; Rows = @($rows).Count }
+            $d = New-TestCleanDeleter
+            $c = Invoke-AtmClean -Entries @($roots[0], $roots[1] | ForEach-Object { [pscustomobject]@{ Source = 't'; Path = $_; Fingerprint = $null } }) -PlanPresenter $presenter -ConfirmationReader ${function:Confirm-Correct} -InventoryArgs $ia -LogWriter (New-TestCleanLogWriter) -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+            [pscustomobject]@{ Preview = $afterPreview; Clean = @{ Runs = $cnt.Runs - $afterPreview.Runs; Collections = $cnt.Collections - $afterPreview.Collections; Calls = $d.Calls.Count; Aborted = $c.Aborted; Stopped = $c.StoppedBy } }
+        }
+        Assert-True ($res.Preview.Runs -eq 1 -and $res.Preview.Collections -eq 1 -and $res.Preview.Rows -ge 4) "preview: uma coleta para $($res.Preview.Rows) linhas ($($res.Preview.Runs) execucoes, $($res.Preview.Collections) colecoes)"
+        Assert-True ($res.Clean.Runs -eq 3 -and $res.Clean.Collections -eq 3 -and $res.Clean.Calls -eq 2) "clean: plano + uma por raiz ($($res.Clean.Runs) execucoes, $($res.Clean.Collections) colecoes, $($res.Clean.Calls) chamadas; $($res.Clean.Aborted) $($res.Clean.Stopped))"
+        foreach ($rt in $roots) { Assert-True ([IO.File]::Exists((Join-Path $rt 'sub\b.bin'))) 'nada apagado' }
+    }
+    Test-Case 'Evidencia de execucao (B2-1)' 'Estatico: o motor de limpeza consome so recusas (sem o grafo); preview, plano e revalidacao passam a evidencia; costura de teste so no motor e nula na distribuicao; travas fechadas' {
+        $clean = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Clean.ps1'))
+        Assert-Eq $shippedRuntimeSources $null 'costura distribuida nula'
+        Assert-Eq ([regex]::Matches($clean, '\$script:AtmRuntimeEvidenceSources\s*=').Count) 1 'uma unica atribuicao no motor'
+        Assert-Eq ([regex]::Matches($clean, '-RuntimeEvidence \$(rt|rtRe)\b').Count) 3 'preview, plano e revalidacao passam a evidencia'
+        Assert-Eq ([regex]::Matches($clean, 'Get-AtmCleanRuntimeEvidence -Inventory').Count) 3 'uma coleta no preview, uma no plano, uma por raiz na revalidacao'
+        Assert-True (-not $clean.Contains('Invoke-AtmDiagnose') -and -not $clean.Contains('Get-AtmDependencyGraph')) 'o motor de limpeza nao chama o diagnostico nem o grafo diretamente'
+        foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Name -ne 'Engine.Clean.ps1' })) {
+            Assert-True (-not ([IO.File]::ReadAllText($fi.FullName)).Contains('AtmRuntimeEvidenceSources')) "$($fi.Name) usa a costura de teste"
+        }
+        $diag = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Diagnose.ps1'))
+        $fn = $diag.Substring($diag.IndexOf('function Get-AtmRuntimeRefusals'), $diag.IndexOf('function Invoke-AtmDiagnose {') - $diag.IndexOf('function Get-AtmRuntimeRefusals'))
+        foreach ($pat in @('Get-CimInstance', 'Invoke-AtmInventory', 'Invoke-AtmGitCommand', '[IO.File]', 'Get-ChildItem', 'Registry', 'Start-Process')) { Assert-True (-not $fn.Contains($pat)) "recusas sem '$pat'" }
+        Assert-True ($fn.Contains('-Inventory $Inventory') -and $fn.Contains('-CpuSampleMs 0')) 'reusa o inventario recebido; sem amostra de CPU'
+        Assert-Eq $script:AtmRuntimeDefaultDeadlineSeconds 60 'prazo padrao documentado'
+        foreach ($l in @('en-US', 'pt-BR')) {
+            foreach ($x in $script:AtmRuntimeRefusalCodes) { Assert-True $script:AtmMessages[$l].ContainsKey("runtime.code.$x") "runtime.code.$x ($l)" }
+            foreach ($x in $script:AtmRuntimeNatures) { Assert-True $script:AtmMessages[$l].ContainsKey("runtime.nature.$x") "runtime.nature.$x ($l)" }
+            foreach ($x in $script:AtmRuntimeNoticeKinds) { Assert-True $script:AtmMessages[$l].ContainsKey("runtime.notice.$x") "runtime.notice.$x ($l)" }
+        }
+        Assert-True ($shippedDeletionGate -eq $false -and $script:AtmWorktreeDiagnosticsEnabled -eq $false -and $script:AtmHandleDiagnosticsEnabled -eq $false -and $script:AtmDiagnoseExportEnabled -eq $false) 'travas distribuidas fechadas'
     }
 
     # ------------------------------------------------------------------ read-only guarantee
