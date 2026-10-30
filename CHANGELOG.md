@@ -21,8 +21,8 @@
   new file). It deletes nothing, is read by nothing in the product and makes nothing eligible; the technical result
   (B1, RECENT included) is recorded apart. Schema `atm.discard-authorization/2`: two separate content declarations
   ("results preserved" or "nothing needed"), neither verified by the product (`TOOL_VERIFIED` reserved, never
-  emitted); the process identity, not the respondent; the console requirement and observation as reported by the
-  caller; the justification revalidated in a stable semantic form; success only when the line is written, flushed and
+  emitted); the process identity, not the respondent; the caller and its console requirement as reported, the console
+  observed by the engine in that call; the justification revalidated in a stable semantic form; success only when the line is written, flushed and
   the file closed (a file kept after a failure, even with a complete line, is not a recorded authorization). Details and
   limits: docs/USAGE.md, "Discard authorization".
 

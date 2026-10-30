@@ -307,8 +307,9 @@ try {
                 if ($phrase) { Write-Host (Get-AtmText ('auth.prompt.' + $kind) @fa) -ForegroundColor Yellow } else { Write-Host (Get-AtmText 'auth.prompt.description' $script:AtmDiscardDescriptionMax) }
                 Read-Host (Get-AtmText 'cli.confirmPrompt')
             }
-            # What this call required and observed (recorded as reported by the CLI; never proof of who answered).
-            $authInteraction = @{ Caller = 'CLI'; ConsoleRequired = $true; ConsoleObserved = $authConsole }
+            # Reported by the CLI: the caller and its console requirement (the engine observes the console itself and
+            # refuses if none is observed; never proof of who answered).
+            $authInteraction = @{ Caller = 'CLI'; ConsoleRequired = $true }
             $authRes = Invoke-AtmDiscardAuthorization -Path $Path -InventoryArgs $cliInvArgs -RecordFile $RecordFile -Presenter $authPresenter -Reader $authReader -Interaction $authInteraction
             Show-AtmDiscardResult -Result $authRes
             exit $(if ($authRes.Accepted) { 0 } else { 3 })

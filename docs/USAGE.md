@@ -253,8 +253,9 @@ credential for a future deletion (nothing in the product reads it; a future run 
 its own revalidation).
 
 1. Interactive console only (no redirected input or output; exit code `6` otherwise). This is required, but it does not
-   prove that a person answered. The record says what the CLI required and observed in that call
-   (`interaction`); a direct call of the engine records neither.
+   prove that a person answered. The record (`interaction`) keeps the caller and its console requirement as the caller
+   reported them (`callerFieldsVerified: false`) and the engine's own console observation in that call; a caller that
+   requires a console when the engine observes none is refused before any question (`AUTH_CONSOLE_NOT_OBSERVED`).
 2. The root is presented: exact path, provider, profile SID, session id (the root name), counts, size, newest write and
    its age (information only), fingerprint, evidence, the **technical result** of every gate (B1, RECENT and the
    runtime evidence included), the run notices and the limits of the record.
@@ -277,7 +278,8 @@ its own revalidation).
    and the **justification** in a stable semantic form: the gate reasons as given (principal, path, status), without the
    counts that vary between collections (processes not inspectable, items found by the lock probe); each runtime refusal
    by code, decision, collector, evidence, relation, nature and coverage (never its time, nor its detail, whose sources
-   are pseudonyms new in every collection); the process coverage state. An equivalent new collection does not refuse;
+   are pseudonyms new in every collection, so another process using the root under a refusal code already present is
+   not a divergence); the process coverage state. An equivalent new collection does not refuse;
    new evidence or a changed justification refuses (`AUTH_PLAN_CHANGED`, `TECHNICAL_REASONS`); present it again. The
    comparison uses statistics: a write that keeps them all (same size and modification time) is not detected, equal
    statistics do not prove equal content, and read-only use is not seen.
@@ -300,16 +302,16 @@ Synthetic example (paths, SIDs and ids shortened):
 {"schema":"atm.discard-authorization/2","authorizationId":"6f1c…","planId":"5dc6f2aa-…","tool":"…",
  "presentedUtc":"…","revalidatedUtc":"…","composedUtc":"…",
  "processIdentity":{"name":"PC\\alice","sid":"S-1-5-21-…","elevated":false,"identifiesRespondent":false},
- "interaction":{"caller":"CLI","consoleRequiredByCaller":true,"interactiveConsoleObserved":true,"observedBy":"CALLER_CONSOLE_CHECK"},
- "root":{"path":"C:\\Users\\alice\\AppData\\Local\\Temp\\claude\\C--work\\0d0b…","provider":"claude-code","profileSid":"S-1-5-21-…","sessionId":"0d0b…","kind":"SessionRoot"},
+ "interaction":{"caller":"CLI","consoleRequiredByCaller":true,"callerFieldsVerified":false,"interactiveConsoleObserved":true,"observedBy":"ENGINE_CONSOLE_CHECK"},
+ "root":{"path":"C:\\Users\\alice\\AppData\\Local\\Temp\\claude\\C--work-proj\\0d0b…","provider":"claude-code","profileSid":"S-1-5-21-…","sessionId":"0d0b…","kind":"SessionRoot"},
  "association":{"kind":"NAME_CONVENTION_CORROBORATED","transcriptLastWriteUtc":"…","basis":"ROOT_NAME_EQUALS_SESSION_ID"},
- "presented":{"files":293,"dirs":76,"bytes":6592149,"fingerprint":"B34D2D015552A3BE","ageHours":226.4,"class":"ORPHAN_SUSPECTED","flags":[],"sessionRegistry":null,…},
+ "presented":{"files":2,"dirs":1,"bytes":2148,"fingerprint":"B34D2D015552A3BE","ageHours":120,"class":"ORPHAN_SUSPECTED","flags":[],"sessionRegistry":null,…},
  "technical":{"category":"BLOCKED","runtimeCodes":[],"processCoverageBlock":true,"recentBlock":false,
-   "reasonSignature":["COVERAGE:INCOMPLETE","GATE:COBERTURA_DE_PROCESSOS_INCOMPLETA"],"reasons":["COBERTURA_DE_PROCESSOS_INCOMPLETA (137 …)"]},
+   "reasonSignature":["COVERAGE:INCOMPLETE","GATE:COBERTURA_DE_PROCESSOS_INCOMPLETA"],"reasons":["COBERTURA_DE_PROCESSOS_INCOMPLETA (<n> …)"]},
  "declarations":{"declaredBy":"OPERATOR","status":"ALL_PHRASES_TYPED","taskCompleted":true,"contentDecision":"NOTHING_NEEDED","discardAuthorized":true,"taskDescription":null},
  "preservation":{"basis":"NOTHING_NEEDED_DISCARD_ACCEPTED","verifiedByTool":false,"evidence":null},
  "revalidation":{"planRevalidated":true,"compared":"STATISTICS_FINGERPRINT_AND_SEMANTIC_REASONS"},
- "limitations":["ASSOCIATION_BY_NAME_CONVENTION","TASK_DECLARED_BY_OPERATOR","PRESERVATION_NOT_VERIFIED_BY_TOOL","STATISTICS_NOT_CONTENT","READ_ONLY_USE_NOT_OBSERVED","NO_EVIDENCE_IS_NOT_NON_USE","RECORD_ALTERABLE_BY_SAME_IDENTITY","RECORD_LINE_MAY_REMAIN_AFTER_FAILURE","NOT_A_DELETION_CREDENTIAL","PROCESS_IDENTITY_IS_NOT_THE_RESPONDENT","INTERACTIVE_CONSOLE_IS_NOT_PROOF_OF_PRESENCE"]}
+ "limitations":["ASSOCIATION_BY_NAME_CONVENTION","TASK_DECLARED_BY_OPERATOR","PRESERVATION_NOT_VERIFIED_BY_TOOL","STATISTICS_NOT_CONTENT","READ_ONLY_USE_NOT_OBSERVED","NO_EVIDENCE_IS_NOT_NON_USE","RECORD_ALTERABLE_BY_SAME_IDENTITY","RECORD_LINE_MAY_REMAIN_AFTER_FAILURE","NOT_A_DELETION_CREDENTIAL","PROCESS_IDENTITY_IS_NOT_THE_RESPONDENT","CALLER_AND_REQUIREMENT_REPORTED_BY_CALLER","INTERACTIVE_CONSOLE_IS_NOT_PROOF_OF_PRESENCE"]}
 ```
 
 A root can be **authorized and still technically blocked**: the result says so (`Technical result: BLOCKED`) and is never

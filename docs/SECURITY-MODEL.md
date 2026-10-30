@@ -283,8 +283,11 @@ called by `Invoke-AtmGitCommand`):
   task and the content decision are the operator's declarations. `preservation.basis` never takes `TOOL_VERIFIED`:
   that value is reserved for a verification by the product, which does not exist; a typed phrase, a manifest path or an
   external report never produces it. The identity recorded is the process's (`identifiesRespondent: false`); the
-  interaction block records only what the caller reports it required and observed in that call (a direct engine call:
-  nothing). Recording succeeded only when the command returns success (line written, flushed, file closed); after a
+  interaction block keeps the caller and its console requirement as reported (not verified) and the engine's own console
+  observation in that call; a caller requiring a console when none is observed is refused before any question.
+  The revalidation's semantic form leaves out the detail of runtime refusals (pseudonyms new in every collection), so
+  another process using the root under a refusal code already present is not a divergence (the root is already refused
+  by that code). Recording succeeded only when the command returns success (line written, flushed, file closed); after a
   failure past the creation the file is kept as it is, never reopened or removed, and may hold a complete line: neither
   the line nor the file proves a recording, and the format provides no atomicity or authenticity. Limits: statistics are
   compared, not content (a write that keeps every statistic is not detected); read-only use is not observed; the record

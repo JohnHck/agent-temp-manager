@@ -522,7 +522,18 @@ $script:AtmPreservationBases = @('OPERATOR_DECLARED', 'NOTHING_NEEDED_DISCARD_AC
 # What the record cannot guarantee, recorded with it (codes; text in the message catalog).
 $script:AtmDiscardLimitations = @('ASSOCIATION_BY_NAME_CONVENTION', 'TASK_DECLARED_BY_OPERATOR', 'PRESERVATION_NOT_VERIFIED_BY_TOOL', 'STATISTICS_NOT_CONTENT',
     'READ_ONLY_USE_NOT_OBSERVED', 'NO_EVIDENCE_IS_NOT_NON_USE', 'RECORD_ALTERABLE_BY_SAME_IDENTITY', 'RECORD_LINE_MAY_REMAIN_AFTER_FAILURE',
-    'NOT_A_DELETION_CREDENTIAL', 'PROCESS_IDENTITY_IS_NOT_THE_RESPONDENT', 'INTERACTIVE_CONSOLE_IS_NOT_PROOF_OF_PRESENCE')
+    'NOT_A_DELETION_CREDENTIAL', 'PROCESS_IDENTITY_IS_NOT_THE_RESPONDENT', 'CALLER_AND_REQUIREMENT_REPORTED_BY_CALLER', 'INTERACTIVE_CONSOLE_IS_NOT_PROOF_OF_PRESENCE')
+
+function Test-AtmDiscardConsoleObserved {
+    # The engine's own observation, in this call, of an interactive console (console host, input and output not
+    # redirected, a real console window). It says nothing about who answered.
+    try {
+        if ($Host.Name -ne 'ConsoleHost') { return $false }
+        if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) { return $false }
+        $null = [Console]::WindowWidth
+        return $true
+    } catch { return $false }
+}
 function Get-AtmDiscardReasonSignature {
     <#
       Stable, semantic form of the technical justification shown to the operator, for the revalidation: a new collection
@@ -620,9 +631,10 @@ function Invoke-AtmDiscardAuthorization {
                      description (optional free text). $null or '' cancels.
         -RecordFile  a NEW file outside the audited directories, created by the pinned writer (AtmCleanLog: new file
                      only, protected DACL, an unsafe folder is refused and never changed).
-        -Interaction what the caller itself required and observed: Caller ('CLI'; anything else is a direct call),
-                     ConsoleRequired and ConsoleObserved (the CLI's own console check in this call). Recorded as
-                     reported by the caller; a direct call records no console requirement and no observation.
+        -Interaction what the caller reports: Caller ('CLI'; anything else is a direct call) and ConsoleRequired
+                     (the caller requires an interactive console). Recorded as reported, never verified. The console
+                     itself is observed by the engine in this call (Test-AtmDiscardConsoleObserved); a caller that
+                     requires one when none is observed is refused before any question (AUTH_CONSOLE_NOT_OBSERVED).
       The CLI calls it only from an interactive console (redirected input never records an acceptance); even so that is
       not proof that a person answered. Before writing, the root is presented again and must still match: any detected
       change refuses this plan (AUTH_PLAN_CHANGED) and a new presentation is needed. No record is written unless every
@@ -637,6 +649,11 @@ function Invoke-AtmDiscardAuthorization {
     $done = { [pscustomobject]$res }
     if (-not $Presenter -or -not $Reader) { $res.Refused = 'AUTH_NO_PRESENTER_OR_READER'; return (& $done) }
     if (-not $RecordFile) { $res.Refused = 'AUTH_RECORD_REQUIRED'; return (& $done) }
+    # Interaction: the caller and its requirement as reported; the console as observed by the engine in this call.
+    $isCli = ([string]$Interaction['Caller'] -ceq 'CLI')
+    $required = ($isCli -and $Interaction['ConsoleRequired'] -eq $true)
+    $observed = [bool](Test-AtmDiscardConsoleObserved)
+    if ($required -and -not $observed) { $res.Refused = 'AUTH_CONSOLE_NOT_OBSERVED'; return (& $done) }
     $pres = Get-AtmDiscardPresentation -Path $Path -InventoryArgs $InventoryArgs
     if ($pres.Refused) { $res.Refused = $pres.Refused; $res.Detail = $pres.Detail; return (& $done) }
     $res.Presentation = $pres; $res.PlanId = $pres.PlanId
@@ -673,17 +690,15 @@ function Invoke-AtmDiscardAuthorization {
     $p = $pres.Partition; $idn = $pres.Inventory.Identity
     $iso = { param($v) if ($null -ne $v) { ([datetime]$v).ToUniversalTime().ToString('o') } else { $null } }
     $authId = [guid]::NewGuid().ToString()
-    # Interaction: only what the caller reports it required and observed in this call; a direct call (tests, any other
-    # caller) records no console requirement and no observation. Never a statement about who answered.
-    $isCli = ([string]$Interaction['Caller'] -ceq 'CLI')
-    $observed = $(if ($isCli -and $Interaction['ConsoleObserved'] -is [bool]) { $Interaction['ConsoleObserved'] } else { $null })
     $basis = $(if ($decision -ceq 'NOTHING_NEEDED') { 'NOTHING_NEEDED_DISCARD_ACCEPTED' } else { 'OPERATOR_DECLARED' })
     $rec = [ordered]@{
         schema = $script:AtmDiscardAuthSchema; authorizationId = $authId; planId = $pres.PlanId; tool = $script:AtmVersion
         presentedUtc = (& $iso $pres.PresentedUtc); revalidatedUtc = (& $iso $again.PresentedUtc); composedUtc = (& $iso ([datetime]::UtcNow))
         processIdentity = [ordered]@{ name = $idn.Name; sid = $idn.Sid; elevated = [bool]$idn.IsAdmin; identifiesRespondent = $false }
-        interaction = [ordered]@{ caller = $(if ($isCli) { 'CLI' } else { 'DIRECT_CALL' }); consoleRequiredByCaller = ($isCli -and $Interaction['ConsoleRequired'] -eq $true)
-            interactiveConsoleObserved = $observed; observedBy = $(if ($null -ne $observed) { 'CALLER_CONSOLE_CHECK' } else { $null }) }
+        # Caller and requirement as reported by the caller (not verified); the console as observed by the engine in this
+        # call. Never a statement about who answered.
+        interaction = [ordered]@{ caller = $(if ($isCli) { 'CLI' } else { 'DIRECT_CALL' }); consoleRequiredByCaller = $required; callerFieldsVerified = $false
+            interactiveConsoleObserved = $observed; observedBy = 'ENGINE_CONSOLE_CHECK' }
         root = [ordered]@{ path = $p.Path; provider = $p.Provider; profileSid = $p.Sid; sessionId = [string]$p.Name; kind = $p.Kind }
         association = [ordered]@{ kind = $pres.Association.Kind; transcriptLastWriteUtc = (& $iso $pres.Association.TranscriptLastWriteUtc); basis = 'ROOT_NAME_EQUALS_SESSION_ID' }
         presented = [ordered]@{ files = $pres.Facts.Files; dirs = $pres.Facts.Dirs; bytes = $pres.Facts.Bytes; newestWriteUtc = (& $iso $pres.Facts.NewestWriteUtc); creationUtc = (& $iso $pres.Facts.CreationUtc)

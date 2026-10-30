@@ -2287,6 +2287,12 @@ exit 0
             $txt = (@(Show-AtmDiscardResult -Result $res 6>&1 | ForEach-Object { [string]$_.MessageData }) -join "`n")
             Assert-True ($txt.Contains((Get-AtmText ('auth.decision.' + $c.Decision)))) "$($c.Tag): console diz qual declaracao foi feita"
         }
+        # The CLI's prompt: the two phrases splatted as format arguments, as its reader does (the reader itself only runs
+        # at a real console).
+        $fa = @($kept, $none)
+        $prompt = Get-AtmText 'auth.prompt.results' @fa
+        Assert-True ($prompt.Contains($kept) -and $prompt.Contains($none) -and -not $prompt.Contains('{0}') -and -not $prompt.Contains('{1}')) 'pergunta da CLI mostra as duas frases'
+        Assert-True ([IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1')).Contains("Get-AtmText ('auth.prompt.' + `$kind) @fa")) 'CLI formata a pergunta com as frases como argumentos'
         $lit = (@(Get-ChildItem -LiteralPath $srcDir -Recurse -File | ForEach-Object { [regex]::Matches([IO.File]::ReadAllText($_.FullName), "'TOOL_VERIFIED'").Count }) | Measure-Object -Sum).Sum
         Assert-Eq $lit 1 'TOOL_VERIFIED so na lista reservada: nenhum codigo o emite'
         Assert-True ([IO.File]::Exists((Join-Path $r 'sub\b.bin'))) 'nada apagado'
@@ -2332,18 +2338,20 @@ exit 0
         Assert-True ($cli.Contains('exit $(if ($authRes.Accepted) { 0 } else { 3 })')) 'CLI: saida 3 sempre que nao concluiu'
         Assert-True ([IO.File]::Exists((Join-Path $r 'sub\b.bin'))) 'nada apagado'
     }
-    Test-Case 'Autorizacao de descarte (AUT-1)' 'Identidade e interacao: identidade do processo, nunca da pessoa; chamada direta nao afirma console nem observacao; o exigido e observado pela CLI registrado como informado por ela' {
+    Test-Case 'Autorizacao de descarte (AUT-1)' 'Identidade e interacao: identidade do processo, nunca da pessoa; chamador e exigencia como informados; console observado pelo proprio motor nesta chamada; exigencia sem console observado recusada sem pergunta' {
         $dir = New-TestCleanLogDir 'auth-int'
         if (-not $dir) { return }
         $p = New-TestProfile 'authint'
         $r = New-TestRoot -ProfileInfo $p
         $null = New-TestTranscript -ProfileInfo $p -Root $r
         $ia = Get-InvArgs -Profiles @($p)
+        # The suite's own process: the engine's observation here is what the record must say (no claim of a console the
+        # run does not have).
+        $here = [bool](Test-AtmDiscardConsoleObserved)
         $cases = @(
-            @{ Tag = 'chamada direta'; Interaction = @{}; Caller = 'DIRECT_CALL'; Required = $false; Observed = $null; By = $null },
-            @{ Tag = 'CLI'; Interaction = @{ Caller = 'CLI'; ConsoleRequired = $true; ConsoleObserved = $true }; Caller = 'CLI'; Required = $true; Observed = $true; By = 'CALLER_CONSOLE_CHECK' },
-            @{ Tag = 'observacao nao booleana'; Interaction = @{ Caller = 'CLI'; ConsoleRequired = $true; ConsoleObserved = 'sim' }; Caller = 'CLI'; Required = $true; Observed = $null; By = $null },
-            @{ Tag = 'outro chamador'; Interaction = @{ Caller = 'TUI'; ConsoleRequired = $true; ConsoleObserved = $true }; Caller = 'DIRECT_CALL'; Required = $false; Observed = $null; By = $null })
+            @{ Tag = 'chamada direta'; Interaction = @{}; Caller = 'DIRECT_CALL'; Required = $false },
+            @{ Tag = 'outro chamador'; Interaction = @{ Caller = 'TUI'; ConsoleRequired = $true }; Caller = 'DIRECT_CALL'; Required = $false },
+            @{ Tag = 'CLI sem exigencia'; Interaction = @{ Caller = 'CLI' }; Caller = 'CLI'; Required = $false })
         $i = 0
         foreach ($c in $cases) {
             $i++
@@ -2352,11 +2360,20 @@ exit 0
             $res = Invoke-AtmDiscardAuthorization -Path $r -InventoryArgs $ia -RecordFile $file -Presenter $op.Presenter -Reader $op.Reader -Interaction $c.Interaction
             $rec = [IO.File]::ReadAllText($file) | ConvertFrom-Json
             Assert-True ($res.Accepted -and $rec.processIdentity.sid -ceq $p.Sid -and $rec.processIdentity.identifiesRespondent -eq $false) "$($c.Tag): identidade do processo, nao da pessoa"
-            Assert-True ($rec.interaction.caller -ceq $c.Caller -and $rec.interaction.consoleRequiredByCaller -eq $c.Required -and $rec.interaction.interactiveConsoleObserved -eq $c.Observed -and $rec.interaction.observedBy -eq $c.By) "$($c.Tag): $($rec.interaction | ConvertTo-Json -Compress)"
-            Assert-True (@($rec.limitations) -contains 'PROCESS_IDENTITY_IS_NOT_THE_RESPONDENT' -and @($rec.limitations) -contains 'INTERACTIVE_CONSOLE_IS_NOT_PROOF_OF_PRESENCE') "$($c.Tag): limites de identidade e presenca"
+            Assert-True ($rec.interaction.caller -ceq $c.Caller -and $rec.interaction.consoleRequiredByCaller -eq $c.Required -and $rec.interaction.callerFieldsVerified -eq $false -and $rec.interaction.interactiveConsoleObserved -is [bool] -and $rec.interaction.interactiveConsoleObserved -eq $here -and $rec.interaction.observedBy -ceq 'ENGINE_CONSOLE_CHECK') "$($c.Tag): $($rec.interaction | ConvertTo-Json -Compress)"
+            Assert-True (@($rec.limitations) -contains 'PROCESS_IDENTITY_IS_NOT_THE_RESPONDENT' -and @($rec.limitations) -contains 'CALLER_AND_REQUIREMENT_REPORTED_BY_CALLER' -and @($rec.limitations) -contains 'INTERACTIVE_CONSOLE_IS_NOT_PROOF_OF_PRESENCE') "$($c.Tag): limites de identidade, chamador e presenca"
+        }
+        # A caller that requires a console: without one observed by the engine, refused before any question.
+        $op = New-TestAuthOperator
+        $file = Join-Path $dir 'int-req.jsonl'
+        $res = Invoke-AtmDiscardAuthorization -Path $r -InventoryArgs $ia -RecordFile $file -Presenter $op.Presenter -Reader $op.Reader -Interaction @{ Caller = 'CLI'; ConsoleRequired = $true }
+        if ($here) {
+            Assert-True ($res.Accepted -and ([IO.File]::ReadAllText($file) | ConvertFrom-Json).interaction.interactiveConsoleObserved -eq $true) 'console observado: registrado com a observacao do motor'
+        } else {
+            Assert-True (-not $res.Accepted -and $res.Refused -ceq 'AUTH_CONSOLE_NOT_OBSERVED' -and $op.Presented -eq 0 -and $op.Prompts.Count -eq 0 -and -not (Test-Path -LiteralPath $file)) "exigencia sem console observado: $($res.Refused), nada perguntado nem registrado"
         }
         $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
-        Assert-True ($cli.Contains('$authConsole = [bool](Test-AtmTuiInteractive)') -and $cli.Contains('ConsoleObserved = $authConsole') -and $cli.Contains('-Interaction $authInteraction')) 'CLI informa a propria verificacao de console desta chamada'
+        Assert-True ($cli.Contains('$authConsole = [bool](Test-AtmTuiInteractive)') -and $cli.Contains("Caller = 'CLI'; ConsoleRequired = `$true") -and $cli.Contains('-Interaction $authInteraction') -and -not $cli.Contains('ConsoleObserved')) 'CLI informa chamador e exigencia; a observacao e do motor'
         $clean = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Clean.ps1'))
         Assert-True (-not $clean.Contains('interactiveConsoleRequiredByCli') -and -not $clean.Contains("result = 'ACCEPTED'")) 'nenhuma constante de interacao nem ACCEPTED no registro'
     }
