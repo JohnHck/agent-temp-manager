@@ -365,6 +365,20 @@ function Show-AtmDiscardResult {
     Write-Host ('  ' + (Get-AtmText 'auth.nothingDeleted')) -ForegroundColor Green
 }
 
+function Read-AtmCleanAnswer {
+    # AUT-2: one question of a clean run past the release gate (CLI and TUI). Each declaration names its root; every
+    # phrase comes from the engine; the answer is returned exactly as typed.
+    param([string]$Phrase, [string]$Kind, [string]$RootPath, $Choices, [scriptblock]$LineReader)
+    Write-Host ''
+    if ($Kind -ceq 'task' -or $Kind -ceq 'results') {
+        Write-Host ('  ' + (Get-AtmText 'clean.declRoot' $RootPath)) -ForegroundColor Cyan
+        $fa = @($Choices)
+        Write-Host (Get-AtmText ('auth.prompt.' + $Kind) @fa) -ForegroundColor Yellow
+    } else { Write-Host (Get-AtmText 'cli.typePhrase' $Phrase) -ForegroundColor Yellow }
+    # The phrase just shown is passed as a second argument (Read-Host ignores it; the headless TUI tests echo it).
+    return (& $LineReader (Get-AtmText 'cli.confirmPrompt') $Phrase)
+}
+
 function Show-AtmCleanResult {
     param($Result)
     Write-AtmHeader (Get-AtmText 'clean.resultHeader')
@@ -379,6 +393,10 @@ function Show-AtmCleanResult {
         if ($Result.Aborted -eq 'EXCLUSAO_REAL_DESABILITADA_V0_1') { Write-Host ('  ' + (Get-AtmText 'clean.gateMsg' @($Result.Verified).Count)) -ForegroundColor Yellow }
         if ($Result.Aborted -eq 'NENHUM_CAMINHO_ELEGIVEL') { Write-AtmTable (@($Result.Rejected) | ForEach-Object { New-AtmRow ([ordered]@{ 'col.origin' = $_.Source; 'col.path' = $_.Path; 'col.reasons' = (@($_.Reasons) -join ' ; ') }) }) }
         if ($Result.Aborted -eq 'LOG_REQUIRED') { Write-Host ('  ' + (Get-AtmText 'clean.logRequired')) -ForegroundColor Yellow }
+        # AUT-2: the run stopped in the questions or before the first operation; the step and root are named.
+        if ($Result.Aborted -eq 'CONSOLE_NOT_OBSERVED') { Write-Host ('  ' + (Get-AtmText 'clean.consoleRequired')) -ForegroundColor Yellow }
+        if ($Result.RefusedAt) { Write-Host ('  ' + (Get-AtmText 'clean.refusedAt' $Result.RefusedAt.Step $(if ($Result.RefusedAt.Path) { $Result.RefusedAt.Path } else { '-' }))) -ForegroundColor Yellow }
+        if ($Result.Aborted -eq 'PLAN_CHANGED_BEFORE_EXECUTION') { Write-Host ('  ' + (Get-AtmText 'clean.planChanged')) -ForegroundColor Yellow }
         # B8: the lock refusals never claim that another clean is running; an abandoned lock is not a recovery.
         if ($Result.Aborted -eq 'CLEAN_LOCK_ABANDONED') { Write-Host ('  ' + (Get-AtmText 'clean.lockAbandoned')) -ForegroundColor Yellow }
         elseif ($Result.Aborted -eq 'CLEAN_LOCK_NESTED') { Write-Host ('  ' + (Get-AtmText 'clean.lockNested')) -ForegroundColor Yellow }
@@ -389,6 +407,8 @@ function Show-AtmCleanResult {
         Write-Host ('  ' + (Get-AtmText 'clean.nothing')) -ForegroundColor Green
         return
     }
+    # AUT-2: what the operator declared for each root (declarations, not verified facts).
+    foreach ($d in @($Result.Declarations)) { Write-Host ('  ' + (Get-AtmText ('clean.declared.' + $d.ContentDecision) $d.Path)) }
     Write-AtmTable (@($Result.Deleted) | ForEach-Object { New-AtmRow ([ordered]@{ 'col.path' = $_.Path; 'col.outcome' = $_.Outcome; 'col.mb' = (Format-AtmMB $_.Bytes); 'col.done' = $_.Completed; 'col.verified' = $_.Verified; 'col.files' = "$($_.FilesDeleted)/$($_.FilesPlanned)"; 'col.dirs' = "$($_.DirsDeleted)/$($_.DirsPlanned)"; 'col.interruption' = $(if ($_.ExceptionType) { $_.ExceptionType } else { $_.AbortReason }) }) })
     if (@($Result.Skipped).Count -gt 0) {
         Write-Host ('  ' + (Get-AtmText 'clean.skipped')) -ForegroundColor Yellow

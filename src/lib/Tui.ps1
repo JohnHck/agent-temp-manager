@@ -861,14 +861,14 @@ function Invoke-AtmTuiClean {
         $other = ((& $tuiRead (Get-AtmText 'tuiclean.askOthers' $yesWord)) -ceq $yesWord)
     }
     $presenter = { param($v, $r, $i) Show-AtmCleanPlan -Verified $v -Rejected $r -Inventory $i }
-    $reader = { param($phrase) Write-Host ''; Write-Host (Get-AtmText 'cli.typePhrase' $phrase) -ForegroundColor Yellow; & $tuiRead (Get-AtmText 'cli.confirmPrompt') }
+    $reader = { param($phrase, $kind, $rootPath, $choices) Read-AtmCleanAnswer -Phrase $phrase -Kind $kind -RootPath $rootPath -Choices $choices -LineReader $tuiRead }
     # T1: only with real deletion enabled (never in a distributed copy) the engine requires a new log file; the TUI asks
     # for it and never picks one. An empty answer passes none and the engine refuses the run (LOG_REQUIRED).
     $logFile = $null
     if ($script:AtmRealDeletionEnabled) { $logFile = & $tuiRead (Get-AtmText 'tuiclean.askLog') }
     $a = @{} + $State.InventoryArgs
     $a['NoProgress'] = $true
-    $res = Invoke-AtmClean -Entries $entries -IncludeOtherUsers:$other -PlanPresenter $presenter -ConfirmationReader $reader -InventoryArgs $a -LogFile $logFile
+    $res = Invoke-AtmClean -Entries $entries -IncludeOtherUsers:$other -PlanPresenter $presenter -ConfirmationReader $reader -InventoryArgs $a -LogFile $logFile -Interaction @{ Caller = 'TUI'; ConsoleRequired = $true }
     Show-AtmCleanResult -Result $res
     $State.LastClean = $res
     if ($res.PostInventory) { $State.Inventory = $res.PostInventory; $State.Preview = $null }
@@ -880,7 +880,7 @@ function Start-AtmTui {
       -InventoryArgs : splatted into Invoke-AtmInventory (self markers, config dir; overrides in tests)
       -KeySource     : scriptblock returning [ConsoleKeyInfo] (default [Console]::ReadKey($true))
       -Renderer      : scriptblock(frame) (default: console writer)
-      -LineReader    : scriptblock(prompt) -> string (default Read-Host)
+      -LineReader    : scriptblock(prompt[, phrase shown]) -> string (default Read-Host)
       -Width/-Height : fixed size (tests); default = console window
       -DiagnoseArgs  : splatted into Invoke-AtmDiagnose (default: the inventory arguments above)
       -DiagnoseRunner: scriptblock(args) -> diagnose result (tests; default Invoke-AtmDiagnose)

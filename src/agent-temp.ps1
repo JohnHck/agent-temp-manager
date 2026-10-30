@@ -278,10 +278,13 @@ try {
                 $probe = Invoke-AtmInventory @cliInvArgs
                 if (-not (Test-AtmOutputPathOutsideBases -Path $LogFile -Inventory $probe)) { Write-Host (Get-AtmText 'cli.logRefused') -ForegroundColor Red; exit 2 }
             }
+            # AUT-2: only with real deletion enabled (never in a distributed copy) the run asks questions; then an
+            # interactive console is required here and observed again by the engine. With the gate closed nothing changes.
+            if ($script:AtmRealDeletionEnabled -and -not (Test-AtmTuiInteractive)) { Write-Host (Get-AtmText 'cli.cleanNeedsConsole') -ForegroundColor Yellow; exit 6 }
             $presenter = { param($v, $r, $i) Show-AtmCleanPlan -Verified $v -Rejected $r -Inventory $i }
-            $reader = { param($phrase) Write-Host ''; Write-Host (Get-AtmText 'cli.typePhrase' $phrase) -ForegroundColor Yellow; Read-Host (Get-AtmText 'cli.confirmPrompt') }
+            $reader = { param($phrase, $kind, $rootPath, $choices) Read-AtmCleanAnswer -Phrase $phrase -Kind $kind -RootPath $rootPath -Choices $choices -LineReader { param($pr) Read-Host $pr } }
             $res = Invoke-AtmClean -Entries $entries -IncludeOtherUsers:$IncludeOtherUsers `
-                -PlanPresenter $presenter -ConfirmationReader $reader -InventoryArgs $cliInvArgs -LogFile $LogFile
+                -PlanPresenter $presenter -ConfirmationReader $reader -InventoryArgs $cliInvArgs -LogFile $LogFile -Interaction @{ Caller = 'CLI'; ConsoleRequired = [bool]$script:AtmRealDeletionEnabled }
             Show-AtmCleanResult -Result $res
             if ($res.PostInventory) {
                 Write-Host ''

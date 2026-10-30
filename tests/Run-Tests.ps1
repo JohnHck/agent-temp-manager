@@ -43,6 +43,10 @@ $script:AtmCleanLockName = 'Global\AgentTempManager.Test.' + [guid]::NewGuid().T
 # empty service and virtualization sources, only inside this process (dedicated tests check the shipped $null).
 $shippedRuntimeSources = $script:AtmRuntimeEvidenceSources
 $script:AtmRuntimeEvidenceSources = @{ ServiceSource = { param($Names) @() }; VirtualizationSource = { param($Op) @() } }
+# AUT-2: the suite has no interactive console; past the release gate the engine's console observation is replaced, only
+# inside this process (dedicated tests check the shipped $null and the refusal without a console).
+$shippedConsoleSource = $script:AtmCleanConsoleSource
+$script:AtmCleanConsoleSource = { $true }
 
 $me = Get-AtmCurrentIdentity
 $results = New-Object System.Collections.Generic.List[object]
@@ -346,15 +350,17 @@ $presenter = { param($v, $r, $i) Show-AtmCleanPlan -Verified $v -Rejected $r -In
 # log file with read sharing) and returns the next scripted result: COMPLETE, REFUSED, PARTIAL, or THROW (a synthetic
 # IOException). Present: the post-delete presence answer ($false gone, $true present, $null unknown).
 function New-TestCleanLogWriter {
-    param([string]$FailOn, [int]$FailAt = 1, [string]$CloseCode)
+    # -FailCode: the code the failing record returns (default a write failure; AUT-2 also passes a flush failure code,
+    # as AtmCleanLog.AppendLine returns when FlushFileBuffers fails after the write).
+    param([string]$FailOn, [int]$FailAt = 1, [string]$CloseCode, [string]$FailCode = 'LOG_WRITE_FAILED_WIN32_112')
     # [string] parameters are '' when not given: Close must return $null (no failure), like AtmCleanLog.
-    $w = [pscustomobject]@{ Lines = (New-Object System.Collections.Generic.List[string]); FailOn = $FailOn; FailAt = $FailAt; Seen = @{}; Failed = $false; CloseCode = $(if ($CloseCode) { $CloseCode } else { $null }); Closed = 0; Disposed = 0 }
+    $w = [pscustomobject]@{ Lines = (New-Object System.Collections.Generic.List[string]); FailOn = $FailOn; FailAt = $FailAt; FailCode = $FailCode; Seen = @{}; Failed = $false; CloseCode = $(if ($CloseCode) { $CloseCode } else { $null }); Closed = 0; Disposed = 0 }
     $w | Add-Member -MemberType ScriptMethod -Name AppendLine -Value {
         param([string]$Line)
         if ($this.Failed) { return 'LOG_STOPPED' }
         $type = [string]($Line | ConvertFrom-Json).type
         $this.Seen[$type] = 1 + $(if ($this.Seen.ContainsKey($type)) { $this.Seen[$type] } else { 0 })
-        if ($this.FailOn -and $type -ceq $this.FailOn -and $this.Seen[$type] -eq $this.FailAt) { $this.Failed = $true; return 'LOG_WRITE_FAILED_WIN32_112' }
+        if ($this.FailOn -and $type -ceq $this.FailOn -and $this.Seen[$type] -eq $this.FailAt) { $this.Failed = $true; return $this.FailCode }
         $this.Lines.Add($Line)
         return $null
     }
@@ -363,6 +369,28 @@ function New-TestCleanLogWriter {
     return $w
 }
 function Get-TestCleanLogRecords { param($Writer) return @($Writer.Lines | ForEach-Object { $_ | ConvertFrom-Json }) }
+# AUT-2: a simulated operator for the clean questions (tests only; the CLI has no way to pass answers). Keys: 'task#<n>'
+# and 'results#<n>' (n-th root asked), 'confirm'. A value is the text typed, $null (cancel), or a scriptblock run at that
+# step with the phrase shown: its output, if any, is typed, otherwise the default. Default: the phrase shown; for
+# 'results', -Decisions[path] when given. Every question is recorded as 'kind|path'.
+function New-TestCleanOperator {
+    param([hashtable]$Answers = @{}, [hashtable]$Decisions = @{})
+    $st = @{ Calls = (New-Object System.Collections.Generic.List[string]); Answers = $Answers; Decisions = $Decisions; Index = @{}; Phrases = (New-Object System.Collections.Generic.List[string]) }
+    $st.Reader = {
+        param($phrase, $kind, $rootPath, $choices)
+        $st.Calls.Add(('{0}|{1}' -f $kind, $rootPath))
+        $st.Phrases.Add([string]$phrase)
+        $n = 1 + $(if ($st.Index.ContainsKey([string]$kind)) { $st.Index[[string]$kind] } else { 0 }); $st.Index[[string]$kind] = $n
+        $key = $(if ($kind -ceq 'confirm') { 'confirm' } else { '{0}#{1}' -f $kind, $n })
+        $def = $phrase
+        if ($kind -ceq 'results' -and $rootPath -and $st.Decisions.ContainsKey([string]$rootPath)) { $def = $st.Decisions[[string]$rootPath] }
+        if (-not $st.Answers.ContainsKey($key)) { return $def }
+        $a = $st.Answers[$key]
+        if ($a -is [scriptblock]) { $v = & $a $phrase; if ($null -ne $v) { return [string]$v }; return $def }
+        return $a
+    }.GetNewClosure()
+    return $st
+}
 function Read-TestCleanLogFile {
     param([string]$Path)
     $b = [IO.File]::ReadAllBytes($Path)
@@ -1249,7 +1277,9 @@ foreach ($k in @('__ua__', '__dnf__', '__io__')) {
         $p = New-TestProfile 'noconfirm'
         $r = New-TestRoot -ProfileInfo $p
         $e = @([pscustomobject]@{ Source = 't'; Path = $r; Fingerprint = $null })
-        foreach ($reader in @({ param($x) $null }, { param($x) '' }, { param($x) $x.ToLowerInvariant() }, { param($x) "$x " }, { param($x) 'sim' })) {
+        # AUT-2: the declarations are answered with the phrase shown; only the final confirmation is wrong or missing.
+        foreach ($wrong in @({ param($x) $null }, { param($x) '' }, { param($x) $x.ToLowerInvariant() }, { param($x) "$x " }, { param($x) 'sim' })) {
+            $reader = { param($x, $k) if ($k -ceq 'confirm') { & $wrong $x } else { $x } }.GetNewClosure()
             $c = Invoke-AtmClean -Entries $e -PlanPresenter $presenter -ConfirmationReader $reader -InventoryArgs (Get-InvArgs -Profiles @($p)) -LogWriter (New-TestCleanLogWriter)
             Assert-Eq $c.Aborted 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE' 'abortado'
             Assert-Eq @($c.Deleted).Count 0 'nada excluido'
@@ -1337,8 +1367,8 @@ foreach ($k in @('__ua__', '__dnf__', '__io__')) {
         Assert-True ($null -eq $c.Aborted -and $null -eq $c.StoppedBy -and @($c.LogErrors).Count -eq 0) "sem parada ($($c.Aborted) $($c.StoppedBy))"
         Assert-Eq $d.Calls.Count 3 'tres chamadas ao deleter simulado'
         $recs = Get-TestCleanLogRecords $w
-        Assert-Eq (@($recs | ForEach-Object { $_.type }) -join ',') 'run-start,plan,plan,plan,confirmation,intent,result,intent,result,intent,result,run-end' 'ordem dos registros'
-        Assert-Eq (@($recs | ForEach-Object { $_.recSeq }) -join ',') ((1..12) -join ',') 'recSeq continuo'
+        Assert-Eq (@($recs | ForEach-Object { $_.type }) -join ',') 'run-start,plan,plan,plan,declaration,declaration,declaration,confirmation,plan-check,intent,result,intent,result,intent,result,run-end' 'ordem dos registros'
+        Assert-Eq (@($recs | ForEach-Object { $_.recSeq }) -join ',') ((1..16) -join ',') 'recSeq continuo'
         Assert-Eq @($recs | Where-Object { $_.runId -cne $c.RunId -or $_.schema -cne 'atm.cleanlog/1' }).Count 0 'runId e schema em todos os registros'
         foreach ($call in $d.Calls) { Assert-True ($call.LastType -ceq 'intent' -and [string]::Equals($call.LastPath, $call.Path, [StringComparison]::OrdinalIgnoreCase)) "intent da propria raiz gravado antes da chamada ($($call.LastType))" }
         Assert-Eq (@($c.Deleted | ForEach-Object { $_.OpId }) -join ',') (@(1..3 | ForEach-Object { '{0}:{1}' -f $c.RunId, $_ }) -join ',') 'opId runId:seq'
@@ -1369,7 +1399,7 @@ foreach ($k in @('__ua__', '__dnf__', '__io__')) {
             $row = @($c.Deleted)
             Assert-True ($row.Count -eq 1 -and $row[0].Outcome -ceq $k.Outcome -and $row[0].VerifiedState -ceq $k.Vs) "$($tag): desfecho $($row[0].Outcome)/$($row[0].VerifiedState)"
             $recs = Get-TestCleanLogRecords $w
-            Assert-Eq (@($recs | ForEach-Object { $_.type }) -join ',') 'run-start,plan,plan,confirmation,intent,result,run-end' "$($tag): registros"
+            Assert-Eq (@($recs | ForEach-Object { $_.type }) -join ',') 'run-start,plan,plan,declaration,declaration,confirmation,plan-check,intent,result,run-end' "$($tag): registros"
             $res = @($recs | Where-Object { $_.type -ceq 'result' })[0]
             Assert-True ($res.outcome -ceq $k.Outcome -and $res.opId -ceq $row[0].OpId) "$($tag): result registrado"
             Assert-Eq @($recs | Where-Object { $_.type -ceq 'run-end' })[0].stoppedBy ('STOPPED_AFTER_' + $k.Outcome) "$($tag): run-end com o motivo"
@@ -1399,7 +1429,7 @@ foreach ($k in @('__ua__', '__dnf__', '__io__')) {
             Assert-True ($w.Disposed -ge 1) "$($t): liberado"
         }
         $o = & $go (New-TestCleanLogWriter -FailOn 'confirmation')
-        Assert-True ($o.C.Aborted -ceq 'LOG_WRITE_FAILED' -and $o.Calls -eq 0 -and $o.Reader -eq 1 -and $o.Stages -ceq 'confirmation' -and -not $o.C.Confirmed) "confirmacao nao registrada: nada iniciado ($($o.C.Aborted))"
+        Assert-True ($o.C.Aborted -ceq 'LOG_WRITE_FAILED' -and $o.Calls -eq 0 -and $o.Reader -eq 5 -and $o.Stages -ceq 'confirmation' -and -not $o.C.Confirmed) "confirmacao nao registrada: nada iniciado ($($o.C.Aborted))"
         $o = & $go (New-TestCleanLogWriter -FailOn 'intent')
         Assert-True ($o.C.Aborted -ceq 'LOG_INTENT_FAILED' -and $o.Calls -eq 0 -and @($o.C.LogErrors)[0].OpId -ceq ('{0}:1' -f $o.C.RunId)) "intent da primeira raiz: deleter nunca chamado ($($o.C.Aborted))"
         $o = & $go (New-TestCleanLogWriter -FailOn 'intent' -FailAt 2)
@@ -1425,7 +1455,7 @@ foreach ($k in @('__ua__', '__dnf__', '__io__')) {
         $w = New-TestCleanLogWriter
         $d = New-TestCleanDeleter -Writer $w
         $c = Invoke-AtmClean -Entries $f.Entries -PlanPresenter $presenter -ConfirmationReader { param($x) 'nao' } -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -LogWriter $w -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
-        Assert-True ($c.Aborted -ceq 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE' -and $d.Calls.Count -eq 0 -and -not $c.Confirmed) "rejeitada ($($c.Aborted))"
+        Assert-True ($c.Aborted -ceq 'DECLARATION_DECLINED' -and $c.RefusedAt.Step -ceq 'task' -and $d.Calls.Count -eq 0 -and -not $c.Confirmed) "rejeitada ($($c.Aborted))"
         $recs = Get-TestCleanLogRecords $w
         Assert-Eq (@($recs | ForEach-Object { $_.type }) -join ',') 'run-start,plan,confirmation,run-end' 'registros'
         Assert-True (@($recs | Where-Object { $_.type -ceq 'confirmation' })[0].accepted -eq $false) 'rejeicao registrada'
@@ -1466,7 +1496,7 @@ foreach ($k in @('__ua__', '__dnf__', '__io__')) {
         $hook = { param($part) [IO.File]::WriteAllBytes((Join-Path $part.Path 'apareceu.bin'), (New-Object byte[] 9)) }
         $c = Invoke-AtmClean -Entries $f.Entries -PlanPresenter $presenter -ConfirmationReader ${function:Confirm-Correct} -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -BeforeDeleteHook $hook -LogWriter $w -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
         $recs = Get-TestCleanLogRecords $w
-        Assert-Eq (@($recs | ForEach-Object { $_.type }) -join ',') 'run-start,plan,confirmation,skip,run-end' 'registros'
+        Assert-Eq (@($recs | ForEach-Object { $_.type }) -join ',') 'run-start,plan,declaration,confirmation,plan-check,skip,run-end' 'registros'
         $sk = @($recs | Where-Object { $_.type -ceq 'skip' })[0]
         Assert-True ($sk.opId -ceq ('{0}:1' -f $c.RunId) -and [string]::Equals($sk.path, $f.Roots[0], [StringComparison]::OrdinalIgnoreCase) -and ((@($sk.reasons) -join ' ') -match 'ALTERADO_APOS_CONFIRMACAO')) "skip identificado ($(@($sk.reasons) -join ';'))"
         Assert-True ($d.Calls.Count -eq 0 -and @($c.Deleted).Count -eq 0 -and @($c.Skipped).Count -eq 1 -and $null -eq $c.Aborted -and $null -eq $c.StoppedBy) 'nenhuma chamada; sem parada'
@@ -1585,7 +1615,7 @@ foreach ($k in @('__ua__', '__dnf__', '__io__')) {
         foreach ($call in $d.Calls) { Assert-True ($call.LastType -ceq 'intent' -and [string]::Equals($call.LastPath, $call.Path, [StringComparison]::OrdinalIgnoreCase)) "intent no arquivo antes da chamada ($($call.LastType))" }
         $fs = [IO.File]::Open($path, 'Open', 'Read', 'None'); $fs.Dispose()
         $rd = Read-TestCleanLogFile $path
-        Assert-Eq (@($rd.Records | ForEach-Object { $_.type }) -join ',') 'run-start,plan,plan,confirmation,intent,result,intent,result,run-end' 'registros no arquivo'
+        Assert-Eq (@($rd.Records | ForEach-Object { $_.type }) -join ',') 'run-start,plan,plan,declaration,declaration,confirmation,plan-check,intent,result,intent,result,run-end' 'registros no arquivo'
         Assert-Eq @($rd.Records | Where-Object { $_.runId -cne $c.RunId }).Count 0 'runId'
         $bytes = [IO.File]::ReadAllBytes($path)
         $seen = @{ Reader = 0 }
@@ -1623,7 +1653,9 @@ $script:AtmRealDeletionEnabled = $true
 $script:AtmCleanLockName = $LockName
 # B2-1: as the suite, no query of this runner's services or Hyper-V.
 $script:AtmRuntimeEvidenceSources = @{ ServiceSource = { param($Names) @() }; VirtualizationSource = { param($Op) @() } }
-$prof = [pscustomobject]@{ Sid = $Sid; UserName = 'TEST\t1intr'; ProfilePath = $ProfileRoot; Loaded = $true; Special = $false; Origin = 'Test'; EnvStatus = 'OK'
+# AUT-2: as the suite, the console observation replaced (this child has no console).
+$script:AtmCleanConsoleSource = { $true }
+$prof =[pscustomobject]@{ Sid = $Sid; UserName = 'TEST\t1intr'; ProfilePath = $ProfileRoot; Loaded = $true; Special = $false; Origin = 'Test'; EnvStatus = 'OK'
     TempCandidates = @([pscustomobject]@{ TempPath = $Temp; Source = 'test' }); EnvValues = @{}; EnvKnown = $true; Notes = @() }
 $ia = @{ ProfilesOverride = @($prof); ProcessesOverride = @([pscustomobject]@{ ProcessId = 1; Name = 'idle.exe'; ParentProcessId = 0; CommandLine = 'idle.exe'; CreationDate = (Get-Date).AddHours(-1) })
     IdentityOverride = [pscustomobject]@{ Sid = $Sid; Name = $Name; IsAdmin = ($IsAdmin -ceq 'True') }; NowUtc = (New-Object DateTime ([long]$NowTicks), ([DateTimeKind]::Utc)); NoProgress = $true; ConfigDir = (Join-Path $Src 'config') }
@@ -1637,7 +1669,7 @@ exit 0
         Assert-True ($r.Exit -eq 7 -and -not $r.TimedOut) "o filho saiu sozinho dentro do deleter simulado (saida $($r.Exit) $($r.Text))"
         $rd = Read-TestCleanLogFile $path
         $types = @($rd.Records | ForEach-Object { $_.type })
-        Assert-Eq ($types -join ',') 'run-start,plan,confirmation,intent' 'o log termina no intent: sem result e sem run-end'
+        Assert-Eq ($types -join ',') 'run-start,plan,declaration,confirmation,plan-check,intent' 'o log termina no intent: sem result e sem run-end'
         Assert-True (-not $rd.Bom -and $rd.EndsLf) 'registros completos ate o intent'
         Assert-True (Test-TestT1RootsIntact $f) 'raiz intacta (o deleter simulado nada apagou)'
         $script:caseNote = 'intent sem result = desfecho desconhecido; queda de energia e falha real de flush nao reproduzidas'
@@ -1700,7 +1732,7 @@ exit 0
         $script:AtmCleanLockName = $n
         try {
             $runs = @(
-                @{ Tag = 'rejeitada'; Reader = { param($x) 'nao' }; Writer = (New-TestCleanLogWriter); Results = @(); Presence = $false; Want = 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE' },
+                @{ Tag = 'rejeitada'; Reader = { param($x) 'nao' }; Writer = (New-TestCleanLogWriter); Results = @(); Presence = $false; Want = 'DECLARATION_DECLINED' },
                 @{ Tag = 'run-start'; Reader = ${function:Confirm-Correct}; Writer = (New-TestCleanLogWriter -FailOn 'run-start'); Results = @(); Presence = $false; Want = 'LOG_WRITE_FAILED' },
                 @{ Tag = 'intent'; Reader = ${function:Confirm-Correct}; Writer = (New-TestCleanLogWriter -FailOn 'intent'); Results = @(); Presence = $false; Want = 'LOG_INTENT_FAILED' },
                 @{ Tag = 'excecao do deleter'; Reader = ${function:Confirm-Correct}; Writer = (New-TestCleanLogWriter); Results = @('THROW'); Presence = $false; Want = 'STOPPED_AFTER_EXCEPTION' },
@@ -2077,7 +2109,7 @@ exit 0
             [pscustomobject]@{ Preview = $afterPreview; Clean = @{ Runs = $cnt.Runs - $afterPreview.Runs; Collections = $cnt.Collections - $afterPreview.Collections; Calls = $d.Calls.Count; Aborted = $c.Aborted; Stopped = $c.StoppedBy } }
         }
         Assert-True ($res.Preview.Runs -eq 1 -and $res.Preview.Collections -eq 1 -and $res.Preview.Rows -ge 4) "preview: uma coleta para $($res.Preview.Rows) linhas ($($res.Preview.Runs) execucoes, $($res.Preview.Collections) colecoes)"
-        Assert-True ($res.Clean.Runs -eq 3 -and $res.Clean.Collections -eq 3 -and $res.Clean.Calls -eq 2) "clean: plano + uma por raiz ($($res.Clean.Runs) execucoes, $($res.Clean.Collections) colecoes, $($res.Clean.Calls) chamadas; $($res.Clean.Aborted) $($res.Clean.Stopped))"
+        Assert-True ($res.Clean.Runs -eq 4 -and $res.Clean.Collections -eq 4 -and $res.Clean.Calls -eq 2) "clean: plano + conferencia do plano antes da execucao (AUT-2) + uma por raiz ($($res.Clean.Runs) execucoes, $($res.Clean.Collections) colecoes, $($res.Clean.Calls) chamadas; $($res.Clean.Aborted) $($res.Clean.Stopped))"
         foreach ($rt in $roots) { Assert-True ([IO.File]::Exists((Join-Path $rt 'sub\b.bin'))) 'nada apagado' }
     }
     Test-Case 'Evidencia de execucao (B2-1)' 'Estatico: o motor de limpeza consome so recusas (sem o grafo); preview, plano e revalidacao passam a evidencia; costura de teste so no motor e nula na distribuicao; travas fechadas' {
@@ -2085,7 +2117,7 @@ exit 0
         Assert-Eq $shippedRuntimeSources $null 'costura distribuida nula'
         Assert-Eq ([regex]::Matches($clean, '\$script:AtmRuntimeEvidenceSources\s*=').Count) 1 'uma unica atribuicao no motor'
         Assert-Eq ([regex]::Matches($clean, '-RuntimeEvidence \$(rt|rtRe)\b').Count) 4 'preview, plano, revalidacao e apresentacao da autorizacao (AUT-1) passam a evidencia'
-        Assert-Eq ([regex]::Matches($clean, 'Get-AtmCleanRuntimeEvidence -Inventory').Count) 4 'uma coleta no preview, uma no plano, uma por raiz na revalidacao, uma por apresentacao da autorizacao (AUT-1)'
+        Assert-Eq ([regex]::Matches($clean, 'Get-AtmCleanRuntimeEvidence -Inventory').Count) 5 'uma coleta no preview, uma no plano, uma na conferencia do plano antes da execucao (AUT-2), uma por raiz na revalidacao, uma por apresentacao da autorizacao (AUT-1)'
         Assert-True (-not $clean.Contains('Invoke-AtmDiagnose') -and -not $clean.Contains('Get-AtmDependencyGraph')) 'o motor de limpeza nao chama o diagnostico nem o grafo diretamente'
         foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Name -ne 'Engine.Clean.ps1' })) {
             Assert-True (-not ([IO.File]::ReadAllText($fi.FullName)).Contains('AtmRuntimeEvidenceSources')) "$($fi.Name) usa a costura de teste"
@@ -2481,6 +2513,187 @@ exit 0
         Assert-True ($shippedDeletionGate -eq $false -and $script:AtmWorktreeDiagnosticsEnabled -eq $false -and $script:AtmHandleDiagnosticsEnabled -eq $false -and $script:AtmDiagnoseExportEnabled -eq $false) 'travas distribuidas fechadas'
     }
 
+    # ------------------------------------------------------------------ plan-bound confirmation in clean (AUT-2)
+    # Synthetic roots, the stand-in deleter (counter of calls) and the in-memory writer; the deletion gate is open only in
+    # this process (as for T1/B8) and the console observation is the suite's seam unless a case sets its own.
+    Test-Case 'Confirmacao vinculada ao plano (AUT-2)' 'Duas raizes com decisoes diferentes: perguntas por raiz com o caminho, confirmacao unica com planId e quantidade; declaracoes e confirmacao gravadas antes do primeiro intent; nada apagado' {
+        $f = New-TestT1Fixture 'aut2two' 2
+        $w = New-TestCleanLogWriter
+        $d = New-TestCleanDeleter -Writer $w
+        $kept = Get-AtmText 'auth.phrase.results'; $none = Get-AtmText 'auth.phrase.nothingNeeded'
+        $op = New-TestCleanOperator -Decisions @{ ($f.Roots[0]) = $kept; ($f.Roots[1]) = $none }
+        $c = Invoke-AtmClean -Entries $f.Entries -PlanPresenter $presenter -ConfirmationReader $op.Reader -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -LogWriter $w -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+        Assert-True ($null -eq $c.Aborted -and $null -eq $c.StoppedBy -and $c.Confirmed -and $d.Calls.Count -eq 2) "executado com o deleter simulado ($($c.Aborted) $($c.StoppedBy); chamadas $($d.Calls.Count))"
+        Assert-Eq ($op.Calls -join ',') ("task|$($f.Roots[0]),results|$($f.Roots[0]),task|$($f.Roots[1]),results|$($f.Roots[1]),confirm|") 'perguntas por raiz com o caminho, depois uma confirmacao'
+        $recs = Get-TestCleanLogRecords $w
+        Assert-Eq (@($recs | ForEach-Object { $_.type }) -join ',') 'run-start,plan,plan,declaration,declaration,confirmation,plan-check,intent,result,intent,result,run-end' 'ordem: declaracoes e confirmacao antes de qualquer intent'
+        $start = @($recs | Where-Object { $_.type -ceq 'run-start' })[0]; $conf = @($recs | Where-Object { $_.type -ceq 'confirmation' })[0]
+        $expected = Get-AtmCleanPlanId -RunId $c.RunId -Parts @($c.Verified)
+        Assert-True ($c.PlanId -ceq $expected -and $start.planId -ceq $expected -and $conf.planId -ceq $expected -and $conf.accepted -eq $true -and $conf.roots -eq 2) 'planId do conjunto apresentado no estado, no run-start e na confirmacao'
+        Assert-Eq $c.Phrase ('APAGAR 2 CAMINHOS ' + $expected.Substring(0, 8).ToUpperInvariant()) 'frase com a quantidade exata e o planId'
+        $plans = @($recs | Where-Object { $_.type -ceq 'plan' }); $decl = @($recs | Where-Object { $_.type -ceq 'declaration' })
+        for ($i = 0; $i -lt 2; $i++) {
+            Assert-True ($decl[$i].opId -ceq $plans[$i].opId -and $decl[$i].path -ceq $plans[$i].path -and $decl[$i].fingerprint -ceq $plans[$i].fingerprint -and $decl[$i].declaredBy -ceq 'OPERATOR' -and $decl[$i].taskCompleted -eq $true -and $decl[$i].preservation.verifiedByTool -eq $false) "declaracao $($i + 1) ligada a raiz do plano"
+        }
+        Assert-True ($decl[0].contentDecision -ceq 'RESULTS_PRESERVED' -and $decl[0].preservation.basis -ceq 'OPERATOR_DECLARED' -and $decl[1].contentDecision -ceq 'NOTHING_NEEDED' -and $decl[1].preservation.basis -ceq 'NOTHING_NEEDED_DISCARD_ACCEPTED') 'decisoes diferentes por raiz, com a semantica do AUT-1'
+        Assert-True ($conf.interaction.observedBy -ceq 'TEST_SEAM' -and $conf.interaction.identifiesRespondent -eq $false -and @($conf.limitations) -contains 'PRESERVATION_NOT_VERIFIED_BY_TOOL' -and @($conf.limitations) -contains 'INTERACTIVE_CONSOLE_IS_NOT_PROOF_OF_PRESENCE') 'confirmacao com interacao honesta e limites'
+        Assert-True (-not (($w.Lines -join "`n").Contains('TOOL_VERIFIED'))) 'TOOL_VERIFIED nunca gravado'
+        foreach ($call in $d.Calls) { Assert-True ($call.LastType -ceq 'intent') "intent antes de cada chamada ($($call.LastType))" }
+        $txt = (@(Show-AtmCleanResult -Result $c 6>&1 | ForEach-Object { [string]$_.MessageData }) -join "`n")
+        Assert-True ($txt.Contains((Get-AtmText 'clean.declared.RESULTS_PRESERVED' $f.Roots[0])) -and $txt.Contains((Get-AtmText 'clean.declared.NOTHING_NEEDED' $f.Roots[1]))) 'console mostra o que foi declarado por raiz'
+        Assert-True (Test-TestT1RootsIntact $f) 'deleter simulado: nada apagado'
+    }
+    Test-Case 'Confirmacao vinculada ao plano (AUT-2)' 'Recusa e cancelamento em cada etapa (tarefa, conteudo, em cada raiz, e confirmacao final): execucao inteira abortada antes da primeira exclusao; recusa registrada com etapa; deleter nunca chamado' {
+        $steps = @('task#1', 'results#1', 'task#2', 'results#2', 'confirm')
+        $n = 0
+        foreach ($step in $steps) {
+            foreach ($ans in @('nao', $null, '', 'TOOL_VERIFIED')) {
+                $n++
+                $f = New-TestT1Fixture ('aut2no' + $n) 2
+                $w = New-TestCleanLogWriter
+                $d = New-TestCleanDeleter -Writer $w
+                $op = New-TestCleanOperator -Answers @{ $step = $ans }
+                $c = Invoke-AtmClean -Entries $f.Entries -PlanPresenter $presenter -ConfirmationReader $op.Reader -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -LogWriter $w -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+                $want = $(if ($step -ceq 'confirm') { 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE' } elseif ($ans) { 'DECLARATION_DECLINED' } else { 'DECLARATION_CANCELLED' })
+                $recs = Get-TestCleanLogRecords $w
+                $conf = @($recs | Where-Object { $_.type -ceq 'confirmation' })[0]
+                Assert-True ($c.Aborted -ceq $want -and $d.Calls.Count -eq 0 -and -not $c.Confirmed -and $c.RefusedAt.Step -ceq ($step -replace '#\d$', '')) "$step / [$ans]: $($c.Aborted) (chamadas $($d.Calls.Count))"
+                Assert-True ((@($recs | ForEach-Object { $_.type }) -join ',') -ceq 'run-start,plan,plan,confirmation,run-end' -and $conf.accepted -eq $false -and $conf.refusal -ceq $want -and $conf.step -ceq ($step -replace '#\d$', '')) "$step / [$ans]: nenhuma declaracao gravada, recusa registrada"
+                Assert-True (Test-TestT1RootsIntact $f) "$step / [$ans]: nada apagado"
+            }
+        }
+        $txt = (@(Show-AtmCleanResult -Result $c 6>&1 | ForEach-Object { [string]$_.MessageData }) -join "`n")
+        Assert-True ($txt.Contains((Get-AtmText 'clean.refusedAt' 'confirm' '-')) -and $txt.Contains((Get-AtmText 'clean.nothing'))) 'console diz onde parou e que nada foi executado'
+    }
+    Test-Case 'Confirmacao vinculada ao plano (AUT-2)' 'Frase de outro plano (outra execucao do mesmo conjunto), quantidade errada ou frase antiga sem planId: recusadas; deleter nunca chamado' {
+        $f = New-TestT1Fixture 'aut2phr' 2
+        $ia = Get-InvArgs -Profiles @($f.Profile)
+        $op0 = New-TestCleanOperator -Answers @{ confirm = 'nao' }
+        $d0 = New-TestCleanDeleter
+        $c0 = Invoke-AtmClean -Entries $f.Entries -PlanPresenter $presenter -ConfirmationReader $op0.Reader -InventoryArgs $ia -LogWriter (New-TestCleanLogWriter) -DeleteTreeImpl $d0.Delete -PathPresenceImpl $d0.Present
+        $otherRun = $c0.Phrase
+        $variants = @(
+            @{ Tag = 'outra execucao'; Answer = { param($ph) $otherRun }.GetNewClosure() },
+            @{ Tag = 'quantidade errada'; Answer = { param($ph) $ph -replace '^APAGAR 2 ', 'APAGAR 1 ' } },
+            @{ Tag = 'frase antiga'; Answer = 'APAGAR 2 CAMINHOS' })
+        foreach ($v in $variants) {
+            $d = New-TestCleanDeleter
+            $op = New-TestCleanOperator -Answers @{ confirm = $v.Answer }
+            $c = Invoke-AtmClean -Entries $f.Entries -PlanPresenter $presenter -ConfirmationReader $op.Reader -InventoryArgs $ia -LogWriter (New-TestCleanLogWriter) -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+            Assert-True ($c.Aborted -ceq 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE' -and $d.Calls.Count -eq 0 -and $c.Phrase -cne $otherRun) "$($v.Tag): recusada ($($c.Aborted), chamadas $($d.Calls.Count))"
+        }
+        Assert-True (Test-TestT1RootsIntact $f) 'nada apagado'
+    }
+    Test-Case 'Confirmacao vinculada ao plano (AUT-2)' 'Plano muda durante as perguntas (raiz alterada na confirmacao): PLAN_CHANGED_BEFORE_EXECUTION, nenhuma raiz executada, plano nunca reduzido nem atualizado silenciosamente' {
+        $f = New-TestT1Fixture 'aut2chg' 2
+        $w = New-TestCleanLogWriter
+        $d = New-TestCleanDeleter -Writer $w
+        $target = $f.Roots[1]
+        $when = $nowFuture.AddDays(-5)
+        $op = New-TestCleanOperator -Answers @{ confirm = { param($ph) [IO.File]::WriteAllBytes((Join-Path $target 'apareceu.bin'), (New-Object byte[] 5)); [IO.File]::SetLastWriteTimeUtc((Join-Path $target 'apareceu.bin'), $when) }.GetNewClosure() }
+        $c = Invoke-AtmClean -Entries $f.Entries -PlanPresenter $presenter -ConfirmationReader $op.Reader -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -LogWriter $w -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+        $recs = Get-TestCleanLogRecords $w
+        $chk = @($recs | Where-Object { $_.type -ceq 'plan-check' })[0]
+        Assert-True ($c.Aborted -ceq 'PLAN_CHANGED_BEFORE_EXECUTION' -and $d.Calls.Count -eq 0 -and @($c.Deleted).Count -eq 0) "mudanca recusada antes da execucao ($($c.Aborted), chamadas $($d.Calls.Count))"
+        Assert-True ($chk.matched -eq $false -and (@($chk.changed) -join ',') -ceq ('{0}:2' -f $c.RunId) -and $chk.planId -ceq $c.PlanId) "plan-check registra a raiz alterada ($(@($chk.changed) -join ','))"
+        Assert-Eq (@($recs | ForEach-Object { $_.type }) -join ',') 'run-start,plan,plan,declaration,declaration,confirmation,plan-check,run-end' 'sem intent: a raiz inalterada tambem nao foi executada'
+        $txt = (@(Show-AtmCleanResult -Result $c 6>&1 | ForEach-Object { [string]$_.MessageData }) -join "`n")
+        Assert-True ($txt.Contains((Get-AtmText 'clean.planChanged'))) 'console pede nova apresentacao'
+        Assert-True (Test-TestT1RootsIntact $f) 'nada apagado'
+    }
+    Test-Case 'Confirmacao vinculada ao plano (AUT-2)' 'Falha de gravacao ou de descarga das declaracoes, da confirmacao ou da conferencia do plano (escritor simulado): LOG_WRITE_FAILED antes de qualquer intent; deleter nunca chamado' {
+        $cases = @(
+            @{ FailOn = 'declaration'; FailAt = 1; Code = 'LOG_WRITE_FAILED_WIN32_112' }, @{ FailOn = 'declaration'; FailAt = 2; Code = 'LOG_FLUSH_FAILED_WIN32_1117' },
+            @{ FailOn = 'confirmation'; FailAt = 1; Code = 'LOG_FLUSH_FAILED_WIN32_1117' }, @{ FailOn = 'plan-check'; FailAt = 1; Code = 'LOG_WRITE_FAILED_WIN32_112' })
+        foreach ($k in $cases) {
+            $f = New-TestT1Fixture ('aut2lf' + $k.FailOn.Substring(0, 3) + $k.FailAt) 2
+            $w = New-TestCleanLogWriter -FailOn $k.FailOn -FailAt $k.FailAt -FailCode $k.Code
+            $d = New-TestCleanDeleter -Writer $w
+            $op = New-TestCleanOperator
+            $c = Invoke-AtmClean -Entries $f.Entries -PlanPresenter $presenter -ConfirmationReader $op.Reader -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -LogWriter $w -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+            $tag = "$($k.FailOn)#$($k.FailAt) $($k.Code)"
+            $types = @(Get-TestCleanLogRecords $w | ForEach-Object { $_.type })
+            Assert-True ($c.Aborted -ceq 'LOG_WRITE_FAILED' -and $d.Calls.Count -eq 0 -and @($c.LogErrors)[0].Stage -ceq $k.FailOn -and @($c.LogErrors)[0].Code -ceq $k.Code -and $types -notcontains 'intent') "$($tag): abortado antes de qualquer intent ($($c.Aborted), chamadas $($d.Calls.Count))"
+            Assert-True ((-not $c.Confirmed) -eq ($k.FailOn -cne 'plan-check')) "$($tag): confirmado so depois de declaracoes e confirmacao gravadas"
+            Assert-True (Test-TestT1RootsIntact $f) "$($tag): nada apagado"
+        }
+    }
+    Test-Case 'Confirmacao vinculada ao plano (AUT-2)' 'Sem console observado pelo motor: CONSOLE_NOT_OBSERVED antes de log, perguntas ou deleter; CLI exige console so com a trava aberta; seam distribuido nulo e usado so pelo motor' {
+        $f = New-TestT1Fixture 'aut2con' 1
+        $w = New-TestCleanLogWriter
+        $d = New-TestCleanDeleter -Writer $w
+        $op = New-TestCleanOperator
+        $prev = $script:AtmCleanConsoleSource
+        try { $script:AtmCleanConsoleSource = { $false }; $c = Invoke-AtmClean -Entries $f.Entries -PlanPresenter $presenter -ConfirmationReader $op.Reader -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -LogWriter $w -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present }
+        finally { $script:AtmCleanConsoleSource = $prev }
+        Assert-True ($c.Aborted -ceq 'CONSOLE_NOT_OBSERVED' -and $op.Calls.Count -eq 0 -and $w.Lines.Count -eq 0 -and $d.Calls.Count -eq 0 -and $null -eq $c.RunId) "sem console: $($c.Aborted) (perguntas $($op.Calls.Count), registros $($w.Lines.Count), chamadas $($d.Calls.Count))"
+        $txt = (@(Show-AtmCleanResult -Result $c 6>&1 | ForEach-Object { [string]$_.MessageData }) -join "`n")
+        Assert-True ($txt.Contains((Get-AtmText 'clean.consoleRequired'))) 'console explica a exigencia'
+        # The engine's own observation (no seam): in this suite's process (redirected output) it observes no console.
+        if (-not (Test-AtmDiscardConsoleObserved)) {
+            $op2 = New-TestCleanOperator; $d2 = New-TestCleanDeleter
+            try { $script:AtmCleanConsoleSource = $null; $c2 = Invoke-AtmClean -Entries $f.Entries -PlanPresenter $presenter -ConfirmationReader $op2.Reader -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -LogWriter (New-TestCleanLogWriter) -DeleteTreeImpl $d2.Delete -PathPresenceImpl $d2.Present }
+            finally { $script:AtmCleanConsoleSource = $prev }
+            Assert-True ($c2.Aborted -ceq 'CONSOLE_NOT_OBSERVED' -and $op2.Calls.Count -eq 0 -and $d2.Calls.Count -eq 0) "observacao real do motor sem console: $($c2.Aborted)"
+        }
+        $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        $blk = $cli.Substring($cli.IndexOf("'clean' {"), $cli.IndexOf("'authorize' {") - $cli.IndexOf("'clean' {"))
+        $gi = $blk.IndexOf('if ($script:AtmRealDeletionEnabled -and -not (Test-AtmTuiInteractive))')
+        Assert-True ($gi -gt 0 -and $gi -lt $blk.IndexOf('Invoke-AtmClean')) 'CLI clean: console exigido antes do motor, so com a trava aberta'
+        Assert-True ($null -eq $shippedConsoleSource) 'seam distribuido nulo'
+        $assign = 0; $refs = @()
+        foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File)) {
+            $t = [IO.File]::ReadAllText($fi.FullName)
+            $assign += ([regex]::Matches($t, '\$script:AtmCleanConsoleSource\s*=')).Count
+            if ($fi.Name -ne 'Engine.Clean.ps1' -and $t.Contains('AtmCleanConsoleSource')) { $refs += $fi.Name }
+        }
+        Assert-True ($assign -eq 1 -and $refs.Count -eq 0) "seam atribuido uma vez, so no motor ($assign; $($refs -join ','))"
+        Assert-True (Test-TestT1RootsIntact $f) 'nada apagado'
+    }
+    Test-Case 'Confirmacao vinculada ao plano (AUT-2)' 'Revalidacao imediata mantida depois das declaracoes: raiz alterada depois da conferencia (antes da exclusao) e pulada; a outra segue; declaracoes das duas gravadas' {
+        $f = New-TestT1Fixture 'aut2rev' 2
+        $w = New-TestCleanLogWriter
+        $d = New-TestCleanDeleter -Writer $w
+        $second = $f.Roots[1]
+        $hook = { param($part) if ([string]::Equals($part.Path, $second, [StringComparison]::OrdinalIgnoreCase)) { [IO.File]::WriteAllBytes((Join-Path $part.Path 'apareceu.bin'), (New-Object byte[] 9)) } }.GetNewClosure()
+        $op = New-TestCleanOperator
+        $c = Invoke-AtmClean -Entries $f.Entries -PlanPresenter $presenter -ConfirmationReader $op.Reader -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -BeforeDeleteHook $hook -LogWriter $w -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+        $recs = Get-TestCleanLogRecords $w
+        Assert-Eq (@($recs | ForEach-Object { $_.type }) -join ',') 'run-start,plan,plan,declaration,declaration,confirmation,plan-check,intent,result,skip,run-end' 'registros'
+        Assert-True ($d.Calls.Count -eq 1 -and @($c.Skipped).Count -eq 1 -and [string]::Equals(@($c.Skipped)[0].Path, $second, [StringComparison]::OrdinalIgnoreCase) -and ((@(@($c.Skipped)[0].Reasons) -join ' ') -match 'ALTERADO_APOS_CONFIRMACAO')) 'a declaracao nao substitui a revalidacao'
+        Assert-True (Test-TestT1RootsIntact $f) 'nada apagado'
+    }
+    Test-Case 'Confirmacao vinculada ao plano (AUT-2)' 'Trava fechada: fluxo de plano inalterado - nenhuma pergunta, sem exigencia de console nem log, frase sem planId; leitor e deleter nunca chamados' {
+        $f = New-TestT1Fixture 'aut2gate' 2
+        $op = New-TestCleanOperator
+        $d = New-TestCleanDeleter
+        $prevGate = $script:AtmRealDeletionEnabled; $prevCon = $script:AtmCleanConsoleSource
+        try {
+            $script:AtmRealDeletionEnabled = $false; $script:AtmCleanConsoleSource = { $false }
+            $c = Invoke-AtmClean -Entries $f.Entries -PlanPresenter $presenter -ConfirmationReader $op.Reader -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+        } finally { $script:AtmRealDeletionEnabled = $prevGate; $script:AtmCleanConsoleSource = $prevCon }
+        Assert-True ($c.Aborted -ceq 'EXCLUSAO_REAL_DESABILITADA_V0_1' -and $op.Calls.Count -eq 0 -and $d.Calls.Count -eq 0 -and $null -eq $c.PlanId -and @($c.Declarations).Count -eq 0 -and $c.Phrase -ceq 'APAGAR 2 CAMINHOS' -and $null -eq $c.RunId) "plano apenas ($($c.Aborted); perguntas $($op.Calls.Count); frase $($c.Phrase))"
+        Assert-True ($shippedDeletionGate -eq $false) 'trava distribuida fechada'
+        Assert-True (Test-TestT1RootsIntact $f) 'nada apagado'
+    }
+    Test-Case 'Confirmacao vinculada ao plano (AUT-2)' 'B1 e RECENT intactos: raiz RECENT nunca recebe declaracao; com cobertura incompleta nenhuma raiz entra e nada e perguntado; so o conjunto executavel e declarado e confirmado' {
+        $p = New-TestProfile 'aut2b1'
+        $ok = New-TestRoot -ProfileInfo $p; $rec = New-TestRoot -ProfileInfo $p
+        [IO.File]::SetLastWriteTimeUtc((Join-Path $rec 'a.txt'), $nowFuture.AddHours(-3))
+        $e = @($ok, $rec | ForEach-Object { [pscustomobject]@{ Source = 't'; Path = $_; Fingerprint = $null } })
+        $op = New-TestCleanOperator -Answers @{ confirm = 'nao' }
+        $d = New-TestCleanDeleter
+        $c = Invoke-AtmClean -Entries $e -PlanPresenter $presenter -ConfirmationReader $op.Reader -InventoryArgs (Get-InvArgs -Profiles @($p)) -LogWriter (New-TestCleanLogWriter) -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+        Assert-True (@($c.Verified).Count -eq 1 -and @($c.Rejected | Where-Object { $_.Path -ceq $rec }).Count -eq 1 -and ($op.Calls -join ',') -ceq "task|$ok,results|$ok,confirm|" -and $c.Phrase -like 'APAGAR 1 CAMINHOS *') "RECENT fora do conjunto; perguntas so da raiz executavel ($($op.Calls -join ','))"
+        $op2 = New-TestCleanOperator
+        $d2 = New-TestCleanDeleter
+        $c2 = Invoke-AtmClean -Entries $e -PlanPresenter $presenter -ConfirmationReader $op2.Reader -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs (New-Procs -Extra @((New-TestRuntimeProc 850 'secret.exe' $null)))) -LogWriter (New-TestCleanLogWriter) -DeleteTreeImpl $d2.Delete -PathPresenceImpl $d2.Present
+        Assert-True ($c2.Aborted -ceq 'NENHUM_CAMINHO_ELEGIVEL' -and $op2.Calls.Count -eq 0 -and $d.Calls.Count -eq 0 -and $d2.Calls.Count -eq 0) "B1: nenhum candidato executavel, nenhuma pergunta ($($c2.Aborted))"
+        $clean = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Clean.ps1'))
+        Assert-True ($clean.Contains('if (-not $Inventory.ProcessCoverageComplete) {') -and $clean.Contains("if (`$p.Class -in @('ACTIVE_EVIDENCE', 'RECENT')) { `$reasons.Add((Get-AtmText 'reason.class' `$p.Class)) }")) 'gates B1 e RECENT inalterados'
+        Assert-True ([IO.Directory]::Exists($ok) -and [IO.Directory]::Exists($rec)) 'nada apagado'
+    }
+
     # ------------------------------------------------------------------ read-only guarantee
     Test-Case 'Somente leitura' 'audit + preview nao alteram nada no sandbox' {
         $p = New-TestProfile 'ro'
@@ -2710,7 +2923,8 @@ exit 0
         $script:tuiFrames = New-Object System.Collections.Generic.List[string]
         $script:tuiPrompts = New-Object System.Collections.Generic.List[string]
         $ks = { if ($script:tuiKeys.Count -gt 0) { $script:tuiKeys.Dequeue() } else { $null } }
-        $lr = { param($p) $script:tuiPrompts.Add([string]$p); if ($script:tuiLines.Count -gt 0) { $script:tuiLines.Dequeue() } else { '' } }
+        # '@PHRASE' answers with the phrase the clean flow has just shown (AUT-2: the final phrase carries the plan id).
+        $lr = { param($p, $shown) $script:tuiPrompts.Add([string]$p); $v = $(if ($script:tuiLines.Count -gt 0) { $script:tuiLines.Dequeue() } else { '' }); if ($v -ceq '@PHRASE') { [string]$shown } else { $v } }
         $rd = { param($frame) $script:tuiFrames.Add((($frame | ForEach-Object { ($_ | ForEach-Object { $_.Text }) -join '' }) -join "`n")) }
         $tuiArgs = @{ InventoryArgs = $InvArgs; KeySource = $ks; Renderer = $rd; LineReader = $lr; Ascii = $Ascii; Width = $W; Height = $H }
         if ($null -ne $DiagRunner) { $tuiArgs['DiagnoseRunner'] = $DiagRunner; $tuiArgs['DiagnoseArgs'] = @{} }
@@ -2786,7 +3000,7 @@ exit 0
             $log = { param([string]$Tag) Join-Path $logDir ("{0}-{1}.jsonl" -f $Tag, [int]$asAdmin) }
             $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines @('', '', '')
             Assert-True ([IO.Directory]::Exists($r)) "cancelado: preservado (admin=$asAdmin)"
-            $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines (@('', $r) + $others + @((& $log 'wrong'), 'APAGAR 1 caminhos', ''))
+            $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines (@('', $r) + $others + @((& $log 'wrong'), '@PHRASE', '@PHRASE', 'APAGAR 1 caminhos', ''))
             Assert-True ([IO.Directory]::Exists($r)) "frase errada: preservado (admin=$asAdmin)"
             Assert-Eq $o.State.LastClean.Aborted 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE' "motor abortou (admin=$asAdmin)"
             Assert-True ([IO.File]::Exists((& $log 'wrong'))) "log da execucao rejeitada criado (admin=$asAdmin)"
@@ -2794,10 +3008,10 @@ exit 0
             Assert-True ([IO.Directory]::Exists($r) -and $o.State.LastClean.Aborted -ceq 'LOG_REQUIRED') "sem log: recusado antes da confirmacao, preservado (admin=$asAdmin; $($o.State.LastClean.Aborted))"
             $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines (@('', "$(Get-Base $p)") + $others + @((& $log 'base'), ''))
             Assert-Eq $o.State.LastClean.Aborted 'NENHUM_CAMINHO_ELEGIVEL' "base recusada pelo motor (admin=$asAdmin)"
-            $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines (@('', $r) + $others + @((& $log 'ok'), 'APAGAR 1 CAMINHOS', ''))
+            $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines (@('', $r) + $others + @((& $log 'ok'), '@PHRASE', '@PHRASE', '@PHRASE', ''))
             Assert-True (-not [IO.Directory]::Exists($r)) "confirmado: excluido pelo motor (admin=$asAdmin)"
             Assert-True ($null -ne $o.State.LastClean.PostInventory) "auditoria posterior (admin=$asAdmin)"
-            Assert-Eq (@((Read-TestCleanLogFile (& $log 'ok')).Records | ForEach-Object { $_.type }) -join ',') 'run-start,plan,confirmation,intent,result,run-end' "log da exclusao pela TUI (admin=$asAdmin)"
+            Assert-Eq (@((Read-TestCleanLogFile (& $log 'ok')).Records | ForEach-Object { $_.type }) -join ',') 'run-start,plan,declaration,confirmation,plan-check,intent,result,run-end' "log da exclusao pela TUI (admin=$asAdmin)"
             Assert-True ($o.Prompts -contains (Get-AtmText 'tuiclean.askLog')) "trava aberta: a TUI pergunta o log (admin=$asAdmin)"
         }
         # Gate closed (every distributed copy): the screen is as before - no log question, plan only, nothing deleted.

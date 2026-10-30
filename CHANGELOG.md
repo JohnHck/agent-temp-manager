@@ -16,6 +16,12 @@
   the read-only V0.2 collectors: observed use or a live session of the root blocks; ambiguous relations, unverified
   sessions and failed or timed-out collection need investigation. Nothing is ever made eligible by it, and no
   evidence is not evidence of non-use. Details and the time limits: docs/USAGE.md, "Runtime evidence in preview and plan".
+* V0.3 AUT-2 (past the deletion gate only; no distributed copy reaches it): the clean confirmation is bound to the plan.
+  An interactive console is required (CLI) and observed by the engine; for each root of the executable set, with its
+  path, the task and the content decision (AUT-1 meanings: results preserved, or nothing needed, neither verified);
+  then one phrase `APAGAR <N> CAMINHOS <plan id>` for the exact set. Declarations and confirmation are logged and
+  flushed before any deletion; a plan check refuses any change during the questions; any refusal aborts the whole run.
+  With the gate closed the plan-only flow is unchanged. Details and limits: docs/USAGE.md, "Plan-bound confirmation".
 * V0.3 AUT-1: `agent-temp authorize -Path <root> -RecordFile <new file>` records the operator's discard authorization of
   one root bound to the plan shown (three confirmations, interactive console only, plan presented again and compared,
   new file). It deletes nothing, is read by nothing in the product and makes nothing eligible; the technical result

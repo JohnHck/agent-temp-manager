@@ -9,7 +9,8 @@
 3. **No authority from classification.** `ORPHAN_SUSPECTED` is informational; age > 72 h and absence of
    references never prove inactivity.
 4. **Human approval of exact paths.** Cleanup requires an explicit allowlist of exact absolute paths, an exact
-   plan display and a typed phrase (`APAGAR <N> CAMINHOS`).
+   plan display and a typed phrase (`APAGAR <N> CAMINHOS`; past the deletion gate, V0.3 AUT-2: per-root declarations
+   and `APAGAR <N> CAMINHOS <plan id>` bound to the exact set).
 
 ## Permissions are distinct
 
@@ -302,6 +303,17 @@ called by `Invoke-AtmGitCommand`):
   * **RECENT:** `Set-AtmClassification` (Engine.Audit.ps1) sets the class `RECENT` when the newest write is less than
     `$script:AtmRecentHours` (72) old, and `Get-AtmCandidateGate` blocks `ACTIVE_EVIDENCE` and `RECENT` before every
     other gate; so a root written in the last 72 h cannot be evaluated as eligible. Age is shown as information only.
+* **Plan-bound confirmation in clean (V0.3 AUT-2; unreleased; past the deletion gate only):** `Invoke-AtmCleanCore`
+  (no other executor) requires an interactive console observed by the engine (`Test-AtmDiscardConsoleObserved`; the
+  suite replaces it through `$script:AtmCleanConsoleSource`, `$null` in every copy, assigned once, read only past the
+  gate) and checked by the CLI; asks, for each root of the executable set with its path, the task and the AUT-1 content
+  decision (shared helpers `Get-AtmContentDecisions`, `Get-AtmPreservationBasis`, `Test-AtmTypedPhrase`); then one phrase
+  bound to the plan id (SHA-256 of the run id and every root's path and statistics) and the exact count. Declarations and
+  confirmation are written and flushed before any `intent`; a fresh plan check before execution refuses any change
+  (`PLAN_CHANGED_BEFORE_EXECUTION`) instead of adjusting the plan; the per-root revalidation is unchanged. With the gate
+  closed the plan-only flow is unchanged (no question, console or log). No AUT-1 record is read. Limits: declarations
+  are not verified; the console is not proof of presence; the identity is the process's; the plan id rests on
+  statistics (a write that keeps them all is not seen); the users/sessions/elevation matrix is not tested.
 * **Runtime evidence as refusals (V0.3 B2-1; unreleased):** preview, the clean plan and each root's revalidation run the
   V0.2 collectors once over the inventory just taken (`Get-AtmRuntimeRefusals`, Engine.Diagnose.ps1; the clean engine
   only consumes its refusals and never reads the dependency correlation itself). A refusal can only keep or raise a

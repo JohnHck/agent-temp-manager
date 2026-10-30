@@ -231,14 +231,60 @@ agent-temp clean -Path "C:\Users\alice\AppData\Local\Temp\claude\C--src-app\<uui
 agent-temp clean -AllowListFile list.txt -LogFile D:\logs\clean.jsonl
 ```
 
-3. Read the plan. It ends with **NADA FOI APAGADO AINDA**. Type the exact phrase shown
-   (e.g. `APAGAR 2 CAMINHOS`) to proceed; anything else aborts.
+3. Read the plan. It ends with **NADA FOI APAGADO AINDA**. Then (V0.3 AUT-2, see below) answer, for each root of the
+   executable set, the task and the content decision, and type the final phrase shown (e.g.
+   `APAGAR 2 CAMINHOS 3F9A0C1B`) to proceed; anything else aborts.
 4. Each path is revalidated immediately before deletion; paths that changed are preserved. A read-only audit
    runs afterwards.
 
 **V0.1 and V0.2:** `clean` runs every gate and prints the exact plan, then stops with
 `EXCLUSAO_REAL_DESABILITADA_V0_1`; no confirmation is requested and nothing is deleted. Steps 3-4 above describe
 the behaviour of a future release in which deletion is explicitly authorized.
+
+### Plan-bound confirmation (V0.3 AUT-2, unreleased; past the deletion gate only)
+
+With the deletion gate closed (every distributed copy) nothing below happens: the plan is shown and the run stops, with
+no question, no console requirement and no log. Past the gate, after the B8 lock, the gates, the plan and the log
+(`-LogFile`, T1):
+
+1. **Interactive console:** required by the CLI (exit code `6`) and observed again by the engine
+   (`CONSOLE_NOT_OBSERVED`, before any log or question). Never proof that a person answers.
+2. **Per root**, only for the roots of the executable set (blocked roots are listed in the plan and never asked about),
+   with the root path shown: the task has finished (`TAREFA CONCLUIDA`), and the content decision with the AUT-1
+   meanings: `RESULTADOS PRESERVADOS` (what you need is preserved outside the root; a declaration, not verified) or
+   `NADA NECESSARIO` (nothing needs to be kept; discard explicitly accepted). `TOOL_VERIFIED` is never recorded.
+3. **One final phrase for the exact set:** `APAGAR <N> CAMINHOS <plan id>`. The plan id is the SHA-256 of the run id and,
+   per root in plan order, its path, fingerprint, counts, bytes and newest write; the state and the log keep those data
+   (run-start `planId`, one `plan` record per root). A phrase of another run, another count or without the plan id is
+   refused.
+4. **Any refusal, cancellation or wrong phrase** (any root, any step) aborts the whole run before the first deletion
+   (`DECLARATION_DECLINED`, `DECLARATION_CANCELLED`, `CONFIRMACAO_AUSENTE_OU_DIVERGENTE`); a `confirmation` record with
+   `accepted: false`, the step and the root is written.
+5. **Recorded before any operation:** one `declaration` record per root (path, fingerprint, `declaredBy: OPERATOR`,
+   `contentDecision`, `preservation.basis`, `verifiedByTool: false`) and a `confirmation` record (`planId`, number of
+   roots, interaction as reported by the caller and observed by the engine, limits), each written and flushed; a
+   failure stops the run (`LOG_WRITE_FAILED`) before any `intent`.
+6. **Plan check:** a fresh inventory, the same gates and fresh runtime evidence, root by root against the plan. If any
+   root is missing, its statistics changed or it is no longer eligible, nothing is executed
+   (`PLAN_CHANGED_BEFORE_EXECUTION`, record `plan-check`); the plan is never reduced, extended or updated under the old
+   confirmation. Statistics only: a write that keeps every statistic is not seen.
+7. **Unchanged after that:** the revalidation immediately before each root, the `intent` before the deleter, the
+   `result` after it. The declarations never replace the revalidation.
+
+Log order of a run: `run-start`, `plan`…, `declaration`…, `confirmation`, `plan-check`, then `intent`/`result` or `skip`
+per root, `run-end`. Synthetic example of two roots:
+
+```json
+{"type":"run-start","planned":2,"planId":"3f9a0c1b…",…}
+{"type":"plan","opId":"<run>:1","path":"C:\\Users\\alice\\AppData\\Local\\Temp\\claude\\C--work\\0d0b…","fingerprint":"B34D2D015552A3BE","files":2,"dirs":1,"bytes":2148,…}
+{"type":"plan","opId":"<run>:2","path":"C:\\Users\\alice\\AppData\\Local\\Temp\\claude\\C--work\\7c1e…","fingerprint":"91E0A44C2B7F0D13","files":2,"dirs":1,"bytes":2148,…}
+{"type":"declaration","opId":"<run>:1","path":"…\\0d0b…","declaredBy":"OPERATOR","taskCompleted":true,"contentDecision":"RESULTS_PRESERVED","preservation":{"basis":"OPERATOR_DECLARED","verifiedByTool":false},…}
+{"type":"declaration","opId":"<run>:2","path":"…\\7c1e…","declaredBy":"OPERATOR","taskCompleted":true,"contentDecision":"NOTHING_NEEDED","preservation":{"basis":"NOTHING_NEEDED_DISCARD_ACCEPTED","verifiedByTool":false},…}
+{"type":"confirmation","accepted":true,"planId":"3f9a0c1b…","roots":2,"interaction":{"caller":"CLI","consoleRequiredByCaller":true,"callerFieldsVerified":false,"interactiveConsoleObserved":true,"observedBy":"ENGINE_CONSOLE_CHECK","identifiesRespondent":false},"limitations":[…]}
+{"type":"plan-check","planId":"3f9a0c1b…","matched":true,"changed":[]}
+```
+
+Nothing reads an AUT-1 record as permission: `authorize` stays an independent record.
 
 Administrator-only switch: `-IncludeOtherUsers`. Incomplete process coverage cannot be overridden.
 
@@ -391,7 +437,7 @@ elevation level) holds the named kernel mutex `Global\AgentTempManager.Clean`:
 deletion enabled (not in any published copy), stopped before completing (Clean log, above); `authorize`: nothing recorded ·
 `4` no manifest (source checkout, `verify` only) · `5` integrity mismatch (a listed file missing, altered or
 unreadable, a missing or unreadable `providers` directory, an unlisted library or provider, an unreadable or
-invalid manifest, or an installed copy without one; nothing is loaded) · `6` TUI or `authorize` needs an interactive console · `10` unexpected error,
+invalid manifest, or an installed copy without one; nothing is loaded) · `6` TUI, `authorize`, or `clean` with real deletion enabled (not in any published copy) needs an interactive console · `10` unexpected error,
 or a `diagnose` export refused or not written (nothing deleted because of it).
 
 ## Project names

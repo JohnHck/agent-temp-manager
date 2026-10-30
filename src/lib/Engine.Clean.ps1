@@ -259,6 +259,11 @@ function Write-AtmCleanLogRecord {
 # a Global\AgentTempManager.Test.<hex> name inside its own process; the CLI and the TUI never do.
 $script:AtmCleanLockName = 'Global\AgentTempManager.Clean'
 
+# AUT-2: past the release gate a clean run needs an interactive console observed by the engine itself
+# (Test-AtmDiscardConsoleObserved). Test seam, single assignment: the suite, which has no console, replaces the
+# observation inside its own process; the CLI and the TUI never set it. It is read only past the release gate.
+$script:AtmCleanConsoleSource = $null
+
 function Invoke-AtmClean {
     <#
       Entry point of clean (CLI and TUI). With the release gate closed (every distributed copy) it runs the plan-only flow
@@ -281,7 +286,8 @@ function Invoke-AtmClean {
         [string]$LogFile,
         [scriptblock]$DeleteTreeImpl,
         [scriptblock]$PathPresenceImpl,
-        $LogWriter
+        $LogWriter,
+        [hashtable]$Interaction = @{}
     )
     if (-not $script:AtmRealDeletionEnabled) { return (Invoke-AtmCleanCore @PSBoundParameters) }
     $lock = [AgentTempManager.AtmCleanLock]::TryAcquire($script:AtmCleanLockName)
@@ -306,8 +312,14 @@ function Invoke-AtmCleanCore {
       decision; callers only provide:
         -PlanPresenter      scriptblock(verified, rejected, inventory) that MUST display the exact plan
                             (including "NADA FOI APAGADO AINDA"). Without it nothing proceeds.
-        -ConfirmationReader scriptblock(phrase) returning the text typed by the operator. The phrase is
-                            generated here; anything but an exact ordinal match aborts.
+        -ConfirmationReader scriptblock(phrase, kind, path, choices) returning the text typed by the operator. Every
+                            phrase is generated here; anything but an exact ordinal match aborts. Past the release
+                            gate (AUT-2) it is asked, for each root of the executable set (path shown): kind 'task'
+                            (the task finished) and kind 'results' (choices: results preserved, or nothing needed,
+                            with the AUT-1 meanings); then once kind 'confirm' for the whole set, a phrase bound to
+                            the plan id and the exact number of roots. With the gate closed it is never called.
+        -Interaction        what the caller reports: Caller ('CLI', 'TUI'; anything else is a direct call) and
+                            ConsoleRequired. Recorded as reported; the console itself is observed by the engine.
         -LogFile            T1: a NEW file outside the audited directories. Required once real deletion is enabled
                             (LOG_REQUIRED otherwise); with the release gate closed it is neither required, created nor
                             opened, and the plan-only flow is unchanged.
@@ -334,6 +346,7 @@ function Invoke-AtmCleanCore {
         [scriptblock]$DeleteTreeImpl,
         [scriptblock]$PathPresenceImpl,
         $LogWriter,
+        [hashtable]$Interaction = @{},
         [string]$RefusedBy,
         [string]$LockReleaseError
     )
@@ -342,10 +355,12 @@ function Invoke-AtmCleanCore {
     $deleted = New-Object System.Collections.Generic.List[object]
     $skipped = New-Object System.Collections.Generic.List[object]
     $logErrors = New-Object System.Collections.Generic.List[object]
-    $state = @{ Confirmed = $false; Aborted = $null; Stopped = $null; Post = $null; Phrase = $null; RunId = $null; RecSeq = 0; LogCreated = $false }
+    $declarations = New-Object System.Collections.Generic.List[object]
+    $state = @{ Confirmed = $false; Aborted = $null; Stopped = $null; Post = $null; Phrase = $null; RunId = $null; RecSeq = 0; LogCreated = $false; PlanId = $null; RefusedAt = $null }
     $finish = {
         [pscustomobject]@{
-            Requested = @($Entries).Count; Rejected = $rejected.ToArray(); Verified = $verified.ToArray(); Phrase = $state.Phrase
+            Requested = @($Entries).Count; Rejected = $rejected.ToArray(); Verified = $verified.ToArray(); Phrase = $state.Phrase; PlanId = $state.PlanId
+            Declarations = $declarations.ToArray(); RefusedAt = $state.RefusedAt
             Confirmed = $state.Confirmed; Deleted = $deleted.ToArray(); Skipped = $skipped.ToArray(); PostInventory = $state.Post; Aborted = $state.Aborted
             StoppedBy = $state.Stopped; RunId = $state.RunId; LogFile = $(if ($state.RunId) { $LogFile } else { $null }); LogCreated = $state.LogCreated
             LogErrors = $logErrors.ToArray(); LockReleaseError = $(if ($LockReleaseError) { $LockReleaseError } else { $null })
@@ -394,6 +409,13 @@ function Invoke-AtmCleanCore {
     # T1: past the release gate every run is logged in a new file, created and started before the confirmation, so the
     # operator never confirms a run that cannot be recorded.
     if (-not $LogFile -and $null -eq $LogWriter) { $state.Aborted = 'LOG_REQUIRED'; return (& $finish) }
+    # AUT-2: an interactive console observed by the engine in this run (never proof that a person answers).
+    $consoleBy = $(if ($null -ne $script:AtmCleanConsoleSource) { 'TEST_SEAM' } else { 'ENGINE_CONSOLE_CHECK' })
+    $consoleObserved = $(if ($null -ne $script:AtmCleanConsoleSource) { [bool](& $script:AtmCleanConsoleSource) } else { [bool](Test-AtmDiscardConsoleObserved) })
+    if (-not $consoleObserved) { $state.Aborted = 'CONSOLE_NOT_OBSERVED'; return (& $finish) }
+    $callerName = [string]$Interaction['Caller']
+    $interactionRec = [ordered]@{ caller = $(if ($callerName -ceq 'CLI' -or $callerName -ceq 'TUI') { $callerName } else { 'DIRECT_CALL' }); consoleRequiredByCaller = ($Interaction['ConsoleRequired'] -eq $true)
+        callerFieldsVerified = $false; interactiveConsoleObserved = $true; observedBy = $consoleBy; identifiesRespondent = $false }
     $state.RunId = [guid]::NewGuid().ToString()
     # The first failure of a run: before any call to the deleter it is an abort, after one it is a stop.
     $halt = { param([string]$Code) if ($deleted.Count -gt 0) { $state.Stopped = $Code } else { $state.Aborted = $Code } }
@@ -408,26 +430,85 @@ function Invoke-AtmCleanCore {
         }
         $plan = New-Object System.Collections.Generic.List[object]
         foreach ($p in $verified) { $plan.Add([pscustomobject]@{ OpId = ('{0}:{1}' -f $state.RunId, ($plan.Count + 1)); Part = $p }) }
-        $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'run-start' -Fields ([ordered]@{ tool = $script:AtmVersion; user = $inv.Identity.Name; sid = $inv.Identity.Sid; elevated = [bool]$inv.Identity.IsAdmin; planned = $plan.Count })
+        # AUT-2: the plan id identifies the exact executable set presented (paths and their statistics); the final phrase
+        # carries it and the exact number of roots.
+        $state.PlanId = Get-AtmCleanPlanId -RunId $state.RunId -Parts @($plan | ForEach-Object { $_.Part })
+        $state.Phrase = "APAGAR $($plan.Count) CAMINHOS $($state.PlanId.Substring(0, 8).ToUpperInvariant())"
+        $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'run-start' -Fields ([ordered]@{ tool = $script:AtmVersion; user = $inv.Identity.Name; sid = $inv.Identity.Sid; elevated = [bool]$inv.Identity.IsAdmin; planned = $plan.Count; planId = $state.PlanId })
         $stage = 'run-start'
         if ($null -eq $lc) {
             $stage = 'plan'
             foreach ($item in $plan) {
                 $p = $item.Part
-                $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'plan' -Fields ([ordered]@{ opId = $item.OpId; path = $p.Path; fingerprint = $p.Fingerprint; files = $p.Files; dirs = $p.Dirs; bytes = $p.Bytes })
+                $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'plan' -Fields ([ordered]@{ opId = $item.OpId; path = $p.Path; fingerprint = $p.Fingerprint; files = $p.Files; dirs = $p.Dirs; bytes = $p.Bytes
+                        newestWriteUtc = $(if ($p.NewestWriteTimeUtc) { ([datetime]$p.NewestWriteTimeUtc).ToUniversalTime().ToString('o') } else { $null }) })
                 if ($null -ne $lc) { break }
             }
         }
         if ($null -ne $lc) { & $logFail $stage $null $lc; $state.Aborted = 'LOG_WRITE_FAILED'; return (& $finish) }
 
-        $typed = & $ConfirmationReader $state.Phrase
-        $accepted = (($typed -is [string]) -and [string]::Equals($typed, $state.Phrase, [StringComparison]::Ordinal))
-        $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'confirmation' -Fields ([ordered]@{ accepted = $accepted })
-        if ($null -ne $lc) { & $logFail 'confirmation' $null $lc }
-        if (-not $accepted) { $state.Aborted = 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE' }
-        elseif ($null -ne $lc) { $state.Aborted = 'LOG_WRITE_FAILED' }
-        else {
-            $state.Confirmed = $true
+        # AUT-2: for each root of the executable set (path shown), the task and the content decision (AUT-1 meanings);
+        # then one confirmation for the whole set. Any refusal, cancellation or wrong phrase aborts the run before any
+        # deletion. Declarations never replace the revalidation below.
+        $refusal = $null
+        $taskPhrase = Get-AtmText 'auth.phrase.task'
+        $decisionMap = Get-AtmContentDecisions
+        $choices = @($decisionMap.Keys)
+        foreach ($item in $plan) {
+            $p = $item.Part
+            $t = Test-AtmTypedPhrase -Typed (& $ConfirmationReader $taskPhrase 'task' $p.Path @($taskPhrase)) -Phrases @($taskPhrase)
+            if ($t.Code) { $refusal = [pscustomobject]@{ Code = 'DECLARATION_' + $t.Code; Step = 'task'; OpId = $item.OpId; Path = $p.Path }; break }
+            $cd = Test-AtmTypedPhrase -Typed (& $ConfirmationReader $choices[0] 'results' $p.Path $choices) -Phrases $choices
+            if ($cd.Code) { $refusal = [pscustomobject]@{ Code = 'DECLARATION_' + $cd.Code; Step = 'results'; OpId = $item.OpId; Path = $p.Path }; break }
+            $dec = $decisionMap[$cd.Hit]
+            $declarations.Add([pscustomobject]@{ OpId = $item.OpId; Path = $p.Path; Fingerprint = $p.Fingerprint; TaskCompleted = $true; ContentDecision = $dec; PreservationBasis = (Get-AtmPreservationBasis $dec) })
+        }
+        if ($null -eq $refusal) {
+            $fc = Test-AtmTypedPhrase -Typed (& $ConfirmationReader $state.Phrase 'confirm' $null @($state.Phrase)) -Phrases @($state.Phrase)
+            if ($fc.Code) { $refusal = [pscustomobject]@{ Code = 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE'; Step = 'confirm'; OpId = $null; Path = $null } }
+        }
+        if ($null -ne $refusal) {
+            $state.RefusedAt = $refusal
+            $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'confirmation' -Fields ([ordered]@{ accepted = $false; planId = $state.PlanId; step = $refusal.Step; opId = $refusal.OpId; refusal = $refusal.Code; interaction = $interactionRec })
+            if ($null -ne $lc) { & $logFail 'confirmation' $null $lc }
+            $state.Aborted = $refusal.Code
+        } else {
+            # The declarations and the confirmation are written and flushed before any intent.
+            $lc = $null; $stage = 'declaration'
+            foreach ($dcl in $declarations) {
+                $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'declaration' -Fields ([ordered]@{ opId = $dcl.OpId; path = $dcl.Path; fingerprint = $dcl.Fingerprint; declaredBy = 'OPERATOR'
+                        taskCompleted = $true; contentDecision = $dcl.ContentDecision; preservation = [ordered]@{ basis = $dcl.PreservationBasis; verifiedByTool = $false } })
+                if ($null -ne $lc) { break }
+            }
+            if ($null -eq $lc) {
+                $stage = 'confirmation'
+                $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'confirmation' -Fields ([ordered]@{ accepted = $true; planId = $state.PlanId; roots = $plan.Count; interaction = $interactionRec; limitations = @($script:AtmCleanDeclarationLimitations) })
+            }
+            if ($null -ne $lc) { & $logFail $stage $null $lc; $state.Aborted = 'LOG_WRITE_FAILED' }
+            else {
+                $state.Confirmed = $true
+                # The executable set must not have changed while the operator answered: a fresh inventory, the same gates
+                # and fresh runtime evidence, root by root against the plan. Nothing is reduced, extended or updated under
+                # the old confirmation; a difference stops the run and a new presentation is needed. Statistics only: a
+                # write that keeps every statistic is not seen here either.
+                $iaChk = @{} + $InventoryArgs
+                $iaChk['NoProgress'] = $true
+                $invChk = Invoke-AtmInventory @iaChk
+                $rtChk = Get-AtmCleanRuntimeEvidence -Inventory $invChk -InventoryArgs $iaChk
+                $changed = New-Object System.Collections.Generic.List[string]
+                foreach ($item in $plan) {
+                    $m3 = @($invChk.Partitions | Where-Object { [string]::Equals($_.Path, $item.Part.Path, [StringComparison]::Ordinal) -and $_.Kind -ne 'NotScanned' -and $_.Kind -ne 'BaseLooseFiles' })
+                    if ($m3.Count -ne 1) { $changed.Add($item.OpId); continue }
+                    if ((Get-AtmCleanPlanItemKey $m3[0]) -cne (Get-AtmCleanPlanItemKey $item.Part)) { $changed.Add($item.OpId); continue }
+                    $g3 = Test-AtmCandidate -Partition $m3[0] -Inventory $invChk -IncludeOtherUsers:$IncludeOtherUsers -ForClean -RuntimeEvidence $rtChk
+                    if ($g3.Category -ne 'ELIGIBLE') { $changed.Add($item.OpId) }
+                }
+                $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'plan-check' -Fields ([ordered]@{ planId = $state.PlanId; matched = ($changed.Count -eq 0); changed = @($changed) })
+                if ($null -ne $lc) { & $logFail 'plan-check' $null $lc; $state.Aborted = 'LOG_WRITE_FAILED' }
+                elseif ($changed.Count -gt 0) { $state.Aborted = 'PLAN_CHANGED_BEFORE_EXECUTION' }
+            }
+        }
+        if (-not $state.Aborted) {
             # 18-19: per-path revalidation immediately before deleting; only still-eligible paths are deleted.
             foreach ($item in $plan) {
                 $p = $item.Part
@@ -527,6 +608,49 @@ $script:AtmPreservationBases = @('OPERATOR_DECLARED', 'NOTHING_NEEDED_DISCARD_AC
 $script:AtmDiscardLimitations = @('ASSOCIATION_BY_NAME_CONVENTION', 'TASK_DECLARED_BY_OPERATOR', 'PRESERVATION_NOT_VERIFIED_BY_TOOL', 'STATISTICS_NOT_CONTENT',
     'READ_ONLY_USE_NOT_OBSERVED', 'NO_EVIDENCE_IS_NOT_NON_USE', 'RECORD_ALTERABLE_BY_SAME_IDENTITY', 'RECORD_LINE_MAY_REMAIN_AFTER_FAILURE',
     'NOT_A_DELETION_CREDENTIAL', 'PROCESS_IDENTITY_IS_NOT_THE_RESPONDENT', 'CALLER_AND_REQUIREMENT_REPORTED_BY_CALLER', 'INTERACTIVE_CONSOLE_IS_NOT_PROOF_OF_PRESENCE')
+
+# AUT-2: the limits recorded with a clean run's confirmation (same codes and texts as AUT-1).
+$script:AtmCleanDeclarationLimitations = @('TASK_DECLARED_BY_OPERATOR', 'PRESERVATION_NOT_VERIFIED_BY_TOOL', 'STATISTICS_NOT_CONTENT', 'READ_ONLY_USE_NOT_OBSERVED',
+    'NO_EVIDENCE_IS_NOT_NON_USE', 'PROCESS_IDENTITY_IS_NOT_THE_RESPONDENT', 'CALLER_AND_REQUIREMENT_REPORTED_BY_CALLER', 'INTERACTIVE_CONSOLE_IS_NOT_PROOF_OF_PRESENCE')
+
+function Get-AtmContentDecisions {
+    # The two content declarations (phrase -> decision), shared by authorize (AUT-1) and clean (AUT-2): the content
+    # needed is preserved outside the root, or nothing in it needs to be kept. Neither is verified by the product.
+    return [ordered]@{ (Get-AtmText 'auth.phrase.results') = 'RESULTS_PRESERVED'; (Get-AtmText 'auth.phrase.nothingNeeded') = 'NOTHING_NEEDED' }
+}
+
+function Get-AtmPreservationBasis {
+    # The basis recorded for a content decision; never TOOL_VERIFIED (no verifier exists).
+    param([string]$Decision)
+    if ($Decision -ceq 'NOTHING_NEEDED') { return 'NOTHING_NEEDED_DISCARD_ACCEPTED' }
+    return 'OPERATOR_DECLARED'
+}
+
+function Test-AtmTypedPhrase {
+    # Code $null with Hit = the phrase matched exactly (ordinal); CANCELLED for $null, '' or a non-string; DECLINED for
+    # anything else. No trimming or case folding.
+    param($Typed, [string[]]$Phrases)
+    if (-not ($Typed -is [string]) -or $Typed -eq '') { return [pscustomobject]@{ Code = 'CANCELLED'; Hit = $null } }
+    $hit = @($Phrases | Where-Object { [string]::Equals($Typed, $_, [StringComparison]::Ordinal) })
+    if ($hit.Count -ne 1) { return [pscustomobject]@{ Code = 'DECLINED'; Hit = $null } }
+    return [pscustomobject]@{ Code = $null; Hit = $hit[0] }
+}
+
+function Get-AtmCleanPlanItemKey {
+    # One root of a clean plan as compared before execution: path and the statistics behind its fingerprint.
+    param($Part)
+    $nw = $(if ($Part.NewestWriteTimeUtc) { [string]([datetime]$Part.NewestWriteTimeUtc).ToUniversalTime().Ticks } else { '' })
+    return ((@([string]$Part.Path, [string]$Part.Fingerprint, [string]$Part.Files, [string]$Part.Dirs, [string]$Part.Bytes, $nw) | ForEach-Object { '{0}:{1}' -f $_.Length, $_ }) -join ';')
+}
+
+function Get-AtmCleanPlanId {
+    # Identifies the exact executable set presented in a run: SHA-256 over the run id and every root's key, in plan order.
+    param([string]$RunId, $Parts)
+    $text = 'atm-clean-plan/1;' + $RunId + ';' + ((@($Parts) | ForEach-Object { Get-AtmCleanPlanItemKey $_ }) -join '|')
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $h = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)) } finally { $sha.Dispose() }
+    return (-join @($h | ForEach-Object { $_.ToString('x2') }))
+}
 
 function Test-AtmDiscardConsoleObserved {
     # The engine's own observation, in this call, of an interactive console (console host, input and output not
@@ -683,15 +807,14 @@ function Invoke-AtmDiscardAuthorization {
     # The content decision has two declarations, each with its own phrase: the content needed is preserved outside the
     # root (OPERATOR_DECLARED), or nothing in it needs to be kept (NOTHING_NEEDED_DISCARD_ACCEPTED). Neither is verified
     # by the product, and neither says that the root is unused.
-    $decisions = [ordered]@{ (Get-AtmText 'auth.phrase.results') = 'RESULTS_PRESERVED'; (Get-AtmText 'auth.phrase.nothingNeeded') = 'NOTHING_NEEDED' }
+    $decisions = Get-AtmContentDecisions
     $decision = $null
     foreach ($step in @(@('task', @(Get-AtmText 'auth.phrase.task')), @('results', @($decisions.Keys)), @('discard', @(Get-AtmText 'auth.phrase.discard' $short)))) {
         $phrases = @($step[1])
         $typed = & $Reader $step[0] $(if ($phrases.Count -eq 1) { $phrases[0] } else { $phrases })
-        if (-not ($typed -is [string]) -or $typed -eq '') { $res.Refused = 'AUTH_CANCELLED'; $res.Step = $step[0]; return (& $done) }
-        $hit = @($phrases | Where-Object { [string]::Equals($typed, $_, [StringComparison]::Ordinal) })
-        if ($hit.Count -ne 1) { $res.Refused = 'AUTH_DECLINED'; $res.Step = $step[0]; return (& $done) }
-        if ($step[0] -ceq 'results') { $decision = $decisions[$hit[0]] }
+        $tp = Test-AtmTypedPhrase -Typed $typed -Phrases $phrases
+        if ($tp.Code) { $res.Refused = 'AUTH_' + $tp.Code; $res.Step = $step[0]; return (& $done) }
+        if ($step[0] -ceq 'results') { $decision = $decisions[$tp.Hit] }
     }
     $res.ContentDecision = $decision
     # Optional free text, kept as data only: control characters replaced, length capped.
@@ -705,7 +828,7 @@ function Invoke-AtmDiscardAuthorization {
     $p = $pres.Partition; $idn = $pres.Inventory.Identity
     $iso = { param($v) if ($null -ne $v) { ([datetime]$v).ToUniversalTime().ToString('o') } else { $null } }
     $authId = [guid]::NewGuid().ToString()
-    $basis = $(if ($decision -ceq 'NOTHING_NEEDED') { 'NOTHING_NEEDED_DISCARD_ACCEPTED' } else { 'OPERATOR_DECLARED' })
+    $basis = Get-AtmPreservationBasis $decision
     $rec = [ordered]@{
         schema = $script:AtmDiscardAuthSchema; authorizationId = $authId; planId = $pres.PlanId; tool = $script:AtmVersion
         presentedUtc = (& $iso $pres.PresentedUtc); revalidatedUtc = (& $iso $again.PresentedUtc); composedUtc = (& $iso ([datetime]::UtcNow))
