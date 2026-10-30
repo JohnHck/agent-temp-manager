@@ -242,6 +242,43 @@ the behaviour of a future release in which deletion is explicitly authorized.
 
 Administrator-only switch: `-IncludeOtherUsers`. Incomplete process coverage cannot be overridden.
 
+### Discard authorization (`authorize`; V0.3 AUT-1, unreleased)
+
+```powershell
+agent-temp authorize -Path "C:\Users\alice\AppData\Local\Temp\claude\<slug>\<uuid>" -RecordFile D:\records\auth-1.jsonl
+```
+
+Records **your decision** about **one** root and the plan shown; it deletes nothing, makes nothing eligible and is not a
+credential for a future deletion (nothing in the product reads it; a future run would need a current confirmation and
+its own revalidation).
+
+1. Interactive console only (no redirected input or output; exit code `6` otherwise). This is required, but it does not
+   prove that a person answered.
+2. The root is presented: exact path, provider, profile SID, session id (the root name), counts, size, newest write and
+   its age (information only), fingerprint, evidence, the **technical result** of every gate (B1, RECENT and the
+   runtime evidence included), the run notices and the limits of the record.
+3. The association root -> session is the provider's naming convention (root name = session id), corroborated by a
+   readable transcript of the same id. Without one, or with the same id under another project scope, the root cannot be
+   authorized (`AUTH_ASSOCIATION_UNKNOWN`, `_AMBIGUOUS`). The task is **your declaration**, never read from a record.
+4. Three separate confirmations, each with an exact phrase: the task has finished; the results you need are preserved
+   outside this root; you authorize discarding the content presented (this plan only). Then an optional short
+   description (at most 200 characters, stored as text). Any other answer or an empty one records nothing.
+5. The root is presented again and compared: path, kind, SID, provider, session id, counts, bytes, newest write,
+   creation, fingerprint, class, flags, association, session registry, technical result. Any difference refuses
+   (`AUTH_PLAN_CHANGED`); present it again. The comparison uses statistics: a write that keeps them all (same size and
+   modification time) is not detected, equal statistics do not prove equal content, and read-only use is not seen.
+6. The record is a new file (never an existing one; an unsafe folder is refused and not changed) holding one JSON line,
+   schema `atm.discard-authorization/1`: identifiers (authorization, plan), operator, root, association, what was
+   presented, the technical result, the declarations, the confirmation and the limits. No conversation or file content.
+   Processes running as you can change it afterwards: it is not tamper-proof.
+
+A root can be **authorized and still technically blocked**: the result says so (`Technical result: BLOCKED`) and is never
+shown as eligible. Today, on a real machine, process coverage (B1) blocks every root, and a root written less than 72 h
+ago is RECENT; no exception to either has been approved (see SECURITY-MODEL, "Discard authorization").
+
+Exit codes of `authorize`: `0` recorded, `2` missing `-Path` or `-RecordFile`, `3` not recorded (refused, declined or
+cancelled), `6` no interactive console.
+
 ### Clean log (`-LogFile`; V0.3 T1, unreleased)
 
 With the deletion gate closed (every published copy, 0.2.0 included) `-LogFile` keeps the plan-only behaviour: the
@@ -301,11 +338,11 @@ elevation level) holds the named kernel mutex `Global\AgentTempManager.Clean`:
 ## Exit codes
 
 `0` ok (for `diagnose`, partial coverage included) · `1` unknown command · `2` invalid clean invocation, or a refused
-`-PseudonymKeyFile` · `3` clean aborted (nothing deleted) or, only with deletion enabled (not in any published copy),
-stopped before completing (Clean log, above) ·
+`-PseudonymKeyFile`, or `authorize` without `-Path`/`-RecordFile` · `3` clean aborted (nothing deleted) or, only with
+deletion enabled (not in any published copy), stopped before completing (Clean log, above); `authorize`: nothing recorded ·
 `4` no manifest (source checkout, `verify` only) · `5` integrity mismatch (a listed file missing, altered or
 unreadable, a missing or unreadable `providers` directory, an unlisted library or provider, an unreadable or
-invalid manifest, or an installed copy without one; nothing is loaded) · `6` TUI needs an interactive console · `10` unexpected error,
+invalid manifest, or an installed copy without one; nothing is loaded) · `6` TUI or `authorize` needs an interactive console · `10` unexpected error,
 or a `diagnose` export refused or not written (nothing deleted because of it).
 
 ## Project names

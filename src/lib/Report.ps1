@@ -324,6 +324,44 @@ function Show-AtmCleanPlan {
     Write-Host ('  ' + (Get-AtmText 'clean.nothingYet')) -ForegroundColor Black -BackgroundColor Yellow
 }
 
+function Show-AtmDiscardPresentation {
+    # AUT-1: what the operator is asked to authorize, then the technical result apart from it (a root can be authorized
+    # by the operator and stay technically blocked), then the limits. Age is information only.
+    param($Presentation)
+    $pr = $Presentation; $p = $pr.Partition
+    Write-AtmHeader (Get-AtmText 'auth.header')
+    Write-Host ('  ' + (Get-AtmText 'auth.plan' $pr.PlanId (Format-AtmTime $pr.PresentedUtc)))
+    Write-Host ('  ' + (Get-AtmText 'auth.root' $p.Path))
+    Write-Host ('  ' + (Get-AtmText 'auth.identity' $p.Provider $p.Sid $pr.Association.SessionId))
+    Write-Host ('  ' + (Get-AtmText 'auth.facts' $pr.Facts.Files $pr.Facts.Dirs (Format-AtmMB $pr.Facts.Bytes) (Format-AtmTime $pr.Facts.NewestWriteUtc) $(if ($null -ne $pr.Facts.AgeHours) { $pr.Facts.AgeHours } else { '-' }) $pr.Facts.Fingerprint))
+    Write-Host ('  ' + (Get-AtmText ('auth.assoc.' + $pr.Association.Kind) (Format-AtmTime $pr.Association.TranscriptLastWriteUtc))) -ForegroundColor $(if ($pr.Association.Kind -ceq 'NAME_CONVENTION_CORROBORATED') { 'Gray' } else { 'Yellow' })
+    if (@($p.Evidence).Count -gt 0) { Write-Host ('  ' + (Get-AtmText 'auth.evidence' (@($p.Evidence) -join ' ; '))) }
+    Write-AtmHeader (Get-AtmText 'auth.technicalHeader')
+    Write-Host ('  ' + (Get-AtmText 'auth.technical' $pr.Technical.Category)) -ForegroundColor $(if ($pr.Technical.Category -eq 'BLOCKED') { 'Red' } elseif ($pr.Technical.Category -eq 'INVESTIGATE') { 'Yellow' } else { 'Gray' })
+    foreach ($r in @($pr.Technical.Reasons)) { Write-Host ('    - ' + $r) }
+    if ($pr.Technical.ProcessCoverageBlock) { Write-Host ('  ' + (Get-AtmText 'auth.b1Note')) -ForegroundColor Yellow }
+    if ($pr.Technical.RecentBlock) { Write-Host ('  ' + (Get-AtmText 'auth.recentNote')) -ForegroundColor Yellow }
+    Show-AtmRuntimeNotices -Runtime $pr.Runtime
+    Write-AtmHeader (Get-AtmText 'auth.limitsHeader')
+    foreach ($l in @($pr.Limitations)) { Write-Host ('  - ' + (Get-AtmText ('auth.limit.' + $l))) }
+    Write-Host ('  ' + (Get-AtmText 'auth.notCredential')) -ForegroundColor Yellow
+}
+
+function Show-AtmDiscardResult {
+    param($Result)
+    Write-AtmHeader (Get-AtmText 'auth.resultHeader')
+    if ($Result.Accepted) {
+        Write-Host ('  ' + (Get-AtmText 'auth.accepted' $Result.AuthorizationId $Result.PlanId $Result.RecordFile)) -ForegroundColor Green
+        Write-Host ('  ' + (Get-AtmText 'auth.acceptedTechnical' $Result.Presentation.Technical.Category)) -ForegroundColor $(if ($Result.Presentation.Technical.Category -eq 'BLOCKED') { 'Red' } else { 'Yellow' })
+    } else {
+        $more = @(@($Result.Step) + @($Result.Detail) + @($Result.Changes) | Where-Object { $_ }) -join ', '
+        Write-Host ('  ' + (Get-AtmText 'auth.refused' $Result.Refused $(if ($more) { $more } else { '-' }))) -ForegroundColor Yellow
+        if ($Result.RecordCreated) { Write-Host ('  ' + (Get-AtmText 'auth.recordKept' $Result.RecordFile)) -ForegroundColor Yellow }
+        else { Write-Host ('  ' + (Get-AtmText 'auth.noRecord')) }
+    }
+    Write-Host ('  ' + (Get-AtmText 'auth.nothingDeleted')) -ForegroundColor Green
+}
+
 function Show-AtmCleanResult {
     param($Result)
     Write-AtmHeader (Get-AtmText 'clean.resultHeader')

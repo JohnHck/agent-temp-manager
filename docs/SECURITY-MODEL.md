@@ -271,6 +271,22 @@ called by `Invoke-AtmGitCommand`):
   change made before the check, never one made between the check and the write; after the run the same identity can
   change or delete the log. Test seams (stand-in deleter, presence check and
   writer) exist only in `Invoke-AtmClean`, past the gate, and no other file references them (static test).
+* **Discard authorization (V0.3 AUT-1; unreleased):** `agent-temp authorize` records the operator's declaration for ONE
+  root bound to the plan just presented (`Invoke-AtmDiscardAuthorization`, Engine.Clean.ps1): three separate confirmations
+  (task finished, needed results preserved, discard of the content presented), an interactive console required by the
+  CLI (never proof of a person: B6 stays open), the plan presented again and compared before writing (any detected
+  difference refuses), and a new file from the pinned writer (schema `atm.discard-authorization/1`). It is not a
+  credential: nothing in the product reads it, no gate changes, and it makes nothing eligible; it records the technical
+  result apart from the declaration. The association is the naming convention (root name = session id) corroborated by a
+  transcript of the same id; the task is the operator's declaration. Limits: statistics are compared, not content (a write
+  that keeps every statistic is not detected); read-only use is not observed; the record can be changed afterwards by
+  processes of the same identity. **Approved by the maintainer as a priority: finished task and discardable content;
+  not approved yet: the code of any exception.** The exact points a future decision would change:
+  * **B1:** `Get-AtmCandidateGate` (Engine.Clean.ps1), the block `if (-not $Inventory.ProcessCoverageComplete)` that adds
+    `COBERTURA_DE_PROCESSOS_INCOMPLETA` for every root when any command line cannot be read.
+  * **RECENT:** `Set-AtmClassification` (Engine.Audit.ps1) sets the class `RECENT` when the newest write is less than
+    `$script:AtmRecentHours` (72) old, and `Get-AtmCandidateGate` blocks `ACTIVE_EVIDENCE` and `RECENT` before every
+    other gate; so a root written in the last 72 h cannot be evaluated as eligible. Age is shown as information only.
 * **Runtime evidence as refusals (V0.3 B2-1; unreleased):** preview, the clean plan and each root's revalidation run the
   V0.2 collectors once over the inventory just taken (`Get-AtmRuntimeRefusals`, Engine.Diagnose.ps1; the clean engine
   only consumes its refusals and never reads the dependency correlation itself). A refusal can only keep or raise a

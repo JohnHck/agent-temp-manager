@@ -14,6 +14,7 @@ param(
     [switch]$IncludeOtherUsers,
     [string]$ExportJson,
     [string]$LogFile,
+    [string]$RecordFile,
     [switch]$NoProgress,
     [switch]$Ascii,
     [string]$Lang,
@@ -177,7 +178,7 @@ $cliInvArgs['NoProgress'] = [bool]$NoProgress
 $cliInvArgs['ProgressCallback'] = { param($pct, $msg) $act = Get-AtmText 'cli.progressActivity'; if ($pct -ge 100) { Write-Progress -Activity $act -Completed } else { Write-Progress -Activity $act -Status $msg -PercentComplete $pct } }
 
 function Show-Help {
-    foreach ($k in @('help.title', 'help.blank', 'help.tui', 'help.audit', 'help.preview', 'help.diagnose', 'help.clean', 'help.clean2', 'help.verify', 'help.version', 'help.help', 'help.blank',
+    foreach ($k in @('help.title', 'help.blank', 'help.tui', 'help.audit', 'help.preview', 'help.diagnose', 'help.clean', 'help.clean2', 'help.authorize', 'help.verify', 'help.version', 'help.help', 'help.blank',
             'help.drill', 'help.export', 'help.diagOpts', 'help.cleanOpts', 'help.cleanOpts2', 'help.cleanOpts3', 'help.tuiOpts', 'help.lang', 'help.blank', 'help.examples')) { Write-Host (Get-AtmText $k) }
     Write-Host '  agent-temp'
     Write-Host '  agent-temp audit'
@@ -289,6 +290,23 @@ try {
             }
             # A run stopped after a deletion (T1) is never reported as a success.
             exit $(if ($res.Aborted -or $res.StoppedBy) { 3 } else { 0 })
+        }
+        'authorize' {
+            # AUT-1: records the operator's discard authorization of ONE root and the plan shown; deletes nothing and makes
+            # nothing eligible. Only from an interactive console: piped or scripted input never records an acceptance
+            # (which is still not proof that a person answered).
+            if (-not $Path -or -not $RecordFile) { Write-Host (Get-AtmText 'cli.authNeeds') -ForegroundColor Red; exit 2 }
+            if (-not (Test-AtmTuiInteractive)) { Write-Host (Get-AtmText 'cli.authNeedsConsole') -ForegroundColor Yellow; exit 6 }
+            $authPresenter = { param($pr) Show-AtmDiscardPresentation -Presentation $pr }
+            $authReader = {
+                param($kind, $phrase)
+                Write-Host ''
+                if ($phrase) { Write-Host (Get-AtmText ('auth.prompt.' + $kind) $phrase) -ForegroundColor Yellow } else { Write-Host (Get-AtmText 'auth.prompt.description' $script:AtmDiscardDescriptionMax) }
+                Read-Host (Get-AtmText 'cli.confirmPrompt')
+            }
+            $authRes = Invoke-AtmDiscardAuthorization -Path $Path -InventoryArgs $cliInvArgs -RecordFile $RecordFile -Presenter $authPresenter -Reader $authReader
+            Show-AtmDiscardResult -Result $authRes
+            exit $(if ($authRes.Accepted) { 0 } else { 3 })
         }
         'version' {
             Initialize-AtmNative -LibDir (Join-Path $here 'lib')

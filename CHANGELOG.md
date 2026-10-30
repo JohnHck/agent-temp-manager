@@ -16,6 +16,10 @@
   the read-only V0.2 collectors: observed use or a live session of the root blocks; ambiguous relations, unverified
   sessions and failed or timed-out collection need investigation. Nothing is ever made eligible by it, and no
   evidence is not evidence of non-use. Details and the time limits: docs/USAGE.md, "Runtime evidence in preview and plan".
+* V0.3 AUT-1: `agent-temp authorize -Path <root> -RecordFile <new file>` records the operator's discard authorization of
+  one root bound to the plan shown (three confirmations, interactive console only, plan presented again and compared,
+  new file). It deletes nothing, is read by nothing in the product and makes nothing eligible; the technical result
+  (B1, RECENT included) is recorded apart. Details and limits: docs/USAGE.md, "Discard authorization".
 
 ## 0.2.0
 

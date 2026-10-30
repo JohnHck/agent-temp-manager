@@ -503,6 +503,151 @@ function Invoke-AtmCleanCore {
     } finally { if ($null -ne $log) { try { $log.Dispose() } catch { $null = $_ } } }
 }
 
+# ---------------------------------------------------------------------------------------------
+# AUT-1 (V0.3): the operator's discard authorization of ONE root, bound to a plan just presented. It records a
+# declaration of the operator (task completed, needed results preserved, the content shown may be discarded); it is not
+# a credential: nothing in the product reads it, it makes nothing eligible, and a future run would still need a current
+# confirmation and its own revalidation. The technical result (B1, RECENT and every other gate) is shown and recorded
+# apart from the declaration: a root can be authorized by the operator and stay technically blocked. The association
+# root -> session is the provider's naming convention (root name = session id), corroborated by a readable transcript
+# of the same id; the task is the operator's declaration, never a fact read from the records.
+# ---------------------------------------------------------------------------------------------
+$script:AtmDiscardAuthSchema = 'atm.discard-authorization/1'
+$script:AtmDiscardDescriptionMax = 200
+# What the record cannot guarantee, recorded with it (codes; text in the message catalog).
+$script:AtmDiscardLimitations = @('ASSOCIATION_BY_NAME_CONVENTION', 'TASK_DECLARED_BY_OPERATOR', 'STATISTICS_NOT_CONTENT', 'READ_ONLY_USE_NOT_OBSERVED',
+    'NO_EVIDENCE_IS_NOT_NON_USE', 'RECORD_ALTERABLE_BY_SAME_IDENTITY', 'NOT_A_DELETION_CREDENTIAL', 'INTERACTIVE_CONSOLE_IS_NOT_PROOF_OF_PRESENCE')
+
+function Get-AtmDiscardPresentation {
+    <#
+      What the operator is shown for one root, read-only: identity, observed facts (statistics and fingerprint), age as
+      information, the association, the technical result of every gate with the runtime evidence, and the limits.
+      Returns Refused (a code, with Detail) or the presentation with a new PlanId.
+    #>
+    param([string]$Path, [hashtable]$InventoryArgs = @{})
+    $refuse = { param([string]$Code, $Detail) [pscustomobject]@{ Refused = $Code; Detail = $Detail } }
+    $why = Test-AtmAllowListPathSyntax $Path
+    if ($why) { return (& $refuse 'AUTH_PATH_INVALID' $why) }
+    $ia = @{} + $InventoryArgs
+    $inv = Invoke-AtmInventory @ia
+    $m = @($inv.Partitions | Where-Object { [string]::Equals($_.Path, $Path, [StringComparison]::OrdinalIgnoreCase) -and $_.Kind -ne 'BaseLooseFiles' })
+    if ($m.Count -ne 1) { return (& $refuse 'AUTH_NOT_A_ROOT' $null) }
+    $p = $m[0]
+    if (-not [string]::Equals($p.Path, $Path, [StringComparison]::Ordinal)) { return (& $refuse 'AUTH_PATH_CASE_MISMATCH' $p.Path) }
+    if ($p.Kind -ne 'SessionRoot') { return (& $refuse 'AUTH_NOT_SESSION_ROOT' $p.Kind) }
+    if ([string]$p.Sid -cne [string]$inv.Identity.Sid) { return (& $refuse 'AUTH_OTHER_USER' $null) }
+    $rt = Get-AtmCleanRuntimeEvidence -Inventory $inv -InventoryArgs $ia
+    $g = Test-AtmCandidate -Partition $p -Inventory $inv -ForClean -RuntimeEvidence $rt
+    # Association: corroborated only by a readable transcript of the same id; the same session id under another scope
+    # is ambiguous; anything else is unknown (never presented as proved).
+    $same = @($inv.Partitions | Where-Object { $_.Kind -eq 'SessionRoot' -and [string]::Equals($_.Name, $p.Name, [StringComparison]::OrdinalIgnoreCase) })
+    $tlw = $p.TranscriptLastWriteUtc
+    $assoc = $(if ($same.Count -gt 1) { 'AMBIGUOUS' } elseif (@($p.Flags) -contains 'TRANSCRIPTS_UNREADABLE') { 'UNKNOWN' } elseif ($null -ne $tlw) { 'NAME_CONVENTION_CORROBORATED' } else { 'UNKNOWN' })
+    $now = [datetime]::UtcNow
+    return [pscustomobject]@{
+        Refused = $null; Detail = $null; PlanId = [guid]::NewGuid().ToString(); PresentedUtc = $now
+        Partition = $p; Inventory = $inv; Runtime = $rt; Gate = $g
+        Association = [pscustomobject]@{ Kind = $assoc; SessionId = [string]$p.Name; TranscriptLastWriteUtc = $tlw; SameIdElsewhere = ($same.Count - 1) }
+        SessionRegistry = $p.Session
+        Facts = [pscustomobject]@{ Files = [long]$p.Files; Dirs = [long]$p.Dirs; Bytes = [long]$p.Bytes; NewestWriteUtc = $p.NewestWriteTimeUtc; CreationUtc = $p.CreationTimeUtc; Fingerprint = $p.Fingerprint
+            AgeHours = $(if ($p.NewestWriteTimeUtc) { [Math]::Round(($inv.NowUtc - $p.NewestWriteTimeUtc).TotalHours, 1) } else { $null }); Class = $p.Class; Flags = @($p.Flags) }
+        Technical = [pscustomobject]@{ Category = $g.Category; Reasons = @($g.Reasons); RuntimeCodes = @(@($g.RuntimeReasons) | ForEach-Object { $_.Code } | Sort-Object -Unique)
+            ProcessCoverageBlock = (@($g.Reasons | Where-Object { [string]$_ -like 'COBERTURA_DE_PROCESSOS_INCOMPLETA*' }).Count -gt 0); RecentBlock = ($p.Class -eq 'RECENT') }
+        Limitations = @($script:AtmDiscardLimitations)
+    }
+}
+
+function Compare-AtmDiscardPresentation {
+    # The facts a later presentation must still match for the operator's answers to apply to it. A difference means the
+    # plan changed; equal statistics never prove equal content nor non-use (a write that keeps every statistic, and any
+    # read-only use, are not seen).
+    param($Before, $After)
+    $d = New-Object System.Collections.Generic.List[string]
+    $pb = $Before.Partition; $pa = $After.Partition
+    if (-not [string]::Equals($pb.Path, $pa.Path, [StringComparison]::Ordinal)) { $d.Add('PATH') }
+    foreach ($k in @('Kind', 'Sid', 'Provider', 'Name', 'Fingerprint', 'Class')) { if ([string]$pb.$k -cne [string]$pa.$k) { $d.Add($k.ToUpperInvariant()) } }
+    foreach ($k in @('Files', 'Dirs', 'Bytes')) { if ([long]$pb.$k -ne [long]$pa.$k) { $d.Add($k.ToUpperInvariant()) } }
+    foreach ($k in @('NewestWriteTimeUtc', 'CreationTimeUtc')) { if ([string]$pb.$k -cne [string]$pa.$k) { $d.Add($k.ToUpperInvariant()) } }
+    if ((@($pb.Flags) -join ',') -cne (@($pa.Flags) -join ',')) { $d.Add('FLAGS') }
+    if ([string]$Before.Association.Kind -cne [string]$After.Association.Kind -or [string]$Before.Association.TranscriptLastWriteUtc -cne [string]$After.Association.TranscriptLastWriteUtc) { $d.Add('ASSOCIATION') }
+    if ([string]$Before.SessionRegistry -cne [string]$After.SessionRegistry) { $d.Add('SESSION_REGISTRY') }
+    if ([string]$Before.Technical.Category -cne [string]$After.Technical.Category -or (@($Before.Technical.RuntimeCodes) -join ',') -cne (@($After.Technical.RuntimeCodes) -join ',')) { $d.Add('TECHNICAL_RESULT') }
+    return $d.ToArray()
+}
+
+function Invoke-AtmDiscardAuthorization {
+    <#
+      Records the operator's discard authorization of one root, bound to the plan just presented. Callers provide:
+        -Presenter  scriptblock(presentation) that MUST show it (facts, association, technical result, limits).
+        -Reader     scriptblock(kind, phrase) returning what the operator typed; kind is task, results, discard
+                    (each needs its exact phrase) or description (optional free text). $null or '' cancels.
+        -RecordFile a NEW file outside the audited directories, created by the pinned writer (AtmCleanLog: new file
+                    only, protected DACL, an unsafe folder is refused and never changed).
+      The CLI calls it only from an interactive console (redirected input never records an acceptance); even so that is
+      not proof that a person answered. Before writing, the root is presented again and must still match: any detected
+      change refuses this plan (AUTH_PLAN_CHANGED) and a new presentation is needed. No record is written unless every
+      declaration is confirmed and the plan still matches. Nothing is deleted and no gate result changes.
+    #>
+    param([string]$Path, [hashtable]$InventoryArgs = @{}, [string]$RecordFile, [scriptblock]$Presenter, [scriptblock]$Reader)
+    $res = [ordered]@{ Accepted = $false; Refused = $null; Detail = $null; Step = $null; PlanId = $null; AuthorizationId = $null; RecordFile = $null; RecordCreated = $false; Changes = @(); Presentation = $null }
+    $done = { [pscustomobject]$res }
+    if (-not $Presenter -or -not $Reader) { $res.Refused = 'AUTH_NO_PRESENTER_OR_READER'; return (& $done) }
+    if (-not $RecordFile) { $res.Refused = 'AUTH_RECORD_REQUIRED'; return (& $done) }
+    $pres = Get-AtmDiscardPresentation -Path $Path -InventoryArgs $InventoryArgs
+    if ($pres.Refused) { $res.Refused = $pres.Refused; $res.Detail = $pres.Detail; return (& $done) }
+    $res.Presentation = $pres; $res.PlanId = $pres.PlanId
+    # The destination is checked before any question (it is checked again, pinned, when the record is created).
+    if (-not (Test-AtmOutputPathOutsideBases -Path $RecordFile -Inventory $pres.Inventory -MustNotExist)) { $res.Refused = 'AUTH_RECORD_DESTINATION_REFUSED'; return (& $done) }
+    $pin = [AgentTempManager.AtmCleanLog]::Pin([IO.Path]::GetDirectoryName($RecordFile), (Get-AtmCurrentIdentity).Sid)
+    try { $pinErr = $pin.Error } finally { $pin.Dispose() }
+    if ($null -ne $pinErr) { $res.Refused = 'AUTH_RECORD_DESTINATION_REFUSED'; $res.Detail = $pinErr; return (& $done) }
+    & $Presenter $pres
+    if ($pres.Association.Kind -cne 'NAME_CONVENTION_CORROBORATED') { $res.Refused = 'AUTH_ASSOCIATION_' + $pres.Association.Kind; return (& $done) }
+    $short = $pres.PlanId.Substring(0, 8).ToUpperInvariant()
+    foreach ($step in @(@('task', (Get-AtmText 'auth.phrase.task')), @('results', (Get-AtmText 'auth.phrase.results')), @('discard', (Get-AtmText 'auth.phrase.discard' $short)))) {
+        $typed = & $Reader $step[0] $step[1]
+        if (-not ($typed -is [string]) -or $typed -eq '') { $res.Refused = 'AUTH_CANCELLED'; $res.Step = $step[0]; return (& $done) }
+        if (-not [string]::Equals($typed, $step[1], [StringComparison]::Ordinal)) { $res.Refused = 'AUTH_DECLINED'; $res.Step = $step[0]; return (& $done) }
+    }
+    # Optional free text, kept as data only: control characters replaced, length capped.
+    $descRaw = & $Reader 'description' $null
+    $desc = $(if ($descRaw -is [string] -and $descRaw.Trim() -ne '') { $t = [regex]::Replace($descRaw.Trim(), '[\x00-\x1f\x7f-\x9f]', '?'); if ($t.Length -gt $script:AtmDiscardDescriptionMax) { $t.Substring(0, $script:AtmDiscardDescriptionMax) } else { $t } } else { $null })
+    # The plan must still match: presented again, compared fact by fact.
+    $again = Get-AtmDiscardPresentation -Path $Path -InventoryArgs $InventoryArgs
+    if ($again.Refused) { $res.Refused = 'AUTH_PLAN_CHANGED'; $res.Detail = $again.Refused; return (& $done) }
+    $diff = @(Compare-AtmDiscardPresentation -Before $pres -After $again)
+    if ($diff.Count -gt 0) { $res.Refused = 'AUTH_PLAN_CHANGED'; $res.Changes = $diff; return (& $done) }
+    $p = $pres.Partition; $idn = $pres.Inventory.Identity
+    $iso = { param($v) if ($null -ne $v) { ([datetime]$v).ToUniversalTime().ToString('o') } else { $null } }
+    $authId = [guid]::NewGuid().ToString()
+    $rec = [ordered]@{
+        schema = $script:AtmDiscardAuthSchema; authorizationId = $authId; planId = $pres.PlanId; tool = $script:AtmVersion
+        presentedUtc = (& $iso $pres.PresentedUtc); revalidatedUtc = (& $iso $again.PresentedUtc); recordedUtc = (& $iso ([datetime]::UtcNow))
+        operator = [ordered]@{ name = $idn.Name; sid = $idn.Sid; elevated = [bool]$idn.IsAdmin }
+        root = [ordered]@{ path = $p.Path; provider = $p.Provider; profileSid = $p.Sid; sessionId = [string]$p.Name; kind = $p.Kind }
+        association = [ordered]@{ kind = $pres.Association.Kind; transcriptLastWriteUtc = (& $iso $pres.Association.TranscriptLastWriteUtc); basis = 'ROOT_NAME_EQUALS_SESSION_ID' }
+        presented = [ordered]@{ files = $pres.Facts.Files; dirs = $pres.Facts.Dirs; bytes = $pres.Facts.Bytes; newestWriteUtc = (& $iso $pres.Facts.NewestWriteUtc); creationUtc = (& $iso $pres.Facts.CreationUtc)
+            fingerprint = $pres.Facts.Fingerprint; ageHours = $pres.Facts.AgeHours; class = $pres.Facts.Class; flags = @($pres.Facts.Flags); sessionRegistry = $pres.SessionRegistry }
+        technical = [ordered]@{ category = $pres.Technical.Category; runtimeCodes = @($pres.Technical.RuntimeCodes); processCoverageBlock = $pres.Technical.ProcessCoverageBlock; recentBlock = $pres.Technical.RecentBlock; reasons = @($pres.Technical.Reasons) }
+        declarations = [ordered]@{ declaredBy = 'OPERATOR'; taskCompleted = $true; resultsPreserved = $true; discardAuthorized = $true; taskDescription = $desc }
+        confirmation = [ordered]@{ result = 'ACCEPTED'; planRevalidated = $true; interactiveConsoleRequiredByCli = $true }
+        limitations = @($pres.Limitations)
+    }
+    $line = ConvertTo-Json -InputObject $rec -Compress -Depth 6
+    $res.RecordFile = $RecordFile
+    $opened = Open-AtmCleanLog -Path $RecordFile -Inventory $again.Inventory -ProcessUserSid (Get-AtmCurrentIdentity).Sid
+    $res.RecordCreated = [bool]$opened.Created
+    if ($null -eq $opened.Log) { $res.Refused = 'AUTH_RECORD_FAILED'; $res.Detail = $opened.Code; return (& $done) }
+    try {
+        $wc = $opened.Log.AppendLine($line)
+        if ($null -ne $wc) { $res.Refused = 'AUTH_RECORD_FAILED'; $res.Detail = $wc; return (& $done) }
+        $cc = $opened.Log.Close()
+        if ($null -ne $cc) { $res.Refused = 'AUTH_RECORD_FAILED'; $res.Detail = $cc; return (& $done) }
+    } finally { $opened.Log.Dispose() }
+    $res.Accepted = $true; $res.AuthorizationId = $authId
+    return (& $done)
+}
+
 function Test-AtmOutputPathOutsideBases {
     # Report/log destinations: absolute, canonical, parent chain free of reparse points (so the lexical check
     # cannot be redirected into an audited tree), outside every base; optionally must not exist yet.

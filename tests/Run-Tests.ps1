@@ -499,6 +499,33 @@ function Write-TestSessionFile {
     [IO.File]::WriteAllText((Join-Path $ProfileInfo.ProfilePath ('.claude\sessions\' + $File)), ($o | ConvertTo-Json -Compress))
 }
 function Get-TestPreviewRow { param($Rows, [string]$Path) return @(@($Rows) | Where-Object { [string]::Equals($_.Partition.Path, $Path, [StringComparison]::OrdinalIgnoreCase) -and $_.Partition.Kind -ne 'BaseLooseFiles' })[0] }
+# AUT-1 helpers: a transcript of the root's own id (corroborates the association; its content is a marker the record
+# must never contain), and a simulated operator: answers per step (the phrase itself, another text, $null to cancel, or a
+# scriptblock run at that step), prompts counted. Tests only; the CLI has no way to pass answers.
+function New-TestTranscript {
+    param($ProfileInfo, [string]$Root, [string]$Text = '{"marker":"ATM-AUT1-TRANSCRIPT-CONTENT"}')
+    $slug = Split-Path (Split-Path $Root -Parent) -Leaf
+    $dir = Join-Path $ProfileInfo.ProfilePath (".claude\projects\" + $slug)
+    [void][IO.Directory]::CreateDirectory($dir)
+    $f = Join-Path $dir ((Split-Path $Root -Leaf) + '.jsonl')
+    [IO.File]::WriteAllText($f, $Text)
+    return $f
+}
+function New-TestAuthOperator {
+    param([hashtable]$Answers = @{}, [string]$Description = $null)
+    $st = @{ Prompts = (New-Object System.Collections.Generic.List[string]); Presented = 0; Answers = $Answers; Description = $Description }
+    $st.Presenter = { param($pr) $st.Presented++ }.GetNewClosure()
+    $st.Reader = {
+        param($kind, $phrase)
+        $st.Prompts.Add([string]$kind)
+        if ($kind -ceq 'description') { return $st.Description }
+        if (-not $st.Answers.ContainsKey($kind)) { return $phrase }
+        $a = $st.Answers[$kind]
+        if ($a -is [scriptblock]) { & $a; return $phrase }
+        return $a
+    }.GetNewClosure()
+    return $st
+}
 function Get-TestRuntimeCodes { param($Gate) return (@(@($Gate.RuntimeReasons) | ForEach-Object { $_.Code } | Sort-Object -Unique) -join ',') }
 function New-TestCleanLogDir {
     # A new folder under the sandbox for real clean logs; its files stay until the sandbox goes. When the log's folder
@@ -2054,8 +2081,8 @@ exit 0
         $clean = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Clean.ps1'))
         Assert-Eq $shippedRuntimeSources $null 'costura distribuida nula'
         Assert-Eq ([regex]::Matches($clean, '\$script:AtmRuntimeEvidenceSources\s*=').Count) 1 'uma unica atribuicao no motor'
-        Assert-Eq ([regex]::Matches($clean, '-RuntimeEvidence \$(rt|rtRe)\b').Count) 3 'preview, plano e revalidacao passam a evidencia'
-        Assert-Eq ([regex]::Matches($clean, 'Get-AtmCleanRuntimeEvidence -Inventory').Count) 3 'uma coleta no preview, uma no plano, uma por raiz na revalidacao'
+        Assert-Eq ([regex]::Matches($clean, '-RuntimeEvidence \$(rt|rtRe)\b').Count) 4 'preview, plano, revalidacao e apresentacao da autorizacao (AUT-1) passam a evidencia'
+        Assert-Eq ([regex]::Matches($clean, 'Get-AtmCleanRuntimeEvidence -Inventory').Count) 4 'uma coleta no preview, uma no plano, uma por raiz na revalidacao, uma por apresentacao da autorizacao (AUT-1)'
         Assert-True (-not $clean.Contains('Invoke-AtmDiagnose') -and -not $clean.Contains('Get-AtmDependencyGraph')) 'o motor de limpeza nao chama o diagnostico nem o grafo diretamente'
         foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Name -ne 'Engine.Clean.ps1' })) {
             Assert-True (-not ([IO.File]::ReadAllText($fi.FullName)).Contains('AtmRuntimeEvidenceSources')) "$($fi.Name) usa a costura de teste"
@@ -2078,6 +2105,168 @@ exit 0
         $prevCi = [Threading.Thread]::CurrentThread.CurrentCulture
         try { [Threading.Thread]::CurrentThread.CurrentCulture = $ci; $txt = Format-AtmRuntimeRefusal $ref } finally { [Threading.Thread]::CurrentThread.CurrentCulture = $prevCi }
         Assert-True ($txt.Contains('2026-10-30 01:02:03Z')) "horario invariante ($txt)"
+    }
+
+    # ------------------------------------------------------------------ discard authorization (AUT-1)
+    # Simulated operator (tests only), record files under the sandbox, nothing deleted: no clean runs in these cases.
+    Test-Case 'Autorizacao de descarte (AUT-1)' 'Declaracoes completas com bloqueio tecnico preservado (RECENT e B1): registro aceito com apresentado, declarado, bloqueio e limites; sem conteudo de conversa; categoria tecnica inalterada' {
+        $dir = New-TestCleanLogDir 'auth-ok'
+        if (-not $dir) { return }
+        foreach ($k in @('recent', 'b1')) {
+            $p = New-TestProfile ('authok' + $k)
+            $r = New-TestRoot -ProfileInfo $p
+            $null = New-TestTranscript -ProfileInfo $p -Root $r
+            $procs = New-Procs
+            if ($k -ceq 'recent') { [IO.File]::SetLastWriteTimeUtc((Join-Path $r 'a.txt'), $nowFuture.AddHours(-3)) }
+            else { $procs = New-Procs -Extra @((New-TestRuntimeProc 820 'secret.exe' $null)) }
+            $ia = Get-InvArgs -Profiles @($p) -Procs $procs
+            $before = Test-AtmCandidate -Partition (Find-Part (Inv -Profiles @($p) -Procs $procs) $r) -Inventory (Inv -Profiles @($p) -Procs $procs)
+            $op = New-TestAuthOperator -Description ("Relatorio entregue`tno repositorio" + ('x' * 400))
+            $file = Join-Path $dir ("auth-$k.jsonl")
+            $res = Invoke-AtmDiscardAuthorization -Path $r -InventoryArgs $ia -RecordFile $file -Presenter $op.Presenter -Reader $op.Reader
+            Assert-True ($res.Accepted -and $null -eq $res.Refused -and $res.RecordCreated -and $op.Presented -eq 1) "$($k): aceito ($($res.Refused) $($res.Detail))"
+            Assert-Eq ($op.Prompts -join ',') 'task,results,discard,description' "$($k): tres confirmacoes separadas e a descricao opcional"
+            $raw = [IO.File]::ReadAllText($file)
+            $rec = $raw | ConvertFrom-Json
+            Assert-True ($rec.schema -ceq 'atm.discard-authorization/1' -and $rec.planId -ceq $res.PlanId -and $rec.authorizationId -ceq $res.AuthorizationId -and $rec.root.path -ceq $r -and $rec.root.sessionId -ceq (Split-Path $r -Leaf) -and $rec.root.profileSid -ceq $p.Sid) "$($k): identificadores e raiz"
+            Assert-True ($rec.association.kind -ceq 'NAME_CONVENTION_CORROBORATED' -and $rec.declarations.declaredBy -ceq 'OPERATOR' -and $rec.declarations.taskCompleted -and $rec.declarations.resultsPreserved -and $rec.declarations.discardAuthorized -and $rec.confirmation.result -ceq 'ACCEPTED' -and $rec.confirmation.planRevalidated) "$($k): associacao por convencao, declaracoes do operador, confirmacao"
+            Assert-True ($rec.presented.files -eq 2 -and $rec.presented.bytes -eq 2148 -and $rec.presented.fingerprint -ceq (Find-Part (Inv -Profiles @($p) -Procs $procs) $r).Fingerprint -and $null -ne $rec.presented.ageHours) "$($k): o que foi apresentado"
+            Assert-True ($rec.technical.category -ceq 'BLOCKED' -and $(if ($k -ceq 'recent') { $rec.technical.recentBlock } else { $rec.technical.processCoverageBlock })) "$($k): bloqueio tecnico registrado ($($rec.technical.category))"
+            Assert-True (@($rec.limitations) -contains 'NOT_A_DELETION_CREDENTIAL' -and @($rec.limitations) -contains 'STATISTICS_NOT_CONTENT' -and @($rec.limitations) -contains 'RECORD_ALTERABLE_BY_SAME_IDENTITY') "$($k): limites registrados"
+            Assert-True ($rec.declarations.taskDescription.Length -eq 200 -and -not $rec.declarations.taskDescription.Contains("`t") -and -not $raw.Contains('ATM-AUT1-TRANSCRIPT-CONTENT')) "$($k): descricao como dado limitado; nenhum conteudo de transcricao"
+            $after = Test-AtmCandidate -Partition (Find-Part (Inv -Profiles @($p) -Procs $procs) $r) -Inventory (Inv -Profiles @($p) -Procs $procs)
+            Assert-True ($after.Category -ceq $before.Category -and $after.Category -ceq 'BLOCKED') "$($k): autorizada e ainda tecnicamente bloqueada ($($after.Category))"
+            $txt = (@(Show-AtmDiscardResult -Result $res 6>&1 | ForEach-Object { [string]$_.MessageData }) -join "`n")
+            Assert-True ($txt.Contains((Get-AtmText 'auth.acceptedTechnical' 'BLOCKED')) -and -not $txt.Contains('ELIGIBLE')) "$($k): console mostra o bloqueio, nunca elegivel"
+            Assert-True ([IO.File]::Exists((Join-Path $r 'sub\b.bin'))) "$($k): nada apagado"
+        }
+    }
+    Test-Case 'Autorizacao de descarte (AUT-1)' 'Declaracao rejeitada ou cancelada em cada passo: nada registrado, nenhum arquivo criado' {
+        $dir = New-TestCleanLogDir 'auth-no'
+        if (-not $dir) { return }
+        $p = New-TestProfile 'authno'
+        $r = New-TestRoot -ProfileInfo $p
+        $null = New-TestTranscript -ProfileInfo $p -Root $r
+        $n = 0
+        foreach ($step in @('task', 'results', 'discard')) {
+            foreach ($ans in @('nao', $null, '')) {
+                $n++
+                $file = Join-Path $dir ("no-$n.jsonl")
+                $op = New-TestAuthOperator -Answers @{ $step = $ans }
+                $res = Invoke-AtmDiscardAuthorization -Path $r -InventoryArgs (Get-InvArgs -Profiles @($p)) -RecordFile $file -Presenter $op.Presenter -Reader $op.Reader
+                $want = $(if ($ans -ceq 'nao') { 'AUTH_DECLINED' } else { 'AUTH_CANCELLED' })
+                Assert-True (-not $res.Accepted -and $res.Refused -ceq $want -and $res.Step -ceq $step -and -not $res.RecordCreated -and -not (Test-Path -LiteralPath $file)) "$step / [$ans]: $($res.Refused) $($res.Step)"
+            }
+        }
+        Assert-True ([IO.File]::Exists((Join-Path $r 'sub\b.bin'))) 'nada apagado'
+    }
+    Test-Case 'Autorizacao de descarte (AUT-1)' 'Caminho, identidade e associacao: caixa divergente, nao-raiz, outra conta, sintaxe invalida, sem transcricao (desconhecida) e mesmo id em dois escopos (ambigua) recusados sem pergunta' {
+        $dir = New-TestCleanLogDir 'auth-id'
+        if (-not $dir) { return }
+        $p = New-TestProfile 'authid'
+        $r = New-TestRoot -ProfileInfo $p
+        $null = New-TestTranscript -ProfileInfo $p -Root $r
+        $po = New-TestProfile 'authother' -Sid 'S-1-5-21-9-9-9-1000'
+        $ro = New-TestRoot -ProfileInfo $po; $null = New-TestTranscript -ProfileInfo $po -Root $ro
+        $pn = New-TestProfile 'authnotr'
+        $rn = New-TestRoot -ProfileInfo $pn
+        $u = [guid]::NewGuid().ToString()
+        $pa = New-TestProfile 'authamb'
+        $ra1 = New-TestRoot -ProfileInfo $pa -Slug 'C--amb-x' -Uuid $u; $null = New-TestRoot -ProfileInfo $pa -Slug 'C--amb-y' -Uuid $u
+        $null = New-TestTranscript -ProfileInfo $pa -Root $ra1
+        $cases = @(
+            @{ Tag = 'caixa'; Path = $r.ToUpperInvariant(); Profiles = @($p); Want = 'AUTH_PATH_CASE_MISMATCH'; Presented = 0 },
+            @{ Tag = 'nao-raiz'; Path = (Get-Base $p); Profiles = @($p); Want = 'AUTH_NOT_A_ROOT'; Presented = 0 },
+            @{ Tag = 'outra conta'; Path = $ro; Profiles = @($po); Want = 'AUTH_OTHER_USER'; Presented = 0 },
+            @{ Tag = 'sintaxe'; Path = ($r + '\..\x'); Profiles = @($p); Want = 'AUTH_PATH_INVALID'; Presented = 0 },
+            @{ Tag = 'sem transcricao'; Path = $rn; Profiles = @($pn); Want = 'AUTH_ASSOCIATION_UNKNOWN'; Presented = 1 },
+            @{ Tag = 'ambigua'; Path = $ra1; Profiles = @($pa); Want = 'AUTH_ASSOCIATION_AMBIGUOUS'; Presented = 1 })
+        $i = 0
+        foreach ($k in $cases) {
+            $i++
+            $file = Join-Path $dir ("id-$i.jsonl")
+            $op = New-TestAuthOperator
+            $res = Invoke-AtmDiscardAuthorization -Path $k.Path -InventoryArgs (Get-InvArgs -Profiles $k.Profiles) -RecordFile $file -Presenter $op.Presenter -Reader $op.Reader
+            Assert-True (-not $res.Accepted -and $res.Refused -ceq $k.Want -and $op.Prompts.Count -eq 0 -and $op.Presented -eq $k.Presented -and -not (Test-Path -LiteralPath $file)) "$($k.Tag): $($res.Refused) (apresentado $($op.Presented), perguntas $($op.Prompts.Count))"
+        }
+    }
+    Test-Case 'Autorizacao de descarte (AUT-1)' 'Alteracao entre a apresentacao e o registro: arquivo novo na raiz durante as perguntas -> AUTH_PLAN_CHANGED com as diferencas; escrita que mantem as estatisticas nao e detectada (limite registrado)' {
+        $dir = New-TestCleanLogDir 'auth-chg'
+        if (-not $dir) { return }
+        $p = New-TestProfile 'authchg'
+        $r = New-TestRoot -ProfileInfo $p
+        $null = New-TestTranscript -ProfileInfo $p -Root $r
+        $ia = Get-InvArgs -Profiles @($p)
+        $file = Join-Path $dir 'chg.jsonl'
+        $add = { [IO.File]::WriteAllBytes((Join-Path $r 'apareceu.bin'), (New-Object byte[] 7)); [IO.File]::SetLastWriteTimeUtc((Join-Path $r 'apareceu.bin'), $nowFuture.AddDays(-5)) }.GetNewClosure()
+        $op = New-TestAuthOperator -Answers @{ discard = $add }
+        $res = Invoke-AtmDiscardAuthorization -Path $r -InventoryArgs $ia -RecordFile $file -Presenter $op.Presenter -Reader $op.Reader
+        Assert-True (-not $res.Accepted -and $res.Refused -ceq 'AUTH_PLAN_CHANGED' -and @($res.Changes) -contains 'FILES' -and @($res.Changes) -contains 'BYTES' -and -not (Test-Path -LiteralPath $file)) "mudanca detectada: $($res.Refused) [$(@($res.Changes) -join ',')]"
+        # Limit: a write that keeps size and modification time leaves every statistic equal and is not detected.
+        $target = Join-Path $r 'a.txt'
+        $mtime = [IO.File]::GetLastWriteTimeUtc($target)
+        $same = { [IO.File]::WriteAllBytes($target, ([byte[]](@(65) * 100))); [IO.File]::SetLastWriteTimeUtc($target, $mtime) }.GetNewClosure()
+        $op2 = New-TestAuthOperator -Answers @{ discard = $same }
+        $file2 = Join-Path $dir 'same.jsonl'
+        $res2 = Invoke-AtmDiscardAuthorization -Path $r -InventoryArgs $ia -RecordFile $file2 -Presenter $op2.Presenter -Reader $op2.Reader
+        Assert-True ($res2.Accepted -and (([IO.File]::ReadAllText($file2) | ConvertFrom-Json).limitations -contains 'STATISTICS_NOT_CONTENT')) "limite: escrita com as mesmas estatisticas nao e detectada, e o registro diz isso ($($res2.Refused))"
+        $script:caseNote = 'conteudo trocado mantendo tamanho e horario: nao detectado (limite declarado no registro e na documentacao)'
+    }
+    Test-Case 'Autorizacao de descarte (AUT-1)' 'Destino: arquivo existente ou pasta em que outra conta pode criar arquivos -> recusado antes das perguntas, sem alterar arquivo nem ACL' {
+        $dir = New-TestCleanLogDir 'auth-dest'
+        if (-not $dir) { return }
+        $p = New-TestProfile 'authdest'
+        $r = New-TestRoot -ProfileInfo $p
+        $null = New-TestTranscript -ProfileInfo $p -Root $r
+        $ex = Join-Path $dir 'existente.jsonl'; [IO.File]::WriteAllText($ex, 'antes')
+        $op = New-TestAuthOperator
+        $res = Invoke-AtmDiscardAuthorization -Path $r -InventoryArgs (Get-InvArgs -Profiles @($p)) -RecordFile $ex -Presenter $op.Presenter -Reader $op.Reader
+        Assert-True ($res.Refused -ceq 'AUTH_RECORD_DESTINATION_REFUSED' -and $op.Prompts.Count -eq 0 -and $op.Presented -eq 0 -and [IO.File]::ReadAllText($ex) -ceq 'antes') "existente: $($res.Refused)"
+        $open = Join-Path $dir 'aberta'; [void][IO.Directory]::CreateDirectory($open)
+        $acl = Get-Acl -LiteralPath $open
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier('S-1-1-0')), 'CreateFiles', 'Allow')))
+        Set-Acl -LiteralPath $open -AclObject $acl
+        $sddl = (Get-Acl -LiteralPath $open).Sddl
+        $op2 = New-TestAuthOperator
+        $res2 = Invoke-AtmDiscardAuthorization -Path $r -InventoryArgs (Get-InvArgs -Profiles @($p)) -RecordFile (Join-Path $open 'x.jsonl') -Presenter $op2.Presenter -Reader $op2.Reader
+        Assert-True ($res2.Refused -ceq 'AUTH_RECORD_DESTINATION_REFUSED' -and $res2.Detail -ceq 'PARENT_THIRD_PARTY_WRITE' -and $op2.Prompts.Count -eq 0 -and (Get-Acl -LiteralPath $open).Sddl -ceq $sddl -and -not (Test-Path -LiteralPath (Join-Path $open 'x.jsonl'))) "pasta insegura: $($res2.Refused) $($res2.Detail)"
+    }
+    Test-Case 'Autorizacao de descarte (AUT-1)' 'Autorizacao registrada nao promove nem e lida: preview igual antes e depois; nada no produto le o registro; CLI sem console interativo nao registra' {
+        $dir = New-TestCleanLogDir 'auth-np'
+        if (-not $dir) { return }
+        $p = New-TestProfile 'authnp'
+        $r = New-TestRoot -ProfileInfo $p
+        $null = New-TestTranscript -ProfileInfo $p -Root $r
+        $ia = Get-InvArgs -Profiles @($p)
+        $inv = Inv -Profiles @($p)
+        $b = @(Invoke-AtmPreview -Inventory $inv -InventoryArgs $ia | ForEach-Object { "$($_.Partition.Name)=$($_.Gate.Category)" }) -join ','
+        $op = New-TestAuthOperator
+        $res = Invoke-AtmDiscardAuthorization -Path $r -InventoryArgs $ia -RecordFile (Join-Path $dir 'np.jsonl') -Presenter $op.Presenter -Reader $op.Reader
+        $a = @(Invoke-AtmPreview -Inventory (Inv -Profiles @($p)) -InventoryArgs $ia | ForEach-Object { "$($_.Partition.Name)=$($_.Gate.Category)" }) -join ','
+        Assert-True ($res.Accepted -and $a -ceq $b) "registro aceito e preview identico ($b -> $a)"
+        foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File)) {
+            $t = [IO.File]::ReadAllText($fi.FullName)
+            Assert-True (-not ($t -match 'ConvertFrom-Json[^\r\n]*discard|discard-authorization[^\r\n]*ConvertFrom-Json')) "$($fi.Name) le o registro de autorizacao"
+        }
+        $cmd = Join-Path $srcDir 'bin\agent-temp.cmd'
+        $out = (& cmd.exe /c "`"$cmd`" authorize -Path `"$r`" -RecordFile `"$(Join-Path $dir 'cli.jsonl')`"" 2>&1) -join ' '
+        Assert-True ($LASTEXITCODE -eq 6 -and -not (Test-Path -LiteralPath (Join-Path $dir 'cli.jsonl'))) "CLI sem console interativo: saida $LASTEXITCODE, nada registrado"
+        $null = & cmd.exe /c "`"$cmd`" authorize" 2>&1
+        Assert-Eq $LASTEXITCODE 2 'CLI sem -Path/-RecordFile'
+        Assert-True ([IO.File]::Exists((Join-Path $r 'sub\b.bin'))) 'nada apagado'
+    }
+    Test-Case 'Autorizacao de descarte (AUT-1)' 'Estatico: console interativo exigido antes de registrar; leitura so por Read-Host na CLI; sem parametro que dispense a interacao; autorizacao nunca chama exclusao; schema gravado em um unico lugar; travas fechadas' {
+        $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        $blk = $cli.Substring($cli.IndexOf("'authorize' {"), $cli.IndexOf("'version' {") - $cli.IndexOf("'authorize' {"))
+        Assert-True ($blk.IndexOf('Test-AtmTuiInteractive') -gt 0 -and $blk.IndexOf('Test-AtmTuiInteractive') -lt $blk.IndexOf('Invoke-AtmDiscardAuthorization') -and $blk.Contains('Read-Host')) 'console interativo antes do registro; respostas so por Read-Host'
+        $param = $cli.Substring($cli.IndexOf('param('), $cli.IndexOf('$ErrorActionPreference') - $cli.IndexOf('param('))
+        foreach ($pat in @('Answer', 'Yes', 'Confirm', 'NonInteractive', 'Force', 'Accept')) { Assert-True (-not $param.Contains($pat)) "nenhum parametro publico '$pat'" }
+        $clean = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Clean.ps1'))
+        $auth = $clean.Substring($clean.IndexOf('$script:AtmDiscardAuthSchema ='), $clean.IndexOf('function Test-AtmOutputPathOutsideBases') - $clean.IndexOf('$script:AtmDiscardAuthSchema ='))
+        foreach ($pat in @('DeleteTree', 'AtmDeleter', 'Invoke-AtmClean', 'AtmRealDeletionEnabled', 'AtmCleanLock')) { Assert-True (-not $auth.Contains($pat)) "autorizacao sem '$pat'" }
+        Assert-Eq ([regex]::Matches($clean, "atm\.discard-authorization/").Count) 1 'schema definido uma vez'
+        Assert-True ($auth.Contains('Open-AtmCleanLog -Path $RecordFile')) 'registro pelo escritor fixado (arquivo novo)'
+        Assert-True ($shippedDeletionGate -eq $false -and $script:AtmWorktreeDiagnosticsEnabled -eq $false -and $script:AtmHandleDiagnosticsEnabled -eq $false -and $script:AtmDiagnoseExportEnabled -eq $false) 'travas distribuidas fechadas'
     }
 
     # ------------------------------------------------------------------ read-only guarantee
