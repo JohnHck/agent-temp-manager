@@ -1300,6 +1300,41 @@ foreach ($k in @('__ua__', '__dnf__', '__io__')) {
         Assert-True ($txt.Contains((Get-AtmText 'clean.logRequired')) -and $txt.Contains((Get-AtmText 'clean.nothing'))) 'console explica a exigencia'
         Assert-True (Test-TestT1RootsIntact $f) 'nada apagado'
     }
+    Test-Case 'Clean log (T1)' 'CREATED_* (resultado simulado do escritor): arquivo criado e recusado depois - resultado e console dizem que foi criado, o arquivo fica intacto, nenhuma confirmacao nem chamada ao deleter' {
+        # Simulated: Open-AtmCleanLog is replaced in this scope only by a stand-in that reports a refusal after the creation
+        # (no real failure is provoked); the file it "created" is a sandbox fixture written here, checked intact at the end.
+        $f = New-TestT1Fixture 't1created' 1
+        $path = Join-Path $sandbox 't1-created-refused.jsonl'
+        [IO.File]::WriteAllText($path, '')
+        $seen = @{ Reader = 0 }
+        $d = New-TestCleanDeleter
+        $c = & {
+            Set-Item -LiteralPath 'function:local:Open-AtmCleanLog' -Value { param([string]$Path, $Inventory, [string]$ProcessUserSid) [pscustomobject]@{ Log = $null; Code = 'LOG_CREATE_CREATED_LINK_COUNT'; Created = $true } }
+            Invoke-AtmClean -Entries $f.Entries -PlanPresenter $presenter -ConfirmationReader ({ param($x) $seen.Reader++; $x }.GetNewClosure()) -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -LogFile $path -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+        }
+        Assert-True ($c.Aborted -ceq 'LOG_OPEN_FAILED' -and $c.LogCreated -and $c.LogFile -ceq $path) "recusa depois da criacao ($($c.Aborted), criado=$($c.LogCreated))"
+        Assert-True (@($c.LogErrors)[0].Stage -ceq 'open' -and @($c.LogErrors)[0].Code -ceq 'LOG_CREATE_CREATED_LINK_COUNT') 'codigo CREATED_ propagado'
+        Assert-True ($seen.Reader -eq 0 -and $d.Calls.Count -eq 0 -and -not $c.Confirmed -and @($c.Deleted).Count -eq 0) 'nenhuma confirmacao nem exclusao iniciada'
+        $txt = (@(Show-AtmCleanResult -Result $c 6>&1 | ForEach-Object { [string]$_.MessageData }) -join "`n")
+        Assert-True ($txt.Contains((Get-AtmText 'clean.logKept' $path)) -and $txt.Contains('LOG_CREATE_CREATED_LINK_COUNT')) 'console: o arquivo foi criado e e mantido'
+        Assert-True ([IO.File]::Exists($path)) 'arquivo preservado'
+        Assert-Eq ${function:Open-AtmCleanLog}.ToString().Contains('AtmCleanLog]::Pin') $true 'o substituto nao vaza para o resto da suite'
+        Assert-True (Test-TestT1RootsIntact $f) 'nada apagado'
+    }
+    Test-Case 'Clean log (T1)' 'Revalidacao recusada: registro skip com opId, caminho e motivos; nenhum intent nem chamada ao deleter para essa raiz; a execucao segue sem parada' {
+        $f = New-TestT1Fixture 't1skip' 1
+        $w = New-TestCleanLogWriter
+        $d = New-TestCleanDeleter -Writer $w
+        $hook = { param($part) [IO.File]::WriteAllBytes((Join-Path $part.Path 'apareceu.bin'), (New-Object byte[] 9)) }
+        $c = Invoke-AtmClean -Entries $f.Entries -PlanPresenter $presenter -ConfirmationReader ${function:Confirm-Correct} -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -BeforeDeleteHook $hook -LogWriter $w -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+        $recs = Get-TestCleanLogRecords $w
+        Assert-Eq (@($recs | ForEach-Object { $_.type }) -join ',') 'run-start,plan,confirmation,skip,run-end' 'registros'
+        $sk = @($recs | Where-Object { $_.type -ceq 'skip' })[0]
+        Assert-True ($sk.opId -ceq ('{0}:1' -f $c.RunId) -and [string]::Equals($sk.path, $f.Roots[0], [StringComparison]::OrdinalIgnoreCase) -and ((@($sk.reasons) -join ' ') -match 'ALTERADO_APOS_CONFIRMACAO')) "skip identificado ($(@($sk.reasons) -join ';'))"
+        Assert-True ($d.Calls.Count -eq 0 -and @($c.Deleted).Count -eq 0 -and @($c.Skipped).Count -eq 1 -and $null -eq $c.Aborted -and $null -eq $c.StoppedBy) 'nenhuma chamada; sem parada'
+        Assert-Eq @($recs | Where-Object { $_.type -ceq 'run-end' })[0].skipped 1 'run-end conta a raiz preservada'
+        Assert-True (Test-TestT1RootsIntact $f) 'nada apagado'
+    }
     Test-Case 'Clean log (T1)' 'Trava fechada: fluxo de plano inalterado - sem LOG_REQUIRED, log nunca criado nem aberto (caminho novo ou existente), escritor e deleter simulados nunca chamados' {
         $f = New-TestT1Fixture 't1gate' 1
         $new = Join-Path $sandbox 't1-gate-novo.jsonl'
@@ -1357,6 +1392,17 @@ foreach ($k in @('__ua__', '__dnf__', '__io__')) {
         $nl = Open-AtmCleanLog -Path (Join-Path $dir 'nl.jsonl') -Inventory $inv -ProcessUserSid $me.Sid
         try { Assert-Eq ($nl.Log.AppendLine("a`nb")) 'LOG_RECORD_INVALID' 'quebra de linha recusada' } finally { $nl.Log.Dispose() }
         Assert-Eq ([IO.File]::ReadAllBytes((Join-Path $dir 'nl.jsonl'))).Length 0 'nada gravado (arquivo criado e mantido)'
+        # The 64 KiB limit counts UTF-8 bytes (with the LF), not characters: 21845 CJK characters are 65535 bytes + LF.
+        $mb = Open-AtmCleanLog -Path (Join-Path $dir 'bytes.jsonl') -Inventory $inv -ProcessUserSid $me.Sid
+        try {
+            $cjk = [string][char]0x65E5
+            Assert-Eq ($mb.Log.AppendLine(($cjk * 21845))) $null '65536 bytes UTF-8 (limite exato) aceitos'
+            Assert-Eq ($mb.Log.AppendLine(($cjk * 21846))) 'LOG_RECORD_TOO_LARGE' '21846 caracteres = 65539 bytes: recusado (bem abaixo de 65536 caracteres)'
+        } finally { $mb.Log.Dispose() }
+        Assert-Eq ([IO.File]::ReadAllBytes((Join-Path $dir 'bytes.jsonl'))).Length 65536 'so o registro dentro do limite foi gravado'
+        $sg = Open-AtmCleanLog -Path (Join-Path $dir 'surrogate.jsonl') -Inventory $inv -ProcessUserSid $me.Sid
+        try { Assert-Eq ($sg.Log.AppendLine(('a' + [char]0xD800 + 'b'))) 'LOG_RECORD_INVALID' 'UTF-16 invalido (surrogate isolado) recusado, nunca substituido' } finally { $sg.Log.Dispose() }
+        Assert-Eq ([IO.File]::ReadAllBytes((Join-Path $dir 'surrogate.jsonl'))).Length 0 'nada gravado'
         $ex = Join-Path $dir 'existente.jsonl'; [IO.File]::WriteAllText($ex, 'antes')
         $o3 = Open-AtmCleanLog -Path $ex -Inventory $inv -ProcessUserSid $me.Sid
         Assert-True ($null -eq $o3.Log -and $o3.Code -ceq 'LOG_CREATE_EXISTS' -and -not $o3.Created -and [IO.File]::ReadAllText($ex) -ceq 'antes') "existente recusado e intacto ($($o3.Code))"
@@ -1374,6 +1420,9 @@ foreach ($k in @('__ua__', '__dnf__', '__io__')) {
         Assert-True ($o.Code -ceq 'LOG_DESTINATION_NOT_ALLOWED' -and -not $o.Created -and -not (Test-Path -LiteralPath $inBase)) "dentro da base ($($o.Code))"
         $o = Open-AtmCleanLog -Path ((Get-Base $p) + '\..\log.jsonl') -Inventory $inv -ProcessUserSid $me.Sid
         Assert-Eq $o.Code 'LOG_DESTINATION_NOT_ALLOWED' 'nao canonico'
+        $inRoot = Join-Path (@($inv.Partitions | Where-Object { $_.Kind -eq 'SessionRoot' })[0].Path) 'log.jsonl'
+        $o = Open-AtmCleanLog -Path $inRoot -Inventory $inv -ProcessUserSid $me.Sid
+        Assert-True ($o.Code -ceq 'LOG_DESTINATION_NOT_ALLOWED' -and -not $o.Created -and -not (Test-Path -LiteralPath $inRoot)) "dentro de uma raiz ($($o.Code))"
         $o = Open-AtmCleanLog -Path (Join-Path $dir 'nao-existe\x.jsonl') -Inventory $inv -ProcessUserSid $me.Sid
         Assert-True ($o.Code -like 'LOG_PIN_*' -and -not $o.Created) "pasta inexistente ($($o.Code))"
         $open = Join-Path $dir 'aberta'; [void][IO.Directory]::CreateDirectory($open)
@@ -1406,6 +1455,12 @@ foreach ($k in @('__ua__', '__dnf__', '__io__')) {
         $c2 = Invoke-AtmClean -Entries $f.Entries -PlanPresenter $presenter -ConfirmationReader ({ param($x) $seen.Reader++; $x }.GetNewClosure()) -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -LogFile $path -DeleteTreeImpl $d2.Delete -PathPresenceImpl $d2.Present
         Assert-True ($c2.Aborted -ceq 'LOG_OPEN_FAILED' -and @($c2.LogErrors)[0].Code -ceq 'LOG_CREATE_EXISTS' -and -not $c2.LogCreated -and $seen.Reader -eq 0 -and $d2.Calls.Count -eq 0) "existente ($($c2.Aborted) $(@($c2.LogErrors)[0].Code))"
         Assert-Eq ([Convert]::ToBase64String([IO.File]::ReadAllBytes($path))) ([Convert]::ToBase64String($bytes)) 'arquivo existente intacto'
+        # A log inside a root this run would delete is outside the destination policy (every root is inside a base).
+        $inRoot = Join-Path $f.Roots[0] 'clean.jsonl'
+        $d3 = New-TestCleanDeleter
+        $seen.Reader = 0
+        $c3 = Invoke-AtmClean -Entries $f.Entries -PlanPresenter $presenter -ConfirmationReader ({ param($x) $seen.Reader++; $x }.GetNewClosure()) -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -LogFile $inRoot -DeleteTreeImpl $d3.Delete -PathPresenceImpl $d3.Present
+        Assert-True ($c3.Aborted -ceq 'LOG_OPEN_FAILED' -and @($c3.LogErrors)[0].Code -ceq 'LOG_DESTINATION_NOT_ALLOWED' -and $seen.Reader -eq 0 -and $d3.Calls.Count -eq 0 -and -not (Test-Path -LiteralPath $inRoot)) "log dentro da raiz a excluir recusado ($($c3.Aborted) $(@($c3.LogErrors)[0].Code))"
         Assert-True (Test-TestT1RootsIntact $f) 'nada apagado'
     }
     Test-Case 'Clean log (T1)' 'Interrupcao entre intent e result: processo filho que sai sozinho dentro do deleter simulado (sem encerramento forcado) deixa intent sem result - desfecho desconhecido; raiz intacta' {
@@ -1456,6 +1511,8 @@ exit 0
         $cls = $ncs.Substring($ncs.IndexOf('public sealed class AtmCleanLog'))
         $cls = $cls.Substring(0, $cls.IndexOf('public static class AtmPathCheck'))
         Assert-True ($cls.Contains('FILE_APPEND_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE, ref oa') -and $cls.Contains('FILE_SHARE_READ, FILE_CREATE,') -and $cls.Contains('OBJ_DONT_REPARSE') -and $cls.Contains('FILE_OPEN_REPARSE_POINT | FILE_WRITE_THROUGH') -and $cls.Contains('FlushFileBuffers(file)')) 'escritor: acrescimo, arquivo novo, sem reparse, write-through e flush'
+        foreach ($pat in @('DeleteFile', 'DeleteTree', 'DELETE_ON_CLOSE', 'FileDispositionInformation', 'SetFileInformationByHandle', 'SetSecurityInfo', 'SetNamedSecurityInfo')) { Assert-True (-not $cls.Contains($pat)) "escritor nunca remove arquivo nem altera ACL ($pat)" }
+        Assert-True ($cls.Contains('if (written != (uint)body.Length) return Stop("LOG_WRITE_INCOMPLETE")') -and $cls.Contains('new UTF8Encoding(false, true).GetBytes(line + "\n")') -and $cls.Contains('if (body.Length > MaxRecordBytes)')) 'escrita parcial detectada; limite contado nos bytes UTF-8 da linha com o LF'
         Assert-True ([IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1')).Contains('exit $(if ($res.Aborted -or $res.StoppedBy) { 3 } else { 0 })')) 'CLI: parada depois de uma exclusao sai com 3'
     }
 
@@ -1686,13 +1743,14 @@ exit 0
         $script:tuiKeys = New-Object System.Collections.Generic.Queue[object]; foreach ($k in $Keys) { $script:tuiKeys.Enqueue($k) }
         $script:tuiLines = New-Object System.Collections.Generic.Queue[string]; foreach ($l in $Lines) { $script:tuiLines.Enqueue($l) }
         $script:tuiFrames = New-Object System.Collections.Generic.List[string]
+        $script:tuiPrompts = New-Object System.Collections.Generic.List[string]
         $ks = { if ($script:tuiKeys.Count -gt 0) { $script:tuiKeys.Dequeue() } else { $null } }
-        $lr = { param($p) if ($script:tuiLines.Count -gt 0) { $script:tuiLines.Dequeue() } else { '' } }
+        $lr = { param($p) $script:tuiPrompts.Add([string]$p); if ($script:tuiLines.Count -gt 0) { $script:tuiLines.Dequeue() } else { '' } }
         $rd = { param($frame) $script:tuiFrames.Add((($frame | ForEach-Object { ($_ | ForEach-Object { $_.Text }) -join '' }) -join "`n")) }
         $tuiArgs = @{ InventoryArgs = $InvArgs; KeySource = $ks; Renderer = $rd; LineReader = $lr; Ascii = $Ascii; Width = $W; Height = $H }
         if ($null -ne $DiagRunner) { $tuiArgs['DiagnoseRunner'] = $DiagRunner; $tuiArgs['DiagnoseArgs'] = @{} }
         $st = Start-AtmTui @tuiArgs
-        return [pscustomobject]@{ State = $st; Frames = $script:tuiFrames.ToArray() }
+        return [pscustomobject]@{ State = $st; Frames = $script:tuiFrames.ToArray(); Prompts = $script:tuiPrompts.ToArray() }
     }
     Test-Case 'TUI' 'Navegacao headless: dashboard, usuarios, roots, detalhe, classes, erros, preview, ajuda' {
         $p = New-TestProfile 'tui'
@@ -1775,7 +1833,18 @@ exit 0
             Assert-True (-not [IO.Directory]::Exists($r)) "confirmado: excluido pelo motor (admin=$asAdmin)"
             Assert-True ($null -ne $o.State.LastClean.PostInventory) "auditoria posterior (admin=$asAdmin)"
             Assert-Eq (@((Read-TestCleanLogFile (& $log 'ok')).Records | ForEach-Object { $_.type }) -join ',') 'run-start,plan,confirmation,intent,result,run-end' "log da exclusao pela TUI (admin=$asAdmin)"
+            Assert-True ($o.Prompts -contains (Get-AtmText 'tuiclean.askLog')) "trava aberta: a TUI pergunta o log (admin=$asAdmin)"
         }
+        # Gate closed (every distributed copy): the screen is as before - no log question, plan only, nothing deleted.
+        $p = New-TestProfile 'tuicleangate'
+        $r = New-TestRoot -ProfileInfo $p
+        $ia = Get-InvArgs -Profiles @($p) -Identity ([pscustomobject]@{ Sid = $testOwnerSid; Name = $me.Name; IsAdmin = $false })
+        $script:AtmRealDeletionEnabled = $false
+        try { $o = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $ia -Lines @('', $r, '') }
+        finally { $script:AtmRealDeletionEnabled = $true }
+        Assert-True ($o.State.LastClean.Aborted -ceq 'EXCLUSAO_REAL_DESABILITADA_V0_1' -and $null -eq $o.State.LastClean.RunId) "trava fechada: so o plano ($($o.State.LastClean.Aborted))"
+        Assert-True (-not ($o.Prompts -contains (Get-AtmText 'tuiclean.askLog')) -and ($o.Prompts -contains (Get-AtmText 'tuiclean.askPath'))) "trava fechada: nenhuma pergunta de log ($($o.Prompts -join ' | '))"
+        Assert-True ([IO.Directory]::Exists($r)) 'trava fechada: preservado'
     }
     Test-Case 'Camadas' 'TUI e relatorio nunca chamam APIs de exclusao; motor de auditoria nao exclui nem imprime' {
         $lib = Join-Path $srcDir 'lib'

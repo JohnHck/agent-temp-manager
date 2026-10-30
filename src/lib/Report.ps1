@@ -315,6 +315,7 @@ function Show-AtmCleanResult {
         if ($Result.Aborted -eq 'NENHUM_CAMINHO_ELEGIVEL') { Write-AtmTable (@($Result.Rejected) | ForEach-Object { New-AtmRow ([ordered]@{ 'col.origin' = $_.Source; 'col.path' = $_.Path; 'col.reasons' = (@($_.Reasons) -join ' ; ') }) }) }
         if ($Result.Aborted -eq 'LOG_REQUIRED') { Write-Host ('  ' + (Get-AtmText 'clean.logRequired')) -ForegroundColor Yellow }
         & $logLines
+        # LogCreated: the writer reported the file as created (CREATED_* refusals included); it stays where it is.
         if ($Result.LogCreated) { Write-Host ('  ' + (Get-AtmText 'clean.logKept' $Result.LogFile)) -ForegroundColor Yellow }
         Write-Host ('  ' + (Get-AtmText 'clean.nothing')) -ForegroundColor Green
         return

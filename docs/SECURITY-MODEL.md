@@ -262,7 +262,14 @@ called by `Invoke-AtmGitCommand`):
   root: revalidation, `intent` flushed, deleter, `result` flushed. Anything but a complete, verified deletion, or any log
   failure, stops the run; `run-end` and close failures never replace the main reason. Limits: a flush does not
   guarantee durability across a power loss or a disk cache; an `intent` without a `result` is an unknown outcome; the
-  folder is pinned only for the run; nothing is undone (no rollback). Test seams (stand-in deleter, presence check and
+  folder is pinned only for the run; nothing is undone (no rollback). Who it protects against: another account cannot
+  open the file (protected DACL) nor add or delete entries in its folder (folder policy). Processes of the same identity,
+  SYSTEM and Administrators are not stopped by that: while the run lasts the share mode (read only, no delete) refuses
+  another writer, a rename and a delete, but rights outside share modes (such as `FILE_WRITE_ATTRIBUTES`) remain, so a
+  hard link to the open log is not excluded by construction (the standard tool was refused in a local trial; not
+  guaranteed, not tested in CI). The link count, volume and final path are checked before each write: that detects a
+  change made before the check, never one made between the check and the write; after the run the same identity can
+  change or delete the log. Test seams (stand-in deleter, presence check and
   writer) exist only in `Invoke-AtmClean`, past the gate, and no other file references them (static test).
 * **TUI diagnostics area (P5-A, ADR-0009):** presentation only. It runs `Invoke-AtmDiagnose` on an explicit action
   (entering the area without a result, or `U`) and renders the diagnose JSON export of that result: no collector,
