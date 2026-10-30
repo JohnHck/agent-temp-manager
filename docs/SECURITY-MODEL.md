@@ -273,14 +273,22 @@ called by `Invoke-AtmGitCommand`):
   writer) exist only in `Invoke-AtmClean`, past the gate, and no other file references them (static test).
 * **Discard authorization (V0.3 AUT-1; unreleased):** `agent-temp authorize` records the operator's declaration for ONE
   root bound to the plan just presented (`Invoke-AtmDiscardAuthorization`, Engine.Clean.ps1): three separate confirmations
-  (task finished, needed results preserved, discard of the content presented), an interactive console required by the
-  CLI (never proof of a person: B6 stays open), the plan presented again and compared before writing (any detected
-  difference refuses), and a new file from the pinned writer (schema `atm.discard-authorization/1`). It is not a
-  credential: nothing in the product reads it, no gate changes, and it makes nothing eligible; it records the technical
-  result apart from the declaration. The association is the naming convention (root name = session id) corroborated by a
-  transcript of the same id; the task is the operator's declaration. Limits: statistics are compared, not content (a write
-  that keeps every statistic is not detected); read-only use is not observed; the record can be changed afterwards by
-  processes of the same identity. **Approved by the maintainer as a priority: finished task and discardable content;
+  (task finished; the content decision, either "needed results preserved" (`OPERATOR_DECLARED`) or "nothing needed"
+  (`NOTHING_NEEDED_DISCARD_ACCEPTED`); discard of the content presented), an interactive console required by the CLI
+  (never proof of a person: B6 stays open), the plan presented again and compared before writing (any detected
+  difference refuses, the justification included in a stable semantic form: `Get-AtmDiscardReasonSignature`), and a new
+  file from the pinned writer (schema `atm.discard-authorization/2`). It is not a credential: nothing in the product
+  reads it, no gate changes, and it makes nothing eligible; it records the technical result apart from the declarations.
+  The association is the naming convention (root name = session id) corroborated by a transcript of the same id; the
+  task and the content decision are the operator's declarations. `preservation.basis` never takes `TOOL_VERIFIED`:
+  that value is reserved for a verification by the product, which does not exist; a typed phrase, a manifest path or an
+  external report never produces it. The identity recorded is the process's (`identifiesRespondent: false`); the
+  interaction block records only what the caller reports it required and observed in that call (a direct engine call:
+  nothing). Recording succeeded only when the command returns success (line written, flushed, file closed); after a
+  failure past the creation the file is kept as it is, never reopened or removed, and may hold a complete line: neither
+  the line nor the file proves a recording, and the format provides no atomicity or authenticity. Limits: statistics are
+  compared, not content (a write that keeps every statistic is not detected); read-only use is not observed; the record
+  can be changed afterwards by processes of the same identity. **Approved by the maintainer as a priority: finished task and discardable content;
   not approved yet: the code of any exception.** The exact points a future decision would change:
   * **B1:** `Get-AtmCandidateGate` (Engine.Clean.ps1), the block `if (-not $Inventory.ProcessCoverageComplete)` that adds
     `COBERTURA_DE_PROCESSOS_INCOMPLETA` for every root when any command line cannot be read.

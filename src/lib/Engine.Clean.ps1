@@ -504,19 +504,52 @@ function Invoke-AtmCleanCore {
 }
 
 # ---------------------------------------------------------------------------------------------
-# AUT-1 (V0.3): the operator's discard authorization of ONE root, bound to a plan just presented. It records a
-# declaration of the operator (task completed, needed results preserved, the content shown may be discarded); it is not
-# a credential: nothing in the product reads it, it makes nothing eligible, and a future run would still need a current
-# confirmation and its own revalidation. The technical result (B1, RECENT and every other gate) is shown and recorded
-# apart from the declaration: a root can be authorized by the operator and stay technically blocked. The association
-# root -> session is the provider's naming convention (root name = session id), corroborated by a readable transcript
-# of the same id; the task is the operator's declaration, never a fact read from the records.
+# AUT-1 (V0.3): the operator's discard authorization of ONE root, bound to a plan just presented. It records the
+# operator's declarations (the task finished; the content needed is preserved, or nothing in it needs to be kept; the
+# content shown may be discarded); it is not a credential: nothing in the product reads it, it makes nothing eligible,
+# and a future run would still need a current confirmation and its own revalidation. The technical result (B1, RECENT
+# and every other gate) is shown and recorded apart from the declarations: a root can be authorized by the operator and
+# stay technically blocked. The association root -> session is the provider's naming convention (root name = session
+# id), corroborated by a readable transcript of the same id; the task is the operator's declaration, never a fact read
+# from the records. Recording succeeded only when the command says so (line written, flushed and the file closed); a
+# line, complete or not, can remain in a file after a failure, so neither the line nor the file is proof of a recording.
 # ---------------------------------------------------------------------------------------------
-$script:AtmDiscardAuthSchema = 'atm.discard-authorization/1'
+$script:AtmDiscardAuthSchema = 'atm.discard-authorization/2'
 $script:AtmDiscardDescriptionMax = 200
+# Basis of the preservation statement. TOOL_VERIFIED is reserved for a verification performed by the product itself;
+# no such verifier exists, so it is never emitted (only the operator's two declarations below are).
+$script:AtmPreservationBases = @('OPERATOR_DECLARED', 'NOTHING_NEEDED_DISCARD_ACCEPTED', 'TOOL_VERIFIED')
 # What the record cannot guarantee, recorded with it (codes; text in the message catalog).
-$script:AtmDiscardLimitations = @('ASSOCIATION_BY_NAME_CONVENTION', 'TASK_DECLARED_BY_OPERATOR', 'STATISTICS_NOT_CONTENT', 'READ_ONLY_USE_NOT_OBSERVED',
-    'NO_EVIDENCE_IS_NOT_NON_USE', 'RECORD_ALTERABLE_BY_SAME_IDENTITY', 'NOT_A_DELETION_CREDENTIAL', 'INTERACTIVE_CONSOLE_IS_NOT_PROOF_OF_PRESENCE')
+$script:AtmDiscardLimitations = @('ASSOCIATION_BY_NAME_CONVENTION', 'TASK_DECLARED_BY_OPERATOR', 'PRESERVATION_NOT_VERIFIED_BY_TOOL', 'STATISTICS_NOT_CONTENT',
+    'READ_ONLY_USE_NOT_OBSERVED', 'NO_EVIDENCE_IS_NOT_NON_USE', 'RECORD_ALTERABLE_BY_SAME_IDENTITY', 'RECORD_LINE_MAY_REMAIN_AFTER_FAILURE',
+    'NOT_A_DELETION_CREDENTIAL', 'PROCESS_IDENTITY_IS_NOT_THE_RESPONDENT', 'INTERACTIVE_CONSOLE_IS_NOT_PROOF_OF_PRESENCE')
+function Get-AtmDiscardReasonSignature {
+    <#
+      Stable, semantic form of the technical justification shown to the operator, for the revalidation: a new collection
+      that says the same thing gives the same signature; new evidence or a changed justification gives another one.
+        * V0.1 gate reasons as given (principal, path and status are part of the reason), except the counts that vary
+          between collections: process coverage keeps only its code (its state is below), and the lock probe's
+          in-use and access-denied reasons keep only their codes;
+        * each runtime refusal as code|decision|collector|evidence|relation|nature|coverage, list fields sorted (never
+          its time, nor its detail: the sources there are pseudonyms of the run, new in every collection);
+        * the process coverage state (COMPLETE, INCOMPLETE, FAILED), not its counts.
+      The class, flags, association, session registry and statistics are compared on their own.
+    #>
+    param($Gate, $Inventory)
+    $sorted = { param([string]$s) (@($s -split ',' | Where-Object { $_ } | Sort-Object -Unique) -join ',') }
+    $all = @($Gate.Reasons); $rt = @($Gate.RuntimeReasons)
+    $v01 = $(if ($all.Count -gt $rt.Count) { @($all[0..($all.Count - $rt.Count - 1)]) } else { @() })
+    $sig = New-Object System.Collections.Generic.List[string]
+    foreach ($r in $v01) {
+        $t = [string]$r
+        if ($t.StartsWith('COBERTURA_DE_PROCESSOS_INCOMPLETA', [StringComparison]::Ordinal)) { $t = 'COBERTURA_DE_PROCESSOS_INCOMPLETA' }
+        elseif ($t -cmatch '^(EM_USO|ACESSO_NEGADO_PARA_EXCLUSAO):') { $t = $Matches[1] }
+        $sig.Add('GATE:' + $t)
+    }
+    foreach ($x in $rt) { $sig.Add('RUNTIME:' + (@([string]$x.Code, [string]$x.Decision, (& $sorted ([string]$x.Collector)), (& $sorted ([string]$x.Evidence)), (& $sorted ([string]$x.Relation)), [string]$x.Nature, [string]$x.Coverage) -join '|')) }
+    $sig.Add('COVERAGE:' + $(if ($Inventory.Snapshot.Failed) { 'FAILED' } elseif ($Inventory.ProcessCoverageComplete) { 'COMPLETE' } else { 'INCOMPLETE' }))
+    return , @($sig | Sort-Object -Unique)
+}
 
 function Get-AtmDiscardPresentation {
     <#
@@ -552,7 +585,8 @@ function Get-AtmDiscardPresentation {
         Facts = [pscustomobject]@{ Files = [long]$p.Files; Dirs = [long]$p.Dirs; Bytes = [long]$p.Bytes; NewestWriteUtc = $p.NewestWriteTimeUtc; CreationUtc = $p.CreationTimeUtc; Fingerprint = $p.Fingerprint
             AgeHours = $(if ($p.NewestWriteTimeUtc) { [Math]::Round(($inv.NowUtc - $p.NewestWriteTimeUtc).TotalHours, 1) } else { $null }); Class = $p.Class; Flags = @($p.Flags) }
         Technical = [pscustomobject]@{ Category = $g.Category; Reasons = @($g.Reasons); RuntimeCodes = @(@($g.RuntimeReasons) | ForEach-Object { $_.Code } | Sort-Object -Unique)
-            ProcessCoverageBlock = (@($g.Reasons | Where-Object { [string]$_ -like 'COBERTURA_DE_PROCESSOS_INCOMPLETA*' }).Count -gt 0); RecentBlock = ($p.Class -eq 'RECENT') }
+            ProcessCoverageBlock = (@($g.Reasons | Where-Object { [string]$_ -like 'COBERTURA_DE_PROCESSOS_INCOMPLETA*' }).Count -gt 0); RecentBlock = ($p.Class -eq 'RECENT')
+            ReasonSignature = (Get-AtmDiscardReasonSignature -Gate $g -Inventory $inv) }
         Limitations = @($script:AtmDiscardLimitations)
     }
 }
@@ -560,7 +594,8 @@ function Get-AtmDiscardPresentation {
 function Compare-AtmDiscardPresentation {
     # The facts a later presentation must still match for the operator's answers to apply to it. A difference means the
     # plan changed; equal statistics never prove equal content nor non-use (a write that keeps every statistic, and any
-    # read-only use, are not seen).
+    # read-only use, are not seen). The justification is compared in its semantic form (Get-AtmDiscardReasonSignature),
+    # never as formatted text or collection times, so an equivalent new collection does not refuse by itself.
     param($Before, $After)
     $d = New-Object System.Collections.Generic.List[string]
     $pb = $Before.Partition; $pa = $After.Partition
@@ -572,24 +607,33 @@ function Compare-AtmDiscardPresentation {
     if ([string]$Before.Association.Kind -cne [string]$After.Association.Kind -or [string]$Before.Association.TranscriptLastWriteUtc -cne [string]$After.Association.TranscriptLastWriteUtc) { $d.Add('ASSOCIATION') }
     if ([string]$Before.SessionRegistry -cne [string]$After.SessionRegistry) { $d.Add('SESSION_REGISTRY') }
     if ([string]$Before.Technical.Category -cne [string]$After.Technical.Category -or (@($Before.Technical.RuntimeCodes) -join ',') -cne (@($After.Technical.RuntimeCodes) -join ',')) { $d.Add('TECHNICAL_RESULT') }
+    if ((@($Before.Technical.ReasonSignature) -join "`n") -cne (@($After.Technical.ReasonSignature) -join "`n")) { $d.Add('TECHNICAL_REASONS') }
     return $d.ToArray()
 }
 
 function Invoke-AtmDiscardAuthorization {
     <#
       Records the operator's discard authorization of one root, bound to the plan just presented. Callers provide:
-        -Presenter  scriptblock(presentation) that MUST show it (facts, association, technical result, limits).
-        -Reader     scriptblock(kind, phrase) returning what the operator typed; kind is task, results, discard
-                    (each needs its exact phrase) or description (optional free text). $null or '' cancels.
-        -RecordFile a NEW file outside the audited directories, created by the pinned writer (AtmCleanLog: new file
-                    only, protected DACL, an unsafe folder is refused and never changed).
+        -Presenter   scriptblock(presentation) that MUST show it (facts, association, technical result, limits).
+        -Reader      scriptblock(kind, phrase) returning what the operator typed; kind is task and discard (one exact
+                     phrase each), results (phrase = the two accepted phrases: preserved, or nothing needed) or
+                     description (optional free text). $null or '' cancels.
+        -RecordFile  a NEW file outside the audited directories, created by the pinned writer (AtmCleanLog: new file
+                     only, protected DACL, an unsafe folder is refused and never changed).
+        -Interaction what the caller itself required and observed: Caller ('CLI'; anything else is a direct call),
+                     ConsoleRequired and ConsoleObserved (the CLI's own console check in this call). Recorded as
+                     reported by the caller; a direct call records no console requirement and no observation.
       The CLI calls it only from an interactive console (redirected input never records an acceptance); even so that is
       not proof that a person answered. Before writing, the root is presented again and must still match: any detected
       change refuses this plan (AUTH_PLAN_CHANGED) and a new presentation is needed. No record is written unless every
-      declaration is confirmed and the plan still matches. Nothing is deleted and no gate result changes.
+      declaration is confirmed and the plan still matches. Accepted is true only when the line was written and flushed
+      and the file closed without error; after a failure past the creation the file stays as it is (RecordState
+      INCOMPLETE_OR_UNDETERMINED: it may hold no line, part of one, or a complete one) and is never reopened or removed.
+      Nothing is deleted and no gate result changes.
     #>
-    param([string]$Path, [hashtable]$InventoryArgs = @{}, [string]$RecordFile, [scriptblock]$Presenter, [scriptblock]$Reader)
-    $res = [ordered]@{ Accepted = $false; Refused = $null; Detail = $null; Step = $null; PlanId = $null; AuthorizationId = $null; RecordFile = $null; RecordCreated = $false; Changes = @(); Presentation = $null }
+    param([string]$Path, [hashtable]$InventoryArgs = @{}, [string]$RecordFile, [scriptblock]$Presenter, [scriptblock]$Reader, [hashtable]$Interaction = @{})
+    $res = [ordered]@{ Accepted = $false; Refused = $null; Detail = $null; Step = $null; PlanId = $null; AuthorizationId = $null; RecordFile = $null; RecordCreated = $false
+        RecordState = 'NOT_CREATED'; ContentDecision = $null; Changes = @(); Presentation = $null }
     $done = { [pscustomobject]$res }
     if (-not $Presenter -or -not $Reader) { $res.Refused = 'AUTH_NO_PRESENTER_OR_READER'; return (& $done) }
     if (-not $RecordFile) { $res.Refused = 'AUTH_RECORD_REQUIRED'; return (& $done) }
@@ -604,11 +648,20 @@ function Invoke-AtmDiscardAuthorization {
     & $Presenter $pres
     if ($pres.Association.Kind -cne 'NAME_CONVENTION_CORROBORATED') { $res.Refused = 'AUTH_ASSOCIATION_' + $pres.Association.Kind; return (& $done) }
     $short = $pres.PlanId.Substring(0, 8).ToUpperInvariant()
-    foreach ($step in @(@('task', (Get-AtmText 'auth.phrase.task')), @('results', (Get-AtmText 'auth.phrase.results')), @('discard', (Get-AtmText 'auth.phrase.discard' $short)))) {
-        $typed = & $Reader $step[0] $step[1]
+    # The content decision has two declarations, each with its own phrase: the content needed is preserved outside the
+    # root (OPERATOR_DECLARED), or nothing in it needs to be kept (NOTHING_NEEDED_DISCARD_ACCEPTED). Neither is verified
+    # by the product, and neither says that the root is unused.
+    $decisions = [ordered]@{ (Get-AtmText 'auth.phrase.results') = 'RESULTS_PRESERVED'; (Get-AtmText 'auth.phrase.nothingNeeded') = 'NOTHING_NEEDED' }
+    $decision = $null
+    foreach ($step in @(@('task', @(Get-AtmText 'auth.phrase.task')), @('results', @($decisions.Keys)), @('discard', @(Get-AtmText 'auth.phrase.discard' $short)))) {
+        $phrases = @($step[1])
+        $typed = & $Reader $step[0] $(if ($phrases.Count -eq 1) { $phrases[0] } else { $phrases })
         if (-not ($typed -is [string]) -or $typed -eq '') { $res.Refused = 'AUTH_CANCELLED'; $res.Step = $step[0]; return (& $done) }
-        if (-not [string]::Equals($typed, $step[1], [StringComparison]::Ordinal)) { $res.Refused = 'AUTH_DECLINED'; $res.Step = $step[0]; return (& $done) }
+        $hit = @($phrases | Where-Object { [string]::Equals($typed, $_, [StringComparison]::Ordinal) })
+        if ($hit.Count -ne 1) { $res.Refused = 'AUTH_DECLINED'; $res.Step = $step[0]; return (& $done) }
+        if ($step[0] -ceq 'results') { $decision = $decisions[$hit[0]] }
     }
+    $res.ContentDecision = $decision
     # Optional free text, kept as data only: control characters replaced, length capped.
     $descRaw = & $Reader 'description' $null
     $desc = $(if ($descRaw -is [string] -and $descRaw.Trim() -ne '') { $t = [regex]::Replace($descRaw.Trim(), '[\x00-\x1f\x7f-\x9f]', '?'); if ($t.Length -gt $script:AtmDiscardDescriptionMax) { $t.Substring(0, $script:AtmDiscardDescriptionMax) } else { $t } } else { $null })
@@ -620,23 +673,36 @@ function Invoke-AtmDiscardAuthorization {
     $p = $pres.Partition; $idn = $pres.Inventory.Identity
     $iso = { param($v) if ($null -ne $v) { ([datetime]$v).ToUniversalTime().ToString('o') } else { $null } }
     $authId = [guid]::NewGuid().ToString()
+    # Interaction: only what the caller reports it required and observed in this call; a direct call (tests, any other
+    # caller) records no console requirement and no observation. Never a statement about who answered.
+    $isCli = ([string]$Interaction['Caller'] -ceq 'CLI')
+    $observed = $(if ($isCli -and $Interaction['ConsoleObserved'] -is [bool]) { $Interaction['ConsoleObserved'] } else { $null })
+    $basis = $(if ($decision -ceq 'NOTHING_NEEDED') { 'NOTHING_NEEDED_DISCARD_ACCEPTED' } else { 'OPERATOR_DECLARED' })
     $rec = [ordered]@{
         schema = $script:AtmDiscardAuthSchema; authorizationId = $authId; planId = $pres.PlanId; tool = $script:AtmVersion
-        presentedUtc = (& $iso $pres.PresentedUtc); revalidatedUtc = (& $iso $again.PresentedUtc); recordedUtc = (& $iso ([datetime]::UtcNow))
-        operator = [ordered]@{ name = $idn.Name; sid = $idn.Sid; elevated = [bool]$idn.IsAdmin }
+        presentedUtc = (& $iso $pres.PresentedUtc); revalidatedUtc = (& $iso $again.PresentedUtc); composedUtc = (& $iso ([datetime]::UtcNow))
+        processIdentity = [ordered]@{ name = $idn.Name; sid = $idn.Sid; elevated = [bool]$idn.IsAdmin; identifiesRespondent = $false }
+        interaction = [ordered]@{ caller = $(if ($isCli) { 'CLI' } else { 'DIRECT_CALL' }); consoleRequiredByCaller = ($isCli -and $Interaction['ConsoleRequired'] -eq $true)
+            interactiveConsoleObserved = $observed; observedBy = $(if ($null -ne $observed) { 'CALLER_CONSOLE_CHECK' } else { $null }) }
         root = [ordered]@{ path = $p.Path; provider = $p.Provider; profileSid = $p.Sid; sessionId = [string]$p.Name; kind = $p.Kind }
         association = [ordered]@{ kind = $pres.Association.Kind; transcriptLastWriteUtc = (& $iso $pres.Association.TranscriptLastWriteUtc); basis = 'ROOT_NAME_EQUALS_SESSION_ID' }
         presented = [ordered]@{ files = $pres.Facts.Files; dirs = $pres.Facts.Dirs; bytes = $pres.Facts.Bytes; newestWriteUtc = (& $iso $pres.Facts.NewestWriteUtc); creationUtc = (& $iso $pres.Facts.CreationUtc)
             fingerprint = $pres.Facts.Fingerprint; ageHours = $pres.Facts.AgeHours; class = $pres.Facts.Class; flags = @($pres.Facts.Flags); sessionRegistry = $pres.SessionRegistry }
-        technical = [ordered]@{ category = $pres.Technical.Category; runtimeCodes = @($pres.Technical.RuntimeCodes); processCoverageBlock = $pres.Technical.ProcessCoverageBlock; recentBlock = $pres.Technical.RecentBlock; reasons = @($pres.Technical.Reasons) }
-        declarations = [ordered]@{ declaredBy = 'OPERATOR'; taskCompleted = $true; resultsPreserved = $true; discardAuthorized = $true; taskDescription = $desc }
-        confirmation = [ordered]@{ result = 'ACCEPTED'; planRevalidated = $true; interactiveConsoleRequiredByCli = $true }
+        technical = [ordered]@{ category = $pres.Technical.Category; runtimeCodes = @($pres.Technical.RuntimeCodes); processCoverageBlock = $pres.Technical.ProcessCoverageBlock; recentBlock = $pres.Technical.RecentBlock
+            reasonSignature = @($pres.Technical.ReasonSignature); reasons = @($pres.Technical.Reasons) }
+        # Received from the operator: every phrase was typed as required. A declaration, not an observed fact, not a
+        # recording result and not a permission.
+        declarations = [ordered]@{ declaredBy = 'OPERATOR'; status = 'ALL_PHRASES_TYPED'; taskCompleted = $true; contentDecision = $decision; discardAuthorized = $true; taskDescription = $desc }
+        preservation = [ordered]@{ basis = $basis; verifiedByTool = $false; evidence = $null }
+        revalidation = [ordered]@{ planRevalidated = $true; compared = 'STATISTICS_FINGERPRINT_AND_SEMANTIC_REASONS' }
         limitations = @($pres.Limitations)
     }
+    if ($script:AtmPreservationBases -cnotcontains $rec.preservation.basis -or $rec.preservation.basis -ceq $script:AtmPreservationBases[2]) { throw (Get-AtmText 'err.diagFinding' 'preservation basis') }
     $line = ConvertTo-Json -InputObject $rec -Compress -Depth 6
     $res.RecordFile = $RecordFile
     $opened = Open-AtmCleanLog -Path $RecordFile -Inventory $again.Inventory -ProcessUserSid (Get-AtmCurrentIdentity).Sid
     $res.RecordCreated = [bool]$opened.Created
+    if ($res.RecordCreated) { $res.RecordState = 'INCOMPLETE_OR_UNDETERMINED' }
     if ($null -eq $opened.Log) { $res.Refused = 'AUTH_RECORD_FAILED'; $res.Detail = $opened.Code; return (& $done) }
     try {
         $wc = $opened.Log.AppendLine($line)
@@ -644,7 +710,7 @@ function Invoke-AtmDiscardAuthorization {
         $cc = $opened.Log.Close()
         if ($null -ne $cc) { $res.Refused = 'AUTH_RECORD_FAILED'; $res.Detail = $cc; return (& $done) }
     } finally { $opened.Log.Dispose() }
-    $res.Accepted = $true; $res.AuthorizationId = $authId
+    $res.RecordState = 'COMPLETE'; $res.Accepted = $true; $res.AuthorizationId = $authId
     return (& $done)
 }
 

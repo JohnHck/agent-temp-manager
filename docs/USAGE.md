@@ -253,31 +253,72 @@ credential for a future deletion (nothing in the product reads it; a future run 
 its own revalidation).
 
 1. Interactive console only (no redirected input or output; exit code `6` otherwise). This is required, but it does not
-   prove that a person answered.
+   prove that a person answered. The record says what the CLI required and observed in that call
+   (`interaction`); a direct call of the engine records neither.
 2. The root is presented: exact path, provider, profile SID, session id (the root name), counts, size, newest write and
    its age (information only), fingerprint, evidence, the **technical result** of every gate (B1, RECENT and the
    runtime evidence included), the run notices and the limits of the record.
 3. The association root -> session is the provider's naming convention (root name = session id), corroborated by a
    readable transcript of the same id. Without one, or with the same id under another project scope, the root cannot be
    authorized (`AUTH_ASSOCIATION_UNKNOWN`, `_AMBIGUOUS`). The task is **your declaration**, never read from a record.
-4. Three separate confirmations, each with an exact phrase: the task has finished; the results you need are preserved
-   outside this root; you authorize discarding the content presented (this plan only). Then an optional short
-   description (at most 200 characters, stored as text). Any other answer or an empty one records nothing.
+4. Three separate confirmations, each with an exact phrase:
+   * the task has finished (`TASK COMPLETED`);
+   * the content decision, one of two declarations: what you need from the root is preserved outside it
+     (`RESULTS PRESERVED`, recorded as `OPERATOR_DECLARED`), or nothing in it needs to be kept (`NOTHING NEEDED`,
+     recorded as `NOTHING_NEEDED_DISCARD_ACCEPTED`). The product verifies no copy, and neither says that the root is
+     unused. `TOOL_VERIFIED` is reserved for a verification by the product itself; no such verifier exists, so it is
+     never recorded, whatever is typed or whatever external report or manifest exists;
+   * you authorize discarding the content presented (`DISCARD <plan>`, this plan only).
+
+   Then an optional short description (at most 200 characters, stored as text). Any other answer or an empty one
+   records nothing.
 5. The root is presented again and compared: path, kind, SID, provider, session id, counts, bytes, newest write,
-   creation, fingerprint, class, flags, association, session registry, technical result. Any difference refuses
-   (`AUTH_PLAN_CHANGED`); present it again. The comparison uses statistics: a write that keeps them all (same size and
-   modification time) is not detected, equal statistics do not prove equal content, and read-only use is not seen.
+   creation, fingerprint, class, flags, association, session registry, technical result (category and runtime codes)
+   and the **justification** in a stable semantic form: the gate reasons as given (principal, path, status), without the
+   counts that vary between collections (processes not inspectable, items found by the lock probe); each runtime refusal
+   by code, decision, collector, evidence, relation, nature and coverage (never its time, nor its detail, whose sources
+   are pseudonyms new in every collection); the process coverage state. An equivalent new collection does not refuse;
+   new evidence or a changed justification refuses (`AUTH_PLAN_CHANGED`, `TECHNICAL_REASONS`); present it again. The
+   comparison uses statistics: a write that keeps them all (same size and modification time) is not detected, equal
+   statistics do not prove equal content, and read-only use is not seen.
 6. The record is a new file (never an existing one; an unsafe folder is refused and not changed) holding one JSON line,
-   schema `atm.discard-authorization/1`: identifiers (authorization, plan), operator, root, association, what was
-   presented, the technical result, the declarations, the confirmation and the limits. No conversation or file content.
-   Processes running as you can change it afterwards: it is not tamper-proof.
+   schema `atm.discard-authorization/2`: identifiers (authorization, plan), `processIdentity` (the account the process
+   ran as, `identifiesRespondent: false`), `interaction`, root, association, what was presented, the technical result
+   with its semantic signature, `declarations` (received from you: `status: ALL_PHRASES_TYPED`, the content decision),
+   `preservation` (`basis`, `verifiedByTool: false`, `evidence: null`), the revalidation and the limits. No conversation
+   or file content. Processes running as you can change it afterwards: it is not tamper-proof.
+7. **Recording succeeded only when the command says so** (exit code `0`): the line was written and flushed and the file
+   closed without error. After a failure once the file exists, the command says that the file is kept as it is and that
+   recording did not finish; the file is never reopened or deleted, and it may hold nothing, part of a line or **a
+   complete line**. Nothing in the record says whether recording finished, and the format provides no atomicity or
+   authenticity: neither a line nor the existence of the file is proof of a recorded authorization, and no future
+   consumer may rely on either.
+
+Synthetic example (paths, SIDs and ids shortened):
+
+```json
+{"schema":"atm.discard-authorization/2","authorizationId":"6f1c…","planId":"5dc6f2aa-…","tool":"…",
+ "presentedUtc":"…","revalidatedUtc":"…","composedUtc":"…",
+ "processIdentity":{"name":"PC\\alice","sid":"S-1-5-21-…","elevated":false,"identifiesRespondent":false},
+ "interaction":{"caller":"CLI","consoleRequiredByCaller":true,"interactiveConsoleObserved":true,"observedBy":"CALLER_CONSOLE_CHECK"},
+ "root":{"path":"C:\\Users\\alice\\AppData\\Local\\Temp\\claude\\C--work\\0d0b…","provider":"claude-code","profileSid":"S-1-5-21-…","sessionId":"0d0b…","kind":"SessionRoot"},
+ "association":{"kind":"NAME_CONVENTION_CORROBORATED","transcriptLastWriteUtc":"…","basis":"ROOT_NAME_EQUALS_SESSION_ID"},
+ "presented":{"files":293,"dirs":76,"bytes":6592149,"fingerprint":"B34D2D015552A3BE","ageHours":226.4,"class":"ORPHAN_SUSPECTED","flags":[],"sessionRegistry":null,…},
+ "technical":{"category":"BLOCKED","runtimeCodes":[],"processCoverageBlock":true,"recentBlock":false,
+   "reasonSignature":["COVERAGE:INCOMPLETE","GATE:COBERTURA_DE_PROCESSOS_INCOMPLETA"],"reasons":["COBERTURA_DE_PROCESSOS_INCOMPLETA (137 …)"]},
+ "declarations":{"declaredBy":"OPERATOR","status":"ALL_PHRASES_TYPED","taskCompleted":true,"contentDecision":"NOTHING_NEEDED","discardAuthorized":true,"taskDescription":null},
+ "preservation":{"basis":"NOTHING_NEEDED_DISCARD_ACCEPTED","verifiedByTool":false,"evidence":null},
+ "revalidation":{"planRevalidated":true,"compared":"STATISTICS_FINGERPRINT_AND_SEMANTIC_REASONS"},
+ "limitations":["ASSOCIATION_BY_NAME_CONVENTION","TASK_DECLARED_BY_OPERATOR","PRESERVATION_NOT_VERIFIED_BY_TOOL","STATISTICS_NOT_CONTENT","READ_ONLY_USE_NOT_OBSERVED","NO_EVIDENCE_IS_NOT_NON_USE","RECORD_ALTERABLE_BY_SAME_IDENTITY","RECORD_LINE_MAY_REMAIN_AFTER_FAILURE","NOT_A_DELETION_CREDENTIAL","PROCESS_IDENTITY_IS_NOT_THE_RESPONDENT","INTERACTIVE_CONSOLE_IS_NOT_PROOF_OF_PRESENCE"]}
+```
 
 A root can be **authorized and still technically blocked**: the result says so (`Technical result: BLOCKED`) and is never
 shown as eligible. Today, on a real machine, process coverage (B1) blocks every root, and a root written less than 72 h
 ago is RECENT; no exception to either has been approved (see SECURITY-MODEL, "Discard authorization").
 
-Exit codes of `authorize`: `0` recorded, `2` missing `-Path` or `-RecordFile`, `3` not recorded (refused, declined or
-cancelled), `6` no interactive console.
+Exit codes of `authorize`: `0` recorded (written, flushed and closed), `2` missing `-Path` or `-RecordFile`, `3` not
+recorded (refused, declined, cancelled, plan changed, or a recording failure; a file kept after a failure is said so and
+is not a recorded authorization), `6` no interactive console.
 
 ### Clean log (`-LogFile`; V0.3 T1, unreleased)
 

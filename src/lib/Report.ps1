@@ -352,6 +352,7 @@ function Show-AtmDiscardResult {
     Write-AtmHeader (Get-AtmText 'auth.resultHeader')
     if ($Result.Accepted) {
         Write-Host ('  ' + (Get-AtmText 'auth.accepted' $Result.AuthorizationId $Result.PlanId $Result.RecordFile)) -ForegroundColor Green
+        if ($Result.ContentDecision) { Write-Host ('  ' + (Get-AtmText ('auth.decision.' + $Result.ContentDecision))) }
         Write-Host ('  ' + (Get-AtmText 'auth.acceptedTechnical' $Result.Presentation.Technical.Category)) -ForegroundColor $(if ($Result.Presentation.Technical.Category -eq 'BLOCKED') { 'Red' } else { 'Yellow' })
     } else {
         $more = @(@($Result.Step) + @($Result.Detail) + @($Result.Changes) | Where-Object { $_ }) -join ', '

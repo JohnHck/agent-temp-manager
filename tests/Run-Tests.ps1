@@ -501,7 +501,8 @@ function Write-TestSessionFile {
 function Get-TestPreviewRow { param($Rows, [string]$Path) return @(@($Rows) | Where-Object { [string]::Equals($_.Partition.Path, $Path, [StringComparison]::OrdinalIgnoreCase) -and $_.Partition.Kind -ne 'BaseLooseFiles' })[0] }
 # AUT-1 helpers: a transcript of the root's own id (corroborates the association; its content is a marker the record
 # must never contain), and a simulated operator: answers per step (the phrase itself, another text, $null to cancel, or a
-# scriptblock run at that step), prompts counted. Tests only; the CLI has no way to pass answers.
+# scriptblock run at that step), prompts counted, phrases offered kept. Where a step offers two phrases (the content
+# decision) the default answer is the first one (preserved). Tests only; the CLI has no way to pass answers.
 function New-TestTranscript {
     param($ProfileInfo, [string]$Root, [string]$Text = '{"marker":"ATM-AUT1-TRANSCRIPT-CONTENT"}')
     $slug = Split-Path (Split-Path $Root -Parent) -Leaf
@@ -513,15 +514,17 @@ function New-TestTranscript {
 }
 function New-TestAuthOperator {
     param([hashtable]$Answers = @{}, [string]$Description = $null)
-    $st = @{ Prompts = (New-Object System.Collections.Generic.List[string]); Presented = 0; Answers = $Answers; Description = $Description }
+    $st = @{ Prompts = (New-Object System.Collections.Generic.List[string]); Phrases = @{}; Presented = 0; Answers = $Answers; Description = $Description }
     $st.Presenter = { param($pr) $st.Presented++ }.GetNewClosure()
     $st.Reader = {
         param($kind, $phrase)
         $st.Prompts.Add([string]$kind)
+        $st.Phrases[[string]$kind] = @($phrase)
         if ($kind -ceq 'description') { return $st.Description }
-        if (-not $st.Answers.ContainsKey($kind)) { return $phrase }
+        $first = @($phrase)[0]
+        if (-not $st.Answers.ContainsKey($kind)) { return $first }
         $a = $st.Answers[$kind]
-        if ($a -is [scriptblock]) { & $a; return $phrase }
+        if ($a -is [scriptblock]) { & $a; return $first }
         return $a
     }.GetNewClosure()
     return $st
@@ -2128,8 +2131,10 @@ exit 0
             Assert-Eq ($op.Prompts -join ',') 'task,results,discard,description' "$($k): tres confirmacoes separadas e a descricao opcional"
             $raw = [IO.File]::ReadAllText($file)
             $rec = $raw | ConvertFrom-Json
-            Assert-True ($rec.schema -ceq 'atm.discard-authorization/1' -and $rec.planId -ceq $res.PlanId -and $rec.authorizationId -ceq $res.AuthorizationId -and $rec.root.path -ceq $r -and $rec.root.sessionId -ceq (Split-Path $r -Leaf) -and $rec.root.profileSid -ceq $p.Sid) "$($k): identificadores e raiz"
-            Assert-True ($rec.association.kind -ceq 'NAME_CONVENTION_CORROBORATED' -and $rec.declarations.declaredBy -ceq 'OPERATOR' -and $rec.declarations.taskCompleted -and $rec.declarations.resultsPreserved -and $rec.declarations.discardAuthorized -and $rec.confirmation.result -ceq 'ACCEPTED' -and $rec.confirmation.planRevalidated) "$($k): associacao por convencao, declaracoes do operador, confirmacao"
+            Assert-True ($rec.schema -ceq 'atm.discard-authorization/2' -and $rec.planId -ceq $res.PlanId -and $rec.authorizationId -ceq $res.AuthorizationId -and $rec.root.path -ceq $r -and $rec.root.sessionId -ceq (Split-Path $r -Leaf) -and $rec.root.profileSid -ceq $p.Sid) "$($k): identificadores e raiz"
+            Assert-True ($rec.association.kind -ceq 'NAME_CONVENTION_CORROBORATED' -and $rec.declarations.declaredBy -ceq 'OPERATOR' -and $rec.declarations.status -ceq 'ALL_PHRASES_TYPED' -and $rec.declarations.taskCompleted -and $rec.declarations.contentDecision -ceq 'RESULTS_PRESERVED' -and $rec.declarations.discardAuthorized -and $rec.revalidation.planRevalidated) "$($k): associacao por convencao, declaracoes do operador, revalidacao"
+            Assert-True ($rec.preservation.basis -ceq 'OPERATOR_DECLARED' -and $rec.preservation.verifiedByTool -eq $false -and $null -eq $rec.preservation.evidence -and $res.RecordState -ceq 'COMPLETE' -and $res.ContentDecision -ceq 'RESULTS_PRESERVED') "$($k): preservacao declarada, nao verificada pelo produto; gravacao concluida"
+            Assert-True (-not $rec.PSObject.Properties['confirmation'] -and -not $rec.PSObject.Properties['operator'] -and -not $raw.Contains('ACCEPTED')) "$($k): nenhum campo ACCEPTED nem 'operator' (schema /1)"
             Assert-True ($rec.presented.files -eq 2 -and $rec.presented.bytes -eq 2148 -and $rec.presented.fingerprint -ceq (Find-Part (Inv -Profiles @($p) -Procs $procs) $r).Fingerprint -and $null -ne $rec.presented.ageHours) "$($k): o que foi apresentado"
             Assert-True ($rec.technical.category -ceq 'BLOCKED' -and $(if ($k -ceq 'recent') { $rec.technical.recentBlock } else { $rec.technical.processCoverageBlock })) "$($k): bloqueio tecnico registrado ($($rec.technical.category))"
             Assert-True (@($rec.limitations) -contains 'NOT_A_DELETION_CREDENTIAL' -and @($rec.limitations) -contains 'STATISTICS_NOT_CONTENT' -and @($rec.limitations) -contains 'RECORD_ALTERABLE_BY_SAME_IDENTITY') "$($k): limites registrados"
@@ -2149,13 +2154,14 @@ exit 0
         $null = New-TestTranscript -ProfileInfo $p -Root $r
         $n = 0
         foreach ($step in @('task', 'results', 'discard')) {
-            foreach ($ans in @('nao', $null, '')) {
+            # TOOL_VERIFIED typed as an answer is only another text: the product never takes it as a verification.
+            foreach ($ans in @('nao', $null, '', 'TOOL_VERIFIED')) {
                 $n++
                 $file = Join-Path $dir ("no-$n.jsonl")
                 $op = New-TestAuthOperator -Answers @{ $step = $ans }
                 $res = Invoke-AtmDiscardAuthorization -Path $r -InventoryArgs (Get-InvArgs -Profiles @($p)) -RecordFile $file -Presenter $op.Presenter -Reader $op.Reader
-                $want = $(if ($ans -ceq 'nao') { 'AUTH_DECLINED' } else { 'AUTH_CANCELLED' })
-                Assert-True (-not $res.Accepted -and $res.Refused -ceq $want -and $res.Step -ceq $step -and -not $res.RecordCreated -and -not (Test-Path -LiteralPath $file)) "$step / [$ans]: $($res.Refused) $($res.Step)"
+                $want = $(if ($ans) { 'AUTH_DECLINED' } else { 'AUTH_CANCELLED' })
+                Assert-True (-not $res.Accepted -and $res.Refused -ceq $want -and $res.Step -ceq $step -and -not $res.RecordCreated -and $res.RecordState -ceq 'NOT_CREATED' -and -not (Test-Path -LiteralPath $file)) "$step / [$ans]: $($res.Refused) $($res.Step)"
             }
         }
         Assert-True ([IO.File]::Exists((Join-Path $r 'sub\b.bin'))) 'nada apagado'
@@ -2255,6 +2261,125 @@ exit 0
         Assert-True ($LASTEXITCODE -eq 6 -and -not (Test-Path -LiteralPath (Join-Path $dir 'cli.jsonl'))) "CLI sem console interativo: saida $LASTEXITCODE, nada registrado"
         $null = & cmd.exe /c "`"$cmd`" authorize" 2>&1
         Assert-Eq $LASTEXITCODE 2 'CLI sem -Path/-RecordFile'
+        Assert-True ([IO.File]::Exists((Join-Path $r 'sub\b.bin'))) 'nada apagado'
+    }
+    Test-Case 'Autorizacao de descarte (AUT-1)' 'Duas declaracoes sobre o conteudo, testadas separadamente: preservados (OPERATOR_DECLARED) e nada necessario (NOTHING_NEEDED_DISCARD_ACCEPTED); nenhuma verificada pelo produto; TOOL_VERIFIED nunca emitido' {
+        $dir = New-TestCleanLogDir 'auth-dec'
+        if (-not $dir) { return }
+        $p = New-TestProfile 'authdec'
+        $r = New-TestRoot -ProfileInfo $p
+        $null = New-TestTranscript -ProfileInfo $p -Root $r
+        $ia = Get-InvArgs -Profiles @($p)
+        $kept = Get-AtmText 'auth.phrase.results'; $none = Get-AtmText 'auth.phrase.nothingNeeded'
+        $cases = @(@{ Tag = 'preservados'; Answer = $kept; Decision = 'RESULTS_PRESERVED'; Basis = 'OPERATOR_DECLARED' },
+            @{ Tag = 'nada necessario'; Answer = $none; Decision = 'NOTHING_NEEDED'; Basis = 'NOTHING_NEEDED_DISCARD_ACCEPTED' })
+        $i = 0
+        foreach ($c in $cases) {
+            $i++
+            $file = Join-Path $dir ("dec-$i.jsonl")
+            $op = New-TestAuthOperator -Answers @{ results = $c.Answer }
+            $res = Invoke-AtmDiscardAuthorization -Path $r -InventoryArgs $ia -RecordFile $file -Presenter $op.Presenter -Reader $op.Reader
+            Assert-True ($res.Accepted -and $res.ContentDecision -ceq $c.Decision -and $res.RecordState -ceq 'COMPLETE') "$($c.Tag): aceito ($($res.Refused) $($res.Detail))"
+            Assert-Eq (@($op.Phrases['results']) -join '|') "$kept|$none" "$($c.Tag): as duas frases oferecidas na mesma pergunta"
+            $raw = [IO.File]::ReadAllText($file); $rec = $raw | ConvertFrom-Json
+            Assert-True ($rec.declarations.contentDecision -ceq $c.Decision -and $rec.preservation.basis -ceq $c.Basis -and $rec.preservation.verifiedByTool -eq $false -and $null -eq $rec.preservation.evidence -and -not $raw.Contains('TOOL_VERIFIED')) "$($c.Tag): base $($rec.preservation.basis), sem verificacao do produto"
+            Assert-True (@($rec.limitations) -contains 'PRESERVATION_NOT_VERIFIED_BY_TOOL' -and @($rec.limitations) -contains 'NO_EVIDENCE_IS_NOT_NON_USE') "$($c.Tag): limites: nao verificado e nao prova desuso"
+            $txt = (@(Show-AtmDiscardResult -Result $res 6>&1 | ForEach-Object { [string]$_.MessageData }) -join "`n")
+            Assert-True ($txt.Contains((Get-AtmText ('auth.decision.' + $c.Decision)))) "$($c.Tag): console diz qual declaracao foi feita"
+        }
+        $lit = (@(Get-ChildItem -LiteralPath $srcDir -Recurse -File | ForEach-Object { [regex]::Matches([IO.File]::ReadAllText($_.FullName), "'TOOL_VERIFIED'").Count }) | Measure-Object -Sum).Sum
+        Assert-Eq $lit 1 'TOOL_VERIFIED so na lista reservada: nenhum codigo o emite'
+        Assert-True ([IO.File]::Exists((Join-Path $r 'sub\b.bin'))) 'nada apagado'
+    }
+    Test-Case 'Autorizacao de descarte (AUT-1)' 'Falha no fechamento depois da linha completa (resultado simulado do escritor): sem sucesso, aviso de arquivo remanescente incompleto ou indeterminado, arquivo preservado, nada promovido nem apagado' {
+        # Simulated: Open-AtmCleanLog is replaced in this scope only by a wrapper around the real one: the real writer
+        # creates the file, writes and flushes the line and closes the file; the wrapper then reports a close failure.
+        $dir = New-TestCleanLogDir 'auth-close'
+        if (-not $dir) { return }
+        $p = New-TestProfile 'authclose'
+        $r = New-TestRoot -ProfileInfo $p
+        $null = New-TestTranscript -ProfileInfo $p -Root $r
+        $ia = Get-InvArgs -Profiles @($p)
+        $b = @(Invoke-AtmPreview -Inventory (Inv -Profiles @($p)) -InventoryArgs $ia | ForEach-Object { "$($_.Partition.Name)=$($_.Gate.Category)" }) -join ','
+        $file = Join-Path $dir 'close.jsonl'
+        $realOpen = ${function:Open-AtmCleanLog}
+        $op = New-TestAuthOperator
+        $res = & {
+            Set-Item -LiteralPath 'function:local:Open-AtmCleanLog' -Value {
+                param([string]$Path, $Inventory, [string]$ProcessUserSid)
+                $o = & $realOpen -Path $Path -Inventory $Inventory -ProcessUserSid $ProcessUserSid
+                if ($null -eq $o.Log) { return $o }
+                $w = [pscustomobject]@{ Inner = $o.Log }
+                $w | Add-Member -MemberType ScriptMethod -Name AppendLine -Value { param([string]$Line) $this.Inner.AppendLine($Line) }
+                $w | Add-Member -MemberType ScriptMethod -Name Close -Value { $null = $this.Inner.Close(); 'LOG_CLOSE_FAILED_SIMULATED' }
+                $w | Add-Member -MemberType ScriptMethod -Name Dispose -Value { $this.Inner.Dispose() }
+                [pscustomobject]@{ Log = $w; Code = $null; Created = $o.Created }
+            }
+            Invoke-AtmDiscardAuthorization -Path $r -InventoryArgs $ia -RecordFile $file -Presenter $op.Presenter -Reader $op.Reader
+        }
+        Assert-True (-not $res.Accepted -and $res.Refused -ceq 'AUTH_RECORD_FAILED' -and $res.Detail -ceq 'LOG_CLOSE_FAILED_SIMULATED' -and $null -eq $res.AuthorizationId) "sem sucesso: $($res.Refused) $($res.Detail)"
+        Assert-True ($res.RecordCreated -and $res.RecordState -ceq 'INCOMPLETE_OR_UNDETERMINED' -and [IO.File]::Exists($file)) "arquivo remanescente preservado ($($res.RecordState))"
+        $left = @([IO.File]::ReadAllLines($file) | Where-Object { $_ })
+        $lrec = $left[0] | ConvertFrom-Json
+        Assert-True ($left.Count -eq 1 -and $lrec.declarations.status -ceq 'ALL_PHRASES_TYPED' -and @($lrec.limitations) -contains 'RECORD_LINE_MAY_REMAIN_AFTER_FAILURE') 'limite demonstrado: uma linha completa permanece, e ela mesma diz que nao prova a gravacao'
+        $txt = (@(Show-AtmDiscardResult -Result $res 6>&1 | ForEach-Object { [string]$_.MessageData }) -join "`n")
+        $acceptedHead = (Get-AtmText 'auth.accepted' 'X' 'Y' 'Z').Substring(0, 20)
+        Assert-True ($txt.Contains((Get-AtmText 'auth.recordKept' $file)) -and -not $txt.Contains($acceptedHead) -and $txt.Contains((Get-AtmText 'auth.nothingDeleted'))) 'console: arquivo mantido, registro nao concluido, nunca aceito'
+        $a = @(Invoke-AtmPreview -Inventory (Inv -Profiles @($p)) -InventoryArgs $ia | ForEach-Object { "$($_.Partition.Name)=$($_.Gate.Category)" }) -join ','
+        Assert-Eq $a $b 'nada promovido: preview identico'
+        Assert-Eq ${function:Open-AtmCleanLog}.ToString().Contains('AtmCleanLog]::Pin') $true 'o substituto nao vaza para o resto da suite'
+        $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        Assert-True ($cli.Contains('exit $(if ($authRes.Accepted) { 0 } else { 3 })')) 'CLI: saida 3 sempre que nao concluiu'
+        Assert-True ([IO.File]::Exists((Join-Path $r 'sub\b.bin'))) 'nada apagado'
+    }
+    Test-Case 'Autorizacao de descarte (AUT-1)' 'Identidade e interacao: identidade do processo, nunca da pessoa; chamada direta nao afirma console nem observacao; o exigido e observado pela CLI registrado como informado por ela' {
+        $dir = New-TestCleanLogDir 'auth-int'
+        if (-not $dir) { return }
+        $p = New-TestProfile 'authint'
+        $r = New-TestRoot -ProfileInfo $p
+        $null = New-TestTranscript -ProfileInfo $p -Root $r
+        $ia = Get-InvArgs -Profiles @($p)
+        $cases = @(
+            @{ Tag = 'chamada direta'; Interaction = @{}; Caller = 'DIRECT_CALL'; Required = $false; Observed = $null; By = $null },
+            @{ Tag = 'CLI'; Interaction = @{ Caller = 'CLI'; ConsoleRequired = $true; ConsoleObserved = $true }; Caller = 'CLI'; Required = $true; Observed = $true; By = 'CALLER_CONSOLE_CHECK' },
+            @{ Tag = 'observacao nao booleana'; Interaction = @{ Caller = 'CLI'; ConsoleRequired = $true; ConsoleObserved = 'sim' }; Caller = 'CLI'; Required = $true; Observed = $null; By = $null },
+            @{ Tag = 'outro chamador'; Interaction = @{ Caller = 'TUI'; ConsoleRequired = $true; ConsoleObserved = $true }; Caller = 'DIRECT_CALL'; Required = $false; Observed = $null; By = $null })
+        $i = 0
+        foreach ($c in $cases) {
+            $i++
+            $op = New-TestAuthOperator
+            $file = Join-Path $dir ("int-$i.jsonl")
+            $res = Invoke-AtmDiscardAuthorization -Path $r -InventoryArgs $ia -RecordFile $file -Presenter $op.Presenter -Reader $op.Reader -Interaction $c.Interaction
+            $rec = [IO.File]::ReadAllText($file) | ConvertFrom-Json
+            Assert-True ($res.Accepted -and $rec.processIdentity.sid -ceq $p.Sid -and $rec.processIdentity.identifiesRespondent -eq $false) "$($c.Tag): identidade do processo, nao da pessoa"
+            Assert-True ($rec.interaction.caller -ceq $c.Caller -and $rec.interaction.consoleRequiredByCaller -eq $c.Required -and $rec.interaction.interactiveConsoleObserved -eq $c.Observed -and $rec.interaction.observedBy -eq $c.By) "$($c.Tag): $($rec.interaction | ConvertTo-Json -Compress)"
+            Assert-True (@($rec.limitations) -contains 'PROCESS_IDENTITY_IS_NOT_THE_RESPONDENT' -and @($rec.limitations) -contains 'INTERACTIVE_CONSOLE_IS_NOT_PROOF_OF_PRESENCE') "$($c.Tag): limites de identidade e presenca"
+        }
+        $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        Assert-True ($cli.Contains('$authConsole = [bool](Test-AtmTuiInteractive)') -and $cli.Contains('ConsoleObserved = $authConsole') -and $cli.Contains('-Interaction $authInteraction')) 'CLI informa a propria verificacao de console desta chamada'
+        $clean = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Clean.ps1'))
+        Assert-True (-not $clean.Contains('interactiveConsoleRequiredByCli') -and -not $clean.Contains("result = 'ACCEPTED'")) 'nenhuma constante de interacao nem ACCEPTED no registro'
+    }
+    Test-Case 'Autorizacao de descarte (AUT-1)' 'Revalidacao semantica dos motivos: coleta equivalente (contagens e pseudonimos novos) nao diverge; motivo novo com mesma categoria e mesmos codigos (escrita concedida a terceiros na raiz durante as perguntas) exige novo plano' {
+        $dir = New-TestCleanLogDir 'auth-sem'
+        if (-not $dir) { return }
+        $p = New-TestProfile 'authsem'
+        $r = New-TestRoot -ProfileInfo $p
+        $null = New-TestTranscript -ProfileInfo $p -Root $r
+        $ia1 = Get-InvArgs -Profiles @($p) -Procs (New-Procs -Extra @((New-TestRuntimeProc 820 'secret.exe' $null)))
+        $ia2 = Get-InvArgs -Profiles @($p) -Procs (New-Procs -Extra @((New-TestRuntimeProc 820 'secret.exe' $null), (New-TestRuntimeProc 821 'secret2.exe' $null)))
+        $a = Get-AtmDiscardPresentation -Path $r -InventoryArgs $ia1
+        $b = Get-AtmDiscardPresentation -Path $r -InventoryArgs $ia2
+        Assert-True ($a.Technical.ProcessCoverageBlock -and $b.Technical.ProcessCoverageBlock -and (@($a.Technical.Reasons) -join '|') -cne (@($b.Technical.Reasons) -join '|')) 'o texto dos motivos difere (contagem de processos nao inspecionaveis)'
+        Assert-Eq (@(Compare-AtmDiscardPresentation -Before $a -After $b) -join ',') '' 'coleta equivalente: nenhuma divergencia'
+        Assert-Eq (@(Compare-AtmDiscardPresentation -Before $a -After (Get-AtmDiscardPresentation -Path $r -InventoryArgs $ia1)) -join ',') '' 'nova coleta igual: nenhuma divergencia'
+        $file = Join-Path $dir 'sem.jsonl'
+        $grant = { $acl = Get-Acl -LiteralPath $r; $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier('S-1-1-0')), 'Write', 'Allow'))); Set-Acl -LiteralPath $r -AclObject $acl }.GetNewClosure()
+        $op = New-TestAuthOperator -Answers @{ discard = $grant }
+        $res = Invoke-AtmDiscardAuthorization -Path $r -InventoryArgs $ia1 -RecordFile $file -Presenter $op.Presenter -Reader $op.Reader
+        Assert-True (-not $res.Accepted -and $res.Refused -ceq 'AUTH_PLAN_CHANGED' -and (@($res.Changes) -join ',') -ceq 'TECHNICAL_REASONS' -and -not (Test-Path -LiteralPath $file)) "motivo novo: $($res.Refused) [$(@($res.Changes) -join ',')]"
+        $c = Get-AtmDiscardPresentation -Path $r -InventoryArgs $ia1
+        Assert-True ($c.Technical.Category -ceq $a.Technical.Category -and (@($c.Technical.RuntimeCodes) -join ',') -ceq (@($a.Technical.RuntimeCodes) -join ',') -and $c.Partition.Fingerprint -ceq $a.Partition.Fingerprint) "mesma categoria ($($c.Technical.Category)), mesmos codigos e estatisticas: so o motivo mudou"
         Assert-True ([IO.File]::Exists((Join-Path $r 'sub\b.bin'))) 'nada apagado'
     }
     Test-Case 'Autorizacao de descarte (AUT-1)' 'Estatico: console interativo exigido antes de registrar; leitura so por Read-Host na CLI; sem parametro que dispense a interacao; autorizacao nunca chama exclusao; schema gravado em um unico lugar; travas fechadas' {

@@ -19,7 +19,12 @@
 * V0.3 AUT-1: `agent-temp authorize -Path <root> -RecordFile <new file>` records the operator's discard authorization of
   one root bound to the plan shown (three confirmations, interactive console only, plan presented again and compared,
   new file). It deletes nothing, is read by nothing in the product and makes nothing eligible; the technical result
-  (B1, RECENT included) is recorded apart. Details and limits: docs/USAGE.md, "Discard authorization".
+  (B1, RECENT included) is recorded apart. Schema `atm.discard-authorization/2`: two separate content declarations
+  ("results preserved" or "nothing needed"), neither verified by the product (`TOOL_VERIFIED` reserved, never
+  emitted); the process identity, not the respondent; the console requirement and observation as reported by the
+  caller; the justification revalidated in a stable semantic form; success only when the line is written, flushed and
+  the file closed (a file kept after a failure, even with a complete line, is not a recorded authorization). Details and
+  limits: docs/USAGE.md, "Discard authorization".
 
 ## 0.2.0
 

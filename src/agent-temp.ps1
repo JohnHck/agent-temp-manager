@@ -296,15 +296,20 @@ try {
             # nothing eligible. Only from an interactive console: piped or scripted input never records an acceptance
             # (which is still not proof that a person answered).
             if (-not $Path -or -not $RecordFile) { Write-Host (Get-AtmText 'cli.authNeeds') -ForegroundColor Red; exit 2 }
-            if (-not (Test-AtmTuiInteractive)) { Write-Host (Get-AtmText 'cli.authNeedsConsole') -ForegroundColor Yellow; exit 6 }
+            $authConsole = [bool](Test-AtmTuiInteractive)
+            if (-not $authConsole) { Write-Host (Get-AtmText 'cli.authNeedsConsole') -ForegroundColor Yellow; exit 6 }
             $authPresenter = { param($pr) Show-AtmDiscardPresentation -Presentation $pr }
             $authReader = {
                 param($kind, $phrase)
                 Write-Host ''
-                if ($phrase) { Write-Host (Get-AtmText ('auth.prompt.' + $kind) $phrase) -ForegroundColor Yellow } else { Write-Host (Get-AtmText 'auth.prompt.description' $script:AtmDiscardDescriptionMax) }
+                # One phrase, or the two accepted for the content decision (each one a format argument of the prompt).
+                $fa = @($phrase)
+                if ($phrase) { Write-Host (Get-AtmText ('auth.prompt.' + $kind) @fa) -ForegroundColor Yellow } else { Write-Host (Get-AtmText 'auth.prompt.description' $script:AtmDiscardDescriptionMax) }
                 Read-Host (Get-AtmText 'cli.confirmPrompt')
             }
-            $authRes = Invoke-AtmDiscardAuthorization -Path $Path -InventoryArgs $cliInvArgs -RecordFile $RecordFile -Presenter $authPresenter -Reader $authReader
+            # What this call required and observed (recorded as reported by the CLI; never proof of who answered).
+            $authInteraction = @{ Caller = 'CLI'; ConsoleRequired = $true; ConsoleObserved = $authConsole }
+            $authRes = Invoke-AtmDiscardAuthorization -Path $Path -InventoryArgs $cliInvArgs -RecordFile $RecordFile -Presenter $authPresenter -Reader $authReader -Interaction $authInteraction
             Show-AtmDiscardResult -Result $authRes
             exit $(if ($authRes.Accepted) { 0 } else { 3 })
         }
