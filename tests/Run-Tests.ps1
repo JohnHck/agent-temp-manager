@@ -2198,7 +2198,9 @@ exit 0
         $null = New-TestTranscript -ProfileInfo $p -Root $r
         $ia = Get-InvArgs -Profiles @($p)
         $file = Join-Path $dir 'chg.jsonl'
-        $add = { [IO.File]::WriteAllBytes((Join-Path $r 'apareceu.bin'), (New-Object byte[] 7)); [IO.File]::SetLastWriteTimeUtc((Join-Path $r 'apareceu.bin'), $nowFuture.AddDays(-5)) }.GetNewClosure()
+        # A closure copies only local variables: the suite's $nowFuture is read here, not inside it.
+        $when = $nowFuture.AddDays(-5)
+        $add = { [IO.File]::WriteAllBytes((Join-Path $r 'apareceu.bin'), (New-Object byte[] 7)); [IO.File]::SetLastWriteTimeUtc((Join-Path $r 'apareceu.bin'), $when) }.GetNewClosure()
         $op = New-TestAuthOperator -Answers @{ discard = $add }
         $res = Invoke-AtmDiscardAuthorization -Path $r -InventoryArgs $ia -RecordFile $file -Presenter $op.Presenter -Reader $op.Reader
         Assert-True (-not $res.Accepted -and $res.Refused -ceq 'AUTH_PLAN_CHANGED' -and @($res.Changes) -contains 'FILES' -and @($res.Changes) -contains 'BYTES' -and -not (Test-Path -LiteralPath $file)) "mudanca detectada: $($res.Refused) [$(@($res.Changes) -join ',')]"
