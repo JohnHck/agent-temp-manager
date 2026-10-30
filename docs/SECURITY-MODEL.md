@@ -281,7 +281,15 @@ called by `Invoke-AtmGitCommand`):
   the object, and the DACL and label of the object behind the handle, created or existing, are checked against that
   policy and never changed; ownership is decided only by the zero-timeout wait, which is atomic. Requested rights:
   `SYNCHRONIZE` and `READ_CONTROL`. An existing object of another type, a denied access or a policy mismatch is a
-  refusal. An abandoned mutex (`WAIT_ABANDONED`) is released at once and the run stops (`CLEAN_LOCK_ABANDONED`). Limits:
+  refusal. An abandoned mutex (`WAIT_ABANDONED`) is released at once and the run stops (`CLEAN_LOCK_ABANDONED`); that state
+  exists only while another handle keeps the object alive (the object is destroyed with its last handle, and the next
+  run then creates a new one with no trace), so it is an opportunistic signal, never a persistent record of an
+  interruption (that evidence is the T1 log). `MUTEX_MODIFY_STATE` is not requested nor granted: Microsoft documents it
+  as reserved, `SYNCHRONIZE` as the right to wait, and `ReleaseMutex` as requiring ownership only; release through an
+  opened handle with `SYNCHRONIZE | READ_CONTROL` is tested for processes of the same identity only. Mutual exclusion
+  does not depend on who created the object or on the policy check (the policy check refuses foreign-looking objects):
+  ownership is exclusive in the kernel, only the owner thread can release it, and every cooperating run uses the same
+  fixed name in the global namespace. Limits:
   only cooperating clean runs are excluded; other processes can still change the trees; any local account can create
   or hold the name first, which refuses every clean run (denial of service, documented, its acceptance left to the
   future deletion gate); a release that cannot be done stays reserved in the process (fail closed) and the system

@@ -258,7 +258,10 @@ elevation level) holds the named kernel mutex `Global\AgentTempManager.Clean`:
 * `CLEAN_LOCK_ABANDONED`: the previous holder ended without releasing it, so a previous run may have been interrupted
   and its outcome must be checked (in its log, if it had one: an `intent` without a `result` is an unknown outcome).
   This run stops before any inventory and releases the lock; nothing records the event and nothing is recovered. A new
-  attempt starts from scratch.
+  attempt starts from scratch. This signal is only opportunistic: Windows destroys the mutex when its last handle is
+  closed, so when the interrupted run held the only handle (the usual case, since refused runs close theirs at once) the
+  next run creates a new mutex and sees nothing. Never rely on it to detect an interruption: the persistent evidence is
+  the T1 log (an `intent` without a `result`).
 * `CLEAN_LOCK_NESTED`: a clean run is already in progress in the same process.
 * Limits: it excludes only cooperating clean runs; it does not stop other processes (agents, the user, other tools)
   from changing the trees, which stays with the revalidation and the deleter. Any local account can create that name

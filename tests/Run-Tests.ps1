@@ -1730,6 +1730,44 @@ exit 0
             $script:AtmCleanLockName = $prev
         }
         Assert-True (Test-TestT1RootsIntact $f) 'nada apagado'
+        # Without an observer handle the object is destroyed with the child's last handle: the next acquisition creates a
+        # new mutex and sees no abandonment (the signal is opportunistic, never a persistent record).
+        $n2 = New-TestLockName
+        $h2 = Start-TestLockHolder -Name $n2 -Mode abandon
+        $end2 = Stop-TestLockHolderByGo $h2
+        $l2 = [AgentTempManager.AtmCleanLock]::TryAcquire($n2)
+        try { Assert-True ($h2.Status -ceq 'ACQUIRED' -and $end2.Exited -and $end2.Exit -eq 0 -and $l2.Status -ceq 'ACQUIRED' -and $l2.Created) "sem observador: objeto novo, nenhum sinal de abandono ($($l2.Status), criado=$($l2.Created))" }
+        finally { $null = $l2.Release() }
+        $script:caseNote = 'abandono detectado so enquanto um handle observador mantem o objeto; sem ele, objeto novo e nenhum sinal'
+    }
+    Test-Case 'Clean lock (B8)' 'Liberacao impossivel (chamada por outra thread, processo filho): codigo LOCK_RELEASE_WRONG_THREAD, reserva mantida (nova aquisicao no mesmo processo recusada como NESTED), handle fechado' {
+        # In a child process only: the reservation it keeps on purpose would refuse every later clean of the suite.
+        $n = New-TestLockName
+        $child = Join-Path $sandbox 'lock-wrongthread.ps1'
+        $out = Join-Path $sandbox 'lock-wrongthread.txt'
+        [IO.File]::WriteAllText($child, @'
+param([string]$Src, [string]$Name, [string]$Out)
+$ErrorActionPreference = 'Stop'
+. (Join-Path $Src 'lib\Engine.Audit.ps1')
+Initialize-AtmNative -LibDir (Join-Path $Src 'lib')
+$l = [AgentTempManager.AtmCleanLock]::TryAcquire($Name)
+# Release() called from the thread of another runspace: not the owner thread.
+$ps = [powershell]::Create()
+$null = $ps.AddScript({ param($x) $x.Release() }).AddArgument($l)
+$rc = @($ps.Invoke())[0]
+$ps.Dispose()
+$held = [AgentTempManager.AtmCleanLock]::IsHeld
+$again = [AgentTempManager.AtmCleanLock]::TryAcquire($Name)
+[IO.File]::WriteAllText($Out, ('{0}|{1}|{2}|{3}' -f $l.Status, $rc, $held, $again.Status))
+exit 0
+'@, (New-Object Text.UTF8Encoding $true))
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Name `"$n`" -Out `"$out`"") -TimeoutSec 300
+        Assert-True ($r.Exit -eq 0 -and (Test-Path -LiteralPath $out)) "processo filho ($($r.Exit) $($r.Text))"
+        Assert-Eq ([IO.File]::ReadAllText($out)) 'ACQUIRED|LOCK_RELEASE_WRONG_THREAD|True|NESTED' 'falha de liberacao: reserva mantida (fail closed)'
+        # The child ended by itself; its handle closed with it, so the object is gone and a new acquisition here works.
+        $l = [AgentTempManager.AtmCleanLock]::TryAcquire($n)
+        try { Assert-True ($l.Status -ceq 'ACQUIRED') "depois do fim do filho ($($l.Status))" } finally { $null = $l.Release() }
     }
     Test-Case 'Clean lock (B8)' 'Objeto preexistente incompativel (mutex com seguranca padrao, evento com o nome) e nome fora do padrao: recusados antes do inventario, sem alterar o objeto' {
         Initialize-AtmTestMutex
