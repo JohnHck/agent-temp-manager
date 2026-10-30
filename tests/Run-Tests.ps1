@@ -1489,7 +1489,7 @@ foreach ($k in @('__ua__', '__dnf__', '__io__')) {
         Assert-Eq ${function:Open-AtmCleanLog}.ToString().Contains('AtmCleanLog]::Pin') $true 'o substituto nao vaza para o resto da suite'
         Assert-True (Test-TestT1RootsIntact $f) 'nada apagado'
     }
-    Test-Case 'Clean log (T1)' 'Revalidacao recusada: registro skip com opId, caminho e motivos; nenhum intent nem chamada ao deleter para essa raiz; a execucao segue sem parada' {
+    Test-Case 'Clean log (T1)' 'Revalidacao recusada: registro skip com opId, caminho e motivos; nenhum intent nem chamada ao deleter para essa raiz; a execucao para (AUT-2: REVALIDATION_REFUSED)' {
         $f = New-TestT1Fixture 't1skip' 1
         $w = New-TestCleanLogWriter
         $d = New-TestCleanDeleter -Writer $w
@@ -1499,8 +1499,9 @@ foreach ($k in @('__ua__', '__dnf__', '__io__')) {
         Assert-Eq (@($recs | ForEach-Object { $_.type }) -join ',') 'run-start,plan,declaration,confirmation,plan-check,skip,run-end' 'registros'
         $sk = @($recs | Where-Object { $_.type -ceq 'skip' })[0]
         Assert-True ($sk.opId -ceq ('{0}:1' -f $c.RunId) -and [string]::Equals($sk.path, $f.Roots[0], [StringComparison]::OrdinalIgnoreCase) -and ((@($sk.reasons) -join ' ') -match 'ALTERADO_APOS_CONFIRMACAO')) "skip identificado ($(@($sk.reasons) -join ';'))"
-        Assert-True ($d.Calls.Count -eq 0 -and @($c.Deleted).Count -eq 0 -and @($c.Skipped).Count -eq 1 -and $null -eq $c.Aborted -and $null -eq $c.StoppedBy) 'nenhuma chamada; sem parada'
-        Assert-Eq @($recs | Where-Object { $_.type -ceq 'run-end' })[0].skipped 1 'run-end conta a raiz preservada'
+        Assert-True ($d.Calls.Count -eq 0 -and @($c.Deleted).Count -eq 0 -and @($c.Skipped).Count -eq 1 -and $c.Aborted -ceq 'REVALIDATION_REFUSED' -and $null -eq $c.StoppedBy) "nenhuma chamada; parada sem exclusao anterior = Aborted ($($c.Aborted) $($c.StoppedBy))"
+        $end = @($recs | Where-Object { $_.type -ceq 'run-end' })[0]
+        Assert-True ($end.skipped -eq 1 -and $end.stoppedBy -ceq 'REVALIDATION_REFUSED' -and $end.stoppedAtOpId -ceq ('{0}:1' -f $c.RunId)) 'run-end com a raiz que parou a execucao'
         Assert-True (Test-TestT1RootsIntact $f) 'nada apagado'
     }
     Test-Case 'Clean log (T1)' 'Trava fechada: fluxo de plano inalterado - sem LOG_REQUIRED, log nunca criado nem aberto (caminho novo ou existente), escritor e deleter simulados nunca chamados' {
@@ -2651,17 +2652,43 @@ exit 0
         Assert-True ($assign -eq 1 -and $refs.Count -eq 0) "seam atribuido uma vez, so no motor ($assign; $($refs -join ','))"
         Assert-True (Test-TestT1RootsIntact $f) 'nada apagado'
     }
-    Test-Case 'Confirmacao vinculada ao plano (AUT-2)' 'Revalidacao imediata mantida depois das declaracoes: raiz alterada depois da conferencia (antes da exclusao) e pulada; a outra segue; declaracoes das duas gravadas' {
-        $f = New-TestT1Fixture 'aut2rev' 2
-        $w = New-TestCleanLogWriter
+    Test-Case 'Confirmacao vinculada ao plano (AUT-2)' 'Recusa da revalidacao depois da confirmacao para a execucao: primeira concluida, segunda recusada, terceira nao tentada (uma chamada, StoppedBy); primeira recusada (zero chamadas, Aborted); sem rollback' {
+        foreach ($k in @(@{ Tag = 'segunda recusada'; Refused = 2; Calls = 1 }, @{ Tag = 'primeira recusada'; Refused = 1; Calls = 0 })) {
+            $f = New-TestT1Fixture ('aut2rev' + $k.Refused) 3
+            $w = New-TestCleanLogWriter
+            $d = New-TestCleanDeleter -Writer $w
+            $target = $f.Roots[$k.Refused - 1]
+            $hook = { param($part) if ([string]::Equals($part.Path, $target, [StringComparison]::OrdinalIgnoreCase)) { [IO.File]::WriteAllBytes((Join-Path $part.Path 'apareceu.bin'), (New-Object byte[] 9)) } }.GetNewClosure()
+            $op = New-TestCleanOperator
+            $c = Invoke-AtmClean -Entries $f.Entries -PlanPresenter $presenter -ConfirmationReader $op.Reader -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -BeforeDeleteHook $hook -LogWriter $w -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+            $recs = Get-TestCleanLogRecords $w
+            $tag = $k.Tag
+            $stopOp = '{0}:{1}' -f $c.RunId, $k.Refused
+            $after = @(($k.Refused + 1)..3 | ForEach-Object { '{0}:{1}' -f $c.RunId, $_ })
+            $wantTypes = 'run-start,plan,plan,plan,declaration,declaration,declaration,confirmation,plan-check,' + $(if ($k.Refused -eq 2) { 'intent,result,' } else { '' }) + 'skip,run-end'
+            Assert-Eq (@($recs | ForEach-Object { $_.type }) -join ',') $wantTypes "$($tag): registros (nada depois do skip)"
+            Assert-True ($d.Calls.Count -eq $k.Calls -and @($c.Deleted).Count -eq $k.Calls -and @($c.Skipped).Count -eq 1 -and [string]::Equals(@($c.Skipped)[0].Path, $target, [StringComparison]::OrdinalIgnoreCase) -and ((@(@($c.Skipped)[0].Reasons) -join ' ') -match 'ALTERADO_APOS_CONFIRMACAO')) "$($tag): $($d.Calls.Count) chamada(s); a declaracao nao substitui a revalidacao"
+            if ($k.Calls -eq 0) { Assert-True ($c.Aborted -ceq 'REVALIDATION_REFUSED' -and $null -eq $c.StoppedBy) "$($tag): Aborted ($($c.Aborted))" }
+            else { Assert-True ($c.StoppedBy -ceq 'REVALIDATION_REFUSED' -and $null -eq $c.Aborted -and @($c.Deleted)[0].Outcome -ceq 'COMPLETE') "$($tag): StoppedBy depois de uma operacao concluida ($($c.StoppedBy))" }
+            Assert-True ($c.StoppedAtOpId -ceq $stopOp -and (@($c.NotAttempted | ForEach-Object { $_.OpId }) -join ',') -ceq ($after -join ',')) "$($tag): raiz que parou e raizes nao tentadas"
+            $end = @($recs | Where-Object { $_.type -ceq 'run-end' })[0]
+            Assert-True ($end.stoppedBy -ceq 'REVALIDATION_REFUSED' -and $end.stoppedAtOpId -ceq $stopOp -and (@($end.notAttempted) -join ',') -ceq ($after -join ',') -and $end.complete -eq $k.Calls) "$($tag): run-end distingue concluidas, a que parou e as nao tentadas"
+            $txt = (@(Show-AtmCleanResult -Result $c 6>&1 | ForEach-Object { [string]$_.MessageData }) -join "`n")
+            Assert-True ($txt.Contains((Get-AtmText 'clean.revalStopped' $stopOp)) -and @($c.NotAttempted | Where-Object { -not $txt.Contains((Get-AtmText 'clean.notAttempted' $_.Path)) }).Count -eq 0) "$($tag): console mostra a parada e as raizes nao tentadas"
+            Assert-True (Test-TestT1RootsIntact $f) "$($tag): deleter simulado: nada apagado"
+        }
+        $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        Assert-True ($cli.Contains('exit $(if ($res.Aborted -or $res.StoppedBy) { 3 } else { 0 })')) 'CLI: saida 3 para Aborted ou StoppedBy'
+    }
+    Test-Case 'Confirmacao vinculada ao plano (AUT-2)' 'Falha ao gravar o registro da recusa da revalidacao: LOG_WRITE_FAILED, nenhuma chamada seguinte; terceira raiz nao tentada' {
+        $f = New-TestT1Fixture 'aut2revlf' 3
+        $w = New-TestCleanLogWriter -FailOn 'skip' -FailCode 'LOG_FLUSH_FAILED_WIN32_1117'
         $d = New-TestCleanDeleter -Writer $w
-        $second = $f.Roots[1]
-        $hook = { param($part) if ([string]::Equals($part.Path, $second, [StringComparison]::OrdinalIgnoreCase)) { [IO.File]::WriteAllBytes((Join-Path $part.Path 'apareceu.bin'), (New-Object byte[] 9)) } }.GetNewClosure()
-        $op = New-TestCleanOperator
-        $c = Invoke-AtmClean -Entries $f.Entries -PlanPresenter $presenter -ConfirmationReader $op.Reader -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -BeforeDeleteHook $hook -LogWriter $w -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
-        $recs = Get-TestCleanLogRecords $w
-        Assert-Eq (@($recs | ForEach-Object { $_.type }) -join ',') 'run-start,plan,plan,declaration,declaration,confirmation,plan-check,intent,result,skip,run-end' 'registros'
-        Assert-True ($d.Calls.Count -eq 1 -and @($c.Skipped).Count -eq 1 -and [string]::Equals(@($c.Skipped)[0].Path, $second, [StringComparison]::OrdinalIgnoreCase) -and ((@(@($c.Skipped)[0].Reasons) -join ' ') -match 'ALTERADO_APOS_CONFIRMACAO')) 'a declaracao nao substitui a revalidacao'
+        $target = $f.Roots[1]
+        $hook = { param($part) if ([string]::Equals($part.Path, $target, [StringComparison]::OrdinalIgnoreCase)) { [IO.File]::WriteAllBytes((Join-Path $part.Path 'apareceu.bin'), (New-Object byte[] 9)) } }.GetNewClosure()
+        $c = Invoke-AtmClean -Entries $f.Entries -PlanPresenter $presenter -ConfirmationReader (New-TestCleanOperator).Reader -InventoryArgs (Get-InvArgs -Profiles @($f.Profile)) -BeforeDeleteHook $hook -LogWriter $w -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+        Assert-True ($c.StoppedBy -ceq 'LOG_WRITE_FAILED' -and $d.Calls.Count -eq 1 -and @($c.LogErrors)[0].Stage -ceq 'skip' -and @($c.LogErrors)[0].Code -ceq 'LOG_FLUSH_FAILED_WIN32_1117') "parada pela falha do log ($($c.StoppedBy); chamadas $($d.Calls.Count))"
+        Assert-True ((@($c.NotAttempted | ForEach-Object { $_.OpId }) -join ',') -ceq ('{0}:3' -f $c.RunId) -and -not (@(Get-TestCleanLogRecords $w | ForEach-Object { $_.type }) -contains 'run-end')) 'terceira nao tentada; nada mais gravado depois da falha'
         Assert-True (Test-TestT1RootsIntact $f) 'nada apagado'
     }
     Test-Case 'Confirmacao vinculada ao plano (AUT-2)' 'Trava fechada: fluxo de plano inalterado - nenhuma pergunta, sem exigencia de console nem log, frase sem planId; leitor e deleter nunca chamados' {

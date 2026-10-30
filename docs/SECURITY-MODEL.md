@@ -308,11 +308,14 @@ called by `Invoke-AtmGitCommand`):
   suite replaces it through `$script:AtmCleanConsoleSource`, `$null` in every copy, assigned once, read only past the
   gate) and checked by the CLI; asks, for each root of the executable set with its path, the task and the AUT-1 content
   decision (shared helpers `Get-AtmContentDecisions`, `Get-AtmPreservationBasis`, `Test-AtmTypedPhrase`); then one phrase
-  bound to the plan id (SHA-256 of the run id and every root's path and statistics) and the exact count. Declarations and
+  bound to the plan id (full SHA-256 of the run id and every root's path and statistics, kept in the state and the
+  log; the typed phrase carries only its first 8 characters, which is neither the full hash, nor a signature, nor proof
+  of who typed it) and the exact count. Declarations and
   confirmation are written and flushed before any `intent`; a fresh plan check before execution refuses any change
-  (`PLAN_CHANGED_BEFORE_EXECUTION`) instead of adjusting the plan; the per-root revalidation is unchanged, so the
-  confirmed set is not all-or-nothing: a root refused by its revalidation after the plan check is skipped and the run
-  continues, and a non-complete outcome stops the run. With the gate
+  (`PLAN_CHANGED_BEFORE_EXECUTION`) instead of adjusting the plan; a per-root revalidation refusal after the
+  confirmation stops the run before that root (`REVALIDATION_REFUSED`, maintainer's decision), as a non-complete outcome
+  or a log failure does. Not all-or-nothing and no rollback: earlier operations stay done; the result and `run-end`
+  name the completed operations, the root that stopped the run and the roots not attempted. With the gate
   closed the plan-only flow is unchanged (no question, console or log). No AUT-1 record is read. Limits: declarations
   are not verified; the console is not proof of presence; the identity is the process's; the plan id rests on
   statistics (a write that keeps them all is not seen); the users/sessions/elevation matrix is not tested.

@@ -234,8 +234,8 @@ agent-temp clean -AllowListFile list.txt -LogFile D:\logs\clean.jsonl
 3. Read the plan. It ends with **NADA FOI APAGADO AINDA**. Then (V0.3 AUT-2, see below) answer, for each root of the
    executable set, the task and the content decision, and type the final phrase shown (e.g.
    `APAGAR 2 CAMINHOS 3F9A0C1B`) to proceed; anything else aborts.
-4. Each path is revalidated immediately before deletion; paths that changed are preserved. A read-only audit
-   runs afterwards.
+4. Each path is revalidated immediately before deletion; a path that changed is preserved and stops the run (later
+   paths are not attempted; earlier deletions are not undone). A read-only audit runs afterwards.
 
 **V0.1 and V0.2:** `clean` runs every gate and prints the exact plan, then stops with
 `EXCLUSAO_REAL_DESABILITADA_V0_1`; no confirmation is requested and nothing is deleted. Steps 3-4 above describe
@@ -253,10 +253,12 @@ no question, no console requirement and no log. Past the gate, after the B8 lock
    with the root path shown: the task has finished (`TAREFA CONCLUIDA`), and the content decision with the AUT-1
    meanings: `RESULTADOS PRESERVADOS` (what you need is preserved outside the root; a declaration, not verified) or
    `NADA NECESSARIO` (nothing needs to be kept; discard explicitly accepted). `TOOL_VERIFIED` is never recorded.
-3. **One final phrase for the exact set:** `APAGAR <N> CAMINHOS <plan id>`. The plan id is the SHA-256 of the run id and,
-   per root in plan order, its path, fingerprint, counts, bytes and newest write; the state and the log keep those data
-   (run-start `planId`, one `plan` record per root). A phrase of another run, another count or without the plan id is
-   refused.
+3. **One final phrase for the exact set:** `APAGAR <N> CAMINHOS <first 8 characters of the plan id>`. The plan id is the
+   full SHA-256 (64 hex characters) of the run id and, per root in plan order, its path, fingerprint, counts, bytes and
+   newest write; the state and the log keep the full value and those data (run-start `planId`, one `plan` record per
+   root). The phrase carries only its first 8 characters (upper case) so that it can be typed: it ties the answer to
+   this run's plan, it is not the full hash, not a cryptographic signature and not proof of who typed it. A phrase of
+   another run, another count or without the plan prefix is refused.
 4. **Any refusal, cancellation or wrong phrase** (any root, any step) aborts the whole run before the first deletion
    (`DECLARATION_DECLINED`, `DECLARATION_CANCELLED`, `CONFIRMACAO_AUSENTE_OU_DIVERGENTE`); a `confirmation` record with
    `accepted: false`, the step and the root is written.
@@ -269,14 +271,17 @@ no question, no console requirement and no log. Past the gate, after the B8 lock
    (`PLAN_CHANGED_BEFORE_EXECUTION`, record `plan-check`): a change during the questions is never absorbed by reducing,
    extending or updating the plan under the old confirmation. Statistics only: a write that keeps every statistic is
    not seen.
-7. **Unchanged after that (T1):** the revalidation immediately before each root, the `intent` before the deleter, the
-   `result` after it. The declarations never replace the revalidation. **The confirmed set is not executed
-   all-or-nothing:** a root whose revalidation refuses after the plan check is skipped (`skip` record) and the run goes
-   on with the others; any outcome other than a complete, verified deletion stops the run, leaving the later roots
-   untouched.
+7. **Then, root by root:** the revalidation immediately before each root, the `intent` before the deleter, the `result`
+   after it. The declarations never replace the revalidation. **A revalidation refusal stops the run** before that root
+   and every later one: the `skip` record (path and reasons) is written and flushed and the run ends with
+   `REVALIDATION_REFUSED` (`Aborted` when no root was deleted yet, `StoppedBy` after one). Any outcome other than a
+   complete, verified deletion, or a log failure, also stops the run. **Nothing is all-or-nothing and nothing is undone:**
+   a refusal before any operation deletes nothing; a stop after earlier operations leaves them done (no rollback). The
+   result and the `run-end` record keep the completed operations, the root that stopped the run (`stoppedAtOpId`) and
+   the roots not attempted (`notAttempted`: never revalidated nor processed).
 
-Log order of a run: `run-start`, `plan`…, `declaration`…, `confirmation`, `plan-check`, then `intent`/`result` or `skip`
-per root, `run-end`. Synthetic example of two roots:
+Log order of a run: `run-start`, `plan`…, `declaration`…, `confirmation`, `plan-check`, then `intent`/`result` per root
+until the end or the first stop (a `skip` ends the sequence), `run-end`. Synthetic example of two roots:
 
 ```json
 {"type":"run-start","planned":2,"planId":"3f9a0c1b…",…}

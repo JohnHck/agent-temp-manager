@@ -21,6 +21,9 @@
   path, the task and the content decision (AUT-1 meanings: results preserved, or nothing needed, neither verified);
   then one phrase `APAGAR <N> CAMINHOS <plan id>` for the exact set. Declarations and confirmation are logged and
   flushed before any deletion; a plan check refuses any change during the questions; any refusal aborts the whole run.
+  A revalidation refusal after the confirmation now stops the run before that root (`REVALIDATION_REFUSED`) instead of
+  skipping it and going on; not all-or-nothing and no rollback (earlier operations stay done; `run-end` names the root
+  that stopped the run and the roots not attempted). The phrase carries the first 8 characters of the plan id.
   With the gate closed the plan-only flow is unchanged. Details and limits: docs/USAGE.md, "Plan-bound confirmation".
 * V0.3 AUT-1: `agent-temp authorize -Path <root> -RecordFile <new file>` records the operator's discard authorization of
   one root bound to the plan shown (three confirmations, interactive console only, plan presented again and compared,

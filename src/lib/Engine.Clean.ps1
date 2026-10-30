@@ -328,8 +328,10 @@ function Invoke-AtmCleanCore {
       deletes nothing), a stand-in presence check and an object with AppendLine/Close/Dispose. They are reached only past
       the release gate, so they cannot make a run with the gate closed delete or log anything.
       Aborted: the run ended before any call to the deleter. StoppedBy: it ended after at least one call; anything but a
-      complete, verified deletion (a refusal, a partial deletion, an exception, a verification that is not conclusive) or
-      a log failure stops the run before the next root. LogErrors lists every log failure (Stage, OpId, Code) without
+      complete, verified deletion (a refusal, a partial deletion, an exception, a verification that is not conclusive),
+      a log failure or (AUT-2) a revalidation refusal after the confirmation (REVALIDATION_REFUSED) stops the run before
+      the next root; nothing is undone. StoppedAtOpId names the root that stopped it; NotAttempted lists the later roots,
+      never revalidated nor processed. LogErrors lists every log failure (Stage, OpId, Code) without
       replacing the main code. -RefusedBy and -LockReleaseError (from Invoke-AtmClean only): the lock was not acquired;
       the result is returned at once with that code, before anything else.
       Returns arrays only (no live collections).
@@ -356,11 +358,12 @@ function Invoke-AtmCleanCore {
     $skipped = New-Object System.Collections.Generic.List[object]
     $logErrors = New-Object System.Collections.Generic.List[object]
     $declarations = New-Object System.Collections.Generic.List[object]
-    $state = @{ Confirmed = $false; Aborted = $null; Stopped = $null; Post = $null; Phrase = $null; RunId = $null; RecSeq = 0; LogCreated = $false; PlanId = $null; RefusedAt = $null }
+    $notAttempted = New-Object System.Collections.Generic.List[object]
+    $state = @{ Confirmed = $false; Aborted = $null; Stopped = $null; Post = $null; Phrase = $null; RunId = $null; RecSeq = 0; LogCreated = $false; PlanId = $null; RefusedAt = $null; StopOpId = $null }
     $finish = {
         [pscustomobject]@{
             Requested = @($Entries).Count; Rejected = $rejected.ToArray(); Verified = $verified.ToArray(); Phrase = $state.Phrase; PlanId = $state.PlanId
-            Declarations = $declarations.ToArray(); RefusedAt = $state.RefusedAt
+            Declarations = $declarations.ToArray(); RefusedAt = $state.RefusedAt; StoppedAtOpId = $state.StopOpId; NotAttempted = $notAttempted.ToArray()
             Confirmed = $state.Confirmed; Deleted = $deleted.ToArray(); Skipped = $skipped.ToArray(); PostInventory = $state.Post; Aborted = $state.Aborted
             StoppedBy = $state.Stopped; RunId = $state.RunId; LogFile = $(if ($state.RunId) { $LogFile } else { $null }); LogCreated = $state.LogCreated
             LogErrors = $logErrors.ToArray(); LockReleaseError = $(if ($LockReleaseError) { $LockReleaseError } else { $null })
@@ -531,14 +534,18 @@ function Invoke-AtmCleanCore {
                     if ($g.Category -ne 'ELIGIBLE') { $why += $g.Reasons }
                 }
                 if ($why.Count -gt 0) {
-                    $skipped.Add([pscustomobject]@{ Path = $p.Path; Reasons = $why })
+                    # AUT-2 (maintainer's decision): a revalidation refusal after the confirmation stops the run before
+                    # this root and every later one. Not atomic and no rollback: earlier roots may already be deleted.
+                    $skipped.Add([pscustomobject]@{ OpId = $item.OpId; Path = $p.Path; Reasons = $why })
+                    $state.StopOpId = $item.OpId
                     $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'skip' -Fields ([ordered]@{ opId = $item.OpId; path = $p.Path; reasons = @($why) })
                     if ($null -ne $lc) { & $logFail 'skip' $item.OpId $lc; & $halt 'LOG_WRITE_FAILED'; break }
-                    continue
+                    & $halt 'REVALIDATION_REFUSED'
+                    break
                 }
                 # The intent is written and flushed BEFORE the deleter is called; without it that root is never started.
                 $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'intent' -Fields ([ordered]@{ opId = $item.OpId; path = $c.Path; fingerprint = $c.Fingerprint; files = $c.Files; dirs = $c.Dirs; bytes = $c.Bytes })
-                if ($null -ne $lc) { & $logFail 'intent' $item.OpId $lc; & $halt 'LOG_INTENT_FAILED'; break }
+                if ($null -ne $lc) { $state.StopOpId = $item.OpId; & $logFail 'intent' $item.OpId $lc; & $halt 'LOG_INTENT_FAILED'; break }
                 # The deleter re-checks, under its own handle pins, that the tree still matches what was just validated.
                 # An exception leaves the state of that root unknown: none, part or all of it may have been deleted.
                 $d = $null; $exType = $null
@@ -568,9 +575,14 @@ function Invoke-AtmCleanCore {
                 $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'result' -Fields ([ordered]@{ opId = $row.OpId; path = $row.Path; outcome = $outcome; attempted = $row.Attempted; completed = $row.Completed
                         filesDeleted = $row.FilesDeleted; dirsDeleted = $row.DirsDeleted; filesPlanned = $row.FilesPlanned; dirsPlanned = $row.DirsPlanned; abortReason = $row.AbortReason; failedAt = $row.FailedAt
                         verifiedGone = $(if ($vs -ceq 'UNKNOWN') { 'UNKNOWN' } else { $gone }); exceptionType = $exType })
-                if ($null -ne $lc) { & $logFail 'result' $row.OpId $lc; & $halt 'LOG_RESULT_FAILED'; break }
+                if ($null -ne $lc) { $state.StopOpId = $item.OpId; & $logFail 'result' $row.OpId $lc; & $halt 'LOG_RESULT_FAILED'; break }
                 # Anything but a complete, verified deletion stops the run before the next root.
-                if ($outcome -cne 'COMPLETE') { & $halt ('STOPPED_AFTER_' + $outcome); break }
+                if ($outcome -cne 'COMPLETE') { $state.StopOpId = $item.OpId; & $halt ('STOPPED_AFTER_' + $outcome); break }
+            }
+            # The roots after the one that stopped the run were never revalidated nor processed.
+            if ($state.StopOpId) {
+                $at = -1; for ($i = 0; $i -lt $plan.Count; $i++) { if ($plan[$i].OpId -ceq $state.StopOpId) { $at = $i } }
+                for ($i = $at + 1; $i -lt $plan.Count; $i++) { $notAttempted.Add([pscustomobject]@{ OpId = $plan[$i].OpId; Path = $plan[$i].Part.Path }) }
             }
 
             # 20: post-clean read-only audit.
@@ -581,7 +593,8 @@ function Invoke-AtmCleanCore {
         # run-end only while the log has not failed (after a failure it writes nothing more). Neither a failed run-end
         # nor a failed close replaces the main code; with none, they make the run incomplete.
         if ($logErrors.Count -eq 0) {
-            $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'run-end' -Fields ([ordered]@{ results = $deleted.Count; complete = @($deleted | Where-Object { $_.Outcome -ceq 'COMPLETE' }).Count; skipped = $skipped.Count; stoppedBy = $(if ($state.Stopped) { $state.Stopped } else { $state.Aborted }) })
+            $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'run-end' -Fields ([ordered]@{ results = $deleted.Count; complete = @($deleted | Where-Object { $_.Outcome -ceq 'COMPLETE' }).Count; skipped = $skipped.Count; stoppedBy = $(if ($state.Stopped) { $state.Stopped } else { $state.Aborted })
+                    stoppedAtOpId = $state.StopOpId; notAttempted = @($notAttempted | ForEach-Object { $_.OpId }) })
             if ($null -ne $lc) { & $logFail 'run-end' $null $lc; if (-not $state.Aborted -and -not $state.Stopped) { & $halt 'LOG_END_FAILED' } }
         }
         $cc = $log.Close()

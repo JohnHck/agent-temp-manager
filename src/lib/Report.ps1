@@ -397,6 +397,11 @@ function Show-AtmCleanResult {
         if ($Result.Aborted -eq 'CONSOLE_NOT_OBSERVED') { Write-Host ('  ' + (Get-AtmText 'clean.consoleRequired')) -ForegroundColor Yellow }
         if ($Result.RefusedAt) { Write-Host ('  ' + (Get-AtmText 'clean.refusedAt' $Result.RefusedAt.Step $(if ($Result.RefusedAt.Path) { $Result.RefusedAt.Path } else { '-' }))) -ForegroundColor Yellow }
         if ($Result.Aborted -eq 'PLAN_CHANGED_BEFORE_EXECUTION') { Write-Host ('  ' + (Get-AtmText 'clean.planChanged')) -ForegroundColor Yellow }
+        if ($Result.Aborted -eq 'REVALIDATION_REFUSED') {
+            Write-AtmTable (@($Result.Skipped) | ForEach-Object { New-AtmRow ([ordered]@{ 'col.path' = $_.Path; 'col.reasons' = (@($_.Reasons) -join ' ; ') }) })
+            Write-Host ('  ' + (Get-AtmText 'clean.revalStopped' $Result.StoppedAtOpId)) -ForegroundColor Yellow
+        }
+        foreach ($na in @($Result.NotAttempted)) { Write-Host ('  ' + (Get-AtmText 'clean.notAttempted' $na.Path)) -ForegroundColor Yellow }
         # B8: the lock refusals never claim that another clean is running; an abandoned lock is not a recovery.
         if ($Result.Aborted -eq 'CLEAN_LOCK_ABANDONED') { Write-Host ('  ' + (Get-AtmText 'clean.lockAbandoned')) -ForegroundColor Yellow }
         elseif ($Result.Aborted -eq 'CLEAN_LOCK_NESTED') { Write-Host ('  ' + (Get-AtmText 'clean.lockNested')) -ForegroundColor Yellow }
@@ -415,6 +420,9 @@ function Show-AtmCleanResult {
         Write-AtmTable (@($Result.Skipped) | ForEach-Object { New-AtmRow ([ordered]@{ 'col.path' = $_.Path; 'col.reasons' = (@($_.Reasons) -join ' ; ') }) })
     }
     if ($Result.StoppedBy) { Write-Host ('  ' + (Get-AtmText 'clean.stopped' $Result.StoppedBy)) -ForegroundColor Red }
+    if ($Result.StoppedBy -eq 'REVALIDATION_REFUSED') { Write-Host ('  ' + (Get-AtmText 'clean.revalStopped' $Result.StoppedAtOpId)) -ForegroundColor Red }
+    # AUT-2: roots after the one that stopped the run: never revalidated nor processed.
+    foreach ($na in @($Result.NotAttempted)) { Write-Host ('  ' + (Get-AtmText 'clean.notAttempted' $na.Path)) -ForegroundColor Yellow }
     & $logLines
     $ok = @($Result.Deleted | Where-Object { $_.Completed -and $_.Verified })
     Write-Host ('  ' + (Get-AtmText 'clean.deleted' $ok.Count (Format-AtmMB (Get-AtmSum $ok 'Bytes'))))
