@@ -192,6 +192,34 @@ function Invoke-E2EClean([string[]]$Labels, [string]$LogName, [switch]$Risk, $Op
     $res = Invoke-AtmClean @a
     return [pscustomobject]@{ Res = $res; Log = $log }
 }
+function Invoke-E2ECleanChurn([string[]]$Labels, [string]$LogBase, [switch]$Risk, [scriptblock]$Hook) {
+    # Up to 3 complete, fresh runs. PLAN_CHANGED_BEFORE_EXECUTION is the engine's fail-closed refusal when the executable
+    # set changed after the plan (with the B1 exception: a process identity not inspectable that was not in the plan).
+    # Nothing is deleted then. Each refusal is explained by comparing the identities recorded in the log's plan record
+    # with a fresh inventory; Exhausted means every attempt was refused.
+    $churn = New-Object System.Collections.Generic.List[object]
+    for ($n = 1; $n -le 3; $n++) {
+        $c = Invoke-E2EClean -Labels $Labels -LogName "$LogBase-$n.jsonl" -Risk:$Risk -Hook $Hook
+        # Also a revalidation refusal before any deletion that is NOT the change declared by the case (same nature).
+        $undeclared = ($c.Res.Aborted -ceq 'REVALIDATION_REFUSED' -and -not ((@($c.Res.Skipped | ForEach-Object { Get-Codes $_.Reasons }) -join ';') -match 'ALTERADO_APOS_CONFIRMACAO'))
+        if ($c.Res.Aborted -cne 'PLAN_CHANGED_BEFORE_EXECUTION' -and -not $undeclared) {
+            return [pscustomobject]@{ Res = $c.Res; Log = $c.Log; Attempts = $n; Churn = $churn.ToArray(); Exhausted = $false }
+        }
+        Assert (@($c.Res.Deleted).Count -eq 0) 'algo apagado numa execucao recusada antes da execucao'
+        $planKeys = @(Read-E2ELog $c.Log | Where-Object { $_.type -ceq 'plan' } | ForEach-Object { @($_.uninspectableKeys) } | Where-Object { $_ })
+        $nowKeys = @((Get-AtmUninspectableKeys (Invoke-AtmInventory @ia)).Keys)
+        $churn.Add([pscustomobject]@{ Attempt = $n; Code = [string]$c.Res.Aborted; NewIdentities = @($nowKeys | Where-Object { $planKeys -notcontains $_ }).Count; PlanIdentities = $planKeys.Count })
+    }
+    return [pscustomobject]@{ Res = $null; Log = $null; Attempts = 3; Churn = $churn.ToArray(); Exhausted = $true }
+}
+function Get-ChurnText($Churn) { return ((@($Churn | ForEach-Object { "attempt $($_.Attempt): $($_.Code), $($_.NewIdentities) new uninspectable process identities (plan had $($_.PlanIdentities))" })) -join '; ') }
+function Resolve-Exhausted($C) {
+    # Every attempt refused before any deletion: NOT_TESTED only when each refusal is explained by new identities
+    # observed (process churn on this runner); otherwise the refusal is unexplained and the case fails.
+    $txt = Get-ChurnText $C.Churn
+    if (@($C.Churn | Where-Object { $_.NewIdentities -eq 0 }).Count -eq 0) { return (NotTested "fail-closed refusal in all 3 attempts, nothing deleted; $txt") }
+    throw "recusa antes da execucao sem nova identidade observada: $txt"
+}
 function Read-E2ELog([string]$Path) {
     $t = (New-Object Text.UTF8Encoding($false, $true)).GetString([IO.File]::ReadAllBytes($Path))
     return @($t.Split([char]10) | Where-Object { $_ -ne '' } | ForEach-Object { $_ | ConvertFrom-Json })
@@ -396,12 +424,14 @@ Case 'P8-revalidation-refused' {
     $ctx.Changed.Add('old2')
     if ($Leg -eq 'A') {
         # One root per run under the exception: the changed root alone; nothing is deleted.
-        $c = Invoke-E2EClean -Labels @('old2') -LogName 'P8.jsonl' -Risk -Hook $hook
+        $c = Invoke-E2ECleanChurn -Labels @('old2') -LogBase 'P8' -Risk -Hook $hook
+        if ($c.Exhausted) { return (Resolve-Exhausted $c) }
         Assert ($c.Res.Aborted -ceq 'REVALIDATION_REFUSED' -and -not $c.Res.StoppedBy) "Aborted=$($c.Res.Aborted) StoppedBy=$($c.Res.StoppedBy)"
         Assert (@($c.Res.Deleted).Count -eq 0) 'deleter chamado para a raiz alterada'
     } else {
         # Two ELIGIBLE roots: the first is deleted by the real deleter, the changed second one stops the run.
-        $c = Invoke-E2EClean -Labels @('old1', 'old2') -LogName 'P8.jsonl' -Hook $hook
+        $c = Invoke-E2ECleanChurn -Labels @('old1', 'old2') -LogBase 'P8' -Hook $hook
+        if ($c.Exhausted) { return (Resolve-Exhausted $c) }
         Assert ($c.Res.StoppedBy -ceq 'REVALIDATION_REFUSED') "StoppedBy=$($c.Res.StoppedBy) Aborted=$($c.Res.Aborted)"
         Assert (@($c.Res.Deleted).Count -eq 1 -and $c.Res.Deleted[0].Outcome -ceq 'COMPLETE' -and $c.Res.Deleted[0].Verified -eq $true) "primeira raiz: $(@($c.Res.Deleted | ForEach-Object { $_.Outcome }) -join ',')"
         Assert (-not (Test-Path -LiteralPath $ctx.Roots['old1'].Path)) 'primeira raiz ainda existe'
@@ -417,7 +447,7 @@ Case 'P8-revalidation-refused' {
     $skip = @($recs | Where-Object { $_.type -ceq 'skip' })
     Assert ($skip.Count -eq 1 -and $recs[-1].type -ceq 'run-end' -and $recs[-1].stoppedBy -ceq 'REVALIDATION_REFUSED') "registros: $(Get-Types $recs)"
     Assert (@($recs | Where-Object { $_.type -ceq 'intent' }).Count -eq $(if ($Leg -eq 'A') { 0 } else { 1 })) "intents: $(Get-Types $recs)"
-    "change between the confirmation and the deletion: REVALIDATION_REFUSED (ALTERADO_APOS_CONFIRMACAO), changed root intact; log: $(Get-Types $recs)" + $(if ($Leg -eq 'B') { '; first root deleted by the real deleter (COMPLETE, verified); lock BUSY from another process during the run' } else { '' })
+    "change between the confirmation and the deletion: REVALIDATION_REFUSED (ALTERADO_APOS_CONFIRMACAO), changed root intact; log: $(Get-Types $recs); attempts $($c.Attempts)$(if ($c.Attempts -gt 1) { ' (' + (Get-ChurnText $c.Churn) + ')' })" + $(if ($Leg -eq 'B') { '; first root deleted by the real deleter (COMPLETE, verified); lock BUSY from another process during the run' } else { '' })
 }
 Case 'P4-P7-real-deletion' {
     $nt = & $needEligible; if ($nt) { return $nt }
@@ -425,7 +455,8 @@ Case 'P4-P7-real-deletion' {
     $v2Probe = @{ Status = $null }
     $hook = { param($part) if ($null -eq $v2Probe.Status) { $v2Probe.Status = Invoke-LockProbe 'during-P4' } }
     $probe = $v2Probe
-    $c = Invoke-E2EClean -Labels @('old1') -LogName 'P4.jsonl' -Risk -Hook $hook
+    $c = Invoke-E2ECleanChurn -Labels @('old1') -LogBase 'P4' -Risk -Hook $hook
+    if ($c.Exhausted) { return (Resolve-Exhausted $c) }
     Assert (-not $c.Res.Aborted -and -not $c.Res.StoppedBy) "Aborted=$($c.Res.Aborted) StoppedBy=$($c.Res.StoppedBy) rejected=$(@($c.Res.Rejected | ForEach-Object { Get-Codes $_.Reasons }) -join ';') skipped=$(@($c.Res.Skipped | ForEach-Object { Get-Codes $_.Reasons }) -join ';')"
     Assert (@($c.Res.Deleted).Count -eq 1 -and $c.Res.Deleted[0].Outcome -ceq 'COMPLETE' -and $c.Res.Deleted[0].Verified -eq $true) "resultado: $(@($c.Res.Deleted | ForEach-Object { $_.Outcome }) -join ',')"
     Assert (-not (Test-Path -LiteralPath $ctx.Roots['old1'].Path)) 'raiz ainda existe'
@@ -444,7 +475,7 @@ Case 'P4-P7-real-deletion' {
     Assert ($recs[1].category -ceq 'ELIGIBLE_WITH_DECLARED_RISK' -and $recs[2].b1ResidualRiskAccepted -eq $true -and $recs[0].b1Exception -eq $true) 'excecao B1 nao registrada no plano/declaracao'
     Assert ($recs[4].matched -eq $true -and $recs[5].opId -ceq ($c.Res.RunId + ':1') -and $recs[6].outcome -ceq 'COMPLETE' -and $recs[6].verifiedGone -eq $true) 'plan-check/intent/result divergentes'
     Assert ($recs[7].complete -eq 1 -and $recs[7].results -eq 1) 'run-end divergente'
-    "real deleter: COMPLETE, verified gone; T1 log read from file: $types (confirmation TEST_SEAM/DIRECT_CALL, planId SHA-256); B8: BUSY from another process during the run, ACQUIRED after it; revalidation passed (plan-check matched)"
+    "real deleter: COMPLETE, verified gone; T1 log read from file: $types (confirmation TEST_SEAM/DIRECT_CALL, planId SHA-256); B8: BUSY from another process during the run, ACQUIRED after it; revalidation passed (plan-check matched); attempts $($c.Attempts)$(if ($c.Attempts -gt 1) { ' (' + (Get-ChurnText $c.Churn) + ')' })"
 }
 Case 'P9-snapshot' {
     if ($null -eq $ctx['RunBefore']) { return (NotTested 'no snapshot before the runs') }
