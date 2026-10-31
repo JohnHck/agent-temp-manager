@@ -71,6 +71,20 @@ rollback, tamper detection (exit 5) and repair, a real standard user (created on
 and verify without write access to the install directory, uninstall (directory and PATH entry removed). Evidence is
 uploaded as artifacts.
 
+Then each published version is installed and taken through the same cycle on every OS and installer shell: 0.1.0,
+0.1.1 and 0.2.0, the latest published version. Each package is the asset of its GitHub Release, accepted only with the
+SHA-256 published in that release's `SHA256SUMS.txt`, pinned in the script. The cycle is:
+
+1. install the published version and check `version` and `verify`;
+2. update to the package under test (`-Update`) and check `version` and `verify`, the older copy kept as `.previous`,
+   and the four installed gates `$false`;
+3. roll back and check the published version again;
+4. update again;
+5. uninstall: the directories and the PATH entry are removed.
+
+The 0.2.0 cycle also checks the installed manifest's version at each step. A download that fails is `NAO_TESTADO`,
+never a pass.
+
 ## Real clean on disposable VMs (V0.3 V2)
 
 The same `install e2e` jobs (every OS and installer shell of the matrix) also run the **real** clean, end to end, through

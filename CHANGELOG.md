@@ -10,6 +10,9 @@ entries below that say "past the deletion gate" are inactive in every copy. Publ
 privilege-matrix rows with the gate closed (V4); a release with the gate open requires the operator's pilot (V5) and its
 own gate. Candidate record: [docs/release/V0.3-RC.md](docs/release/V0.3-RC.md).
 
+* Tests only: the `install e2e` jobs also install the published 0.2.0 (GitHub Release asset, SHA-256 pinned from that
+  release's `SHA256SUMS.txt`), update it to the package under test, roll back, update again and uninstall, checking
+  `version`, `verify`, the installed manifest's version and the four installed gates, as for 0.1.0 and 0.1.1.
 * V0.3 fix (past the deletion gate only; no distributed copy reaches it): `Invoke-AtmClean` loads the verified native
   library before taking the clean lock. The lock comes before any inventory, and the library was otherwise loaded only
   by the first inventory, so a clean with no `-LogFile` (the CLI makes no inventory before the engine then) failed with a
