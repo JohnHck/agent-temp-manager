@@ -490,6 +490,40 @@ function Read-V2Summary([string]$File, [int]$Exit, [string]$Console) {
     $v3 = $(if ($s.PSObject.Properties['v3']) { "; V3a $($s.v3.passed) PASS / $($s.v3.failed) FAIL / $($s.v3.notTested) NOT_TESTED" } else { '' })
     "$($s.passed) PASS / 0 FAIL / $($s.notTested) NOT_TESTED [$($nt -join ', ')]; $($s.shell); coverage complete=$($s.processCoverage.complete)$v3"
 }
+# V0.3 V3b (P2, P3): a watcher of THIS account (the runner's, so a process leg A's standard user cannot inspect) starts a
+# short process of its own that ends by itself when leg A asks through a file in a signal folder, and confirms it. The
+# watcher's script stays in this account's temp folder (the test user cannot change it); it reads only the names of
+# the request files and starts one fixed command. It ends by itself (stop file or deadline); nothing is terminated.
+$v3Signal = Join-Path $userDir 'v3-signal'
+$v3Watcher = $null
+try {
+    [void][IO.Directory]::CreateDirectory($v3Signal)
+    $v3WatchDir = Join-Path ([IO.Path]::GetTempPath()) ('atm-e2e-v3-watch-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    [void][IO.Directory]::CreateDirectory($v3WatchDir)
+    $v3WatchScript = Join-Path $v3WatchDir 'v3-signal-watcher.ps1'
+    [IO.File]::WriteAllText($v3WatchScript, @'
+param([string]$Dir, [string]$Exe)
+$deadline = [datetime]::UtcNow.AddMinutes(45)
+while ([datetime]::UtcNow -lt $deadline -and -not (Test-Path -LiteralPath (Join-Path $Dir 'stop.txt'))) {
+    foreach ($g in @(Get-ChildItem -LiteralPath $Dir -Filter 'go-*.txt' -File)) {
+        $tag = $g.BaseName.Substring(3)
+        if ($tag -notmatch '^[A-Za-z0-9-]{1,32}$') { continue }
+        $ack = Join-Path $Dir "ack-$tag.txt"
+        if (Test-Path -LiteralPath $ack) { continue }
+        try {
+            $psi = New-Object Diagnostics.ProcessStartInfo($Exe, '-NoProfile -NonInteractive -Command Start-Sleep -Seconds 40')
+            $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+            $null = [Diagnostics.Process]::Start($psi)
+            [IO.File]::WriteAllText($ack, 'STARTED')
+        } catch { [IO.File]::WriteAllText($ack, 'FAILED_' + $_.Exception.GetType().Name) }
+    }
+    Start-Sleep -Milliseconds 200
+}
+'@)
+    $wpsi = New-Object Diagnostics.ProcessStartInfo($installerExe, "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$v3WatchScript`" -Dir `"$v3Signal`" -Exe `"$installerExe`"")
+    $wpsi.UseShellExecute = $false; $wpsi.CreateNoWindow = $true
+    $v3Watcher = [Diagnostics.Process]::Start($wpsi)
+} catch { $v3Watcher = $null }
 Step 'v2-clean-leg-A-standard-user' {
     # Leg A: the standard user of this VM (not elevated): B1 restricted exception. The harness is copied to a folder that
     # user can read; the guard is passed explicitly (a process started with other credentials gets that user's
@@ -499,12 +533,15 @@ Step 'v2-clean-leg-A-standard-user' {
     [IO.File]::Copy((Join-Path $PSScriptRoot 'Invoke-CleanE2E.ps1'), $copy, $true)
     $sum = Join-Path $userDir 'v2-clean-A-summary.json'
     $con = Join-Path $userDir 'v2-clean-A-console.txt'
-    $cmdLine = "/c `"`"$installerExe`" -NoProfile -ExecutionPolicy Bypass -File `"$copy`" -Leg A -InstallDir `"$installDir`" -SummaryFile `"$sum`" -WorkDir `"$(Join-Path $userDir 'v2-A')`" -DisposableMachine > `"$con`" 2>&1`""
+    $sig = $(if ($null -ne $v3Watcher) { " -SignalDir `"$v3Signal`"" } else { '' })
+    $cmdLine = "/c `"`"$installerExe`" -NoProfile -ExecutionPolicy Bypass -File `"$copy`" -Leg A -InstallDir `"$installDir`" -SummaryFile `"$sum`" -WorkDir `"$(Join-Path $userDir 'v2-A')`" -DisposableMachine$sig > `"$con`" 2>&1`""
     try {
         $p = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') -ArgumentList $cmdLine -Credential $cred -LoadUserProfile -WorkingDirectory $userDir -WindowStyle Hidden -PassThru -Wait
     } catch { $script:notTested = $true; return "processo como usuario comum nao iniciou neste runner: $($_.Exception.Message)" }
     Read-V2Summary $sum $p.ExitCode $con
 }
+# The watcher ends by itself on this file (never terminated).
+if ($null -ne $v3Watcher) { try { [IO.File]::WriteAllText((Join-Path $v3Signal 'stop.txt'), '1') } catch { $null = $_ } }
 Step 'v2-clean-leg-B-elevated' {
     # Leg B: the elevated runner account: ELIGIBLE only if the process coverage measured by the harness is complete.
     $work = Join-Path ([IO.Path]::GetTempPath()) ('atm-e2e-v2-B-' + [guid]::NewGuid().ToString('N').Substring(0, 8))

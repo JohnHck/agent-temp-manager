@@ -28,7 +28,10 @@ param(
     [Parameter(Mandatory)][string]$InstallDir,
     [Parameter(Mandatory)][string]$SummaryFile,
     [Parameter(Mandatory)][string]$WorkDir,
-    [switch]$DisposableMachine
+    [switch]$DisposableMachine,
+    # V3b (P2, P3): a folder watched by the e2e (another account), which starts a short, self-ending process of its own
+    # when this script asks; leg A only. Without it those cases are NOT_TESTED.
+    [string]$SignalDir
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
@@ -517,7 +520,7 @@ Case 'P9-temp-pre-existing' {
 # (= calls to the deleter) and that nothing outside the planned root and the declared attack changed. Sentinels and link
 # targets live in this run root, outside the base. Leg A runs one root per clean (B1 exception); leg B reaches the
 # deleter only with ELIGIBLE (complete coverage measured), otherwise those cases are NOT_TESTED, never forced.
-$v3 = @{ Ready = $false; Roots = @{}; Sentinels = @{}; Adversarial = @{}; SnapBefore = $null; NativeError = $null; Symlink = @{}; R2 = $null; R3 = $null }
+$v3 = @{ Ready = $false; Roots = @{}; Sentinels = @{}; Adversarial = @{}; SnapBefore = $null; NativeError = $null; Symlink = @{}; R2 = $null; R3 = $null; HardLink = $null }
 $v3Slug = 'C--atm-e2e-v3'
 $v3s = @{ Calls = 0; Before = $null; During = $null; After = $null; Attacked = $false }
 $v3NativeSrc = @'
@@ -529,6 +532,11 @@ public static class AtmE2EV3Native {
     static extern bool DeviceIoControl(SafeFileHandle h, uint code, byte[] inb, int inl, IntPtr outb, int outl, out int ret, IntPtr ov);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern byte CreateSymbolicLinkW(string link, string target, uint flags);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool CreateHardLinkW(string link, string existing, IntPtr sa);
+    public static string CreateHardLink(string link, string existing) {
+        return CreateHardLinkW(link, existing, IntPtr.Zero) ? "OK" : "FAIL " + Marshal.GetLastWin32Error();
+    }
     // FSCTL_SET_REPARSE_POINT through a handle opened with FILE_WRITE_ATTRIBUTES only (share modes do not stop it).
     static string Set(string dir, byte[] b) {
         using (SafeFileHandle h = CreateFileW(dir, 0x100, 7, IntPtr.Zero, 3, 0x02000000u | 0x00200000u, IntPtr.Zero)) {
@@ -707,7 +715,9 @@ $v3ProbeHidden = {
 Case 'V3-plant' {
     Assert ($null -ne $ctx['Base'] -and (Test-Path -LiteralPath $ctx.Base)) 'base plantada indisponivel'
     Assert ($null -eq $v3.NativeError) "auxiliar nativo do teste nao compilou: $($v3.NativeError)"
-    foreach ($l in @('U1', 'U3', 'U4', 'U5', 'U6', 'U7', 'U8', 'U9', 'R1', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9', 'R11', 'R12', 'R13')) { New-V3Root $l }
+    # V3a roots, then V3b (new entries, changes, ACL and processes after the plan).
+    foreach ($l in @('U1', 'U3', 'U4', 'U5', 'U6', 'U7', 'U8', 'U9', 'R1', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9', 'R11', 'R12', 'R13',
+            'N1', 'N2', 'N4', 'N5', 'N6', 'N8', 'A1', 'A2', 'A3', 'A4', 'P1', 'P2', 'P3')) { New-V3Root $l }
     New-V3Root 'R10' 'C--atm-e2e-v3-anc'
     # Leg B: items created elevated are owned by Administrators; the profile's own roots are owned by the account.
     if ($isAdmin) {
@@ -751,9 +761,15 @@ Case 'V3-plant' {
     # R4, R5: a directory and a file symbolic link inside a root (privilege permitting; measured).
     $v3.Symlink['R4'] = [AtmE2EV3Native]::CreateSymlink((Join-Path $v3.Roots['R4'].Path 'sub\symdir'), $v3.Sentinels['R4'], $true)
     $v3.Symlink['R5'] = [AtmE2EV3Native]::CreateSymlink((Join-Path $v3.Roots['R5'].Path 'sub\symfile.txt'), (Join-Path $v3.Sentinels['R5'] 'keep.txt'), $false)
+    # N8 (V3b): a hard link inside a root to a sentinel file outside it. The sentinel's times are set back first (the
+    # link shares them), and the folder that received the new name too.
+    $n8 = New-V3Sentinel 'N8'
+    foreach ($f in @((Join-Path $n8 'keep.txt'), (Join-Path $n8 'deep\deep.txt'))) { [IO.File]::SetLastWriteTimeUtc($f, $old); [IO.File]::SetCreationTimeUtc($f, $old) }
+    $v3.HardLink = [AtmE2EV3Native]::CreateHardLink((Join-Path $v3.Roots['N8'].Path 'sub\link.txt'), (Join-Path $n8 'keep.txt'))
+    [IO.Directory]::SetLastWriteTimeUtc((Join-Path $v3.Roots['N8'].Path 'sub'), $old)
     $v3.SnapBefore = Get-V3Snap
     $v3.Ready = $true
-    "$($v3.Roots.Count) roots (times set back ${shiftHours}h = SIMULATION), $($v3.Sentinels.Count) sentinels outside the base; junctions R1, R2, R3 in place; symbolic links R4 $($v3.Symlink['R4']), R5 $($v3.Symlink['R5'])"
+    "$($v3.Roots.Count) roots (times set back ${shiftHours}h = SIMULATION), $($v3.Sentinels.Count) sentinels outside the base; junctions R1, R2, R3 in place; symbolic links R4 $($v3.Symlink['R4']), R5 $($v3.Symlink['R5']); hard link N8 $($v3.HardLink)"
 }
 
 # ---- 4.2 files and folders in use
@@ -1072,6 +1088,275 @@ function Invoke-V3SymlinkInside([string]$Id, [string]$Kind) {
 }
 Case 'V3-R4-directory-symlink-inside-before-plan' { Invoke-V3SymlinkInside 'R4' 'directory' }
 Case 'V3-R5-file-symlink-inside-before-plan' { Invoke-V3SymlinkInside 'R5' 'file' }
+# ---------------------------------------------------------------------------------------------- V3b
+# V0.3 V3, phase V3b (contract sections 4.3 and 4.4): a new entry, a change, a third-party ACL and a new process after
+# the plan, in each window. N3 (a new file between the confirmation and the revalidation) is V2's P8. ACL changes are
+# fixtures only (J4): an explicit ACE on a root this run planted, never on a folder of the machine or the profile. The
+# processes are short and end by themselves; none is ever terminated.
+function Grant-V3ThirdPartyWrite([string]$Path) {
+    # Fixture only (J4): one explicit, non-inherited ACE giving BUILTIN\Users modify on a root of this run.
+    Assert ($Path.StartsWith((Join-Path $ctx.Base $v3Slug) + '\', [StringComparison]::OrdinalIgnoreCase) -and [IO.File]::ReadAllText((Join-Path $Path 'ATM-E2E-NONCE.txt')) -ceq $nonce) 'ACE fora de uma raiz plantada nesta execucao'
+    $acl = Get-Acl -LiteralPath $Path
+    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-545')), 'Modify', 'None', 'None', 'Allow')))
+    Set-Acl -LiteralPath $Path -AclObject $acl
+    return (Get-Codes @(Get-AtmAclProblems -Path $Path -OwnerSid $mySid))
+}
+function Request-V3OtherAccountProcess([string]$Tag) {
+    # Asks the e2e (another account) to start a short process of its own and waits for its confirmation; returns the
+    # confirmation text or $null.
+    [IO.File]::WriteAllText((Join-Path $SignalDir "go-$Tag.txt"), $nonce)
+    $ack = Join-Path $SignalDir "ack-$Tag.txt"
+    for ($i = 0; $i -lt 200 -and -not (Test-Path -LiteralPath $ack); $i++) { Start-Sleep -Milliseconds 100 }
+    if (-not (Test-Path -LiteralPath $ack)) { return $null }
+    Start-Sleep -Milliseconds 1500
+    return [IO.File]::ReadAllText($ack).Trim()
+}
+$v3NeedSignal = {
+    if ($Leg -ne 'A') { return (NotTested 'leg A only: a process of another account is not inspectable only for a non-elevated token (B1 exception)') }
+    if (-not $SignalDir -or -not (Test-Path -LiteralPath $SignalDir)) { return (NotTested 'no signal folder from the e2e (another account cannot be asked to start a process)') }
+}
+
+# ---- 4.3 new entry and change after the plan
+Case 'V3-N1-new-file-after-preview' {
+    $nt = & $v3NeedPlant; if ($nt) { return $nt }
+    $r = $v3.Roots['N1'].Path
+    $before = Get-V3Snap
+    $fp = @((Invoke-AtmInventory @ia).Partitions | Where-Object { [string]::Equals($_.Path, $r, [StringComparison]::OrdinalIgnoreCase) })[0].Fingerprint
+    # A new file whose time is set back too: only the fingerprint tells it apart (not RECENT).
+    $nf = Join-Path $r 'sub\new-after-preview.txt'
+    [IO.File]::WriteAllText($nf, "new after the preview`n"); [IO.File]::SetLastWriteTimeUtc($nf, [datetime]::UtcNow.AddHours(-$shiftHours))
+    $c = Invoke-V3Clean -Paths @($r) -LogName 'V3-N1.jsonl' -Fingerprints @{ $r = $fp }
+    $codes = Assert-V3PlanRefused $c 'ALTERADO_DESDE_O_PREVIEW'
+    Assert (Test-Path -LiteralPath $nf) 'arquivo novo apagado'
+    $inv = Assert-V3Only $before @((Get-V3Rel $r)) 'V3-N1'
+    "a file added between the preview and clean (preview fingerprint given): NENHUM_CAMINHO_ELEGIVEL with $codes (both legs); no log, 0 intents; $inv"
+}
+Case 'V3-N2-new-file-before-final-confirmation' {
+    $nt = & $v3NeedExec; if ($nt) { return $nt }
+    $r = $v3.Roots['N2'].Path
+    $before = Get-V3Snap
+    $v3New = @{ Path = (Join-Path $r 'sub\new-before-confirmation.txt'); Done = $false }
+    $v3Inner = (New-Operator).Reader
+    $op = @{ Reader = { param($phrase, $kind, $rootPath, $choices, $info) if ($kind -ceq 'confirm' -and -not $v3New.Done) { $v3New.Done = $true; $v3s.Attacked = $true; [IO.File]::WriteAllText($v3New.Path, "new before the final confirmation`n") }; & $v3Inner $phrase $kind $rootPath $choices $info } }
+    $c = Invoke-V3Churn -Paths @($r) -LogBase 'V3-N2' -Operator $op
+    if ($c.Exhausted) { return (Resolve-Exhausted $c) }
+    Assert ($v3New.Done) 'a confirmacao final nao foi pedida'
+    Assert ($c.Res.Aborted -ceq 'PLAN_CHANGED_BEFORE_EXECUTION' -and $c.Calls -eq 0 -and @($c.Res.Deleted).Count -eq 0) "Aborted=$($c.Res.Aborted) chamadas $($c.Calls)"
+    $recs = Read-E2ELog $c.Log; $types = Get-Types $recs
+    $pc = @($recs | Where-Object { $_.type -ceq 'plan-check' })
+    Assert ($types -ceq 'run-start,plan,declaration,confirmation,plan-check,run-end' -and $pc[0].matched -eq $false -and @($pc[0].changed).Count -eq 1) "registros: $types"
+    Assert (Test-Path -LiteralPath $v3New.Path) 'arquivo novo apagado'
+    $inv = Assert-V3Only $before @((Get-V3Rel $r)) 'V3-N2'
+    "a file added between the plan and the final confirmation: PLAN_CHANGED_BEFORE_EXECUTION (plan-check matched=false), 0 intents, the new file intact; log $types; $inv"
+}
+Case 'V3-N4-new-file-before-deleter' {
+    $nt = & $v3NeedExec; if ($nt) { return $nt }
+    $r = $v3.Roots['N4'].Path
+    $before = Get-V3Snap
+    $v3New = Join-Path $r 'sub\new-before-deleter.txt'
+    $v3s.Before = { param($c) [IO.File]::WriteAllText($v3New, "new between the revalidation and the deleter`n") }
+    try { $c = Invoke-V3Churn -Paths @($r) -LogBase 'V3-N4' } finally { $v3s.Before = $null }
+    if ($c.Exhausted) { return (Resolve-Exhausted $c) }
+    $row = Assert-V3Stopped $c 'REFUSED' 'PLAN_DIFFERS_FROM_VALIDATED_MEASUREMENT' $null
+    Assert ($row.Attempted -eq $false -and [long]$row.FilesDeleted -eq 0 -and (Test-Path -LiteralPath $v3New) -and (Test-Path -LiteralPath (Join-Path $r 'sub\z.txt'))) "Attempted=$($row.Attempted) FilesDeleted=$($row.FilesDeleted); arvore intacta"
+    $inv = Assert-V3Only $before @((Get-V3Rel $r)) 'V3-N4'
+    "a file added between the revalidation and the deleter: PLAN_DIFFERS_FROM_VALIDATED_MEASUREMENT, REFUSED, nothing attempted, tree intact; STOPPED_AFTER_REFUSED, 1 intent$(Get-V3Attempts $c); $inv"
+}
+Case 'V3-N5-new-file-in-pinned-folder' {
+    # NOVO-MED. Accepted: the file created and the run stops (DELETE_DIR_FAILED at sub, PARTIAL) with it intact; or the
+    # creation refused by the pin and COMPLETE. Never: the new file deleted.
+    $nt = & $v3NeedExec; if ($nt) { return $nt }
+    $r = $v3.Roots['N5'].Path
+    $before = Get-V3Snap
+    $v3New = @{ Path = (Join-Path $r 'sub\new-in-deleter.txt'); Status = $null }
+    $v3s.During = [Action[string]]({ param($root) try { [IO.File]::WriteAllText($v3New.Path, "new inside the deleter`n"); $v3New.Status = 'CREATED' } catch { $v3New.Status = 'REFUSED_' + $_.Exception.GetType().Name } }.GetNewClosure())
+    try { $c = Invoke-V3Churn -Paths @($r) -LogBase 'V3-N5' } finally { $v3s.During = $null }
+    if ($c.Exhausted) { return (Resolve-Exhausted $c) }
+    $row = @($c.Res.Deleted)
+    Assert ($row.Count -eq 1 -and $null -ne $v3New.Status) "desfechos $($row.Count); criacao $($v3New.Status)"
+    if ($v3New.Status -ceq 'CREATED') {
+        $null = Assert-V3Stopped $c 'PARTIAL' 'DELETE_DIR_FAILED' (Join-Path $r 'sub')
+        Assert (Test-Path -LiteralPath $v3New.Path) 'arquivo criado depois da fixacao foi apagado'
+        $m = "the file was created; PARTIAL, DELETE_DIR_FAILED at sub, the new file intact"
+    } else {
+        Assert ($row[0].Outcome -ceq 'COMPLETE' -and $row[0].Verified -eq $true) "criacao recusada e desfecho $($row[0].Outcome)"
+        $m = "creation refused ($($v3New.Status)); COMPLETE"
+    }
+    $inv = Assert-V3Only $before @((Get-V3Rel $r)) 'V3-N5'
+    "MEASURED: a file created in a pinned folder inside the deleter: $m$(Get-V3Attempts $c); $inv"
+}
+Case 'V3-N6-planned-file-changed-in-deleter' {
+    $nt = & $v3NeedExec; if ($nt) { return $nt }
+    $r = $v3.Roots['N6'].Path
+    $z = Join-Path $r 'sub\z.txt'
+    $top = @(Get-ChildItem -LiteralPath $r -File -Force).Count
+    $before = Get-V3Snap
+    $v3Chg = @{ Err = $null }
+    $v3s.During = [Action[string]]({ param($root) try { [IO.File]::SetLastWriteTimeUtc($z, [datetime]::UtcNow.AddMinutes(-1)) } catch { $v3Chg.Err = $_.Exception.GetType().Name } }.GetNewClosure())
+    try { $c = Invoke-V3Churn -Paths @($r) -LogBase 'V3-N6' } finally { $v3s.During = $null }
+    if ($c.Exhausted) { return (Resolve-Exhausted $c) }
+    Assert ($null -eq $v3Chg.Err) "ataque nao aplicado: $($v3Chg.Err)"
+    $row = Assert-V3Stopped $c 'PARTIAL' 'FILE_CHANGED_AFTER_PLANNING' $z
+    Assert ([long]$row.FilesDeleted -eq $top -and (Test-Path -LiteralPath $z)) "FilesDeleted=$($row.FilesDeleted) (esperado $top); arquivo alterado preservado"
+    $inv = Assert-V3Only $before @((Get-V3Rel $r)) 'V3-N6'
+    "a planned file changed inside the deleter, after pinning: FILE_CHANGED_AFTER_PLANNING at sub\z.txt, PARTIAL ($($row.FilesDeleted) files deleted before), the changed file intact$(Get-V3Attempts $c); $inv"
+}
+Case 'V3-N7-write-keeping-statistics' {
+    NotTested 'by design: a write that keeps every statistic (size, write time, count) does not change the fingerprint, the plan check nor the deleter''s checks; a declared limit (no content hash), never provoked here'
+}
+Case 'V3-N8-hard-link-to-outside' {
+    $nt = & $v3NeedExec; if ($nt) { return $nt }
+    if ($v3.HardLink -cne 'OK') { return (NotTested "the hard link could not be created ($($v3.HardLink))") }
+    $r = $v3.Roots['N8'].Path
+    $keep = Join-Path $v3.Sentinels['N8'] 'keep.txt'
+    $keepSha = Get-FileSha $keep
+    $before = Get-V3Snap
+    $c = Invoke-V3Churn -Paths @($r) -LogBase 'V3-N8'
+    if ($c.Exhausted) { return (Resolve-Exhausted $c) }
+    Assert (-not $c.Res.Aborted -and -not $c.Res.StoppedBy -and @($c.Res.Deleted).Count -eq 1 -and $c.Res.Deleted[0].Outcome -ceq 'COMPLETE' -and $c.Res.Deleted[0].Verified -eq $true) "resultado: $($c.Res.Aborted) $($c.Res.StoppedBy) $(@($c.Res.Deleted | ForEach-Object { $_.Outcome }) -join ',')"
+    Assert ((Test-Path -LiteralPath $keep) -and (Get-FileSha $keep) -ceq $keepSha) 'sentinela ligada por hard link alterada ou apagada'
+    $types = Get-V3LogTypes $c.Log
+    Assert ($types -ceq 'run-start,plan,declaration,confirmation,plan-check,intent,result,run-end' -and $c.Calls -eq 1) "registros: $types"
+    $inv = Assert-V3Only $before @((Get-V3Rel $r)) 'V3-N8'
+    "a hard link inside the root to a sentinel outside it: COMPLETE, only the name inside the root removed, the sentinel intact (same SHA-256); the deleter does not check the link count (recorded); log $types$(Get-V3Attempts $c); $inv"
+}
+
+# ---- 4.3 third-party ACL after the plan (fixture ACE, J4)
+Case 'V3-A1-third-party-acl-after-preview' {
+    $nt = & $v3NeedPlant; if ($nt) { return $nt }
+    $r = $v3.Roots['A1'].Path
+    $before = Get-V3Snap
+    $acl = Grant-V3ThirdPartyWrite $r
+    Assert ($acl -match 'ESCRITA_CONCEDIDA_A_TERCEIROS') "ACE nao reconhecida pelo produto: $acl"
+    $c = Invoke-V3Clean -Paths @($r) -LogName 'V3-A1.jsonl'
+    # The ACL gate runs before B1 in the V0.1 gate (not cut short as the lock probe is): visible in both legs.
+    $codes = Assert-V3PlanRefused $c 'ESCRITA_CONCEDIDA_A_TERCEIROS'
+    $inv = Assert-V3Only $before @() 'V3-A1'
+    "write granted to a third party on the root before clean: NENHUM_CAMINHO_ELEGIVEL with $codes (both legs: the ACL gate is evaluated before B1); no log, 0 intents; $inv"
+}
+Case 'V3-A2-third-party-acl-before-final-confirmation' {
+    $nt = & $v3NeedExec; if ($nt) { return $nt }
+    $r = $v3.Roots['A2'].Path
+    $before = Get-V3Snap
+    $v3Acl = @{ Codes = $null; Root = $r }
+    $v3Inner = (New-Operator).Reader
+    $op = @{ Reader = { param($phrase, $kind, $rootPath, $choices, $info) if ($kind -ceq 'confirm' -and $null -eq $v3Acl.Codes) { $v3s.Attacked = $true; $v3Acl.Codes = Grant-V3ThirdPartyWrite $v3Acl.Root }; & $v3Inner $phrase $kind $rootPath $choices $info } }
+    $c = Invoke-V3Churn -Paths @($r) -LogBase 'V3-A2' -Operator $op
+    if ($c.Exhausted) { return (Resolve-Exhausted $c) }
+    Assert ($v3Acl.Codes -match 'ESCRITA_CONCEDIDA_A_TERCEIROS') "ACE nao aplicada antes da confirmacao: $($v3Acl.Codes)"
+    Assert ($c.Res.Aborted -ceq 'PLAN_CHANGED_BEFORE_EXECUTION' -and $c.Calls -eq 0 -and @($c.Res.Deleted).Count -eq 0) "Aborted=$($c.Res.Aborted) chamadas $($c.Calls)"
+    $recs = Read-E2ELog $c.Log; $types = Get-Types $recs
+    $pc = @($recs | Where-Object { $_.type -ceq 'plan-check' })
+    Assert ($types -ceq 'run-start,plan,declaration,confirmation,plan-check,run-end' -and $pc[0].matched -eq $false) "registros: $types"
+    $inv = Assert-V3Only $before @() 'V3-A2'
+    "write granted to a third party between the plan and the final confirmation (statistics unchanged): PLAN_CHANGED_BEFORE_EXECUTION by the gate, 0 intents; log $types; $inv"
+}
+Case 'V3-A3-third-party-acl-before-revalidation' {
+    $nt = & $v3NeedExec; if ($nt) { return $nt }
+    $r = $v3.Roots['A3'].Path
+    $before = Get-V3Snap
+    $v3Acl = @{ Codes = $null }
+    $hook = { param($part) if ($null -eq $v3Acl.Codes) { $v3s.Attacked = $true; $v3Acl.Codes = Grant-V3ThirdPartyWrite $part.Path } }
+    $c = Invoke-V3Churn -Paths @($r) -LogBase 'V3-A3' -Hook $hook
+    if ($c.Exhausted) { return (Resolve-Exhausted $c) }
+    Assert ($c.Res.Aborted -ceq 'REVALIDATION_REFUSED' -and @($c.Res.Skipped).Count -eq 1 -and $c.Calls -eq 0) "Aborted=$($c.Res.Aborted) chamadas $($c.Calls)"
+    $codes = Get-Codes $c.Res.Skipped[0].Reasons
+    Assert ($codes -match 'ESCRITA_CONCEDIDA_A_TERCEIROS' -and ($Leg -ne 'A' -or $codes -match 'B1_EXCEPTION_NO_LONGER_APPLIES')) "motivos da revalidacao: $codes"
+    $types = Get-V3LogTypes $c.Log
+    Assert ($types -ceq 'run-start,plan,declaration,confirmation,plan-check,skip,run-end') "registros: $types"
+    $inv = Assert-V3Only $before @() 'V3-A3'
+    "write granted to a third party between the confirmation and the revalidation: REVALIDATION_REFUSED ($codes), 0 intents; log $types$(Get-V3Attempts $c); $inv"
+}
+Case 'V3-A4-third-party-acl-in-deleter' {
+    # Proof of a limit: the deleter does not read the ACL again once everything is pinned. Accepted: the ACE applied
+    # and COMPLETE (the limit), or the ACE refused while pinned and COMPLETE.
+    $nt = & $v3NeedExec; if ($nt) { return $nt }
+    $r = $v3.Roots['A4'].Path
+    $before = Get-V3Snap
+    $v3Acl = @{ Status = $null }
+    $v3s.During = [Action[string]]({
+        param($root)
+        try {
+            $a = Get-Acl -LiteralPath $root
+            $a.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-545')), 'Modify', 'None', 'None', 'Allow')))
+            Set-Acl -LiteralPath $root -AclObject $a
+            $v3Acl.Status = $(if (@((Get-Acl -LiteralPath $root).GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference.Value -ceq 'S-1-5-32-545' }).Count -gt 0) { 'APPLIED' } else { 'NOT_PRESENT' })
+        } catch { $v3Acl.Status = 'REFUSED_' + $_.Exception.GetType().Name }
+    }.GetNewClosure())
+    try { $c = Invoke-V3Churn -Paths @($r) -LogBase 'V3-A4' } finally { $v3s.During = $null }
+    if ($c.Exhausted) { return (Resolve-Exhausted $c) }
+    Assert ($null -ne $v3Acl.Status) 'ataque nao executado'
+    Assert (-not $c.Res.Aborted -and -not $c.Res.StoppedBy -and @($c.Res.Deleted).Count -eq 1 -and $c.Res.Deleted[0].Outcome -ceq 'COMPLETE' -and $c.Res.Deleted[0].Verified -eq $true) "resultado: $($c.Res.Aborted) $($c.Res.StoppedBy) $(@($c.Res.Deleted | ForEach-Object { $_.Outcome }) -join ',')"
+    $inv = Assert-V3Only $before @((Get-V3Rel $r)) 'V3-A4'
+    "MEASURED: write granted to a third party inside the deleter, after pinning: ACE $($v3Acl.Status); COMPLETE (the deleter does not read the ACL again once pinned: a declared limit)$(Get-V3Attempts $c); $inv"
+}
+
+# ---- 4.4 processes after the plan
+Case 'V3-P1-referencing-process-before-revalidation' {
+    $nt = & $v3NeedExec; if ($nt) { return $nt }
+    $r = $v3.Roots['P1'].Path
+    $before = Get-V3Snap
+    # A process of this account (inspectable) whose command line names the root; it ends by itself.
+    # The path is the last word of the command line (a comment for the shell), so the reference resolves to the root.
+    $v3Proc = @{ Started = $false; Exe = $shellExe; Arg = ("-NoProfile -NonInteractive -Command `"Start-Sleep -Seconds 25 # " + $r + "`"") }
+    $hook = {
+        param($part)
+        if (-not $v3Proc.Started) {
+            $v3s.Attacked = $true
+            $psi = New-Object Diagnostics.ProcessStartInfo($v3Proc.Exe, $v3Proc.Arg)
+            $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+            $null = [Diagnostics.Process]::Start($psi); $v3Proc.Started = $true
+            Start-Sleep -Milliseconds 1500
+        }
+    }
+    $c = Invoke-V3Churn -Paths @($r) -LogBase 'V3-P1' -Hook $hook
+    if ($c.Exhausted) { return (Resolve-Exhausted $c) }
+    Assert ($c.Res.Aborted -ceq 'REVALIDATION_REFUSED' -and @($c.Res.Skipped).Count -eq 1 -and $c.Calls -eq 0) "Aborted=$($c.Res.Aborted) chamadas $($c.Calls)"
+    $raw = (@($c.Res.Skipped[0].Reasons) -join ' ')
+    Assert ($raw -match 'ACTIVE_EVIDENCE|RUNTIME_USE_OBSERVED') "motivos da revalidacao: $(Get-Codes $c.Res.Skipped[0].Reasons)"
+    Assert ($Leg -ne 'A' -or $raw -match 'B1_EXCEPTION_NO_LONGER_APPLIES') "perna A sem B1_EXCEPTION_NO_LONGER_APPLIES: $(Get-Codes $c.Res.Skipped[0].Reasons)"
+    $types = Get-V3LogTypes $c.Log
+    Assert ($types -ceq 'run-start,plan,declaration,confirmation,plan-check,skip,run-end') "registros: $types"
+    $inv = Assert-V3Only $before @() 'V3-P1'
+    $ev = @([regex]::Matches($raw, 'ACTIVE_EVIDENCE|RUNTIME_USE_OBSERVED') | ForEach-Object { $_.Value } | Sort-Object -Unique) -join ','
+    "a process of this account naming the root started between the confirmation and the revalidation: REVALIDATION_REFUSED ($ev$(if ($Leg -eq 'A') { ', B1_EXCEPTION_NO_LONGER_APPLIES' })), 0 intents; the process ends by itself; log $types; $inv"
+}
+Case 'V3-P2-other-account-process-before-revalidation' {
+    $nt = & $v3NeedExec; if ($nt) { return $nt }
+    $nt = & $v3NeedSignal; if ($nt) { return $nt }
+    $r = $v3.Roots['P2'].Path
+    $before = Get-V3Snap
+    $v3Sig = @{ Ack = $null; Asked = $false }
+    $hook = { param($part) if (-not $v3Sig.Asked) { $v3Sig.Asked = $true; $v3s.Attacked = $true; $v3Sig.Ack = Request-V3OtherAccountProcess 'P2' } }
+    $c = Invoke-V3Churn -Paths @($r) -LogBase 'V3-P2' -Hook $hook
+    if ($c.Exhausted) { return (Resolve-Exhausted $c) }
+    if ($v3Sig.Ack -cne 'STARTED') { return (NotTested "the e2e did not confirm a process of another account ($($v3Sig.Ack)); outcome $($c.Res.Aborted)") }
+    Assert ($c.Res.Aborted -ceq 'REVALIDATION_REFUSED' -and @($c.Res.Skipped).Count -eq 1 -and $c.Calls -eq 0) "Aborted=$($c.Res.Aborted) chamadas $($c.Calls)"
+    $codes = Get-Codes $c.Res.Skipped[0].Reasons
+    Assert ($codes -match 'B1_EXCEPTION_NEW_UNINSPECTABLE_PROCESS') "motivos da revalidacao: $codes"
+    $types = Get-V3LogTypes $c.Log
+    Assert ($types -ceq 'run-start,plan,declaration,confirmation,plan-check,skip,run-end') "registros: $types"
+    $inv = Assert-V3Only $before @() 'V3-P2'
+    "a process of another account (not inspectable here) started between the confirmation and the revalidation: REVALIDATION_REFUSED ($codes), 0 intents; it ends by itself; log $types; $inv"
+}
+Case 'V3-P3-other-account-process-before-final-confirmation' {
+    $nt = & $v3NeedExec; if ($nt) { return $nt }
+    $nt = & $v3NeedSignal; if ($nt) { return $nt }
+    $r = $v3.Roots['P3'].Path
+    $before = Get-V3Snap
+    $v3Sig = @{ Ack = $null; Asked = $false }
+    $v3Inner = (New-Operator).Reader
+    $op = @{ Reader = { param($phrase, $kind, $rootPath, $choices, $info) if ($kind -ceq 'confirm' -and -not $v3Sig.Asked) { $v3Sig.Asked = $true; $v3s.Attacked = $true; $v3Sig.Ack = Request-V3OtherAccountProcess 'P3' }; & $v3Inner $phrase $kind $rootPath $choices $info } }
+    $c = Invoke-V3Churn -Paths @($r) -LogBase 'V3-P3' -Operator $op
+    if ($c.Exhausted) { return (Resolve-Exhausted $c) }
+    if ($v3Sig.Ack -cne 'STARTED') { return (NotTested "the e2e did not confirm a process of another account ($($v3Sig.Ack)); outcome $($c.Res.Aborted)") }
+    Assert ($c.Res.Aborted -ceq 'PLAN_CHANGED_BEFORE_EXECUTION' -and $c.Calls -eq 0 -and @($c.Res.Deleted).Count -eq 0) "Aborted=$($c.Res.Aborted) chamadas $($c.Calls)"
+    $recs = Read-E2ELog $c.Log; $types = Get-Types $recs
+    Assert ($types -ceq 'run-start,plan,declaration,confirmation,plan-check,run-end' -and @($recs | Where-Object { $_.type -ceq 'plan-check' })[0].matched -eq $false) "registros: $types"
+    $inv = Assert-V3Only $before @() 'V3-P3'
+    "a process of another account started between the plan and the final confirmation: PLAN_CHANGED_BEFORE_EXECUTION (a new identity not inspectable), 0 intents; it ends by itself; log $types; $inv"
+}
+
 Case 'V3-snapshot' {
     # Over the whole V3a phase: only the V3 scopes and the V3 logs may differ; sentinels, link targets, the V2 roots,
     # the transcripts and the rest of the run root are unchanged.

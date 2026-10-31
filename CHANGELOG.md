@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+* V0.3 V3, phase V3b (tests only, no product change): new entries, changes, a third-party ACL (fixture ACE on planted
+  roots only) and new processes (of the same account, and in leg A of another account, started by a watcher of the
+  e2e and ending by themselves) after the plan, in each window, with the real deleter. Proves that the deleter does not
+  read the ACL again once everything is pinned (a declared limit). Details: docs/TESTING.md, "New entries, ACL and
+  processes after the plan".
 * V0.3 V3, phase V3a (tests only, no product change): the CI-only harness also attacks planted roots with reparse
   points and links and with files and folders in use, in each window of the flow (before the plan, before the final
   confirmation, before the revalidation, before the deleter and inside it once everything is pinned). Inside the deleter

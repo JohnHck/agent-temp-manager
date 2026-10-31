@@ -150,6 +150,29 @@ attack (`afterPinning`); a static test of the suite compares the two calls. No s
   the suite); the in-deleter cases of leg B while its process coverage is incomplete; the other V3 cases (new entries,
   ACL, processes, deleter outcomes, log, interruption, concurrency and shared bases) are later phases.
 
+## New entries, ACL and processes after the plan (V0.3 V3, phase V3b)
+
+Same harness, same rules (code per leg, log read back, intents counted, nothing outside the planned root changed), on
+roots planted with the V3a ones and covered by the same phase snapshot.
+
+* **New entry or change:** a file added between the preview and clean (`ALTERADO_DESDE_O_PREVIEW`, both legs), before
+  the final confirmation (`PLAN_CHANGED_BEFORE_EXECUTION`) and between the revalidation and the deleter
+  (`PLAN_DIFFERS_FROM_VALIDATED_MEASUREMENT`, nothing attempted); a planned file changed inside the deleter
+  (`FILE_CHANGED_AFTER_PLANNING`, `PARTIAL`, the changed file intact). Between the confirmation and the revalidation it is
+  V2's case. Measured: a file created in a pinned folder inside the deleter. A hard link inside the root to a sentinel
+  outside it: only the name inside the root is removed, the sentinel is intact (the link count is not checked).
+* **Third-party ACL** (a fixture: one explicit ACE for `Users` on a root planted in that run, never a folder of the VM):
+  before clean it is refused in **both** legs (`ESCRITA_CONCEDIDA_A_TERCEIROS`: the ACL gate runs before B1); before the
+  final confirmation `PLAN_CHANGED_BEFORE_EXECUTION`; before the revalidation `REVALIDATION_REFUSED`. Inside the deleter
+  the ACL is not read again: the deletion completes (a declared limit, SECURITY-MODEL).
+* **Processes:** a process of the same account naming the root started before the revalidation (`REVALIDATION_REFUSED`,
+  use observed); in leg A, a process of **another account** started before the revalidation
+  (`B1_EXCEPTION_NEW_UNINSPECTABLE_PROCESS`) or before the final confirmation (`PLAN_CHANGED_BEFORE_EXECUTION`). That
+  process is started by a watcher of the runner account that the e2e launches before leg A; leg A asks through a file
+  and the watcher starts one fixed short command that ends by itself. No process is ever terminated.
+* **Not tested:** a write that keeps every statistic (no content hash, by design); leg B in-deleter cases while its
+  coverage is incomplete.
+
 Gate logic for administrators and other users is also exercised with injected identities (`IsAdmin`, profile SID
 different from the process SID) in every run, on both shells. Manual rows are recorded in the release notes as
 done or `NAO_TESTADO`, never assumed.
