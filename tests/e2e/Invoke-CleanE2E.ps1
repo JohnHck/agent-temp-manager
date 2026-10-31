@@ -1400,7 +1400,7 @@ $summary.failed = $failed
 $summary.notTested = @($summary.cases.Values | Where-Object { $_.status -eq 'NOT_TESTED' }).Count
 $summary.passed = @($summary.cases.Values | Where-Object { $_.status -eq 'PASS' }).Count
 $v3Cases = @($summary.cases.Keys | Where-Object { $_.StartsWith('V3-') } | ForEach-Object { $summary.cases[$_] })
-$summary.v3 = [ordered]@{ phase = 'V3a'; passed = @($v3Cases | Where-Object { $_.status -eq 'PASS' }).Count; failed = @($v3Cases | Where-Object { $_.status -eq 'FAIL' }).Count; notTested = @($v3Cases | Where-Object { $_.status -eq 'NOT_TESTED' }).Count }
+$summary.v3 = [ordered]@{ phase = 'V3a+V3b'; passed = @($v3Cases | Where-Object { $_.status -eq 'PASS' }).Count; failed = @($v3Cases | Where-Object { $_.status -eq 'FAIL' }).Count; notTested = @($v3Cases | Where-Object { $_.status -eq 'NOT_TESTED' }).Count }
 [IO.File]::WriteAllText($SummaryFile, ($summary | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
 [Console]::Out.WriteLine(("V2-{0}: {1} PASS / {2} FAIL / {3} NOT_TESTED | {4} | elevated {5}" -f $Leg, $summary.passed, $failed, $summary.notTested, $summary.shell, $summary.elevated))
 exit $failed

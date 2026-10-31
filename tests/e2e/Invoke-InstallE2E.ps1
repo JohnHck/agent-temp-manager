@@ -486,8 +486,8 @@ function Read-V2Summary([string]$File, [int]$Exit, [string]$Console) {
     $bad = @($s.cases.PSObject.Properties | Where-Object { $_.Value.status -eq 'FAIL' } | ForEach-Object { "$($_.Name): $($_.Value.detail)" })
     $nt = @($s.cases.PSObject.Properties | Where-Object { $_.Value.status -eq 'NOT_TESTED' } | ForEach-Object { $_.Name })
     Assert ($bad.Count -eq 0 -and $Exit -eq 0) ("V2 FAIL (exit $Exit): " + ($bad -join ' | '))
-    # V0.3 V3a: its cases (V3-*) are counted apart, in the same summary.
-    $v3 = $(if ($s.PSObject.Properties['v3']) { "; V3a $($s.v3.passed) PASS / $($s.v3.failed) FAIL / $($s.v3.notTested) NOT_TESTED" } else { '' })
+    # V0.3 V3: its cases (V3-*, every phase so far) are counted apart, in the same summary.
+    $v3 = $(if ($s.PSObject.Properties['v3']) { "; V3 ($($s.v3.phase)) $($s.v3.passed) PASS / $($s.v3.failed) FAIL / $($s.v3.notTested) NOT_TESTED" } else { '' })
     "$($s.passed) PASS / 0 FAIL / $($s.notTested) NOT_TESTED [$($nt -join ', ')]; $($s.shell); coverage complete=$($s.processCoverage.complete)$v3"
 }
 # V0.3 V3b (P2, P3): a watcher of THIS account (the runner's, so a process leg A's standard user cannot inspect) starts a

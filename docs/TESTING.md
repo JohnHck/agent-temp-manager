@@ -159,7 +159,8 @@ roots planted with the V3a ones and covered by the same phase snapshot.
   the final confirmation (`PLAN_CHANGED_BEFORE_EXECUTION`) and between the revalidation and the deleter
   (`PLAN_DIFFERS_FROM_VALIDATED_MEASUREMENT`, nothing attempted); a planned file changed inside the deleter
   (`FILE_CHANGED_AFTER_PLANNING`, `PARTIAL`, the changed file intact). Between the confirmation and the revalidation it is
-  V2's case. Measured: a file created in a pinned folder inside the deleter. A hard link inside the root to a sentinel
+  V2's case. Measured on every image: a file can be created in a pinned folder inside the deleter; it is not in the
+  plan, stays intact, and the run stops as `PARTIAL` (`DELETE_DIR_FAILED`). A hard link inside the root to a sentinel
   outside it: only the name inside the root is removed, the sentinel is intact (the link count is not checked).
 * **Third-party ACL** (a fixture: one explicit ACE for `Users` on a root planted in that run, never a folder of the VM):
   before clean it is refused in **both** legs (`ESCRITA_CONCEDIDA_A_TERCEIROS`: the ACL gate runs before B1); before the
