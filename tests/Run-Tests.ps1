@@ -5582,6 +5582,22 @@ try {
         Assert-True ($h.Contains('function Assert-V3Only') -and $h.Contains("Case 'V3-snapshot'")) 'invariante por caso e da fase inteira'
         Assert-True ($h.IndexOf("Case 'V3-snapshot'") -lt $h.IndexOf("Case 'P1-installed-after'") -and $h.IndexOf("Case 'P9-temp-pre-existing'") -lt $h.IndexOf("Case 'V3-plant'")) 'fase V3a depois do snapshot da V2 e antes da conferencia final da instalacao'
     }
+    Test-Case 'Ambiente de teste' 'V0.3 V3b: casos N, A e P presentes antes do snapshot da fase; ACE so em raiz plantada nesta execucao (J4); processo de outra conta pedido por arquivo a um observador do e2e que so inicia um comando fixo e termina sozinho' {
+        $h = [IO.File]::ReadAllText((Join-Path $testsDir 'e2e\Invoke-CleanE2E.ps1'))
+        foreach ($id in @('N1', 'N2', 'N4', 'N5', 'N6', 'N7', 'N8', 'A1', 'A2', 'A3', 'A4', 'P1', 'P2', 'P3')) {
+            Assert-True ([regex]::IsMatch($h, "Case 'V3-$id-")) "caso V3-$id presente"
+            Assert-True ($h.IndexOf("Case 'V3-$id-") -lt $h.IndexOf("Case 'V3-snapshot'")) "caso V3-$id coberto pelo snapshot da fase"
+        }
+        # J4: the only ACE added by a case on a planted root of this run (checked by the function itself, before the change).
+        $g = $h.Substring($h.IndexOf('function Grant-V3ThirdPartyWrite'), $h.IndexOf('function Request-V3OtherAccountProcess') - $h.IndexOf('function Grant-V3ThirdPartyWrite'))
+        Assert-True ($g.IndexOf("'ACE fora de uma raiz plantada nesta execucao'") -gt 0 -and $g.IndexOf("'ACE fora de uma raiz plantada nesta execucao'") -lt $g.IndexOf('Set-Acl')) 'ACE so depois de conferir raiz plantada e nonce'
+        Assert-True ([regex]::Matches($h, 'Set-Acl -LiteralPath').Count -eq 4 -and $h.Contains('Set-Acl -LiteralPath $root -AclObject $a')) 'Set-Acl: dono no plantio (V2 e V3), a ACE da funcao e a ACE do A4 na raiz que o deleter fixou (entrada conferida); nenhum outro'
+        $e2e = [IO.File]::ReadAllText((Join-Path $testsDir 'e2e\Invoke-InstallE2E.ps1'))
+        $w = $e2e.Substring($e2e.IndexOf('$v3WatchScript, @'''), $e2e.IndexOf("'@)", $e2e.IndexOf('$v3WatchScript, @''')) - $e2e.IndexOf('$v3WatchScript, @'''))
+        Assert-True ($w.Contains("'-NoProfile -NonInteractive -Command Start-Sleep -Seconds 40'") -and $w.Contains("Join-Path `$Dir 'stop.txt'") -and $w.Contains('AddMinutes(45)')) 'observador: um comando fixo que termina sozinho; o observador termina por arquivo ou prazo'
+        Assert-True (-not $w.Contains('Kill') -and -not $w.Contains('Stop-Process') -and -not $w.Contains('Get-Content')) 'observador nunca encerra processos nem le o conteudo dos pedidos'
+        Assert-True ($e2e.Contains('$v3WatchDir = Join-Path ([IO.Path]::GetTempPath())') -and $e2e.Contains('-SignalDir `"$v3Signal`"')) 'script do observador fora da pasta do usuario de teste; pasta de sinal so na perna A'
+    }
 
     Test-Case 'Analise estatica' 'Excecoes revisadas: justificadas, restritas e sem enfraquecer as regras impostas' {
         $root = Split-Path -Parent $testsDir

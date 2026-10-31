@@ -468,6 +468,13 @@ called by `Invoke-AtmGitCommand`):
   older than 72 h without any activity evidence are probed.
 * **Pinned ancestors**: during a deletion, renaming any ancestor directory (e.g. the profile folder) fails
   briefly.
+* **ACL after pinning** (proved by the V3b harness on disposable VMs): the owner and ACL gates run in the plan, the plan
+  check and the revalidation; once the deleter has pinned the tree it does not read the ACL again, so a write right
+  granted to another account at that moment does not stop the deletion of the planned tree. What such an account can
+  then do is limited by the pins (no rename or replacement of a pinned folder); a file it adds is not in the plan, is
+  never deleted and stops the run as a partial deletion.
+* **Hard links**: the deleter removes the names inside the planned tree; a hard link to a file outside it removes only
+  that name (the other name and the content stay; proved by V3b). The link count is not checked.
 * **Unobservable handles**: handles opened with full sharing (including `FILE_SHARE_DELETE`) and no data
   access are not detected by the probe. Measured by the V3a harness on disposable VMs (Windows Server 2022 and 2025,
   Windows 11 ARM64; TESTING.md): such a handle opened during a deletion does not stop the deleter from deleting that
