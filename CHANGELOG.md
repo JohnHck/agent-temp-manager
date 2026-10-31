@@ -10,6 +10,10 @@ entries below that say "past the deletion gate" are inactive in every copy. Publ
 privilege-matrix rows with the gate closed (V4); a release with the gate open requires the operator's pilot (V5) and its
 own gate. Candidate record: [docs/release/V0.3-RC.md](docs/release/V0.3-RC.md).
 
+* Installer hardening (V0.3 BROADCAST-GUARD): the environment broadcast writes its child's script in the current TEMP
+  and runs it elevated, so it now refuses (the existing compile-failure error) unless that TEMP is the private,
+  administrator-only TEMP that `Enter-AtmPrivateTemp` created and still holds (remembered by it, not inferred from the
+  name), before anything is written. Every current caller already runs inside it: no behaviour change.
 * Installer fix (V0.3 INSTALL-RACE): the `WM_SETTINGCHANGE` broadcast after a machine `Path` change (a fresh install
   or an uninstall, never an update) compiled its P/Invoke type in the installer's own process. Under Windows PowerShell
   5.1 that compiler's temporary files could be removed after it returned, while the cleanup of the private TEMP walked

@@ -61,6 +61,8 @@ elseif (-not $atmCatalog) {
 $script:AtmRequiredFiles = @('agent-temp.ps1', 'bin\agent-temp.cmd', 'lib\Engine.Audit.ps1', 'lib\I18n.ps1', 'lib\Engine.Clean.ps1', 'lib\Engine.Diagnose.ps1', 'lib\Report.ps1', 'lib\Tui.ps1', 'lib\Native.cs', 'providers\ClaudeCode.ps1', 'config\projects.json')
 # Principals that must never hold write-type rights on the install directory.
 $script:AtmUntrustedSids = @('S-1-1-0', 'S-1-5-11', 'S-1-5-32-545', 'S-1-5-4', 'S-1-5-2', 'S-1-5-7')
+# The private TEMP currently held by Enter-AtmPrivateTemp (none outside it); kept if this file is loaded again.
+if (-not (Test-Path -LiteralPath 'variable:script:AtmPrivateTempDir')) { $script:AtmPrivateTempDir = $null }
 
 function Assert-AtmElevated {
     $p = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -212,14 +214,17 @@ function Enter-AtmPrivateTemp {
     param([string]$InstallDir)
     $dir = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\') + '.staging-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
     [void][IO.Directory]::CreateDirectory($dir)
-    $state = [pscustomobject]@{ Dir = $dir; Temp = $env:TEMP; Tmp = $env:TMP }
+    $state = [pscustomobject]@{ Dir = $dir; Temp = $env:TEMP; Tmp = $env:TMP; Held = $script:AtmPrivateTempDir }
     $env:TEMP = $dir; $env:TMP = $dir
+    # Remembered here (not inferred from TEMP's name) for Send-AtmEnvironmentChanged; cleared by Exit-AtmPrivateTemp.
+    $script:AtmPrivateTempDir = $dir
     return $state
 }
 
 function Exit-AtmPrivateTemp {
     param($State, [string]$InstallDir)
     $env:TEMP = $State.Temp; $env:TMP = $State.Tmp
+    $script:AtmPrivateTempDir = $State.Held
     if (Test-Path -LiteralPath $State.Dir) { Remove-AtmOwnTree -Path $State.Dir -InstallDir $InstallDir }
 }
 
@@ -238,6 +243,13 @@ $r = [UIntPtr]::Zero
 [void][AtmInstallNative]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$r)
 exit 0
 '@
+    # The child's script is written in the current TEMP and run elevated: only inside the private TEMP that
+    # Enter-AtmPrivateTemp created and still holds (admin-only), never the administrator's own TEMP. Refused before
+    # anything is written (the catalog has no dedicated text: the compile failure is reported).
+    $priv = $script:AtmPrivateTempDir
+    if (-not $priv -or -not $env:TEMP -or -not [string]::Equals([IO.Path]::GetFullPath($env:TEMP).TrimEnd('\'), $priv, [StringComparison]::OrdinalIgnoreCase) -or
+        [IO.Path]::GetFileName($priv) -notmatch '\.staging-[0-9a-f]{8}$' -or -not [IO.Directory]::Exists($priv) -or
+        (([IO.File]::GetAttributes($priv) -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { throw (Get-AtmText 'inst.compileFailed') }
     $tmp = Join-Path $env:TEMP ('.broadcast-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
     [void][IO.Directory]::CreateDirectory($tmp)
     $oldTemp = $env:TEMP; $oldTmp = $env:TMP

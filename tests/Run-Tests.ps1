@@ -5578,6 +5578,45 @@ try {
         }
         Assert-True (-not ('AtmInstallNative' -as [type])) 'nenhum tipo do aviso carregado no processo da suite'
     }
+    Test-Case 'Instalacao' 'BROADCAST-GUARD: o aviso de ambiente so roda dentro do TEMP privado mantido por Enter-AtmPrivateTemp; fora dele (outro TEMP, pasta com nome de staging que ele nao criou, TEMP trocado dentro dele, depois do Exit) e recusado antes de gravar qualquer arquivo' {
+        # Static: the guard comes before the child's folder and script are written; it compares the current TEMP with
+        # the directory remembered by Enter-AtmPrivateTemp (not only its name), which Exit-AtmPrivateTemp gives back.
+        $ic = [IO.File]::ReadAllText((Join-Path (Split-Path -Parent $testsDir) 'install\InstallCommon.ps1'))
+        $fn = $ic.Substring($ic.IndexOf('function Send-AtmEnvironmentChanged'), $ic.IndexOf('function Open-AtmPathKey') - $ic.IndexOf('function Send-AtmEnvironmentChanged'))
+        $iGuard = $fn.IndexOf('$priv = $script:AtmPrivateTempDir'); $iThrow = $fn.IndexOf("{ throw (Get-AtmText 'inst.compileFailed') }")
+        Assert-True ($iGuard -ge 0 -and $iThrow -gt $iGuard -and $iThrow -lt $fn.IndexOf('[void][IO.Directory]::CreateDirectory($tmp)') -and $iThrow -lt $fn.IndexOf('[IO.File]::WriteAllText($childFile, $child)') -and $fn.Contains("[string]::Equals([IO.Path]::GetFullPath(`$env:TEMP).TrimEnd('\'), `$priv, [StringComparison]::OrdinalIgnoreCase)")) 'recusa antes de criar a pasta e gravar o script; TEMP atual comparado com o diretorio lembrado'
+        $en = $ic.Substring($ic.IndexOf('function Enter-AtmPrivateTemp'), $ic.IndexOf('function Send-AtmEnvironmentChanged') - $ic.IndexOf('function Enter-AtmPrivateTemp'))
+        Assert-True ($en.Contains('Held = $script:AtmPrivateTempDir') -and $en.Contains('$script:AtmPrivateTempDir = $dir') -and $en.Contains('$script:AtmPrivateTempDir = $State.Held')) 'Enter lembra o TEMP privado; Exit devolve o anterior'
+        # Behavioural (everywhere: every case is refused before anything is written or sent).
+        $want = Get-AtmText 'inst.compileFailed'
+        $refused = {
+            param([string]$Temp, [string]$Label)
+            $oldTemp = $env:TEMP; $oldTmp = $env:TMP
+            $before = @(Get-ChildItem -LiteralPath $Temp -Force -Recurse).Count
+            $err = $null
+            try { $env:TEMP = $Temp; $env:TMP = $Temp; Send-AtmEnvironmentChanged } catch { $err = $_.Exception.Message } finally { $env:TEMP = $oldTemp; $env:TMP = $oldTmp }
+            Assert-Eq $err $want "${Label}: recusado com o erro existente"
+            Assert-Eq @(Get-ChildItem -LiteralPath $Temp -Force -Recurse).Count $before "${Label}: nada gravado"
+        }
+        $plain = Join-Path $sandbox 'bg-admin-temp'; [void][IO.Directory]::CreateDirectory($plain)
+        $inst = Join-Path $sandbox 'PF-bg\AgentTempManager'
+        $fake = "$inst.staging-0123abcd"; [void][IO.Directory]::CreateDirectory($fake)
+        Assert-True (-not $script:AtmPrivateTempDir) 'fora de Enter-AtmPrivateTemp nenhum TEMP privado e mantido'
+        & $refused $plain 'TEMP comum (como o do administrador)'
+        & $refused $fake 'pasta com nome de staging nao criada por Enter-AtmPrivateTemp'
+        $st = Enter-AtmPrivateTemp -InstallDir $inst
+        try {
+            Assert-Eq $script:AtmPrivateTempDir $st.Dir 'Enter lembra o TEMP privado'
+            & $refused $plain 'dentro de Enter, TEMP trocado para outra pasta'
+            & $refused $fake 'dentro de Enter, TEMP trocado para outra pasta de staging'
+            $st2 = Enter-AtmPrivateTemp -InstallDir $inst
+            try { Assert-Eq $script:AtmPrivateTempDir $st2.Dir 'Enter aninhado lembra o mais recente' } finally { Exit-AtmPrivateTemp -State $st2 -InstallDir $inst }
+            Assert-Eq $script:AtmPrivateTempDir $st.Dir 'Exit aninhado devolve o anterior'
+            Assert-Eq @(Get-ChildItem -LiteralPath $st.Dir -Force -Recurse).Count 0 'TEMP privado intacto (nada gravado pelas recusas)'
+        } finally { Exit-AtmPrivateTemp -State $st -InstallDir $inst }
+        Assert-True (-not $script:AtmPrivateTempDir -and -not (Test-Path -LiteralPath $st.Dir)) 'depois do Exit nada e mantido e o TEMP privado foi removido'
+        & $refused $plain 'depois do Exit-AtmPrivateTemp'
+    }
 
     Test-Case 'Ambiente de teste' 'Ajuste de ACL do sandbox (sessao elevada): somente o sandbox vazio e canonico; ACL resultante verificada' {
         $fakeRoot = Join-Path $sandbox 'acl-guard'
