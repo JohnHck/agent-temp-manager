@@ -1425,9 +1425,15 @@ function Invoke-V3ChildRun([string]$Mode, [string]$Root, [string]$LogName) {
     $argLine = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Leg {1} -InstallDir "{2}" -SummaryFile "{3}" -WorkDir "{4}" -DisposableMachine -ChildMode {5} -ChildRoot "{6}" -ChildLog "{7}" -ChildOut "{8}"' -f $PSCommandPath, $Leg, $InstallDir, (Join-Path $WorkDir "child-summary-$LogName.json"), $WorkDir, $Mode, $Root, $log, $out
     $psi = New-Object Diagnostics.ProcessStartInfo($shellExe, $argLine)
     $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    # The child's own output, kept to explain a failure (the last lines only, through Protect-Text in the case detail).
+    $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
     $p = [Diagnostics.Process]::Start($psi)
+    $so = $p.StandardOutput.ReadToEndAsync(); $se = $p.StandardError.ReadToEndAsync()
     if (-not $p.WaitForExit(600000)) { throw 'processo filho nao terminou em 10 min (nunca encerrado a forca)' }
-    return [pscustomobject]@{ Exit = $p.ExitCode; Out = $(if (Test-Path -LiteralPath $out) { [IO.File]::ReadAllText($out) } else { $null }); Log = $log }
+    $p.WaitForExit()
+    $text = ([string]$so.Result + ' ' + [string]$se.Result) -replace '\s+', ' '
+    return [pscustomobject]@{ Exit = $p.ExitCode; Out = $(if (Test-Path -LiteralPath $out) { [IO.File]::ReadAllText($out) } else { $null }); Log = $log
+        Tail = $(if ($text.Length -gt 600) { $text.Substring($text.Length - 600) } else { $text.Trim() }) }
 }
 function Invoke-V3ChildExit([string]$Mode, [string]$Label, [int]$ExpectedExit) {
     # Up to 3 children: a child that did not exit was refused before the deleter by process churn of the runner (it
@@ -1438,7 +1444,7 @@ function Invoke-V3ChildExit([string]$Mode, [string]$Label, [int]$ExpectedExit) {
     for ($n = 1; $n -le 3; $n++) {
         $k = Invoke-V3ChildRun $Mode $r "V3-$Label-$n.jsonl"
         if ($k.Exit -eq $ExpectedExit) { return [pscustomobject]@{ Exited = $true; Run = $k; Tries = $tries.ToArray() } }
-        Assert ($k.Exit -eq 0 -and $k.Out -and ($k.Out -cmatch '^NOT_EXITED\|(PLAN_CHANGED_BEFORE_EXECUTION|REVALIDATION_REFUSED)\|')) "filho saiu com $($k.Exit): $($k.Out)"
+        Assert ($k.Exit -eq 0 -and $k.Out -and ($k.Out -cmatch '^NOT_EXITED\|(PLAN_CHANGED_BEFORE_EXECUTION|REVALIDATION_REFUSED)\|')) "filho saiu com $($k.Exit): $($k.Out) [$($k.Tail)]"
         $tries.Add(($k.Out -split '\|')[1])
     }
     return [pscustomobject]@{ Exited = $false; Run = $null; Tries = $tries.ToArray() }
@@ -1567,7 +1573,7 @@ Case 'V3-X1-second-clean-while-first-holds-lock' {
     if ($c.Exhausted) { return (Resolve-Exhausted $c) }
     Assert ($null -ne $v3X.Child) 'a segunda execucao nao foi iniciada'
     $k = $v3X.Child
-    Assert ($k.Exit -eq 0 -and $k.Out -ceq 'NOT_EXITED|CLEAN_LOCK_BUSY||0|False' -and -not (Test-Path -LiteralPath $k.Log)) "segunda execucao: exit $($k.Exit), $($k.Out)"
+    Assert ($k.Exit -eq 0 -and $k.Out -ceq 'NOT_EXITED|CLEAN_LOCK_BUSY||0|False' -and -not (Test-Path -LiteralPath $k.Log)) "segunda execucao: exit $($k.Exit), $($k.Out) [$($k.Tail)]"
     if (@('PLAN_CHANGED_BEFORE_EXECUTION', 'REVALIDATION_REFUSED') -ccontains [string]$c.Res.Aborted) { return (NotTested "the second clean was refused CLEAN_LOCK_BUSY (no presenter, no log), but the first one was then refused by process churn of the runner ($($c.Res.Aborted)), nothing deleted") }
     Assert (-not $c.Res.Aborted -and -not $c.Res.StoppedBy -and @($c.Res.Deleted).Count -eq 1 -and $c.Res.Deleted[0].Outcome -ceq 'COMPLETE') "primeira execucao: $($c.Res.Aborted) $($c.Res.StoppedBy)"
     $inv = Assert-V3Only $before @((Get-V3Rel $r)) 'V3-X1'
