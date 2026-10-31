@@ -138,13 +138,17 @@ attack (`afterPinning`); a static test of the suite compares the two calls. No s
 * **Files and folders in use:** a file held with and without `FILE_SHARE_DELETE` before the plan and before the
   revalidation (refused, nothing deleted) and inside the deleter on the last file of the tree (`DELETE_FILE_REFUSED:
   IN_USE`, `PARTIAL`, the held file intact: the partial outcome **with the real deleter**); a process whose working
-  directory is in the root (refused while planning). Measured against an accepted set: a handle with no data access and
-  full sharing on the last file and on the root folder (invisible to the lock probe), and a process started with its
-  working directory in a pinned folder.
-* **Not tested in this phase:** symbolic links as the standard user (no privilege; the suite covers the in-place
-  symbolic link on its own fixtures); a subst drive in the flow (refused before by the path checks; the deleter case is
-  in the suite); the other V3 cases (new entries, ACL, processes, deleter outcomes, log, interruption, concurrency and
-  shared bases) are later phases.
+  directory is in the root (refused while planning). Measured against an accepted set, with the same result on every
+  image of the matrix: a handle with no data access and full sharing (invisible to the lock probe) on the last file
+  gives `PARTIAL` (`DELETE_DIR_FAILED`, the deleted file pending) and on the root folder `VERIFICATION_FAILED`; a process
+  started with its working directory in a pinned folder starts, and the deletion completes (SECURITY-MODEL,
+  "Unobservable handles").
+* **Symbolic links** (`SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE`) could be created by the standard user on the
+  runners; where they cannot, those cases are `NAO_TESTADO`. The suite also covers the in-place symbolic link on its
+  own fixtures.
+* **Not tested in this phase:** a subst drive in the flow (refused before by the path checks; the deleter case is in
+  the suite); the in-deleter cases of leg B while its process coverage is incomplete; the other V3 cases (new entries,
+  ACL, processes, deleter outcomes, log, interruption, concurrency and shared bases) are later phases.
 
 Gate logic for administrators and other users is also exercised with injected identities (`IsAdmin`, profile SID
 different from the process SID) in every run, on both shells. Manual rows are recorded in the release notes as

@@ -469,11 +469,13 @@ called by `Invoke-AtmGitCommand`):
 * **Pinned ancestors**: during a deletion, renaming any ancestor directory (e.g. the profile folder) fails
   briefly.
 * **Unobservable handles**: handles opened with full sharing (including `FILE_SHARE_DELETE`) and no data
-  access are not detected by the probe. Expected, and measured by the V3a harness on disposable VMs (TESTING.md): such
-  a handle opened during a deletion does not stop the deleter from deleting that file, but the file stays pending
-  while the handle is open, so its folder cannot be deleted and the run stops as a partial deletion; on the root folder
-  it leaves the absence unconfirmed. In both cases nothing outside the planned root is affected. Process working
-  directories and environment variables are not
+  access are not detected by the probe. Measured by the V3a harness on disposable VMs (Windows Server 2022 and 2025,
+  Windows 11 ARM64; TESTING.md): such a handle opened during a deletion does not stop the deleter from deleting that
+  file, but the file stays pending while the handle is open, so its folder cannot be deleted (`DELETE_DIR_FAILED`,
+  `WIN32_145`) and the run stops as a partial deletion; on the root folder the deleter completes and the absence is not
+  confirmed (`VERIFICATION_FAILED`). Likewise, the pins do not stop a process from starting with its working directory
+  in a pinned folder during the deletion: the folder is still deleted (the process keeps a deleted working directory).
+  In every case nothing outside the planned root is affected. Process working directories and environment variables are not
   observable (V0.1; in V0.2 the D-1 working-directory reading is deferred, ADR-0004 amendment: the diagnose reports it
   as `NOT_OBSERVABLE`).
 * **Open-file evidence (V0.2 diagnose, D-2; closed by the open-file diagnostics gate, validated on fixtures only):**
