@@ -16,7 +16,8 @@ own gate. Candidate record: [docs/release/V0.3-RC.md](docs/release/V0.3-RC.md).
   it (reparse-point check), so a fresh install failed now and then with "could not find a part of the path". The type
   is now compiled and the broadcast sent from a child Windows PowerShell, with a TEMP/TMP of its own inside the private
   TEMP, removed once the child has exited. The cleanup's reparse-point check and the ACL and manifest checks are
-  unchanged. The installers of 0.1.0, 0.1.1 and 0.2.0 are published and keep the old behaviour.
+  unchanged. The installers of 0.1.0, 0.1.1 and 0.2.0 are published and keep the old behaviour; the e2e makes ONE
+  new attempt of their fresh install, only for that failure (recorded in the step), never for the installer under test.
 * Tests only: the `install e2e` jobs also install the published 0.2.0 (GitHub Release asset, SHA-256 pinned from that
   release's `SHA256SUMS.txt`), update it to the package under test, roll back, update again and uninstall, checking
   `version`, `verify`, the installed manifest's version and the four installed gates, as for 0.1.0 and 0.1.1.

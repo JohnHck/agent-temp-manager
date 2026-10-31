@@ -229,7 +229,8 @@ function Send-AtmEnvironmentChanged {
     # whose temporary files can be removed after Add-Type returns, while Exit-AtmPrivateTemp walks the private TEMP
     # (reparse check before removing it) - an intermittent "could not find a part of the path" on a fresh install.
     # Once the child has exited nothing it started touches the private TEMP. The child's TEMP/TMP is a folder of its
-    # own inside the current (private) TEMP, removed with it.
+    # own inside the current (private, admin-only) TEMP; its script (the constant below, from this verified file) is
+    # written there and run with -File (never an encoded command, which antivirus/ASR rules flag), removed with it.
     $child = @'
 $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class AtmInstallNative { [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult); }'
@@ -241,9 +242,11 @@ exit 0
     [void][IO.Directory]::CreateDirectory($tmp)
     $oldTemp = $env:TEMP; $oldTmp = $env:TMP
     try {
+        $childFile = Join-Path $tmp 'broadcast.ps1'
+        [IO.File]::WriteAllText($childFile, $child)
         $env:TEMP = $tmp; $env:TMP = $tmp
         $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        & $ps -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($child))) | Out-Null
+        & $ps -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $childFile | Out-Null
         if ($LASTEXITCODE -ne 0) { throw (Get-AtmText 'inst.compileFailed') }
     } finally {
         $env:TEMP = $oldTemp; $env:TMP = $oldTmp

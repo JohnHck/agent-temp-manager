@@ -72,6 +72,38 @@ function Invoke-Agent([string]$ArgLine, [string]$Tag) {
 
 function Assert([bool]$Cond, [string]$Msg) { if (-not $Cond) { throw $Msg } }
 
+function Invoke-PublishedFreshInstall([string]$Version, [string]$PkgDir) {
+    # INSTALL-RACE (auditor's decision, option b). The published installers (0.1.0, 0.1.1, 0.2.0; pinned by hash) compile
+    # the PATH broadcast in their own process; under Windows PowerShell 5.1 a compiler temp folder can disappear while
+    # their cleanup walks the private TEMP. ONE new attempt, only of the fresh install of a published version, only when
+    # the failure is "Could not find a part of the path" under <InstallDir>.staging-, and only after the uninstaller
+    # under test has left the machine clean. Any other failure, or a second one, stays FAIL. Never the installer under
+    # test. Returns '' or the note of the new attempt (with the first attempt's text) for the summary.
+    Assert ([bool]$PkgDir -and $PkgDir -ne $pkg) 'nova tentativa so para o instalador de uma versao publicada'
+    # First attempt: waited for until the installer process has exited, stdout and stderr kept in files. As in the
+    # other steps (a native stderr line throws under this driver), any stderr output is a failure, even with exit 0.
+    $installer = Join-Path $PkgDir 'install\Install-AgentTempManager.ps1'
+    $errFile = Join-Path $OutDir "xversion-install-$Version-stderr.txt"
+    $p = Start-Process -FilePath $installerExe -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -File "' + $installer + '"') -Wait -PassThru -NoNewWindow `
+        -RedirectStandardOutput (Join-Path $OutDir "xversion-install-$Version.txt") -RedirectStandardError $errFile
+    $code = $p.ExitCode
+    $errText = $(if (Test-Path -LiteralPath $errFile) { [IO.File]::ReadAllText($errFile) } else { '' })
+    if ($code -eq 0 -and -not $errText.Trim()) { return '' }
+    # Lines joined back (a long stderr line may have been wrapped) before matching the one tolerated failure.
+    $m = [regex]::Match(($errText -replace '\r?\n', ''), "Could not find a part of the path '" + [regex]::Escape("$installDir.staging-") + "[0-9a-f]{8}\\[^']*'", 'IgnoreCase')
+    Assert ($m.Success -and $code -ne 0) "$Version installer exit $code; stderr: $((($errText -split '\r?\n') | Where-Object { $_.Trim() } | Select-Object -First 1))"
+    if (Test-Path -LiteralPath (Join-Path $installDir 'install-state.json')) {
+        & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pkg 'install\Uninstall-AgentTempManager.ps1') *> (Join-Path $OutDir "xversion-install-$Version-cleanup.txt")
+        Assert ($LASTEXITCODE -eq 0) "$Version installer exit $code ($($m.Value)); cleanup before the new attempt: uninstall exit $LASTEXITCODE"
+    }
+    $left = @(Get-ChildItem -LiteralPath (Split-Path -Parent $installDir) -Directory -Filter ((Split-Path -Leaf $installDir) + '.staging-*'))
+    Assert (-not (Test-Path -LiteralPath $installDir) -and -not (Test-Path -LiteralPath "$installDir.previous") -and $left.Count -eq 0 -and
+        -not (([Environment]::GetEnvironmentVariable('Path', 'Machine')) -match 'AgentTempManager')) "$Version installer exit $code ($($m.Value)); machine not clean for a new attempt"
+    & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PkgDir 'install\Install-AgentTempManager.ps1') *> (Join-Path $OutDir "xversion-install-$Version-retry.txt")
+    Assert ($LASTEXITCODE -eq 0) "$Version installer exit $code ($($m.Value)), and exit $LASTEXITCODE on the one new attempt"
+    return " (after ONE new attempt: first attempt exit $code, $($m.Value); machine cleaned by the uninstaller under test)"
+}
+
 $pkg = $null
 $releaseDirUsed = $(if ($ReleaseDir) { $ReleaseDir } else { Join-Path $repo 'dist' })
 Step 'build-release' {
@@ -634,11 +666,10 @@ Step 'xversion-0.1.0-package' {
 Step 'xversion-install-0.1.0' {
     if (-not $script:v010Pkg) { $script:notTested = $true; return '0.1.0 package unavailable' }
     Assert (-not (Test-Path $installDir)) 'instalacao anterior ainda presente'
-    & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $script:v010Pkg 'install\Install-AgentTempManager.ps1') *> (Join-Path $OutDir 'xversion-install-0.1.0.txt')
-    Assert ($LASTEXITCODE -eq 0) "0.1.0 installer exit $LASTEXITCODE"
+    $na = Invoke-PublishedFreshInstall '0.1.0' $script:v010Pkg
     $r = Invoke-Agent 'version -Lang en-US' 'xversion-version-0.1.0'; Assert ($r.Code -eq 0 -and $r.Text -match 'agent-temp 0\.1\.0\b') "0.1.0 version: exit $($r.Code)"
     $r = Invoke-Agent 'verify' 'xversion-verify-0.1.0'; Assert ($r.Code -eq 0) "0.1.0 verify exit $($r.Code)"
-    '0.1.0 installed and verified'
+    '0.1.0 installed and verified' + $na
 }
 Step 'xversion-update-from-0.1.0' {
     if (-not $script:v010Pkg) { $script:notTested = $true; return '0.1.0 package unavailable' }
@@ -702,11 +733,10 @@ Step 'xversion-0.1.1-package' {
 Step 'xversion-install-0.1.1' {
     if (-not $script:v011Pkg) { $script:notTested = $true; return '0.1.1 package unavailable' }
     Assert (-not (Test-Path $installDir)) 'instalacao anterior ainda presente'
-    & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $script:v011Pkg 'install\Install-AgentTempManager.ps1') *> (Join-Path $OutDir 'xversion-install-0.1.1.txt')
-    Assert ($LASTEXITCODE -eq 0) "0.1.1 installer exit $LASTEXITCODE"
+    $na = Invoke-PublishedFreshInstall '0.1.1' $script:v011Pkg
     $r = Invoke-Agent 'version -Lang en-US' 'xversion-version-0.1.1'; Assert ($r.Code -eq 0 -and $r.Text -match 'agent-temp 0\.1\.1\b') "0.1.1 version: exit $($r.Code)"
     $r = Invoke-Agent 'verify' 'xversion-verify-0.1.1'; Assert ($r.Code -eq 0) "0.1.1 verify exit $($r.Code)"
-    '0.1.1 installed and verified'
+    '0.1.1 installed and verified' + $na
 }
 Step 'xversion-update-from-0.1.1' {
     if (-not $script:v011Pkg) { $script:notTested = $true; return '0.1.1 package unavailable' }
@@ -766,12 +796,11 @@ Step 'xversion-0.2.0-package' {
 Step 'xversion-install-0.2.0' {
     if (-not $script:v020Pkg) { $script:notTested = $true; return '0.2.0 package unavailable' }
     Assert (-not (Test-Path $installDir)) 'instalacao anterior ainda presente'
-    & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $script:v020Pkg 'install\Install-AgentTempManager.ps1') *> (Join-Path $OutDir 'xversion-install-0.2.0.txt')
-    Assert ($LASTEXITCODE -eq 0) "0.2.0 installer exit $LASTEXITCODE"
+    $na = Invoke-PublishedFreshInstall '0.2.0' $script:v020Pkg
     $r = Invoke-Agent 'version -Lang en-US' 'xversion-version-0.2.0'; Assert ($r.Code -eq 0 -and $r.Text -match 'agent-temp 0\.2\.0\b') "0.2.0 version: exit $($r.Code)"
     $r = Invoke-Agent 'verify' 'xversion-verify-0.2.0'; Assert ($r.Code -eq 0) "0.2.0 verify exit $($r.Code)"
     $mv = & $manifestVersion $installDir; Assert ($mv -ceq '0.2.0') "manifesto instalado: $mv"
-    '0.2.0 installed and verified (manifest 0.2.0)'
+    '0.2.0 installed and verified (manifest 0.2.0)' + $na
 }
 Step 'xversion-update-from-0.2.0' {
     if (-not $script:v020Pkg) { $script:notTested = $true; return '0.2.0 package unavailable' }

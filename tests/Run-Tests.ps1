@@ -5522,7 +5522,7 @@ try {
             Assert-True ($iElev -ge 0 -and $iEnter -gt $iElev -and $iOp -gt $iEnter -and $txt.Contains('Exit-AtmPrivateTemp')) "${w}: elevacao -> TEMP privado -> operacao -> limpeza"
         }
     }
-    Test-Case 'Instalacao' 'V0.3 INSTALL-RACE: nenhuma compilacao no processo do instalador - o aviso de ambiente compila num processo filho (System32, TEMP proprio dentro do TEMP privado) e termina antes da limpeza do TEMP privado; a verificacao de reparse da limpeza continua inteira' {
+    Test-Case 'Instalacao' 'V0.3 INSTALL-RACE: nenhuma compilacao no processo do instalador - o aviso de ambiente compila num processo filho (System32, -File de um script na pasta propria do filho dentro do TEMP privado, nunca comando codificado) e termina antes da limpeza do TEMP privado; a verificacao de reparse da limpeza continua inteira' {
         # Static: under Windows PowerShell 5.1 an in-process Add-Type (CodeDom) could leave temporary files that are
         # removed after it returns, while Exit-AtmPrivateTemp walks the private TEMP. No script of install\ compiles in
         # its own process: Add-Type appears only in the text of a child's command.
@@ -5535,8 +5535,16 @@ try {
             }
         }
         $fn = $ic.Substring($ic.IndexOf('function Send-AtmEnvironmentChanged'), $ic.IndexOf('function Open-AtmPathKey') - $ic.IndexOf('function Send-AtmEnvironmentChanged'))
-        Assert-True ($fn.Contains("`$child = @'") -and $fn.Contains("`$ps = Join-Path `$env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'") -and $fn.Contains('& $ps -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand') -and -not $fn.Contains("-as [type]")) 'aviso de ambiente: processo filho pelo caminho do System32, sem tipo carregado neste processo'
+        Assert-True ($fn.Contains("`$child = @'") -and $fn.Contains("`$ps = Join-Path `$env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'") -and $fn.Contains('& $ps -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $childFile | Out-Null') -and -not $fn.Contains("-as [type]")) 'aviso de ambiente: processo filho pelo caminho do System32 com -File, sem tipo carregado neste processo'
         Assert-True ($fn.Contains("Join-Path `$env:TEMP ('.broadcast-'") -and $fn.IndexOf('$env:TEMP = $tmp') -lt $fn.IndexOf('& $ps') -and $fn.Contains("if (`$LASTEXITCODE -ne 0) { throw")) 'filho com TEMP proprio dentro do TEMP atual (o privado); falha do filho continua sendo erro'
+        # The child's script lives in the child's own folder: created, written, run, then removed with the folder.
+        $iDir = $fn.IndexOf('[void][IO.Directory]::CreateDirectory($tmp)'); $iFile = $fn.IndexOf("`$childFile = Join-Path `$tmp 'broadcast.ps1'")
+        $iWrite = $fn.IndexOf('[IO.File]::WriteAllText($childFile, $child)'); $iRun = $fn.IndexOf('& $ps'); $iFin = $fn.IndexOf('} finally {')
+        $iDel = $fn.IndexOf('if (Test-Path -LiteralPath $tmp) { [IO.Directory]::Delete($tmp, $true) }')
+        Assert-True ($iDir -ge 0 -and $iFile -gt $iDir -and $iWrite -gt $iFile -and $iRun -gt $iWrite -and $iFin -gt $iRun -and $iDel -gt $iFin) 'script do filho: pasta criada antes, gravado nela, -File, pasta removida depois no finally'
+        foreach ($f in @(Get-ChildItem -LiteralPath $instDir -Filter '*.ps1' -File)) {
+            Assert-True ([IO.File]::ReadAllText($f.FullName) -notmatch '(?i)-(EncodedCommand|enc|ec|e)\s+\S') "$($f.Name): nenhum comando codificado (antivirus/ASR)"
+        }
         Assert-True ($fn.Contains('SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, ''Environment'', 2, 5000, [ref]$r)')) 'mesma mensagem e mesmos argumentos de antes'
         $iHere = $fn.IndexOf("`$child = @'"); $iAdd = $fn.IndexOf('Add-Type -TypeDefinition'); $iEnd = [regex]::Match($fn, "`r?`n'@").Index
         Assert-True ($iHere -ge 0 -and $iAdd -gt $iHere -and $iEnd -gt $iAdd -and $fn.IndexOf('& $ps') -gt $iEnd) 'Add-Type do aviso so dentro do texto do filho'
@@ -5545,6 +5553,15 @@ try {
         Assert-True ($ro.Contains('Get-ChildItem -LiteralPath $full -Recurse -Force') -and $ro.Contains("throw (Get-AtmText 'inst.reparseRefused'") -and -not $ro.Contains('SilentlyContinue') -and -not $ro.Contains('catch')) 'Remove-AtmOwnTree: varredura de reparse inteira, sem tolerancia'
         $ex = $ic.Substring($ic.IndexOf('function Exit-AtmPrivateTemp'), $ic.IndexOf('function Send-AtmEnvironmentChanged') - $ic.IndexOf('function Exit-AtmPrivateTemp'))
         Assert-True ($ex.Contains('Remove-AtmOwnTree -Path $State.Dir -InstallDir $InstallDir')) 'TEMP privado continua removido pela limpeza verificada'
+        # e2e (auditor's decision, option b): ONE new attempt, only for the fresh install of a published version, only
+        # for that message under <InstallDir>.staging-, never for the installer under test.
+        $e2e = [IO.File]::ReadAllText((Join-Path $testsDir 'e2e\Invoke-InstallE2E.ps1'))
+        $calls = @([regex]::Matches($e2e, '(?m)^\s*\$na = Invoke-PublishedFreshInstall ''([0-9.]+)'' \$script:(v0[0-9]{2}Pkg)\r?$') | ForEach-Object { $_.Groups[1].Value + '/' + $_.Groups[2].Value })
+        Assert-Eq ($calls -join ',') '0.1.0/v010Pkg,0.1.1/v011Pkg,0.2.0/v020Pkg' 'nova tentativa so nos tres passos de instalacao nova das versoes publicadas'
+        Assert-Eq ([regex]::Matches($e2e, 'Invoke-PublishedFreshInstall').Count) 4 'definicao + tres chamadas, nenhuma outra'
+        $fr = $e2e.Substring($e2e.IndexOf('function Invoke-PublishedFreshInstall'), $e2e.IndexOf('$pkg = $null') - $e2e.IndexOf('function Invoke-PublishedFreshInstall'))
+        Assert-True ($fr.Contains('Assert ([bool]$PkgDir -and $PkgDir -ne $pkg)') -and $fr.Contains("`"Could not find a part of the path '`" + [regex]::Escape(`"`$installDir.staging-`") + `"[0-9a-f]{8}\\[^']*'`"") -and $fr.Contains('Assert ($m.Success -and $code -ne 0)')) 'nova tentativa: nunca o pacote sob teste; so a mensagem sob .staging-; outra falha continua FAIL'
+        Assert-True (([regex]::Matches($fr, 'Install-AgentTempManager\.ps1')).Count -eq 2 -and $fr.Contains("xversion-install-`$Version-retry.txt") -and $fr.IndexOf('Uninstall-AgentTempManager.ps1') -lt $fr.LastIndexOf('Install-AgentTempManager.ps1') -and $fr.Contains('machine not clean for a new attempt')) 'uma unica nova tentativa, depois da maquina limpa pelo desinstalador sob teste'
         # Behavioural (disposable CI runner only: it broadcasts a real WM_SETTINGCHANGE, which changes nothing): the real
         # child inside a private TEMP, three times, then the cleanup with its reparse check: no error, nothing left.
         if ($env:GITHUB_ACTIONS -ne 'true') { $script:caseSkipped = $true; $script:caseNote = 'parte comportamental so no runner descartavel (envia WM_SETTINGCHANGE real)'; return }
