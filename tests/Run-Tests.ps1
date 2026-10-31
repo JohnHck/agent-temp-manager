@@ -252,6 +252,20 @@ using (SafeFileHandle h = CreateFileW(dir, 0x100, 7, IntPtr.Zero, 3, 0x02000000 
   return ok ? "SET_OK" : "SET_FAIL " + Marshal.GetLastWin32Error();
 }
   }
+  // Test-only (V3a): the same, as an absolute directory symbolic link (needs the symbolic link privilege).
+  public static string SetSymlink(string dir, string target) {
+using (SafeFileHandle h = CreateFileW(dir, 0x100, 7, IntPtr.Zero, 3, 0x02000000 | 0x00200000, IntPtr.Zero)) {
+  if (h.IsInvalid) return "OPEN_FAIL " + Marshal.GetLastWin32Error();
+  byte[] s = Encoding.Unicode.GetBytes("\\??\\" + target); byte[] p = Encoding.Unicode.GetBytes(target);
+  int dataLen = 12 + s.Length + p.Length; byte[] b = new byte[8 + dataLen];
+  BitConverter.GetBytes(0xA000000Cu).CopyTo(b, 0); BitConverter.GetBytes((ushort)dataLen).CopyTo(b, 4);
+  BitConverter.GetBytes((ushort)0).CopyTo(b, 8); BitConverter.GetBytes((ushort)s.Length).CopyTo(b, 10);
+  BitConverter.GetBytes((ushort)s.Length).CopyTo(b, 12); BitConverter.GetBytes((ushort)p.Length).CopyTo(b, 14);
+  BitConverter.GetBytes(0u).CopyTo(b, 16); s.CopyTo(b, 20); p.CopyTo(b, 20 + s.Length);
+  int r; bool ok = DeviceIoControl(h, 0x000900A4, b, b.Length, IntPtr.Zero, 0, out r, IntPtr.Zero);
+  return ok ? "SET_OK" : "SET_FAIL " + Marshal.GetLastWin32Error();
+}
+  }
 }
 '@
     }
@@ -3356,6 +3370,33 @@ exit 0
             $script:caseNote = "unidade subst: $($r.AbortReason -replace ':.*$', '')"
         } finally { $null = cmd /c subst "$($sl):" /d 2>&1 }
     }
+    Test-Case 'Gate V0.1' 'V0.3 V3a R13: pasta vazia pinada convertida em link simbolico de diretorio dentro da janela (FSCTL) recusada (PINNED_DIR_CHANGED), alvo sentinela intacto' {
+        # Native engine only (AtmDeleter), on a tree the harness creates, as the F-10 case above but with a directory
+        # symbolic link (needs the symbolic link privilege: without it, NAO_TESTADO). The full flow repeats it in the e2e.
+        Initialize-AtmTestReparse
+        $v3 = [AgentTempManager.AtmNative]::GetLongPath((New-Item -ItemType Directory -Path (Join-Path $sandbox 'v3a-r13')).FullName)
+        $sent = Join-Path $v3 'sentinel'
+        [void][IO.Directory]::CreateDirectory((Join-Path $sent 'deep'))
+        [IO.File]::WriteAllText((Join-Path $sent 'keep.txt'), 'keep'); [IO.File]::WriteAllText((Join-Path $sent 'deep\deep.txt'), 'deep')
+        $snap = { @(Get-ChildItem -LiteralPath $sent -Recurse -Force | ForEach-Object { $_.FullName.Substring($sent.Length) + '|' + $(if ($_.PSIsContainer) { 'd' } else { [IO.File]::ReadAllText($_.FullName) }) } | Sort-Object) -join ';' }
+        $before = & $snap
+        $t = Join-Path $v3 'tree'
+        foreach ($d in @($t, (Join-Path $t 'empty'), (Join-Path $t 'sub'))) { [void][IO.Directory]::CreateDirectory($d) }
+        [IO.File]::WriteAllText((Join-Path $t 'top.txt'), 't'); [IO.File]::WriteAllText((Join-Path $t 'sub\file.txt'), 'f')
+        $st = @{ Set = $null }
+        $hook = [Action[string]]({ param($root) $st.Set = [AtmTestReparse]::SetSymlink((Join-Path $root 'empty'), $sent) }.GetNewClosure())
+        $r = [AgentTempManager.AtmDeleter]::DeleteTree($t, $hook)
+        $lnk = Join-Path $t 'empty'
+        if ($st.Set -cne 'SET_OK') {
+            Assert-True $r.Completed "sem link gravado ($($st.Set)) a exclusao segue normal ($($r.AbortReason))"
+            $script:caseSkipped = $true; $script:caseNote = "link simbolico nao gravado nesta conta ($($st.Set -replace ' .*$', '')): sem privilegio"
+            return
+        }
+        Assert-True (-not $r.Completed -and [string]$r.AbortReason -like 'PINNED_DIR_CHANGED*' -and [string]$r.FailedAt -ieq $lnk) "exclusao recusada na reverificacao ($($r.AbortReason -replace ':.*$', ''))"
+        Assert-Eq (& $snap) $before 'alvo sentinela intacto (nada apagado nem atravessado)'
+        if ((Test-Path -LiteralPath $lnk) -and (([IO.File]::GetAttributes($lnk) -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { [IO.Directory]::Delete($lnk, $false) }
+        $script:caseNote = "janela: $($r.AbortReason -replace ':.*$', ''), $($r.FilesDeleted) arquivo(s) antes"
+    }
     Test-Case 'Privacidade' 'Scanner detecta dados pessoais plantados e aceita apenas os valores ficticios do projeto' {
         $scan = Join-Path (Split-Path -Parent $testsDir) 'tools\Test-AtmPrivacy.ps1'
         $d = Join-Path $sandbox 'privacy-probe'; [void][IO.Directory]::CreateDirectory($d)
@@ -5495,9 +5536,13 @@ try {
         Assert-True ($h.Contains("`$lib = Join-Path `$InstallDir 'lib'") -and -not $h.Contains("'src'")) 'motor carregado da instalacao, nunca da fonte'
         Assert-True ($h.Contains('$script:AtmCleanConsoleSource = { $true }') -and $h.Contains("observedBy -ceq 'TEST_SEAM'")) 'console pelo ponto de teste, conferido no log'
         # Real deleter, log file, lock name, discovery and recency: no seam, override or product constant changed.
-        foreach ($pat in @('DeleteTreeImpl', 'PathPresenceImpl', 'LogWriter', 'AtmCleanLockName', 'ProfilesOverride', 'IdentityOverride', 'ProcessesOverride', 'NowUtc', 'AtmRuntimeEvidenceSources', 'AtmRecentHours =', 'AtmB1ExceptionActiveMaxRoots', 'DeleteTree(', 'Remove-Item')) {
+        foreach ($pat in @('PathPresenceImpl', 'LogWriter', 'AtmCleanLockName', 'ProfilesOverride', 'IdentityOverride', 'ProcessesOverride', 'NowUtc', 'AtmRuntimeEvidenceSources', 'AtmRecentHours =', 'AtmB1ExceptionActiveMaxRoots', 'Remove-Item')) {
             Assert-True (-not $h.Contains($pat)) "harness sem '$pat'"
         }
+        # V3a: the only deleter seam is the wrapper of the V3 cases (the real deleter with the engine's arguments, checked
+        # in the V3a case below); the V2 runs never pass it.
+        $v2Fn = $h.Substring($h.IndexOf('function Invoke-E2EClean('), $h.IndexOf('function Invoke-E2ECleanChurn(') - $h.IndexOf('function Invoke-E2EClean('))
+        Assert-True (-not $v2Fn.Contains('DeleteTreeImpl') -and [regex]::Matches($h, 'DeleteTreeImpl').Count -eq 1 -and $h.Contains('DeleteTreeImpl = $v3Deleter')) 'V2: deleter real sem ponto de teste; o unico uso de DeleteTreeImpl e o wrapper da V3'
         Assert-True ($h.Contains('-LogFile') -or $h.Contains('LogFile = $log')) 'log T1 em arquivo'
         # Containment: run root created atomically with a protected DACL, refused if present; nonce checked per entry.
         Assert-True ($h.Contains("Assert (-not (Test-Path -LiteralPath `$runRoot)) 'RUN_ROOT_EXISTS'") -and $h.Contains('D:PAI(') -and $h.Contains('AreAccessRulesProtected')) 'raiz de execucao atomica, protegida, recusada se existir'
@@ -5518,6 +5563,24 @@ try {
         }
         $clean = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Clean.ps1'))
         Assert-True ([regex]::Matches($clean, '\$script:AtmCleanConsoleSource\s*=').Count -eq 1 -and $clean -match '(?m)^\$script:AtmCleanConsoleSource = \$null\r?$') 'ponto de teste do console: atribuicao unica $null no produto'
+    }
+    Test-Case 'Ambiente de teste' 'V0.3 V3a: wrapper do harness chama o deleter real com exatamente os argumentos da unica chamada do motor (J1, sem ponto de teste novo no produto); casos R1-R13 e U1-U9 presentes; entradas presas a raiz da execucao; alvos de link so na raiz da execucao' {
+        $h = [IO.File]::ReadAllText((Join-Path $testsDir 'e2e\Invoke-CleanE2E.ps1'))
+        $clean = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Clean.ps1'))
+        $call = '\[AgentTempManager\.AtmDeleter\]::DeleteTree\(([^)]*)\)'
+        $mc = [regex]::Matches($clean, $call); $mh = [regex]::Matches($h, $call)
+        Assert-True ($mc.Count -eq 1 -and $mh.Count -eq 1) "uma chamada ao deleter no motor ($($mc.Count)) e uma no harness ($($mh.Count))"
+        $ac = @($mc[0].Groups[1].Value -split ',\s*'); $ah = @($mh[0].Groups[1].Value -split ',\s*')
+        Assert-True ($ac.Count -eq 6 -and $ah.Count -eq 6 -and (($ac[0..4]) -join ',') -ceq (($ah[0..4]) -join ',')) "argumentos do motor ($($ac -join ', ')) e do wrapper ($($ah -join ', '))"
+        Assert-True ($ac[5] -ceq '$null' -and $ah[5] -ceq '$v3After') 'o motor nunca passa afterPinning; so o wrapper do teste passa o ataque'
+        # The engine hands the same partition ($c) to the seam; the wrapper receives it under the same name.
+        Assert-True ($clean.Contains('if ($DeleteTreeImpl) { $d = & $DeleteTreeImpl $c }') -and ($h.Contains("`$v3Deleter = {`r`n    param(`$c)") -or $h.Contains("`$v3Deleter = {`n    param(`$c)"))) 'o wrapper recebe a mesma particao que o motor passaria ao deleter'
+        foreach ($id in @('R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9', 'R10', 'R11', 'R12', 'R13', 'U1', 'U2', 'U3', 'U4', 'U5', 'U6', 'U7', 'U8', 'U9')) {
+            Assert-True ([regex]::IsMatch($h, "Case 'V3-$id-")) "caso V3-$id presente"
+        }
+        Assert-True ($h.Contains('function Assert-V3Entry') -and $h.Contains('Assert-V3Entry $v3p;') -and $h.Contains("'alvo do link fora da raiz desta execucao'") -and $h.Contains('Assert-Entry $Path')) 'entradas da V3 conferidas (nonce e base; links criados nesta execucao com alvo na raiz da execucao)'
+        Assert-True ($h.Contains('function Assert-V3Only') -and $h.Contains("Case 'V3-snapshot'")) 'invariante por caso e da fase inteira'
+        Assert-True ($h.IndexOf("Case 'V3-snapshot'") -lt $h.IndexOf("Case 'P1-installed-after'") -and $h.IndexOf("Case 'P9-temp-pre-existing'") -lt $h.IndexOf("Case 'V3-plant'")) 'fase V3a depois do snapshot da V2 e antes da conferencia final da instalacao'
     }
 
     Test-Case 'Analise estatica' 'Excecoes revisadas: justificadas, restritas e sem enfraquecer as regras impostas' {

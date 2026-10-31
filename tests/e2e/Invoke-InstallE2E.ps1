@@ -486,7 +486,9 @@ function Read-V2Summary([string]$File, [int]$Exit, [string]$Console) {
     $bad = @($s.cases.PSObject.Properties | Where-Object { $_.Value.status -eq 'FAIL' } | ForEach-Object { "$($_.Name): $($_.Value.detail)" })
     $nt = @($s.cases.PSObject.Properties | Where-Object { $_.Value.status -eq 'NOT_TESTED' } | ForEach-Object { $_.Name })
     Assert ($bad.Count -eq 0 -and $Exit -eq 0) ("V2 FAIL (exit $Exit): " + ($bad -join ' | '))
-    "$($s.passed) PASS / 0 FAIL / $($s.notTested) NOT_TESTED [$($nt -join ', ')]; $($s.shell); coverage complete=$($s.processCoverage.complete)"
+    # V0.3 V3a: its cases (V3-*) are counted apart, in the same summary.
+    $v3 = $(if ($s.PSObject.Properties['v3']) { "; V3a $($s.v3.passed) PASS / $($s.v3.failed) FAIL / $($s.v3.notTested) NOT_TESTED" } else { '' })
+    "$($s.passed) PASS / 0 FAIL / $($s.notTested) NOT_TESTED [$($nt -join ', ')]; $($s.shell); coverage complete=$($s.processCoverage.complete)$v3"
 }
 Step 'v2-clean-leg-A-standard-user' {
     # Leg A: the standard user of this VM (not elevated): B1 restricted exception. The harness is copied to a folder that

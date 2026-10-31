@@ -195,7 +195,10 @@ already built in V0.1 and the evidence gathered in V0.2.
   disposable GitHub-hosted VMs, against the installed candidate, as a non-elevated standard user (B1 restricted
   exception) and elevated (ELIGIBLE only when the measured process coverage is complete). The confirmation there is
   automated, never a human acceptance. Details and limits: [TESTING.md](TESTING.md#real-clean-on-disposable-vms-v03-v2).
-* V3 (adversarial cases), V4 (privilege matrix) and V5 (operator pilot): not started.
+* V3, adversarial cases: phase V3a (reparse points and links, files and folders in use) **in CI**, attacked in each
+  window of the flow with the real deleter; the other phases are not started. Details and limits:
+  [TESTING.md](TESTING.md#adversarial-cases-on-disposable-vms-v03-v3-phase-v3a).
+* V4 (privilege matrix) and V5 (operator pilot): not started.
 
 **Deliverables.**
 * Release gate enabled through a reviewed change; deletion only for paths in an explicit allowlist.

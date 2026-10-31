@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+* V0.3 V3, phase V3a (tests only, no product change): the CI-only harness also attacks planted roots with reparse
+  points and links and with files and folders in use, in each window of the flow (before the plan, before the final
+  confirmation, before the revalidation, before the deleter and inside it once everything is pinned). Inside the deleter
+  it uses the real deleter through a wrapper with the engine's own arguments (compared by a static test). Each case
+  asserts its code, the log read back from the file, the number of calls to the deleter and that nothing outside the
+  planned root changed. Details: docs/TESTING.md, "Adversarial cases on disposable VMs (V0.3 V3, phase V3a)".
 * V0.3 V2 (tests only, no product change): the `install e2e` jobs run the real clean end to end on disposable
   GitHub-hosted VMs, through the CI-only harness `tests/e2e/Invoke-CleanE2E.ps1`, on roots it plants itself in a run root
   it creates. It loads the installed engine and opens the deletion gate only in its own process memory; the installed

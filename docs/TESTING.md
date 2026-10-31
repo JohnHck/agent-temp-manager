@@ -109,6 +109,43 @@ the release archive and refuses an archive that contains it, and the e2e checks 
   its own fixtures); partial, exception and inconclusive-verification outcomes with the real deleter (V3); `ELIGIBLE`
   without elevation; an abandoned lock; UAC prompts and filtered tokens (the runners have UAC disabled).
 
+## Adversarial cases on disposable VMs (V0.3 V3, phase V3a)
+
+The same harness, after the V2 runs, plants more roots the same way (run nonce, recency simulated, real discovery) and
+attacks them in each window of the flow: before the plan; between the plan and the final confirmation (the harness's
+own confirmation reader); between the confirmation and the revalidation (`-BeforeDeleteHook`); between the revalidation
+and the deleter, and inside the deleter once everything is pinned. For the last two the harness passes the engine's
+existing deleter test seam a **wrapper that calls the real `AtmDeleter` with exactly the engine's arguments** plus the
+attack (`afterPinning`); a static test of the suite compares the two calls. No seam was added to the product.
+
+* **Each case asserts** its specific code for its leg, the records read back from the log file, the number of `intent`
+  records (= calls to the deleter) and that nothing outside the planned root and the declared attack changed (a
+  snapshot of the run root before and after; sentinels and link targets live in the run root, outside the base). A final
+  case checks the whole phase: only the V3 scopes and logs differ.
+* **Legs.** Leg A (standard user, B1 exception) runs one root per clean. There a refusal of the lock probe, an ACL or
+  runtime evidence removes the exception, so it shows as B1 itself in the plan or `B1_EXCEPTION_NO_LONGER_APPLIES` at the
+  revalidation, never as `EM_USO`. Leg B (elevated) reaches the deleter only with `ELIGIBLE`; with the process coverage
+  measured incomplete those cases are `NAO_TESTADO`, never forced. A refusal before the attack caused by new processes
+  of the runner is retried (up to 3 runs) and, if every attempt is refused that way, is `NAO_TESTADO` with the identities
+  that explain it, as in V2.
+* **Reparse points and links:** a junction, a directory and a file symbolic link inside a root, an entry that is a
+  junction and a scope that is a junction (refused while planning); the root replaced by a junction between the
+  preview and clean (`ALTERADO_DESDE_O_PREVIEW`), before the final confirmation (`PLAN_CHANGED_BEFORE_EXECUTION`), before
+  the revalidation (`REVALIDATION_REFUSED`) and before the deleter (`ROOT_REPARSE_POINT`); the scope replaced by a junction
+  before the deleter (`ANCESTOR_REPARSE_POINT`); renames of the tree, the scope and the base inside the deleter (refused
+  by the system, the deletion completes); an empty pinned folder turned into a junction or a directory symbolic link in
+  place inside the deleter (`PINNED_DIR_CHANGED`, `PARTIAL`, the target never traversed).
+* **Files and folders in use:** a file held with and without `FILE_SHARE_DELETE` before the plan and before the
+  revalidation (refused, nothing deleted) and inside the deleter on the last file of the tree (`DELETE_FILE_REFUSED:
+  IN_USE`, `PARTIAL`, the held file intact: the partial outcome **with the real deleter**); a process whose working
+  directory is in the root (refused while planning). Measured against an accepted set: a handle with no data access and
+  full sharing on the last file and on the root folder (invisible to the lock probe), and a process started with its
+  working directory in a pinned folder.
+* **Not tested in this phase:** symbolic links as the standard user (no privilege; the suite covers the in-place
+  symbolic link on its own fixtures); a subst drive in the flow (refused before by the path checks; the deleter case is
+  in the suite); the other V3 cases (new entries, ACL, processes, deleter outcomes, log, interruption, concurrency and
+  shared bases) are later phases.
+
 Gate logic for administrators and other users is also exercised with injected identities (`IsAdmin`, profile SID
 different from the process SID) in every run, on both shells. Manual rows are recorded in the release notes as
 done or `NAO_TESTADO`, never assumed.
