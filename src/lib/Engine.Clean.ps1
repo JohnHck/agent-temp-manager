@@ -390,6 +390,9 @@ function Invoke-AtmClean {
         [switch]$AcceptB1ResidualRisk
     )
     if (-not $script:AtmRealDeletionEnabled) { return (Invoke-AtmCleanCore @PSBoundParameters) }
+    # The lock lives in the native library, which is otherwise loaded by the first inventory: load it (verified against
+    # the manifest, as everywhere) before taking the lock, which comes before any inventory.
+    Initialize-AtmNative
     $lock = [AgentTempManager.AtmCleanLock]::TryAcquire($script:AtmCleanLockName)
     if (-not $lock.Acquired) { return (Invoke-AtmCleanCore @PSBoundParameters -RefusedBy ('CLEAN_LOCK_' + $lock.Status) -LockReleaseError $lock.ReleaseError) }
     $res = $null

@@ -447,7 +447,9 @@ In a future release in which real deletion is enabled, one clean run at a time p
 elevation level) holds the named kernel mutex `Global\AgentTempManager.Clean`:
 
 * It is taken without waiting, before the first inventory, and held through the plan, the confirmation and the
-  deletions; it is released last, after the log is closed, on every path (refusal, failure, exception).
+  deletions; it is released last, after the log is closed, on every path (refusal, failure, exception). The native
+  library that provides it is loaded first, verified against the manifest like everywhere else, so a run with no
+  `-LogFile` ends with `LOG_REQUIRED` and not with a missing-type error.
 * When it is not available the run starts nothing (no inventory, plan or log) and ends with exit code `3`
   (`CLEAN_LOCK_BUSY`, `_DENIED`, `_TYPE_MISMATCH`, `_POLICY_*`, `_ERROR_*`). The message never claims that another clean
   is running: another process may hold the name or block it (see the limits below). Wait and try again; never end

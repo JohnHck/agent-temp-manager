@@ -1914,6 +1914,62 @@ exit 0
         Assert-True ([AgentTempManager.AtmCleanLock]::ValidName('Global\AgentTempManager.Clean') -and [AgentTempManager.AtmCleanLock]::ValidName($script:AtmCleanLockName)) 'nome de produto e nome de teste da suite aceitos'
         Assert-True (Test-TestT1RootsIntact $f) 'nada apagado'
     }
+    Test-Case 'Clean lock (B8)' 'F-E: processo novo, biblioteca nativa ainda nao carregada - depois da trava, clean sem -LogFile termina em LOG_REQUIRED (nunca tipo ausente), lock liberado, nenhum log; com a trava fechada, so o plano, sem lock nem pergunta' {
+        $f = New-TestT1Fixture 'fixfe' 1
+        $child = Join-Path $sandbox 'fixfe-child.ps1'
+        [IO.File]::WriteAllText($child, @'
+param([string]$Src, [string]$ProfileRoot, [string]$Temp, [string]$Sid, [string]$Name, [string]$IsAdmin, [string]$Root, [string]$NowTicks, [string]$LockName, [string]$Gate, [string]$Out)
+# A fresh process: the product files as shipped and NO explicit load of the native library (as the CLI with no -LogFile:
+# nothing inventories before the engine). The deletion gate is opened in THIS process only when -Gate open; the deleter
+# is a stand-in that deletes nothing.
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 2.0
+. (Join-Path $Src 'lib\Engine.Audit.ps1')
+foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $Src 'providers') -Filter '*.ps1' -File | Sort-Object Name)) { . $f.FullName }
+. (Join-Path $Src 'lib\Engine.Clean.ps1')
+. (Join-Path $Src 'lib\Engine.Diagnose.ps1')
+$loadedBefore = [bool]('AgentTempManager.AtmScanner' -as [type])
+$script:AtmRealDeletionEnabled = ($Gate -ceq 'open')
+$script:AtmCleanLockName = $LockName
+$script:AtmRuntimeEvidenceSources = @{ ServiceSource = { param($Names) @() }; VirtualizationSource = { param($Op) @() } }
+$script:AtmCleanConsoleSource = { $true }
+$prof = [pscustomobject]@{ Sid = $Sid; UserName = 'TEST\fixfe'; ProfilePath = $ProfileRoot; Loaded = $true; Special = $false; Origin = 'Test'; EnvStatus = 'OK'
+    TempCandidates = @([pscustomobject]@{ TempPath = $Temp; Source = 'test' }); EnvValues = @{}; EnvKnown = $true; Notes = @() }
+$ia = @{ ProfilesOverride = @($prof); ProcessesOverride = @([pscustomobject]@{ ProcessId = 1; Name = 'idle.exe'; ParentProcessId = 0; CommandLine = 'idle.exe'; CreationDate = (Get-Date).AddHours(-1) })
+    IdentityOverride = [pscustomobject]@{ Sid = $Sid; Name = $Name; IsAdmin = ($IsAdmin -ceq 'True') }; NowUtc = (New-Object DateTime ([long]$NowTicks), ([DateTimeKind]::Utc)); NoProgress = $true; ConfigDir = (Join-Path $Src 'config') }
+$calls = @{ Reader = 0; Deleter = 0 }
+$err = 'NONE'
+try {
+    $c = Invoke-AtmClean -Entries @([pscustomobject]@{ Source = 't'; Path = $Root; Fingerprint = $null }) -PlanPresenter { param($v, $r, $i) } -ConfirmationReader ({ param($x) $calls.Reader++; $x }.GetNewClosure()) -InventoryArgs $ia -DeleteTreeImpl ({ param($Part) $calls.Deleter++ }.GetNewClosure()) -PathPresenceImpl { param($P) $true }
+    $res = '{0}|{1}|{2}' -f $c.Aborted, $c.StoppedBy, [bool]$c.LogCreated
+} catch { $err = $_.Exception.GetBaseException().GetType().Name + ': ' + $_.Exception.GetBaseException().Message; $res = '||' }
+# The lock is free again (with the gate closed it was never taken): a new acquisition of the same name succeeds.
+$again = 'NOT_LOADED'
+if ('AgentTempManager.AtmCleanLock' -as [type]) { $l = [AgentTempManager.AtmCleanLock]::TryAcquire($LockName); $again = [string]$l.Status; if ($l.Acquired) { $null = $l.Release() }; $l.Dispose() }
+[IO.File]::WriteAllText($Out, ('{0}|{1}|{2}|{3}|{4}|{5}' -f $loadedBefore, $res, $calls.Reader, $calls.Deleter, $again, $err))
+exit 0
+'@, (New-Object Text.UTF8Encoding $true))
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $tp = $f.Profile.TempCandidates[0].TempPath
+        $got = @{}
+        foreach ($gate in @('open', 'closed')) {
+            $out = Join-Path $sandbox "fixfe-$gate.txt"
+            $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -ProfileRoot `"$($f.Profile.ProfilePath)`" -Temp `"$tp`" -Sid `"$($testIdentity.Sid)`" -Name `"$($testIdentity.Name)`" -IsAdmin `"$($testIdentity.IsAdmin)`" -Root `"$($f.Roots[0])`" -NowTicks `"$($nowFuture.Ticks)`" -LockName `"$(New-TestLockName)`" -Gate $gate -Out `"$out`"") -TimeoutSec 300
+            Assert-True ($r.Exit -eq 0 -and -not $r.TimedOut -and (Test-Path -LiteralPath $out)) "filho ($gate) terminou ($($r.Exit) $($r.Text))"
+            $got[$gate] = @([IO.File]::ReadAllText($out) -split '\|')
+        }
+        # loadedBefore|Aborted|StoppedBy|LogCreated|reader|deleter|lock again|error
+        $o = $got['open']
+        Assert-True ($o[0] -ceq 'False') 'biblioteca nativa nao carregada antes do clean (condicao do defeito reproduzida)'
+        Assert-True ($o[7] -ceq 'NONE') "trava aberta: nenhuma excecao (era 'tipo ausente'): $($o[7])"
+        Assert-True ($o[1] -ceq 'LOG_REQUIRED' -and $o[2] -eq '' -and $o[3] -ceq 'False') "trava aberta: recusa LOG_REQUIRED, sem log ($($o[1]) $($o[2]) $($o[3]))"
+        Assert-True ($o[4] -ceq '0' -and $o[5] -ceq '0') "trava aberta: nenhuma pergunta nem chamada ao deleter (leitor $($o[4]), deleter $($o[5]))"
+        Assert-True ($o[6] -ceq 'ACQUIRED') "trava aberta: lock liberado ao final ($($o[6]))"
+        $c2 = $got['closed']
+        Assert-True ($c2[7] -ceq 'NONE' -and $c2[1] -ceq 'EXCLUSAO_REAL_DESABILITADA_V0_1' -and $c2[3] -ceq 'False' -and $c2[4] -ceq '0' -and $c2[5] -ceq '0') "trava fechada: so o plano, sem log, pergunta ou deleter ($($c2[1]) $($c2[7]))"
+        Assert-True ($c2[6] -ceq 'ACQUIRED') "trava fechada: o lock nunca foi tomado ($($c2[6]))"
+        Assert-True (Test-TestT1RootsIntact $f) 'raiz intacta'
+    }
     Test-Case 'Clean lock (B8)' 'Trava fechada: nenhuma aquisicao (um nome invalido nao e nem consultado) e fluxo de plano inalterado' {
         $f = New-TestT1Fixture 'b8gate' 1
         $seen = @{ HeldInPlan = $null }
@@ -1958,6 +2014,10 @@ exit 0
         $iCore = $w.IndexOf('$res = Invoke-AtmCleanCore @PSBoundParameters'); $iFin = $w.IndexOf('} finally {'); $iRel = $w.IndexOf('$rc = $lock.Release()')
         Assert-True ($iGate -gt 0 -and $iAcq -gt $iGate -and $iCore -gt $iAcq -and $iFin -gt $iCore -and $iRel -gt $iFin) "ordem: trava $iGate, aquisicao $iAcq, nucleo $iCore, finally $iFin, liberacao $iRel"
         Assert-True (-not $w.Contains('Invoke-AtmInventory')) 'o wrapper nao inventaria antes do lock'
+        # F-E: past the gate the verified native library is loaded by the product's own loader before the lock (it was
+        # otherwise loaded only by the first inventory); with the gate closed this line is never reached.
+        $iNat = $w.IndexOf('Initialize-AtmNative')
+        Assert-True ($iNat -gt $iGate -and $iNat -lt $iAcq -and [regex]::Matches($w, 'Initialize-AtmNative').Count -eq 1 -and -not $w.Contains('Add-Type')) "carga nativa entre a trava ($iGate) e a aquisicao ($iAcq): $iNat, pelo carregador existente"
         $ncs = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Native.cs'))
         $cls = $ncs.Substring($ncs.IndexOf('public sealed class AtmCleanLock'))
         $cls = $cls.Substring(0, $cls.IndexOf('public static class AtmPathCheck'))

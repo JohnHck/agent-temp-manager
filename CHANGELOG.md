@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+* V0.3 fix (past the deletion gate only; no distributed copy reaches it): `Invoke-AtmClean` loads the verified native
+  library before taking the clean lock. The lock comes before any inventory, and the library was otherwise loaded only
+  by the first inventory, so a clean with no `-LogFile` (the CLI makes no inventory before the engine then) failed with a
+  missing-type error instead of `LOG_REQUIRED`. Nothing was ever deleted (it failed before any inventory). With the gate
+  closed nothing changes.
 * V0.3 V3, phase V3c (tests only, no product change), completing V3: outcomes of the real deleter (partial, an
   inconclusive verification and an exception, the last two provoked by the harness), the log folder pinned during a
   run, a run that ends by itself after the intent or after the deletion (the log ends at the intent; the next clean
