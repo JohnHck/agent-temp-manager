@@ -2862,6 +2862,48 @@ exit 0
         foreach ($pat in @('UninspectableByName', '.Name ', '.Name)', 'svchost', 'SYSTEM', 'S-1-5-18', 'Program Files', 'Windows\')) { Assert-True (-not $fn.Contains($pat)) "excecao sem lista por nome, conta ou caminho ('$pat')" }
         Assert-True (Test-TestT1RootsIntact $x.F) 'nada apagado'
     }
+    Test-Case 'Excecao restrita de B1' 'Cada condicao isolada (Get-AtmB1ExceptionRisk direto): provedor, tipo, classe, flag, elevado, motivo V0.1 adicional, recusa B2-1, process-snapshot nao COMPLETE, processes com outro motivo ou FAILED -> sem excecao; base dentro do escopo; sonda de bloqueio so no clean' {
+        $x = New-TestB1Context 'b1unit' 1
+        $ia = $x.IA
+        $inv = Invoke-AtmInventory @ia
+        $rt = Get-AtmCleanRuntimeEvidence -Inventory $inv -InventoryArgs $ia
+        $p = Find-Part $inv $x.F.Roots[0]
+        $g = Get-AtmCandidateGate -Partition $p -Inventory $inv -ForClean
+        $call = { param($Part = $p, $Inv = $inv, $Gate = $g, $Refs = @(), $Rt = $rt) Get-AtmB1ExceptionRisk -Partition $Part -Inventory $Inv -Gate $Gate -Refusals $Refs -RuntimeEvidence $Rt -SkipLockProbe }
+        $base = & $call
+        Assert-True ($null -ne $base -and $base.Uninspectable -eq 1) 'base dentro do escopo: excecao'
+        $part = { param([hashtable]$Set) $c = $p.PSObject.Copy(); foreach ($k in $Set.Keys) { $c.$k = $Set[$k] }; $c }
+        $cov = { param([object[]]$Records) $c = $rt.PSObject.Copy(); $c.Coverage = @(@($rt.Coverage | Where-Object { @('process-snapshot', 'processes') -cnotcontains [string]$_.Collector }) + @($Records)); $c }
+        $rec = { param([string]$C, [string]$S, [string[]]$R) [pscustomobject]@{ Collector = $C; Status = $S; Reasons = @($R); StartedUtc = $null; ElapsedMs = 0 } }
+        $okSnap = & $rec 'process-snapshot' 'COMPLETE' @(); $okProc = & $rec 'processes' 'PARTIAL' @('UNINSPECTABLE_PROCESSES')
+        Assert-True ($null -ne (& $call -Rt (& $cov @($okSnap, $okProc)))) 'coberturas validas reconstituidas: excecao'
+        $adm = $inv.PSObject.Copy(); $adm.Identity = [pscustomobject]@{ Sid = $inv.Identity.Sid; Name = $inv.Identity.Name; IsAdmin = $true }
+        $gate2 = [pscustomobject]@{ Category = 'BLOCKED'; Reasons = @(@($g.Reasons) + @('ESTRUTURA_PAI_INVALIDA')); ProcessCoverageGate = 'BLOCKED' }
+        $refusal = New-AtmRuntimeRefusal -Code 'RUNTIME_OBSERVATION_INCOMPLETE' -Decision 'INVESTIGATE' -Collector 'process-snapshot' -Evidence 'COLLECTOR_FAILED' -Relation 'COVERAGE' -Nature 'COVERAGE' -ObservedUtc (Get-Date) -Coverage 'FAILED'
+        $cases = @(
+            @{ Tag = 'provedor'; R = (& $call -Part (& $part @{ Provider = 'claude-desktop' })) },
+            @{ Tag = 'tipo'; R = (& $call -Part (& $part @{ Kind = 'ScopeRoot' })) },
+            @{ Tag = 'classe'; R = (& $call -Part (& $part @{ Class = 'LIVENESS_UNKNOWN' })) },
+            @{ Tag = 'flag'; R = (& $call -Part (& $part @{ Flags = @('TRANSCRIPT_RECENT') })) },
+            @{ Tag = 'elevado'; R = (& $call -Inv $adm) },
+            @{ Tag = 'motivo V0.1 adicional'; R = (& $call -Gate $gate2) },
+            @{ Tag = 'recusa B2-1'; R = (& $call -Refs @($refusal)) },
+            @{ Tag = 'process-snapshot PARTIAL'; R = (& $call -Rt (& $cov @((& $rec 'process-snapshot' 'PARTIAL' @('DUPLICATE_PID')), $okProc))) },
+            @{ Tag = 'sem process-snapshot'; R = (& $call -Rt (& $cov @($okProc))) },
+            @{ Tag = 'processes com outro motivo'; R = (& $call -Rt (& $cov @($okSnap, (& $rec 'processes' 'PARTIAL' @('UNINSPECTABLE_PROCESSES', 'PROCESS_LIMIT_EXCEEDED'))))) },
+            @{ Tag = 'processes FAILED'; R = (& $call -Rt (& $cov @($okSnap, (& $rec 'processes' 'FAILED' @('PROCESS_SNAPSHOT_FAILED'))))) },
+            @{ Tag = 'coleta de execucao falhou'; R = (& $call -Rt ([pscustomobject]@{ Failed = 'IOException'; Coverage = @($okSnap, $okProc) })) })
+        foreach ($k in $cases) { Assert-True ($null -eq $k.R) "$($k.Tag): sem excecao" }
+        # The lock probe (exclusive DELETE opens) is asked only for clean: with a file of the root held open without
+        # sharing, preview still shows the category (unprobed) and clean's evaluation refuses (B1 as before).
+        $fs = [IO.File]::Open((Join-Path $x.F.Roots[0] 'a.txt'), 'Open', 'Read', 'None')
+        try {
+            $gp = Test-AtmCandidate -Partition $p -Inventory $inv -RuntimeEvidence $rt
+            $gc = Test-AtmCandidate -Partition $p -Inventory $inv -ForClean -AcceptB1ResidualRisk -RuntimeEvidence $rt
+        } finally { $fs.Dispose() }
+        Assert-True ($gp.Category -ceq 'ELIGIBLE_WITH_DECLARED_RISK' -and $gc.Category -ceq 'BLOCKED' -and $null -eq $gc.B1Risk) "sonda so no clean (preview $($gp.Category); clean $($gc.Category))"
+        Assert-True (Test-TestT1RootsIntact $x.F) 'nada apagado'
+    }
     Test-Case 'Excecao restrita de B1' 'Preview com a trava fechada (en-US e pt-BR): bloco proprio de risco declarado, texto de nao liberada, nunca no bloco ELIGIBLE nem na lista para allowlist' {
         $x = New-TestB1Context 'b1prev' 1
         $xIa = $x.IA
@@ -3177,9 +3219,15 @@ exit 0
         if (-not $logDir) { return }
         $x = New-TestB1Context 'tuib1' 1
         $r = $x.F.Roots[0]
-        $o = Invoke-HeadlessTui -Keys @((New-Key 'P' 'p'), (New-Key 'Escape'), (New-Key 'Q' 'q')) -InvArgs $x.IA -W 160 -H 40
-        $all = $o.Frames -join "`n"
-        Assert-True ($all.Contains((Get-AtmText 'tui.catDeclaredRisk')) -and $all.Contains('B1_EXCEPTION_RESIDUAL_RISK') -and -not ($all -match 'ELIGIBLE_\S*…')) 'preview da TUI: rotulo proprio (nunca ELIGIBLE cortado) e motivo de nao liberada'
+        $old = Get-AtmLanguage
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                $o = Invoke-HeadlessTui -Keys @((New-Key 'P' 'p'), (New-Key 'Escape'), (New-Key 'Q' 'q')) -InvArgs $x.IA -W 160 -H 40
+                $all = $o.Frames -join "`n"
+                Assert-True ($all.Contains((Get-AtmText 'tui.catDeclaredRisk')) -and $all.Contains('B1_EXCEPTION_RESIDUAL_RISK') -and -not ($all -match 'ELIGIBLE_\S*…')) "$($lang): preview da TUI com rotulo proprio (nunca ELIGIBLE cortado) e motivo de nao liberada"
+            }
+        } finally { Set-AtmLanguage -Requested $old }
         $o2 = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $x.IA -Lines @('', $r, (Join-Path $logDir 'tuib1.jsonl'), '@PHRASE', '@PHRASE', '@PHRASE', '@PHRASE', '')
         $rej = @(@($o2.State.LastClean.Rejected)[0].Reasons)
         Assert-True ($o2.State.LastClean.Aborted -ceq 'NENHUM_CAMINHO_ELEGIVEL' -and $rej.Count -eq 1 -and ([string]$rej[0]).StartsWith('COBERTURA_DE_PROCESSOS_INCOMPLETA')) "limpeza pela TUI: B1 identico ($($o2.State.LastClean.Aborted))"

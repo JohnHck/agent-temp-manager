@@ -304,7 +304,8 @@ A change of the product contract (until V0.2: "no override"). A root whose only 
 coverage (B1) is shown as **`ELIGIBLE_WITH_DECLARED_RISK`** (never `ELIGIBLE`) when every condition holds: own profile,
 token not elevated, no `-IncludeOtherUsers`; a Claude Code session root of class `ORPHAN_SUSPECTED` without flags; no
 runtime refusal; `process-snapshot` COMPLETE and `processes` incomplete only because command lines cannot be read; every
-such process has an identity (`pid@creationTicksUtc`); the lock probe passes. RECENT is unchanged (it refuses first).
+such process has an identity (`pid@creationTicksUtc`); the lock probe passes (checked by `clean` only: preview never
+opens real roots for it and shows the category unprobed). RECENT is unchanged (it refuses first).
 
 * **Preview, audit, TUI:** a block of its own, "NOT RELEASED", never in the allowlist suggestions (TUI label `B1-RISK`).
 * **clean without `-AcceptB1ResidualRisk`, or with the gate closed, or from the TUI:** B1 exactly as before.

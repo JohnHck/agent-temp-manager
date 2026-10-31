@@ -163,7 +163,8 @@ function Get-AtmB1ExceptionRisk {
       (the gate reached it and refused only for it); own profile, no -IncludeOtherUsers, token not elevated; a Claude
       Code SessionRoot of class ORPHAN_SUSPECTED without flags; runtime evidence collected with no refusal for the root;
       process-snapshot COMPLETE and processes incomplete only for UNINSPECTABLE_PROCESSES; every uninspectable process
-      has an identity; the lock-probe gate passes (it is not reached by the V0.1 gate when B1 refuses).
+      has an identity; the lock-probe gate passes (it is not reached by the V0.1 gate when B1 refuses; Test-AtmCandidate
+      asks for it only for clean, -SkipLockProbe for preview).
     #>
     param($Partition, $Inventory, $Gate, $Refusals, $RuntimeEvidence, [switch]$IncludeOtherUsers, [switch]$SkipLockProbe)
     $p = $Partition
@@ -208,9 +209,10 @@ function Test-AtmCandidate {
     $rank = @{ 'ELIGIBLE' = 0; 'INVESTIGATE' = 1; 'BLOCKED' = 2 }
     $cat = $g.Category
     foreach ($r in $refs) { if ($rank[$r.Decision] -gt $rank[$cat]) { $cat = $r.Decision } }
-    # B1 restricted exception: shown by preview/audit (not for clean) and used by clean only with the explicit switch;
-    # anywhere else B1 is unchanged.
-    $risk = $(if ($null -ne $RuntimeEvidence -and [string]$g.ProcessCoverageGate -ceq 'BLOCKED') { Get-AtmB1ExceptionRisk -Partition $Partition -Inventory $Inventory -Gate $g -Refusals $refs -RuntimeEvidence $RuntimeEvidence -IncludeOtherUsers:$IncludeOtherUsers -SkipLockProbe:$SkipLockProbe } else { $null })
+    # B1 restricted exception: shown by preview (not for clean) and used by clean only with the explicit switch;
+    # anywhere else B1 is unchanged. The lock probe (exclusive DELETE opens) runs only for clean: a read-only preview of
+    # real roots never opens them (B1 used to stop the gate before the probe), so preview shows the category unprobed.
+    $risk = $(if ($null -ne $RuntimeEvidence -and [string]$g.ProcessCoverageGate -ceq 'BLOCKED') { Get-AtmB1ExceptionRisk -Partition $Partition -Inventory $Inventory -Gate $g -Refusals $refs -RuntimeEvidence $RuntimeEvidence -IncludeOtherUsers:$IncludeOtherUsers -SkipLockProbe:($SkipLockProbe -or -not $ForClean) } else { $null })
     if ($null -ne $risk -and (-not $ForClean -or $AcceptB1ResidualRisk)) {
         return [pscustomobject]@{ Category = $script:AtmB1ExceptionCategory; Reasons = @(@(Get-AtmText 'reason.b1Exception' $script:AtmB1ExceptionReason $risk.Uninspectable) + @($g.Reasons)); Requirements = $g.Requirements; Probe = $g.Probe
             RuntimeReasons = @(); ProcessCoverageGate = $g.ProcessCoverageGate; B1Risk = $risk }

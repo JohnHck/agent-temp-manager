@@ -73,7 +73,8 @@ isolated sandbox.
    no `-IncludeOtherUsers`, token not elevated; a Claude Code `SessionRoot` of class `ORPHAN_SUSPECTED` without flags;
    runtime evidence collected with no refusal for the root; `process-snapshot` COMPLETE and `processes` incomplete only
    for `UNINSPECTABLE_PROCESSES`; every uninspectable process has an identity (`pid@creationTicksUtc`); the lock probe
-   passes. Otherwise B1 is unchanged (same text, BLOCKED). The category is `ELIGIBLE_WITH_DECLARED_RISK`
+   passes (exclusive DELETE opens: `clean` only; preview does not probe real roots for the exception). Otherwise B1 is
+   unchanged (same text, BLOCKED). The category is `ELIGIBLE_WITH_DECLARED_RISK`
    (`B1_EXCEPTION_RESIDUAL_RISK`), never `ELIGIBLE`: preview, audit and the TUI show it as not released; only `clean`
    past the deletion gate with `-AcceptB1ResidualRisk` (CLI only; it answers nothing and skips no console) can act,
    with one root per run (fixed in code), the AUT-2 questions plus `ACEITO RISCO B1` / `ACCEPT B1 RISK` for the root
