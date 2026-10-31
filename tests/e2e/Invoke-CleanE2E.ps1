@@ -750,6 +750,9 @@ function Invoke-V3Child {
 }
 if ($ChildMode) {
     if (-not $ChildRoot -or -not $ChildLog -or -not $ChildOut) { throw 'modo filho sem raiz, log ou saida' }
+    # The engine loads its native library with the first inventory, and clean takes the lock before any inventory: the
+    # installed library is loaded here first, by the engine's own loader (only if its SHA-256 matches the manifest).
+    Initialize-AtmNative -LibDir $lib
     Invoke-V3Child
     exit 0
 }
