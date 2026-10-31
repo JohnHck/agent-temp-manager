@@ -546,6 +546,10 @@ public static class AtmE2EV3Native {
     public static string CreateHardLink(string link, string existing) {
         return CreateHardLinkW(link, existing, IntPtr.Zero) ? "OK" : "FAIL " + Marshal.GetLastWin32Error();
     }
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern SafeWaitHandle OpenMutexW(uint access, bool inherit, string name);
+    // SYNCHRONIZE only (what the lock's DACL grants every account): keeps the object alive, never owns or releases it.
+    public static SafeWaitHandle OpenMutexSync(string name) { return OpenMutexW(0x00100000, false, name); }
     // FSCTL_SET_REPARSE_POINT through a handle opened with FILE_WRITE_ATTRIBUTES only (share modes do not stop it).
     static string Set(string dir, byte[] b) {
         using (SafeFileHandle h = CreateFileW(dir, 0x100, 7, IntPtr.Zero, 3, 0x02000000u | 0x00200000u, IntPtr.Zero)) {
@@ -1422,7 +1426,11 @@ Case 'V3-P3-other-account-process-before-final-confirmation' {
 # V0.3 V3, phase V3c (contract sections 4.5 and 4.6): outcomes of the real deleter, the log, a process that ends inside
 # a run, concurrency and shared bases. A child is this script started again in child mode (same account, real lock
 # name): it ends by itself (Environment.Exit) and is never terminated; the parent waits for it with a deadline.
-function Invoke-V3ChildRun([string]$Mode, [string]$Root, [string]$LogName) {
+function Invoke-V3ChildRun([string]$Mode, [string]$Root, [string]$LogName, [switch]$KeepLockOpen) {
+    # -KeepLockOpen (K1, K3): while the child runs, this process opens the real lock object with SYNCHRONIZE only and keeps
+    # that handle (returned as Handle; the caller closes it). A mutex whose last handle closes no longer exists, so the
+    # abandoned state is seen by a next run only while another handle keeps the object (measured: without it, the next
+    # run simply acquires).
     $out = Join-Path $WorkDir "child-$LogName.txt"
     $log = Join-Path $ctx.LogDir $LogName
     $argLine = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Leg {1} -InstallDir "{2}" -SummaryFile "{3}" -WorkDir "{4}" -DisposableMachine -ChildMode {5} -ChildRoot "{6}" -ChildLog "{7}" -ChildOut "{8}"' -f $PSCommandPath, $Leg, $InstallDir, (Join-Path $WorkDir "child-summary-$LogName.json"), $WorkDir, $Mode, $Root, $log, $out
@@ -1432,11 +1440,18 @@ function Invoke-V3ChildRun([string]$Mode, [string]$Root, [string]$LogName) {
     $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
     $p = [Diagnostics.Process]::Start($psi)
     $so = $p.StandardOutput.ReadToEndAsync(); $se = $p.StandardError.ReadToEndAsync()
+    $hold = $null
+    if ($KeepLockOpen) {
+        for ($i = 0; $i -lt 6000 -and -not $p.HasExited -and $null -eq $hold; $i++) {
+            $h = [AtmE2EV3Native]::OpenMutexSync('Global\AgentTempManager.Clean')
+            if ($h.IsInvalid) { $h.Dispose(); Start-Sleep -Milliseconds 50 } else { $hold = $h }
+        }
+    }
     if (-not $p.WaitForExit(600000)) { throw 'processo filho nao terminou em 10 min (nunca encerrado a forca)' }
     $p.WaitForExit()
     $text = ([string]$so.Result + ' ' + [string]$se.Result) -replace '\s+', ' '
     return [pscustomobject]@{ Exit = $p.ExitCode; Out = $(if (Test-Path -LiteralPath $out) { [IO.File]::ReadAllText($out) } else { $null }); Log = $log
-        Tail = $(if ($text.Length -gt 600) { $text.Substring($text.Length - 600) } else { $text.Trim() }) }
+        Tail = $(if ($text.Length -gt 600) { $text.Substring($text.Length - 600) } else { $text.Trim() }); Handle = $hold }
 }
 function Invoke-V3ChildExit([string]$Mode, [string]$Label, [int]$ExpectedExit) {
     # Up to 3 children: a child that did not exit was refused before the deleter by process churn of the runner (it
@@ -1445,8 +1460,9 @@ function Invoke-V3ChildExit([string]$Mode, [string]$Label, [int]$ExpectedExit) {
     Assert-V3Entry $r
     $tries = New-Object System.Collections.Generic.List[string]
     for ($n = 1; $n -le 3; $n++) {
-        $k = Invoke-V3ChildRun $Mode $r "V3-$Label-$n.jsonl"
+        $k = Invoke-V3ChildRun $Mode $r "V3-$Label-$n.jsonl" -KeepLockOpen
         if ($k.Exit -eq $ExpectedExit) { return [pscustomobject]@{ Exited = $true; Run = $k; Tries = $tries.ToArray() } }
+        if ($null -ne $k.Handle) { $k.Handle.Dispose() }
         Assert ($k.Exit -eq 0 -and $k.Out -and ($k.Out -cmatch '^NOT_EXITED\|(PLAN_CHANGED_BEFORE_EXECUTION|REVALIDATION_REFUSED)\|')) "filho saiu com $($k.Exit): $($k.Out) [$($k.Tail)]"
         $tries.Add(($k.Out -split '\|')[1])
     }
@@ -1525,6 +1541,7 @@ Case 'V3-K1-exit-after-intent' {
     $k = Invoke-V3ChildExit 'K1' 'K1' 7
     if (-not $k.Exited) { return (NotTested "the child was refused before the deleter in all 3 attempts (process churn): $($k.Tries -join ', ')") }
     $v3.K1Exited = $true
+    $v3.K1Handle = $k.Run.Handle
     $types = Get-V3LogTypes $k.Run.Log
     Assert ($types -ceq 'run-start,plan,declaration,confirmation,plan-check,intent') "o log deve terminar no intent: $types"
     Assert ((Test-Path -LiteralPath (Join-Path $r 'a.txt')) -and (Test-Path -LiteralPath (Join-Path $r 'sub\z.txt'))) 'raiz alterada: a saida foi antes da primeira exclusao'
@@ -1533,15 +1550,17 @@ Case 'V3-K1-exit-after-intent' {
 }
 Case 'V3-K2-abandoned-lock-after-exit' {
     if (-not $v3.K1Exited) { return (NotTested 'K1 did not leave the lock abandoned') }
+    if ($null -eq $v3.K1Handle) { return (NotTested 'the lock object could not be kept open while the child ran: its abandoned state cannot outlive the child') }
     $r = $v3.Roots['K1'].Path
     $before = Get-V3Snap
-    $c = Invoke-V3Clean -Paths @($r) -LogName 'V3-K2-abandoned.jsonl'
+    # The handle this process kept (SYNCHRONIZE only) is what makes the abandoned object visible; closed right after.
+    try { $c = Invoke-V3Clean -Paths @($r) -LogName 'V3-K2-abandoned.jsonl' } finally { $v3.K1Handle.Dispose(); $v3.K1Handle = $null }
     Assert ($c.Res.Aborted -ceq 'CLEAN_LOCK_ABANDONED' -and -not $c.Res.LogCreated -and -not (Test-Path -LiteralPath $c.Log) -and $c.Calls -eq 0 -and @($c.Res.Verified).Count -eq 0) "Aborted=$($c.Res.Aborted) log=$($c.Res.LogCreated) chamadas=$($c.Calls)"
     $n = Invoke-V3Churn -Paths @($r) -LogBase 'V3-K2-next'
     if ($n.Exhausted) { return (Resolve-Exhausted $n) }
     Assert (-not $n.Res.Aborted -and -not $n.Res.StoppedBy -and @($n.Res.Deleted).Count -eq 1 -and $n.Res.Deleted[0].Outcome -ceq 'COMPLETE' -and $n.Res.Deleted[0].Verified -eq $true) "execucao seguinte: $($n.Res.Aborted) $($n.Res.StoppedBy)"
     $inv = Assert-V3Only $before @((Get-V3Rel $r)) 'V3-K2-'
-    "the next clean after the exit: CLEAN_LOCK_ABANDONED (no inventory, no log, no deleter; ownership released); the following one acquired the lock, planned the root again and deleted it (COMPLETE)$(Get-V3Attempts $n); $inv"
+    "the next clean after the exit, while another handle kept the lock object: CLEAN_LOCK_ABANDONED (no inventory, no log, no deleter; ownership released); the following one acquired the lock, planned the root again and deleted it (COMPLETE)$(Get-V3Attempts $n); measured before: with no other handle the object ends with the child and the next clean simply acquires (the log's intent without result remains the evidence); $inv"
 }
 Case 'V3-K3-exit-after-real-deletion' {
     $nt = & $v3NeedExec; if ($nt) { return $nt }
@@ -1549,9 +1568,12 @@ Case 'V3-K3-exit-after-real-deletion' {
     $before = Get-V3Snap
     $k = Invoke-V3ChildExit 'K3' 'K3' 8
     if (-not $k.Exited) { return (NotTested "the child was refused before the deleter in all 3 attempts (process churn): $($k.Tries -join ', ')") }
-    $types = Get-V3LogTypes $k.Run.Log
-    Assert ($types -ceq 'run-start,plan,declaration,confirmation,plan-check,intent' -and -not (Test-Path -LiteralPath $r)) "log $types; raiz presente: $(Test-Path -LiteralPath $r)"
-    $c = Invoke-V3Clean -Paths @($r) -LogName 'V3-K3-abandoned.jsonl' -Gone
+    try {
+        $types = Get-V3LogTypes $k.Run.Log
+        Assert ($types -ceq 'run-start,plan,declaration,confirmation,plan-check,intent' -and -not (Test-Path -LiteralPath $r)) "log $types; raiz presente: $(Test-Path -LiteralPath $r)"
+        if ($null -eq $k.Run.Handle) { return (NotTested 'the lock object could not be kept open while the child ran: its abandoned state cannot outlive the child') }
+        $c = Invoke-V3Clean -Paths @($r) -LogName 'V3-K3-abandoned.jsonl' -Gone
+    } finally { if ($null -ne $k.Run.Handle) { $k.Run.Handle.Dispose() } }
     Assert ($c.Res.Aborted -ceq 'CLEAN_LOCK_ABANDONED' -and -not (Test-Path -LiteralPath $c.Log)) "depois da saida: $($c.Res.Aborted)"
     $c2 = Invoke-V3Clean -Paths @($r) -LogName 'V3-K3-after.jsonl' -Gone
     $codes = Assert-V3PlanRefused $c2 'FORA_DAS_ROOTS_PERMITIDAS'

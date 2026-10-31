@@ -184,9 +184,11 @@ roots planted with the V3a ones and covered by the same phase snapshot.
   complete.
 * **A run that ends inside itself:** the harness starts itself again as a child (same account, the real lock name, only
   on disposable runners); the child ends by itself (`Environment.Exit`, never terminated) inside the real deleter after
-  pinning, or right after the real deletion. The log ends at the `intent` (no `result`: the outcome is unknown); the next
-  clean is refused with `CLEAN_LOCK_ABANDONED` (no inventory, no log), and the following one acquires the lock and plans
-  from scratch (the root deleted, or no longer there).
+  pinning, or right after the real deletion. The log ends at the `intent` (no `result`: the outcome is unknown). While
+  another handle keeps the lock object (the harness opens one with `SYNCHRONIZE` only), the next clean is refused with
+  `CLEAN_LOCK_ABANDONED` (no inventory, no log), and the following one acquires the lock and plans from scratch (the root
+  deleted, or no longer there). Measured: when no other handle exists, the lock object ends with the process and the
+  next clean simply acquires it; the log's `intent` without `result` is then the only trace of the interruption.
 * **Concurrency:** a second complete clean of the same root while the first holds the lock: `CLEAN_LOCK_BUSY` at once (no
   plan shown, no log, no deleter), and the first deletes the root once. Across identities (the standard user and the
   elevated runner account, in both orders) the other side gets `BUSY`, never `DENIED` (the e2e step
