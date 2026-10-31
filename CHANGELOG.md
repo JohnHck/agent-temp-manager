@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+* V0.3 V3, phase V3c (tests only, no product change), completing V3: outcomes of the real deleter (partial, an
+  inconclusive verification and an exception, the last two provoked by the harness), the log folder pinned during a
+  run, a run that ends by itself after the intent or after the deletion (the log ends at the intent; the next clean
+  finds the lock abandoned, the one after starts from scratch), a second clean while the first holds the lock (same
+  account, and across the standard user and an elevated account in both orders: always `BUSY`), another object under
+  the lock name, and shared bases. Details: docs/TESTING.md, "V3 as a whole".
 * V0.3 V3, phase V3b (tests only, no product change): new entries, changes, a third-party ACL (fixture ACE on planted
   roots only) and new processes (of the same account, and in leg A of another account, started by a watcher of the
   e2e and ending by themselves) after the plan, in each window, with the real deleter. Proves that the deleter does not

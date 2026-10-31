@@ -195,10 +195,12 @@ already built in V0.1 and the evidence gathered in V0.2.
   disposable GitHub-hosted VMs, against the installed candidate, as a non-elevated standard user (B1 restricted
   exception) and elevated (ELIGIBLE only when the measured process coverage is complete). The confirmation there is
   automated, never a human acceptance. Details and limits: [TESTING.md](TESTING.md#real-clean-on-disposable-vms-v03-v2).
-* V3, adversarial cases: phases V3a (reparse points and links, files and folders in use) and V3b (new entries, changes,
-  third-party ACL and processes after the plan) **in CI**, attacked in each window of the flow with the real deleter;
-  V3c (deleter outcomes, log, interruption, concurrency, shared bases) is not started. Details and limits:
-  [TESTING.md](TESTING.md#adversarial-cases-on-disposable-vms-v03-v3-phase-v3a).
+* V3, adversarial cases: **in CI, complete**. Phases V3a (reparse points and links, files and folders in use), V3b (new
+  entries, changes, third-party ACL and processes after the plan) and V3c (deleter outcomes, the log, interrupted runs,
+  concurrency, shared bases), attacked in each window of the flow with the real deleter. Not tested by design or
+  decision: a write keeping every statistic, a real exception inside the deleter, a real log write failure, an
+  interruption in the middle of the tree; the elevated leg's in-deleter cases while its coverage is incomplete. Details
+  and limits: [TESTING.md](TESTING.md#v3-as-a-whole).
 * V4 (privilege matrix) and V5 (operator pilot): not started.
 
 **Deliverables.**

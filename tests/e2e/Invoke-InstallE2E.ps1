@@ -551,6 +551,56 @@ Step 'v2-clean-leg-B-elevated' {
     & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Invoke-CleanE2E.ps1') -Leg B -InstallDir $installDir -SummaryFile $sum -WorkDir (Join-Path $work 'v2-B') -DisposableMachine *> $con
     Read-V2Summary $sum $LASTEXITCODE $con
 }
+# V0.3 V3c X2 (CI evidence; it does not replace the V4 row of the operator, J5): the REAL clean lock held by one identity
+# and tried by the other, in both orders: the standard user (not elevated) and this elevated account. Taking this lock
+# without waiting is the first step of every clean past the gate, so BUSY here is what the other clean gets
+# (CLEAN_LOCK_BUSY), and never DENIED (the object carries an explicit Medium label). Each holder releases on a release
+# file and ends by itself; nothing is terminated. The user's copy of the helper is in the test user's folder (run only by
+# that user); this account's copy is in its own temp folder.
+Step 'v3-x2-lock-across-identities' {
+    if (-not $cred) { throw 'usuario de teste indisponivel' }
+    $helper = @'
+param([string]$Dll, [string]$Mode, [string]$Out, [string]$Ready, [string]$Release)
+Add-Type -Path $Dll
+$l = [AgentTempManager.AtmCleanLock]::TryAcquire('Global\AgentTempManager.Clean')
+[IO.File]::WriteAllText($Out, [string]$l.Status)
+if ($l.Acquired) {
+    if ($Mode -eq 'hold') { [IO.File]::WriteAllText($Ready, '1'); $n = 0; while (-not (Test-Path -LiteralPath $Release) -and $n -lt 1200) { Start-Sleep -Milliseconds 100; $n++ } }
+    $rc = $l.Release(); if ($null -ne $rc) { [IO.File]::AppendAllText($Out, '|RELEASE_' + $rc) }
+}
+'@
+    $dll = Join-Path $installDir 'lib\AgentTempManager.Native.dll'
+    $u = Join-Path $userDir 'v3-x2'; [void][IO.Directory]::CreateDirectory($u)
+    $a = Join-Path ([IO.Path]::GetTempPath()) ('atm-e2e-v3-x2-' + [guid]::NewGuid().ToString('N').Substring(0, 8)); [void][IO.Directory]::CreateDirectory($a)
+    $uh = Join-Path $u 'lock-helper.ps1'; [IO.File]::WriteAllText($uh, $helper)
+    $ah = Join-Path $a 'lock-helper.ps1'; [IO.File]::WriteAllText($ah, $helper)
+    $argsFor = { param($h, $mode, $dir) "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$h`" -Dll `"$dll`" -Mode $mode -Out `"$dir\$mode.txt`" -Ready `"$dir\ready.txt`" -Release `"$dir\release.txt`"" }
+    $read = { param($f) if (Test-Path -LiteralPath $f) { [IO.File]::ReadAllText($f) } else { 'NO_OUTPUT' } }
+    $waitReady = { param($dir) $n = 0; while (-not (Test-Path -LiteralPath "$dir\ready.txt") -and $n -lt 600) { Start-Sleep -Milliseconds 100; $n++ }; Test-Path -LiteralPath "$dir\ready.txt" }
+    # Order 1: the standard user holds, this elevated account tries.
+    $hold = Start-Process -FilePath $installerExe -ArgumentList (& $argsFor $uh 'hold' $u) -Credential $cred -LoadUserProfile -WorkingDirectory $userDir -WindowStyle Hidden -PassThru
+    try {
+        Assert (& $waitReady $u) "usuario padrao nao tomou o lock: $(& $read "$u\hold.txt")"
+        $null = & $installerExe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $ah -Dll $dll -Mode probe -Out "$a\probe.txt" -Ready 'none' -Release 'none' 2>&1
+        $o1 = & $read "$a\probe.txt"
+    } finally { [IO.File]::WriteAllText("$u\release.txt", '1'); $null = $hold.WaitForExit(120000) }
+    Assert ((& $read "$u\hold.txt") -ceq 'ACQUIRED' -and $o1 -ceq 'BUSY') "ordem 1: usuario padrao $(& $read "$u\hold.txt"), conta elevada $o1"
+    # Order 2: this elevated account holds, the standard user tries.
+    $b = Join-Path $a 'order2'; [void][IO.Directory]::CreateDirectory($b)
+    $psi = New-Object Diagnostics.ProcessStartInfo($installerExe, (& $argsFor $ah 'hold' $b)); $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $hold2 = [Diagnostics.Process]::Start($psi)
+    try {
+        Assert (& $waitReady $b) "conta elevada nao tomou o lock: $(& $read "$b\hold.txt")"
+        $u2 = Join-Path $u 'order2'; [void][IO.Directory]::CreateDirectory($u2)
+        $p = Start-Process -FilePath $installerExe -ArgumentList (& $argsFor $uh 'probe' $u2) -Credential $cred -LoadUserProfile -WorkingDirectory $userDir -WindowStyle Hidden -PassThru -Wait
+        $o2 = & $read "$u2\probe.txt"
+    } finally { [IO.File]::WriteAllText("$b\release.txt", '1'); $null = $hold2.WaitForExit(120000) }
+    Assert ((& $read "$b\hold.txt") -ceq 'ACQUIRED' -and $o2 -ceq 'BUSY') "ordem 2: conta elevada $(& $read "$b\hold.txt"), usuario padrao $o2 (exit $($p.ExitCode))"
+    # Released in both orders: free again.
+    $null = & $installerExe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $ah -Dll $dll -Mode probe -Out "$a\after.txt" -Ready 'none' -Release 'none' 2>&1
+    Assert ((& $read "$a\after.txt") -ceq 'ACQUIRED') "lock depois das duas ordens: $(& $read "$a\after.txt")"
+    'standard user holds -> elevated account BUSY; elevated account holds -> standard user BUSY (never DENIED); free after both (CI evidence, not the V4 row)'
+}
 
 Step 'uninstall' {
     & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pkg 'install\Uninstall-AgentTempManager.ps1') *> (Join-Path $OutDir 'uninstall.txt')

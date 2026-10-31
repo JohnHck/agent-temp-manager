@@ -31,7 +31,14 @@ param(
     [switch]$DisposableMachine,
     # V3b (P2, P3): a folder watched by the e2e (another account), which starts a short, self-ending process of its own
     # when this script asks; leg A only. Without it those cases are NOT_TESTED.
-    [string]$SignalDir
+    [string]$SignalDir,
+    # V3c (K1, K3, X1): this script started again by itself as a CHILD that runs one clean of its own on -ChildRoot and
+    # writes one line to -ChildOut: K1 exits by itself inside the real deleter (after pinning), K3 right after it, X1
+    # contends for the lock the parent holds. In this mode no case runs.
+    [ValidateSet('', 'K1', 'K3', 'X1')][string]$ChildMode = '',
+    [string]$ChildRoot,
+    [string]$ChildLog,
+    [string]$ChildOut
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
@@ -70,6 +77,7 @@ function Protect-Text([string]$Text) {
 }
 $script:notTested = $false
 function Case([string]$Id, [scriptblock]$Body) {
+    if ($ChildMode) { return }
     $script:notTested = $false
     try {
         $d = & $Body
@@ -140,7 +148,7 @@ Case 'P1-installed-before' {
     $ctx.InstallBefore = Get-Snapshot $InstallDir ([long]::MaxValue)
     "verify 0; installed gate `$false (single assignment); $($ctx.InstallBefore.Count) installed entries hashed"
 }
-if ($summary.cases['identity'].status -ne 'PASS' -or $summary.cases['P1-installed-before'].status -ne 'PASS') {
+if (-not $ChildMode -and ($summary.cases['identity'].status -ne 'PASS' -or $summary.cases['P1-installed-before'].status -ne 'PASS')) {
     [IO.File]::WriteAllText($SummaryFile, ($summary | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
     exit 1
 }
@@ -520,7 +528,8 @@ Case 'P9-temp-pre-existing' {
 # (= calls to the deleter) and that nothing outside the planned root and the declared attack changed. Sentinels and link
 # targets live in this run root, outside the base. Leg A runs one root per clean (B1 exception); leg B reaches the
 # deleter only with ELIGIBLE (complete coverage measured), otherwise those cases are NOT_TESTED, never forced.
-$v3 = @{ Ready = $false; Roots = @{}; Sentinels = @{}; Adversarial = @{}; SnapBefore = $null; NativeError = $null; Symlink = @{}; R2 = $null; R3 = $null; HardLink = $null }
+$v3 = @{ Ready = $false; Roots = @{}; Sentinels = @{}; Adversarial = @{}; SnapBefore = $null; NativeError = $null; Symlink = @{}; R2 = $null; R3 = $null; HardLink = $null
+    S1Run = $null; S1Root = $null; S1Error = $null; K1Exited = $false; K3Exited = $false }
 $v3Slug = 'C--atm-e2e-v3'
 $v3s = @{ Calls = 0; Before = $null; During = $null; After = $null; Attacked = $false }
 $v3NativeSrc = @'
@@ -632,6 +641,13 @@ function Switch-V3ToJunction([string]$Path, [string]$Target) {
     return $moved
 }
 function Assert-V3Entry([string]$Path) {
+    if ($v3.S1Root -and [string]::Equals($Path, $v3.S1Root, [StringComparison]::Ordinal)) {
+        # S1: the root this run planted under %WINDIR%\Temp: canonical, the nonce, no reparse point up to its run folder.
+        Assert ([string]::Equals([IO.Path]::GetFullPath($Path), $Path, [StringComparison]::Ordinal)) 'entrada nao canonica'
+        Assert ([IO.File]::ReadAllText((Join-Path $Path 'ATM-E2E-NONCE.txt')) -ceq $nonce) 'entrada sem o nonce desta execucao'
+        for ($p = $Path; $p.Length -ge $v3.S1Run.Length; $p = [IO.Path]::GetDirectoryName($p)) { Assert (([IO.File]::GetAttributes($p) -band [IO.FileAttributes]::ReparsePoint) -eq 0) 'reparse point na cadeia da entrada' }
+        return
+    }
     if ($v3.Adversarial.ContainsKey($Path)) {
         # An entry that is itself an attack (a link created by this run): canonical, under this run's base, its target
         # a sentinel created in this run root.
@@ -642,8 +658,13 @@ function Assert-V3Entry([string]$Path) {
     }
     Assert-Entry $Path
 }
-function Invoke-V3Clean([string[]]$Paths, [string]$LogName, $Operator, [scriptblock]$Hook, [hashtable]$Fingerprints = @{}) {
-    $entries = @(foreach ($v3p in $Paths) { Assert-V3Entry $v3p; [pscustomobject]@{ Source = 'e2e-v3'; Path = $v3p; Fingerprint = $Fingerprints[$v3p] } })
+function Invoke-V3Clean([string[]]$Paths, [string]$LogName, $Operator, [scriptblock]$Hook, [hashtable]$Fingerprints = @{}, [switch]$Gone) {
+    # -Gone (K3): the entry is a root of this run that no longer exists (nothing left to delete): canonical, under the
+    # base, absent.
+    $entries = @(foreach ($v3p in $Paths) {
+            if ($Gone) { Assert ([string]::Equals([IO.Path]::GetFullPath($v3p), $v3p, [StringComparison]::Ordinal) -and $v3p.StartsWith($ctx.Base + '\', [StringComparison]::OrdinalIgnoreCase) -and -not (Test-Path -LiteralPath $v3p)) 'entrada ausente fora da base ou ainda presente' }
+            else { Assert-V3Entry $v3p }
+            [pscustomobject]@{ Source = 'e2e-v3'; Path = $v3p; Fingerprint = $Fingerprints[$v3p] } })
     $log = Join-Path $ctx.LogDir $LogName
     if (-not $Operator) { $Operator = New-Operator }
     $a = @{ Entries = $entries; PlanPresenter = $presenter; ConfirmationReader = $Operator.Reader; InventoryArgs = $ia; LogFile = $log; Interaction = @{ Caller = 'E2E'; ConsoleRequired = $true }; DeleteTreeImpl = $v3Deleter }
@@ -712,12 +733,34 @@ $v3ProbeHidden = {
     if ($Leg -eq 'B' -and ($null -eq $summary.processCoverage -or -not $summary.processCoverage.complete)) { return (NotTested 'leg B: B1 (coverage measured incomplete) refuses before the lock probe, so EM_USO is not observable in this leg; never forced') }
 }
 
+function Invoke-V3Child {
+    # V3c child (a fresh process of the same account): one clean of its own on -ChildRoot, with the real lock name, the
+    # real deleter (the same wrapper) and its own log file; the parent checked the entry before starting it. K1 and K3
+    # end the process by itself (Environment.Exit: never a forced termination), so the lock is left abandoned and the
+    # log ends at the intent. When it does not exit, it writes its outcome for the parent.
+    $calls = @{ Presenter = 0 }
+    $pres = { param($verified, $rejected, $inventory) $calls.Presenter++ }.GetNewClosure()
+    if ($ChildMode -ceq 'K1') { $v3s.During = [Action[string]]({ param($root) [Environment]::Exit(7) }) }
+    if ($ChildMode -ceq 'K3') { $v3s.After = { param($c, $res) [Environment]::Exit(8) } }
+    $op = New-Operator
+    $a = @{ Entries = @([pscustomobject]@{ Source = 'e2e-v3-child'; Path = $ChildRoot; Fingerprint = $null }); PlanPresenter = $pres; ConfirmationReader = $op.Reader; InventoryArgs = $ia; LogFile = $ChildLog; Interaction = @{ Caller = 'E2E'; ConsoleRequired = $true }; DeleteTreeImpl = $v3Deleter }
+    if ($Leg -eq 'A') { $a['AcceptB1ResidualRisk'] = $true }
+    $res = Invoke-AtmClean @a
+    [IO.File]::WriteAllText($ChildOut, ('NOT_EXITED|{0}|{1}|{2}|{3}' -f $res.Aborted, $res.StoppedBy, $calls.Presenter, [bool]$res.LogCreated))
+}
+if ($ChildMode) {
+    if (-not $ChildRoot -or -not $ChildLog -or -not $ChildOut) { throw 'modo filho sem raiz, log ou saida' }
+    Invoke-V3Child
+    exit 0
+}
+
 Case 'V3-plant' {
     Assert ($null -ne $ctx['Base'] -and (Test-Path -LiteralPath $ctx.Base)) 'base plantada indisponivel'
     Assert ($null -eq $v3.NativeError) "auxiliar nativo do teste nao compilou: $($v3.NativeError)"
     # V3a roots, then V3b (new entries, changes, ACL and processes after the plan).
     foreach ($l in @('U1', 'U3', 'U4', 'U5', 'U6', 'U7', 'U8', 'U9', 'R1', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9', 'R11', 'R12', 'R13',
-            'N1', 'N2', 'N4', 'N5', 'N6', 'N8', 'A1', 'A2', 'A3', 'A4', 'P1', 'P2', 'P3')) { New-V3Root $l }
+            'N1', 'N2', 'N4', 'N5', 'N6', 'N8', 'A1', 'A2', 'A3', 'A4', 'P1', 'P2', 'P3',
+            'O2', 'O3', 'L2', 'K1', 'K3', 'X1', 'X3', 'S2')) { New-V3Root $l }
     New-V3Root 'R10' 'C--atm-e2e-v3-anc'
     # Leg B: items created elevated are owned by Administrators; the profile's own roots are owned by the account.
     if ($isAdmin) {
@@ -767,6 +810,21 @@ Case 'V3-plant' {
     foreach ($f in @((Join-Path $n8 'keep.txt'), (Join-Path $n8 'deep\deep.txt'))) { [IO.File]::SetLastWriteTimeUtc($f, $old); [IO.File]::SetCreationTimeUtc($f, $old) }
     $v3.HardLink = [AtmE2EV3Native]::CreateHardLink((Join-Path $v3.Roots['N8'].Path 'sub\link.txt'), (Join-Path $n8 'keep.txt'))
     [IO.Directory]::SetLastWriteTimeUtc((Join-Path $v3.Roots['N8'].Path 'sub'), $old)
+    # S1 (V3c): a base under %WINDIR%\Temp (shared by every account), with one root of the same shape and its transcript;
+    # outside this run root, created in this run only (the name carries the nonce). Measured: a standard user may create it.
+    try {
+        $v3.S1Run = Join-Path $env:SystemRoot ('Temp\ATM-E2E-V3-' + $nonce.Substring(0, 12))
+        Assert (-not (Test-Path -LiteralPath $v3.S1Run)) 'S1_RUN_EXISTS'
+        $s1id = [guid]::NewGuid().ToString()
+        $v3.S1Root = Join-Path $v3.S1Run "claude\$v3Slug\$s1id"
+        [void][IO.Directory]::CreateDirectory((Join-Path $v3.S1Root 'sub'))
+        [IO.File]::WriteAllText((Join-Path $v3.S1Root 'ATM-E2E-NONCE.txt'), $nonce)
+        [IO.File]::WriteAllText((Join-Path $v3.S1Root 'sub\z.txt'), "synthetic V3 fixture (S1)`n")
+        $tr = Join-Path $ctx.Cfg "projects\$v3Slug\$s1id.jsonl"
+        [IO.File]::WriteAllText($tr, ('{"type":"ai-title","aiTitle":"SYNTHETIC","sessionId":"' + $s1id + '"}' + "`n"))
+        foreach ($f in @((Join-Path $v3.S1Root 'ATM-E2E-NONCE.txt'), (Join-Path $v3.S1Root 'sub\z.txt'), $tr)) { [IO.File]::SetLastWriteTimeUtc($f, $old) }
+        foreach ($d in @((Join-Path $v3.S1Root 'sub'), $v3.S1Root)) { [IO.Directory]::SetLastWriteTimeUtc($d, $old) }
+    } catch { $v3.S1Error = $_.Exception.GetType().Name; $v3.S1Root = $null }
     $v3.SnapBefore = Get-V3Snap
     $v3.Ready = $true
     "$($v3.Roots.Count) roots (times set back ${shiftHours}h = SIMULATION), $($v3.Sentinels.Count) sentinels outside the base; junctions R1, R2, R3 in place; symbolic links R4 $($v3.Symlink['R4']), R5 $($v3.Symlink['R5']); hard link N8 $($v3.HardLink)"
@@ -1357,6 +1415,222 @@ Case 'V3-P3-other-account-process-before-final-confirmation' {
     "a process of another account started between the plan and the final confirmation: PLAN_CHANGED_BEFORE_EXECUTION (a new identity not inspectable), 0 intents; it ends by itself; log $types; $inv"
 }
 
+# ---------------------------------------------------------------------------------------------- V3c
+# V0.3 V3, phase V3c (contract sections 4.5 and 4.6): outcomes of the real deleter, the log, a process that ends inside
+# a run, concurrency and shared bases. A child is this script started again in child mode (same account, real lock
+# name): it ends by itself (Environment.Exit) and is never terminated; the parent waits for it with a deadline.
+function Invoke-V3ChildRun([string]$Mode, [string]$Root, [string]$LogName) {
+    $out = Join-Path $WorkDir "child-$LogName.txt"
+    $log = Join-Path $ctx.LogDir $LogName
+    $argLine = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Leg {1} -InstallDir "{2}" -SummaryFile "{3}" -WorkDir "{4}" -DisposableMachine -ChildMode {5} -ChildRoot "{6}" -ChildLog "{7}" -ChildOut "{8}"' -f $PSCommandPath, $Leg, $InstallDir, (Join-Path $WorkDir "child-summary-$LogName.json"), $WorkDir, $Mode, $Root, $log, $out
+    $psi = New-Object Diagnostics.ProcessStartInfo($shellExe, $argLine)
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $p = [Diagnostics.Process]::Start($psi)
+    if (-not $p.WaitForExit(600000)) { throw 'processo filho nao terminou em 10 min (nunca encerrado a forca)' }
+    return [pscustomobject]@{ Exit = $p.ExitCode; Out = $(if (Test-Path -LiteralPath $out) { [IO.File]::ReadAllText($out) } else { $null }); Log = $log }
+}
+function Invoke-V3ChildExit([string]$Mode, [string]$Label, [int]$ExpectedExit) {
+    # Up to 3 children: a child that did not exit was refused before the deleter by process churn of the runner (it
+    # ran to the end and released the lock); any other outcome fails.
+    $r = $v3.Roots[$Label].Path
+    Assert-V3Entry $r
+    $tries = New-Object System.Collections.Generic.List[string]
+    for ($n = 1; $n -le 3; $n++) {
+        $k = Invoke-V3ChildRun $Mode $r "V3-$Label-$n.jsonl"
+        if ($k.Exit -eq $ExpectedExit) { return [pscustomobject]@{ Exited = $true; Run = $k; Tries = $tries.ToArray() } }
+        Assert ($k.Exit -eq 0 -and $k.Out -and ($k.Out -cmatch '^NOT_EXITED\|(PLAN_CHANGED_BEFORE_EXECUTION|REVALIDATION_REFUSED)\|')) "filho saiu com $($k.Exit): $($k.Out)"
+        $tries.Add(($k.Out -split '\|')[1])
+    }
+    return [pscustomobject]@{ Exited = $false; Run = $null; Tries = $tries.ToArray() }
+}
+
+# ---- 4.5 outcomes of the real deleter
+Case 'V3-O1-partial-with-real-deleter' {
+    # PARTIAL with the real deleter is produced by U4, U5, N6 and R12 in this run (each asserts it); this case collects them.
+    $ids = @('V3-U4-held-no-share-delete-in-deleter', 'V3-U5-held-share-delete-in-deleter', 'V3-N6-planned-file-changed-in-deleter', 'V3-R12-junction-in-place-in-deleter')
+    $st = @($ids | ForEach-Object { if ($summary.cases.Contains($_)) { [string]$summary.cases[$_].status } else { 'MISSING' } })
+    $passed = @($st | Where-Object { $_ -ceq 'PASS' }).Count
+    Assert (@($st | Where-Object { $_ -ceq 'FAIL' -or $_ -ceq 'MISSING' }).Count -eq 0) "casos de PARTIAL: $($st -join ',')"
+    if ($passed -eq 0) { return (NotTested "no PARTIAL case reached the deleter in this leg ($($st -join ','))") }
+    "PARTIAL with the real deleter, STOPPED_AFTER_PARTIAL, proved by $passed of U4, U5, N6, R12 in this run ($($st -join ',')); the stop before a next root needs two ELIGIBLE roots (leg B), not reached while its coverage is incomplete"
+}
+Case 'V3-O2-verification-failed-with-real-deleter' {
+    $nt = & $v3NeedExec; if ($nt) { return $nt }
+    $r = $v3.Roots['O2'].Path
+    $before = Get-V3Snap
+    # Declared provocation of the harness: the real deletion completes, then the root folder is created again before the
+    # engine checks the absence.
+    $v3s.After = { param($c, $res) [void][IO.Directory]::CreateDirectory($c.Path) }
+    try { $c = Invoke-V3Churn -Paths @($r) -LogBase 'V3-O2' } finally { $v3s.After = $null }
+    if ($c.Exhausted) { return (Resolve-Exhausted $c) }
+    $row = Assert-V3Stopped $c 'VERIFICATION_FAILED' $null $null
+    Assert ($row.Completed -eq $true -and $row.Verified -eq $false -and $row.VerifiedState -ceq 'PRESENT') "Completed=$($row.Completed) Verified=$($row.Verified) Estado=$($row.VerifiedState)"
+    Assert ((@(Read-E2ELog $c.Log | Where-Object { $_.type -ceq 'result' })[0].verifiedGone) -eq $false) 'verifiedGone no log diferente de false'
+    $inv = Assert-V3Only $before @((Get-V3Rel $r)) 'V3-O2'
+    "the real deleter completed and the root folder was created again before the check (declared provocation): VERIFICATION_FAILED (PRESENT), STOPPED_AFTER_VERIFICATION_FAILED, result verifiedGone=false$(Get-V3Attempts $c); $inv"
+}
+Case 'V3-O3-exception-after-real-deleter' {
+    $nt = & $v3NeedExec; if ($nt) { return $nt }
+    $r = $v3.Roots['O3'].Path
+    $before = Get-V3Snap
+    # Declared: tests the engine's handling of an exception from the deleter call (the real deletion has run).
+    $v3s.After = { param($c, $res) throw [IO.IOException]::new('V3 O3: declared exception after the real deletion') }
+    try { $c = Invoke-V3Churn -Paths @($r) -LogBase 'V3-O3' } finally { $v3s.After = $null }
+    if ($c.Exhausted) { return (Resolve-Exhausted $c) }
+    $row = Assert-V3Stopped $c 'EXCEPTION' $null $null
+    Assert ($row.ExceptionType -ceq 'IOException' -and $null -eq $row.Attempted -and $null -eq $row.FilesDeleted -and $row.VerifiedState -ceq 'UNKNOWN') "excecao: tipo $($row.ExceptionType), estado $($row.VerifiedState)"
+    $res = @(Read-E2ELog $c.Log | Where-Object { $_.type -ceq 'result' })[0]
+    Assert ([string]$res.verifiedGone -ceq 'UNKNOWN' -and $res.exceptionType -ceq 'IOException') 'log sem UNKNOWN/IOException'
+    $inv = Assert-V3Only $before @((Get-V3Rel $r)) 'V3-O3'
+    "an exception from the deleter call after the real deletion (declared): EXCEPTION, outcome unknown (verifiedGone UNKNOWN, IOException recorded, counts not presumed), STOPPED_AFTER_EXCEPTION$(Get-V3Attempts $c); $inv"
+}
+Case 'V3-O4-internal-exception-of-the-deleter' {
+    NotTested 'no deterministic trigger: the deleter turns its failures into AbortReason codes (it does not throw); the engine path for an exception is O3 and the suite'
+}
+
+# ---- 4.5 log
+Case 'V3-L1-log-write-failure-mid-run' {
+    NotTested 'J3: no size-limited volume on the runner; changing the log ACL mid-run does not fail an open handle; the engine path is covered by the suite with a stand-in writer (each stage)'
+}
+Case 'V3-L2-log-folder-pinned-during-run' {
+    $nt = & $v3NeedExec; if ($nt) { return $nt }
+    $r = $v3.Roots['L2'].Path
+    $before = Get-V3Snap
+    $v3Ren = @{ Status = $null }
+    $hook = { param($part) if ($null -eq $v3Ren.Status) { $v3s.Attacked = $true; try { [IO.Directory]::Move($ctx.LogDir, $ctx.LogDir + '-v3moved'); $v3Ren.Status = 'MOVED' } catch { $v3Ren.Status = 'REFUSED' } } }
+    $c = Invoke-V3Churn -Paths @($r) -LogBase 'V3-L2' -Hook $hook
+    if ($c.Exhausted) { return (Resolve-Exhausted $c) }
+    Assert ($v3Ren.Status -ceq 'REFUSED') "pasta do log durante a execucao: $($v3Ren.Status)"
+    Assert (-not $c.Res.Aborted -and -not $c.Res.StoppedBy -and @($c.Res.Deleted).Count -eq 1 -and $c.Res.Deleted[0].Outcome -ceq 'COMPLETE') "resultado: $($c.Res.Aborted) $($c.Res.StoppedBy)"
+    $types = Get-V3LogTypes $c.Log
+    Assert ($types -ceq 'run-start,plan,declaration,confirmation,plan-check,intent,result,run-end') "registros: $types"
+    $inv = Assert-V3Only $before @((Get-V3Rel $r)) 'V3-L2'
+    "renaming the log folder during the run refused (pinned while the log is open); the log is complete and in place ($types); COMPLETE$(Get-V3Attempts $c); $inv"
+}
+
+# ---- 4.5 a process that ends inside a run, and the abandoned lock (real name, disposable machine only)
+Case 'V3-K1-exit-after-intent' {
+    $nt = & $v3NeedExec; if ($nt) { return $nt }
+    $r = $v3.Roots['K1'].Path
+    $before = Get-V3Snap
+    $k = Invoke-V3ChildExit 'K1' 'K1' 7
+    if (-not $k.Exited) { return (NotTested "the child was refused before the deleter in all 3 attempts (process churn): $($k.Tries -join ', ')") }
+    $v3.K1Exited = $true
+    $types = Get-V3LogTypes $k.Run.Log
+    Assert ($types -ceq 'run-start,plan,declaration,confirmation,plan-check,intent') "o log deve terminar no intent: $types"
+    Assert ((Test-Path -LiteralPath (Join-Path $r 'a.txt')) -and (Test-Path -LiteralPath (Join-Path $r 'sub\z.txt'))) 'raiz alterada: a saida foi antes da primeira exclusao'
+    $inv = Assert-V3Only $before @() 'V3-K1-'
+    "a child (real lock) ended by itself inside the real deleter, after pinning (exit 7, never terminated): the log ends at the intent (no result, no run-end: outcome unknown), the root intact$(if ($k.Tries.Count) { '; earlier attempts: ' + ($k.Tries -join ', ') }); $inv"
+}
+Case 'V3-K2-abandoned-lock-after-exit' {
+    if (-not $v3.K1Exited) { return (NotTested 'K1 did not leave the lock abandoned') }
+    $r = $v3.Roots['K1'].Path
+    $before = Get-V3Snap
+    $c = Invoke-V3Clean -Paths @($r) -LogName 'V3-K2-abandoned.jsonl'
+    Assert ($c.Res.Aborted -ceq 'CLEAN_LOCK_ABANDONED' -and -not $c.Res.LogCreated -and -not (Test-Path -LiteralPath $c.Log) -and $c.Calls -eq 0 -and @($c.Res.Verified).Count -eq 0) "Aborted=$($c.Res.Aborted) log=$($c.Res.LogCreated) chamadas=$($c.Calls)"
+    $n = Invoke-V3Churn -Paths @($r) -LogBase 'V3-K2-next'
+    if ($n.Exhausted) { return (Resolve-Exhausted $n) }
+    Assert (-not $n.Res.Aborted -and -not $n.Res.StoppedBy -and @($n.Res.Deleted).Count -eq 1 -and $n.Res.Deleted[0].Outcome -ceq 'COMPLETE' -and $n.Res.Deleted[0].Verified -eq $true) "execucao seguinte: $($n.Res.Aborted) $($n.Res.StoppedBy)"
+    $inv = Assert-V3Only $before @((Get-V3Rel $r)) 'V3-K2-'
+    "the next clean after the exit: CLEAN_LOCK_ABANDONED (no inventory, no log, no deleter; ownership released); the following one acquired the lock, planned the root again and deleted it (COMPLETE)$(Get-V3Attempts $n); $inv"
+}
+Case 'V3-K3-exit-after-real-deletion' {
+    $nt = & $v3NeedExec; if ($nt) { return $nt }
+    $r = $v3.Roots['K3'].Path
+    $before = Get-V3Snap
+    $k = Invoke-V3ChildExit 'K3' 'K3' 8
+    if (-not $k.Exited) { return (NotTested "the child was refused before the deleter in all 3 attempts (process churn): $($k.Tries -join ', ')") }
+    $types = Get-V3LogTypes $k.Run.Log
+    Assert ($types -ceq 'run-start,plan,declaration,confirmation,plan-check,intent' -and -not (Test-Path -LiteralPath $r)) "log $types; raiz presente: $(Test-Path -LiteralPath $r)"
+    $c = Invoke-V3Clean -Paths @($r) -LogName 'V3-K3-abandoned.jsonl' -Gone
+    Assert ($c.Res.Aborted -ceq 'CLEAN_LOCK_ABANDONED' -and -not (Test-Path -LiteralPath $c.Log)) "depois da saida: $($c.Res.Aborted)"
+    $c2 = Invoke-V3Clean -Paths @($r) -LogName 'V3-K3-after.jsonl' -Gone
+    $codes = Assert-V3PlanRefused $c2 'FORA_DAS_ROOTS_PERMITIDAS'
+    $inv = Assert-V3Only $before @((Get-V3Rel $r)) 'V3-K3-'
+    "a child ended by itself right after the real deletion, before the result (exit 8): the log ends at the intent and the root is gone (the outcome is known only by looking); next clean CLEAN_LOCK_ABANDONED, then the entry no longer exists: NENHUM_CAMINHO_ELEGIVEL ($codes); $inv"
+}
+Case 'V3-K4-exit-mid-tree' {
+    NotTested 'J2: no per-file hook in the native deletion loop and no forced termination; an exit after the intent (K1) and after the deletion (K3) are proved'
+}
+
+# ---- 4.6 concurrency and shared bases
+Case 'V3-X1-second-clean-while-first-holds-lock' {
+    $nt = & $v3NeedExec; if ($nt) { return $nt }
+    $r = $v3.Roots['X1'].Path
+    $before = Get-V3Snap
+    $v3X = @{ Child = $null; Root = $r }
+    $v3Inner = (New-Operator).Reader
+    # The first clean (this process) holds the lock through its questions; at the final phrase a second, complete clean
+    # of the same root runs in a child process and must be refused at once.
+    $op = @{ Reader = { param($phrase, $kind, $rootPath, $choices, $info) if ($kind -ceq 'confirm' -and $null -eq $v3X.Child) { $v3s.Attacked = $true; $v3X.Child = Invoke-V3ChildRun 'X1' $v3X.Root 'V3-X1-child.jsonl' }; & $v3Inner $phrase $kind $rootPath $choices $info } }
+    $c = Invoke-V3Churn -Paths @($r) -LogBase 'V3-X1' -Operator $op
+    if ($c.Exhausted) { return (Resolve-Exhausted $c) }
+    Assert ($null -ne $v3X.Child) 'a segunda execucao nao foi iniciada'
+    $k = $v3X.Child
+    Assert ($k.Exit -eq 0 -and $k.Out -ceq 'NOT_EXITED|CLEAN_LOCK_BUSY||0|False' -and -not (Test-Path -LiteralPath $k.Log)) "segunda execucao: exit $($k.Exit), $($k.Out)"
+    if (@('PLAN_CHANGED_BEFORE_EXECUTION', 'REVALIDATION_REFUSED') -ccontains [string]$c.Res.Aborted) { return (NotTested "the second clean was refused CLEAN_LOCK_BUSY (no presenter, no log), but the first one was then refused by process churn of the runner ($($c.Res.Aborted)), nothing deleted") }
+    Assert (-not $c.Res.Aborted -and -not $c.Res.StoppedBy -and @($c.Res.Deleted).Count -eq 1 -and $c.Res.Deleted[0].Outcome -ceq 'COMPLETE') "primeira execucao: $($c.Res.Aborted) $($c.Res.StoppedBy)"
+    $inv = Assert-V3Only $before @((Get-V3Rel $r)) 'V3-X1'
+    "a second complete clean of the same root (another process, same account) while the first held the lock: CLEAN_LOCK_BUSY at once (presenter never called, no log, no deleter); the first went on and deleted the root once (COMPLETE); $inv"
+}
+Case 'V3-X3-other-object-with-the-lock-name' {
+    $nt = & $v3NeedPlant; if ($nt) { return $nt }
+    $r = $v3.Roots['X3'].Path
+    $before = Get-V3Snap
+    # Squatting with another type of object under the real name, on this disposable machine only.
+    $ev = New-Object Threading.EventWaitHandle($false, [Threading.EventResetMode]::ManualReset, 'Global\AgentTempManager.Clean')
+    try { $c = Invoke-V3Clean -Paths @($r) -LogName 'V3-X3.jsonl' } finally { $ev.Dispose() }
+    Assert ($c.Res.Aborted -ceq 'CLEAN_LOCK_TYPE_MISMATCH' -and -not (Test-Path -LiteralPath $c.Log) -and $c.Calls -eq 0 -and @($c.Res.Verified).Count -eq 0) "Aborted=$($c.Res.Aborted)"
+    $inv = Assert-V3Only $before @() 'V3-X3'
+    "an event created under the real lock name: CLEAN_LOCK_TYPE_MISMATCH before any inventory, no log, no deleter (both legs); $inv"
+}
+function Set-V3TmpDir([string]$Value) {
+    # The variable as V2 sets it (this account's user environment and this process); restored by the caller.
+    $k = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+    try { $k.SetValue('CLAUDE_CODE_TMPDIR', $Value, [Microsoft.Win32.RegistryValueKind]::String) } finally { $k.Close() }
+    [Environment]::SetEnvironmentVariable('CLAUDE_CODE_TMPDIR', $Value, 'Process')
+}
+Case 'V3-S1-base-under-windows-temp' {
+    $nt = & $v3NeedPlant; if ($nt) { return $nt }
+    if (-not $v3.S1Root) { return (NotTested "the base under the Windows temp folder could not be created by this account ($($v3.S1Error))") }
+    $before = Get-V3Snap
+    Set-V3TmpDir $v3.S1Run
+    try {
+        $inv = Invoke-AtmInventory @ia
+        $b = @($inv.Bases | Where-Object { [string]::Equals($_.Path, (Join-Path $v3.S1Run 'claude'), [StringComparison]::OrdinalIgnoreCase) })
+        Assert ($b.Count -eq 1 -and [bool]$b[0].Shared) "base sob o Temp do Windows: encontrada $($b.Count), compartilhada $(if ($b.Count) { $b[0].Shared })"
+        $c = Invoke-V3Clean -Paths @($v3.S1Root) -LogName 'V3-S1.jsonl'
+    } finally { Set-V3TmpDir $ctx.Tmp }
+    $codes = Assert-V3PlanRefused $c 'SHARED_TEMP'
+    Assert (Test-Path -LiteralPath (Join-Path $v3.S1Root 'sub\z.txt')) 'raiz sob o Temp do Windows alterada'
+    $inv2 = Assert-V3Only $before @() 'V3-S1'
+    "a base under the Windows temp folder (writable by every account), found through the user environment: marked shared, NENHUM_CAMINHO_ELEGIVEL with $codes (both legs); no log, 0 intents, the root intact; the variable restored; $inv2"
+}
+Case 'V3-S2-base-shared-by-two-profiles' {
+    # NOVO-MED (leg B, elevated: reads the other accounts' environment): the disposable test account's environment pointed at
+    # this account's base. Only when that account's hive is loaded and its environment readable; otherwise measured as
+    # NOT_TESTED. The value is set only if absent and taken out again.
+    $nt = & $v3NeedPlant; if ($nt) { return $nt }
+    if ($Leg -ne 'B') { return (NotTested 'leg B only: a standard user does not read the environment of other accounts') }
+    $inv = Invoke-AtmInventory @ia
+    $other = @($inv.Profiles | Where-Object { [string]$_.Sid -cne $mySid -and [string]$_.Sid -like 'S-1-5-21-*' -and (Split-Path -Leaf ([string]$_.ProfilePath)) -like 'atme2e*' })
+    if ($other.Count -ne 1) { return (NotTested "the disposable test account was not found among the profiles ($($other.Count))") }
+    $o = $other[0]
+    if (-not $o.Loaded -or [string]$o.EnvStatus -cne 'OK') { return (NotTested "measured: the test account's registry hive is $(if ($o.Loaded) { 'loaded' } else { 'not loaded' }) and its environment $([string]$o.EnvStatus): its base cannot be read, so a shared base cannot be seen through it") }
+    $k = [Microsoft.Win32.Registry]::Users.OpenSubKey(([string]$o.Sid + '\Environment'), $true)
+    if ($null -eq $k) { return (NotTested 'the test account environment key cannot be opened for writing') }
+    $set = $false
+    try {
+        if ($null -ne $k.GetValue('CLAUDE_CODE_TMPDIR', $null)) { return (NotTested 'the test account already has CLAUDE_CODE_TMPDIR; left unchanged') }
+        $k.SetValue('CLAUDE_CODE_TMPDIR', $ctx.Tmp, [Microsoft.Win32.RegistryValueKind]::String); $set = $true
+        $before = Get-V3Snap
+        $c = Invoke-V3Clean -Paths @($v3.Roots['S2'].Path) -LogName 'V3-S2.jsonl'
+    } finally { if ($set) { $k.DeleteValue('CLAUDE_CODE_TMPDIR') }; $k.Close() }
+    $codes = Assert-V3PlanRefused $c 'SHARED_TEMP'
+    $inv2 = Assert-V3Only $before @() 'V3-S2'
+    "the same base claimed by the disposable test account's environment: SHARED_TEMP, NENHUM_CAMINHO_ELEGIVEL ($codes); the value taken out again; $inv2"
+}
+
 Case 'V3-snapshot' {
     # Over the whole V3a phase: only the V3 scopes and the V3 logs may differ; sentinels, link targets, the V2 roots,
     # the transcripts and the rest of the run root are unchanged.
@@ -1400,7 +1674,7 @@ $summary.failed = $failed
 $summary.notTested = @($summary.cases.Values | Where-Object { $_.status -eq 'NOT_TESTED' }).Count
 $summary.passed = @($summary.cases.Values | Where-Object { $_.status -eq 'PASS' }).Count
 $v3Cases = @($summary.cases.Keys | Where-Object { $_.StartsWith('V3-') } | ForEach-Object { $summary.cases[$_] })
-$summary.v3 = [ordered]@{ phase = 'V3a+V3b'; passed = @($v3Cases | Where-Object { $_.status -eq 'PASS' }).Count; failed = @($v3Cases | Where-Object { $_.status -eq 'FAIL' }).Count; notTested = @($v3Cases | Where-Object { $_.status -eq 'NOT_TESTED' }).Count }
+$summary.v3 = [ordered]@{ phase = 'V3a+V3b+V3c'; passed = @($v3Cases | Where-Object { $_.status -eq 'PASS' }).Count; failed = @($v3Cases | Where-Object { $_.status -eq 'FAIL' }).Count; notTested = @($v3Cases | Where-Object { $_.status -eq 'NOT_TESTED' }).Count }
 [IO.File]::WriteAllText($SummaryFile, ($summary | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
 [Console]::Out.WriteLine(("V2-{0}: {1} PASS / {2} FAIL / {3} NOT_TESTED | {4} | elevated {5}" -f $Leg, $summary.passed, $failed, $summary.notTested, $summary.shell, $summary.elevated))
 exit $failed

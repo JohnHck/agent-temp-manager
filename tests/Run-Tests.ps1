@@ -5542,7 +5542,8 @@ try {
         # V3a: the only deleter seam is the wrapper of the V3 cases (the real deleter with the engine's arguments, checked
         # in the V3a case below); the V2 runs never pass it.
         $v2Fn = $h.Substring($h.IndexOf('function Invoke-E2EClean('), $h.IndexOf('function Invoke-E2ECleanChurn(') - $h.IndexOf('function Invoke-E2EClean('))
-        Assert-True (-not $v2Fn.Contains('DeleteTreeImpl') -and [regex]::Matches($h, 'DeleteTreeImpl').Count -eq 1 -and $h.Contains('DeleteTreeImpl = $v3Deleter')) 'V2: deleter real sem ponto de teste; o unico uso de DeleteTreeImpl e o wrapper da V3'
+        $nImpl = [regex]::Matches($h, 'DeleteTreeImpl').Count
+        Assert-True (-not $v2Fn.Contains('DeleteTreeImpl') -and $nImpl -ge 1 -and $nImpl -eq [regex]::Matches($h, [regex]::Escape('DeleteTreeImpl = $v3Deleter')).Count) 'V2: deleter real sem ponto de teste; todo uso de DeleteTreeImpl e o wrapper da V3'
         Assert-True ($h.Contains('-LogFile') -or $h.Contains('LogFile = $log')) 'log T1 em arquivo'
         # Containment: run root created atomically with a protected DACL, refused if present; nonce checked per entry.
         Assert-True ($h.Contains("Assert (-not (Test-Path -LiteralPath `$runRoot)) 'RUN_ROOT_EXISTS'") -and $h.Contains('D:PAI(') -and $h.Contains('AreAccessRulesProtected')) 'raiz de execucao atomica, protegida, recusada se existir'
@@ -5578,7 +5579,7 @@ try {
         foreach ($id in @('R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9', 'R10', 'R11', 'R12', 'R13', 'U1', 'U2', 'U3', 'U4', 'U5', 'U6', 'U7', 'U8', 'U9')) {
             Assert-True ([regex]::IsMatch($h, "Case 'V3-$id-")) "caso V3-$id presente"
         }
-        Assert-True ($h.Contains('function Assert-V3Entry') -and $h.Contains('Assert-V3Entry $v3p;') -and $h.Contains("'alvo do link fora da raiz desta execucao'") -and $h.Contains('Assert-Entry $Path')) 'entradas da V3 conferidas (nonce e base; links criados nesta execucao com alvo na raiz da execucao)'
+        Assert-True ($h.Contains('function Assert-V3Entry') -and $h.Contains('else { Assert-V3Entry $v3p }') -and $h.Contains("'alvo do link fora da raiz desta execucao'") -and $h.Contains('Assert-Entry $Path')) 'entradas da V3 conferidas (nonce e base; links criados nesta execucao com alvo na raiz da execucao)'
         Assert-True ($h.Contains('function Assert-V3Only') -and $h.Contains("Case 'V3-snapshot'")) 'invariante por caso e da fase inteira'
         Assert-True ($h.IndexOf("Case 'V3-snapshot'") -lt $h.IndexOf("Case 'P1-installed-after'") -and $h.IndexOf("Case 'P9-temp-pre-existing'") -lt $h.IndexOf("Case 'V3-plant'")) 'fase V3a depois do snapshot da V2 e antes da conferencia final da instalacao'
     }
@@ -5597,6 +5598,23 @@ try {
         Assert-True ($w.Contains("'-NoProfile -NonInteractive -Command Start-Sleep -Seconds 40'") -and $w.Contains("Join-Path `$Dir 'stop.txt'") -and $w.Contains('AddMinutes(45)')) 'observador: um comando fixo que termina sozinho; o observador termina por arquivo ou prazo'
         Assert-True (-not $w.Contains('Kill') -and -not $w.Contains('Stop-Process') -and -not $w.Contains('Get-Content')) 'observador nunca encerra processos nem le o conteudo dos pedidos'
         Assert-True ($e2e.Contains('$v3WatchDir = Join-Path ([IO.Path]::GetTempPath())') -and $e2e.Contains('-SignalDir `"$v3Signal`"')) 'script do observador fora da pasta do usuario de teste; pasta de sinal so na perna A'
+    }
+    Test-Case 'Ambiente de teste' 'V0.3 V3c: casos O, L, K, X e S presentes antes do snapshot da fase; filho e o proprio harness (motor instalado, trava aberta uma vez, nenhum caso no modo filho) e sai sozinho; nada e encerrado a forca; X2 nas duas ordens no e2e' {
+        $h = [IO.File]::ReadAllText((Join-Path $testsDir 'e2e\Invoke-CleanE2E.ps1'))
+        foreach ($id in @('O1', 'O2', 'O3', 'O4', 'L1', 'L2', 'K1', 'K2', 'K3', 'K4', 'X1', 'X3', 'S1', 'S2')) {
+            Assert-True ([regex]::IsMatch($h, "Case 'V3-$id-") -and $h.IndexOf("Case 'V3-$id-") -lt $h.IndexOf("Case 'V3-snapshot'")) "caso V3-$id presente e coberto pelo snapshot da fase"
+        }
+        # Child mode: no case runs, it branches after the installed engine was loaded and the gate opened once.
+        Assert-True ($h.Contains("function Case([string]`$Id, [scriptblock]`$Body) {`r`n    if (`$ChildMode) { return }") -or $h.Contains("function Case([string]`$Id, [scriptblock]`$Body) {`n    if (`$ChildMode) { return }")) 'modo filho: nenhum caso executa'
+        Assert-True ($h.IndexOf('if ($ChildMode) {' + [Environment]::NewLine) -gt $h.IndexOf('$script:AtmRealDeletionEnabled = $true') -or $h.IndexOf("if (`$ChildMode) {`n") -gt $h.IndexOf('$script:AtmRealDeletionEnabled = $true')) 'filho so depois de carregar o motor instalado e abrir a trava em memoria'
+        Assert-True ([regex]::Matches($h, '\[Environment\]::Exit\(').Count -eq 2 -and $h.Contains('[Environment]::Exit(7)') -and $h.Contains('[Environment]::Exit(8)')) 'saida propria do filho so em K1 e K3'
+        $v3Part = $h.Substring($h.IndexOf('# ---------------------------------------------------------------------------------------------- V3a'))
+        foreach ($pat in @('.Kill(', 'Stop-Process', 'TerminateProcess', 'taskkill')) { Assert-True (-not $v3Part.Contains($pat)) "fases V3 sem '$pat'" }
+        Assert-True ($h.Contains("'Global\AgentTempManager.Clean')") -and $h.Contains("Join-Path `$env:SystemRoot ('Temp\ATM-E2E-V3-' + `$nonce.Substring(0, 12))") -and $h.Contains("'S1_RUN_EXISTS'")) 'X3 com o nome real e S1 com nome desta execucao, recusado se existir'
+        $e2e = [IO.File]::ReadAllText((Join-Path $testsDir 'e2e\Invoke-InstallE2E.ps1'))
+        $x2 = $e2e.Substring($e2e.IndexOf("Step 'v3-x2-lock-across-identities'"), $e2e.IndexOf("Step 'uninstall'") - $e2e.IndexOf("Step 'v3-x2-lock-across-identities'"))
+        Assert-True ($x2.Contains('# Order 1') -and $x2.Contains('# Order 2') -and $x2.Contains("-ceq 'BUSY'") -and -not $x2.Contains('Kill') -and -not $x2.Contains('Stop-Process')) 'X2: duas ordens, BUSY esperado, nenhum processo encerrado'
+        Assert-True ($e2e.IndexOf("Step 'v2-clean-leg-B-elevated'") -lt $e2e.IndexOf("Step 'v3-x2-lock-across-identities'")) 'X2 depois das duas pernas e antes da desinstalacao'
     }
 
     Test-Case 'Analise estatica' 'Excecoes revisadas: justificadas, restritas e sem enfraquecer as regras impostas' {

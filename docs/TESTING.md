@@ -174,6 +174,40 @@ roots planted with the V3a ones and covered by the same phase snapshot.
 * **Not tested:** a write that keeps every statistic (no content hash, by design); leg B in-deleter cases while its
   coverage is incomplete.
 
+## Deleter outcomes, the log, interrupted runs, concurrency and shared bases (V0.3 V3, phase V3c)
+
+* **Outcomes with the real deleter:** `PARTIAL` (from the V3a/V3b cases that stop inside the deleter); a root folder
+  created again right after the real deletion gives `VERIFICATION_FAILED`; an exception raised by the deleter call
+  after the real deletion gives `EXCEPTION` with the outcome unknown (`verifiedGone = UNKNOWN`, counts not presumed).
+  The last two are provoked by the harness (declared).
+* **The log:** renaming the log folder during a run is refused (it is pinned while the log is open) and the log is
+  complete.
+* **A run that ends inside itself:** the harness starts itself again as a child (same account, the real lock name, only
+  on disposable runners); the child ends by itself (`Environment.Exit`, never terminated) inside the real deleter after
+  pinning, or right after the real deletion. The log ends at the `intent` (no `result`: the outcome is unknown); the next
+  clean is refused with `CLEAN_LOCK_ABANDONED` (no inventory, no log), and the following one acquires the lock and plans
+  from scratch (the root deleted, or no longer there).
+* **Concurrency:** a second complete clean of the same root while the first holds the lock: `CLEAN_LOCK_BUSY` at once (no
+  plan shown, no log, no deleter), and the first deletes the root once. Across identities (the standard user and the
+  elevated runner account, in both orders) the other side gets `BUSY`, never `DENIED` (the e2e step
+  `v3-x2-lock-across-identities`; CI evidence, not the V4 row). Another kind of object under the lock name:
+  `CLEAN_LOCK_TYPE_MISMATCH`.
+* **Shared bases:** a base under the Windows temp folder is shared, refused with `SHARED_TEMP` (both legs). A base claimed
+  by two accounts is tried in leg B when the other account's environment is readable; otherwise it is measured as
+  `NAO_TESTADO`.
+
+## V3 as a whole
+
+Every case asserts its own code, the log read back from the file, the number of calls to the deleter and that nothing
+outside the planned root and the declared attack changed. Leg A (standard user, B1 exception, one root per run) runs
+every case; leg B (elevated) runs the cases refused while planning, and the others only when its process coverage is
+complete, which it was not on any runner. A refusal caused by new processes of the runner before an attack is retried
+and, if it persists, reported as `NAO_TESTADO` with the identities that explain it. **Not tested, by design or by
+decision:** a write that keeps every statistic (no content hash); a real exception inside the deleter (it reports
+codes, it does not throw); a real failure of the log write (no size-limited volume on the runners); an interruption in
+the middle of the tree (no per-file hook, no forced termination). Proved limits are in SECURITY-MODEL (unobservable
+handles, a working directory entering a pinned folder, the ACL not read again once pinned, hard links).
+
 Gate logic for administrators and other users is also exercised with injected identities (`IsAdmin`, profile SID
 different from the process SID) in every run, on both shells. Manual rows are recorded in the release notes as
 done or `NAO_TESTADO`, never assumed.
