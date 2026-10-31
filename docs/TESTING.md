@@ -71,6 +71,44 @@ rollback, tamper detection (exit 5) and repair, a real standard user (created on
 and verify without write access to the install directory, uninstall (directory and PATH entry removed). Evidence is
 uploaded as artifacts.
 
+## Real clean on disposable VMs (V0.3 V2)
+
+The same `install e2e` jobs (every OS and installer shell of the matrix) also run the **real** clean, end to end, through
+`tests/e2e/Invoke-CleanE2E.ps1`, before the uninstall. The harness is CI-only: `tools/Build-Release.ps1` leaves it out of
+the release archive and refuses an archive that contains it, and the e2e checks the extracted package.
+
+* **Gate.** It loads the *installed* engine into its own process and opens the deletion gate there only, in memory,
+  as the suite does for its sandbox. The installed files keep the single assignment to `$false`; the harness compares
+  their SHA-256 before and after and runs `agent-temp verify`. No variable, option or file opens the gate in a copy.
+* **Real parts.** The real deleter, the T1 log in a real file, the real B8 lock name, the real revalidation and the
+  real profile discovery (the variables are set in the test account's user environment). The only seam is the console
+  observation (`TEST_SEAM`, checked in the log): **every confirmation is automated by the harness, never a human
+  acceptance.**
+* **Containment.** Everything it can hand to clean is under a run root it creates atomically in that run, with a
+  protected DACL, refused if the name exists; each planted root carries the run's nonce, and every entry is checked
+  against both before clean is called. Real roots of the VM are never entries. The environment check
+  (`GITHUB_ACTIONS`, or `-DisposableMachine`) only guards against an accidental run.
+* **Recency is simulated.** The "old" planted roots and their transcripts get write times set back by 120 hours
+  (recorded as `recencySimulated`); RECENT itself (72 hours) is unchanged.
+* **Leg A**, the VM's standard user (not elevated), B1 restricted exception: preview (`ELIGIBLE_WITH_DECLARED_RISK`
+  for the old roots, `BLOCKED`/`RECENT` for the new one); refusals that delete nothing (lock held by another process,
+  existing log file, no `-AcceptB1ResidualRisk`, a recent root, two roots under the exception, a wrong final phrase);
+  `REVALIDATION_REFUSED` when a root changes between the confirmation and its deletion; one root deleted by the real
+  deleter with the log read back from the file (`run-start, plan, declaration, confirmation, plan-check, intent,
+  result, run-end`) and the lock seen `BUSY` from another process during the run and free after it.
+* **Leg B**, the elevated runner account: `ELIGIBLE` only when the process coverage measured in that run is complete;
+  then two roots, the first deleted by the real deleter and the second, changed after the confirmation, stopping the run.
+  Coverage measured incomplete: `NAO_TESTADO`, never forced.
+* **Snapshot.** The whole run root before and after: only the deleted roots, the new log files and the declared change
+  may differ. The account's temp folder is compared too; other processes write there, so a change of a pre-existing
+  entry is reported as inconclusive (`NAO_TESTADO`), not attributed.
+* **Evidence.** Only the harness summary is uploaded (codes, counts and labels; no path, account name or SID), through
+  the artifact sanitizer and the privacy scanner. The raw clean logs stay in the VM.
+* **Not tested here.** The CLI and the TUI past the gate (opening the gate there would mean changing the installed copy);
+  a refusal inside the deleter after the revalidation (no deterministic trigger without a seam; covered by the suite on
+  its own fixtures); partial, exception and inconclusive-verification outcomes with the real deleter (V3); `ELIGIBLE`
+  without elevation; an abandoned lock; UAC prompts and filtered tokens (the runners have UAC disabled).
+
 Gate logic for administrators and other users is also exercised with injected identities (`IsAdmin`, profile SID
 different from the process SID) in every run, on both shells. Manual rows are recorded in the release notes as
 done or `NAO_TESTADO`, never assumed.

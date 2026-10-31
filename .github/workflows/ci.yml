@@ -189,11 +189,16 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # V0.3 V2: also the REAL clean, end to end, of roots planted by tests/e2e/Invoke-CleanE2E.ps1 itself in a run root it
+  # creates, against this installation: leg A as the VM's standard user (B1 restricted exception), leg B elevated
+  # (ELIGIBLE only if the measured process coverage is complete). The harness opens the deletion gate only in its own
+  # process memory (the installed copy stays closed, checked by hash) and never ships (Build-Release). Only its summary
+  # is uploaded (codes and counts; the raw clean logs are not). Every matrix entry is a failing job on a FAIL.
   install-e2e:
     name: install e2e (${{ matrix.os }}, installer ${{ matrix.installer }})
     needs: build-package
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

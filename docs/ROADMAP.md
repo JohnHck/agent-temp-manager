@@ -190,6 +190,13 @@ persistent monitoring (that is V0.5).
 **Objectives.** Enable real deletion of temporary paths that a human selected and approved, with the protections
 already built in V0.1 and the evidence gathered in V0.2.
 
+**Validation stages (unreleased; every distributed copy keeps real deletion disabled).**
+* V2, disposable CI integration: **in CI**. The real clean, end to end, on roots planted by a CI-only harness on
+  disposable GitHub-hosted VMs, against the installed candidate, as a non-elevated standard user (B1 restricted
+  exception) and elevated (ELIGIBLE only when the measured process coverage is complete). The confirmation there is
+  automated, never a human acceptance. Details and limits: [TESTING.md](TESTING.md#real-clean-on-disposable-vms-v03-v2).
+* V3 (adversarial cases), V4 (privilege matrix) and V5 (operator pilot): not started.
+
 **Deliverables.**
 * Release gate enabled through a reviewed change; deletion only for paths in an explicit allowlist.
 * Typed human confirmation of the exact plan (paths, files, bytes) immediately before deletion.

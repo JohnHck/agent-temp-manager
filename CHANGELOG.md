@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+* V0.3 V2 (tests only, no product change): the `install e2e` jobs run the real clean end to end on disposable
+  GitHub-hosted VMs, through the CI-only harness `tests/e2e/Invoke-CleanE2E.ps1`, on roots it plants itself in a run root
+  it creates. It loads the installed engine and opens the deletion gate only in its own process memory; the installed
+  copy stays closed (checked by SHA-256). Real deleter, T1 log file, B8 lock and revalidation; automated confirmation,
+  never a human acceptance; simulated recency (write times set back). Leg A as a non-elevated standard user (B1
+  restricted exception), leg B elevated (ELIGIBLE only with complete measured coverage). The harness never ships:
+  `tools/Build-Release.ps1` leaves it out and refuses an archive that contains it. Only a summary is uploaded. Details:
+  docs/TESTING.md, "Real clean on disposable VMs (V0.3 V2)".
 * V0.3 T1 (F-04, not closed until released): `clean -LogFile` becomes a new file per run, required once real deletion
   is enabled; written through a handle kept for the run (append-only, flushed per record, JSON Lines). Per-root
   `intent` before the deletion and `result` after it; a refusal, a partial deletion, an exception, an inconclusive

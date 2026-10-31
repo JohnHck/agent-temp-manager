@@ -5472,6 +5472,53 @@ try {
         Assert-True (($o -join ' ') -match 'Recusado') "mensagem de recusa: $($o -join ' ')"
         Assert-True (-not (Test-Path -LiteralPath $out)) 'nada criado'
     }
+    Test-Case 'Ambiente de teste' 'V0.3 V2: harness da exclusao real na CI recusa rodar fora de maquina descartavel e nao cria nada' {
+        $h = Join-Path $testsDir 'e2e\Invoke-CleanE2E.ps1'
+        $sum = Join-Path $sandbox 'v2-summary.json'
+        $work = Join-Path $sandbox 'v2-work'
+        $shell = (Get-Process -Id $PID).Path
+        $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try {
+            $o = @(& $shell -NoProfile -ExecutionPolicy Bypass -Command "`$env:GITHUB_ACTIONS = ''; `$env:RUNNER_ENVIRONMENT = ''; & '$($h.Replace("'", "''"))' -Leg A -InstallDir '$($sandbox.Replace("'", "''"))' -SummaryFile '$($sum.Replace("'", "''"))' -WorkDir '$($work.Replace("'", "''"))'" 2>&1 | ForEach-Object { "$_" })
+            $code = $LASTEXITCODE
+        } finally { $ErrorActionPreference = $eap }
+        Assert-True ($code -ne 0) 'recusa com codigo de saida diferente de zero'
+        Assert-True (($o -join ' ') -match 'Recusado') "mensagem de recusa: $($o -join ' ')"
+        Assert-True (-not (Test-Path -LiteralPath $sum) -and -not (Test-Path -LiteralPath $work)) 'nada criado'
+    }
+    Test-Case 'Ambiente de teste' 'V0.3 V2: harness so da CI - trava aberta so na memoria do proprio processo, motor instalado, deleter/log/lock reais, entradas presas a raiz criada nesta execucao; nunca no pacote (D1); src sem referencia' {
+        $root = Split-Path -Parent $testsDir
+        $h = [IO.File]::ReadAllText((Join-Path $testsDir 'e2e\Invoke-CleanE2E.ps1'))
+        # The gate: one in-memory assignment, after the installed engine is loaded; the console seam (TEST_SEAM) only.
+        Assert-Eq ([regex]::Matches($h, '\$script:AtmRealDeletionEnabled\s*=').Count) 1 'uma unica abertura da trava no harness'
+        Assert-True ($h.IndexOf(". (Join-Path `$lib 'Engine.Clean.ps1')") -gt 0 -and $h.IndexOf(". (Join-Path `$lib 'Engine.Clean.ps1')") -lt $h.IndexOf('$script:AtmRealDeletionEnabled = $true')) 'trava aberta so depois de carregar o motor instalado'
+        Assert-True ($h.Contains("`$lib = Join-Path `$InstallDir 'lib'") -and -not $h.Contains("'src'")) 'motor carregado da instalacao, nunca da fonte'
+        Assert-True ($h.Contains('$script:AtmCleanConsoleSource = { $true }') -and $h.Contains("observedBy -ceq 'TEST_SEAM'")) 'console pelo ponto de teste, conferido no log'
+        # Real deleter, log file, lock name, discovery and recency: no seam, override or product constant changed.
+        foreach ($pat in @('DeleteTreeImpl', 'PathPresenceImpl', 'LogWriter', 'AtmCleanLockName', 'ProfilesOverride', 'IdentityOverride', 'ProcessesOverride', 'NowUtc', 'AtmRuntimeEvidenceSources', 'AtmRecentHours =', 'AtmB1ExceptionActiveMaxRoots', 'DeleteTree(', 'Remove-Item')) {
+            Assert-True (-not $h.Contains($pat)) "harness sem '$pat'"
+        }
+        Assert-True ($h.Contains('-LogFile') -or $h.Contains('LogFile = $log')) 'log T1 em arquivo'
+        # Containment: run root created atomically with a protected DACL, refused if present; nonce checked per entry.
+        Assert-True ($h.Contains("Assert (-not (Test-Path -LiteralPath `$runRoot)) 'RUN_ROOT_EXISTS'") -and $h.Contains('D:PAI(') -and $h.Contains('AreAccessRulesProtected')) 'raiz de execucao atomica, protegida, recusada se existir'
+        Assert-True ($h.Contains('function Assert-Entry') -and $h.Contains('ATM-E2E-NONCE.txt') -and $h.Contains('$entries = @(foreach ($l in $Labels) { $p = $ctx.Roots[$l].Path; Assert-Entry $p;')) 'toda entrada conferida contra a base e o nonce desta execucao'
+        Assert-True ($h.Contains('recencySimulated = $true') -and $h.Contains("throw 'Recusado:")) 'recencia simulada declarada; guarda contra execucao acidental'
+        # D1: never in the release package.
+        $br = [IO.File]::ReadAllText((Join-Path $root 'tools\Build-Release.ps1'))
+        Assert-True ($br.Contains("`$ciOnly = @('tests\e2e\Invoke-CleanE2E.ps1')") -and $br.Contains('[IO.File]::Delete($st)') -and $br.Contains('arquivo exclusivo da CI')) 'build: harness fora do stage e arquivo recusado se o contiver'
+        Assert-True ($br.IndexOf('$ciOnly = @(') -gt $br.IndexOf("Copy-AtmTree -From (Join-Path `$repo `$rel)") -and $br.IndexOf('$ciOnly = @(') -lt $br.IndexOf('Write-AtmManifest')) 'build: exclusao logo apos a copia, antes do manifesto e do zip'
+        $e2e = [IO.File]::ReadAllText((Join-Path $testsDir 'e2e\Invoke-InstallE2E.ps1'))
+        Assert-True ($e2e.Contains("Step 'package-excludes-ci-harness'") -and $e2e.Contains("Step 'v2-clean-leg-A-standard-user'") -and $e2e.Contains("Step 'v2-clean-leg-B-elevated'")) 'e2e: pacote sem o harness e as duas pernas'
+        Assert-True ($e2e.IndexOf("Step 'v2-clean-leg-B-elevated'") -lt $e2e.IndexOf("Step 'uninstall'")) 'e2e: pernas antes da desinstalacao'
+        # The product never references the harness and keeps the console seam a single $null assignment.
+        foreach ($f in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File)) {
+            $t = [IO.File]::ReadAllText($f.FullName)
+            Assert-True (-not $t.Contains('Invoke-CleanE2E')) "$($f.Name) sem referencia ao harness"
+            if ($f.Name -ne 'Engine.Clean.ps1') { Assert-True (-not [regex]::IsMatch($t, 'AtmCleanConsoleSource\s*=')) "$($f.Name) nao atribui o ponto de teste do console" }
+        }
+        $clean = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Clean.ps1'))
+        Assert-True ([regex]::Matches($clean, '\$script:AtmCleanConsoleSource\s*=').Count -eq 1 -and $clean -match '(?m)^\$script:AtmCleanConsoleSource = \$null\r?$') 'ponto de teste do console: atribuicao unica $null no produto'
+    }
 
     Test-Case 'Analise estatica' 'Excecoes revisadas: justificadas, restritas e sem enfraquecer as regras impostas' {
         $root = Split-Path -Parent $testsDir

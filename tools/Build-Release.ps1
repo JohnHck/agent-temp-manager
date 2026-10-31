@@ -22,6 +22,10 @@ $stage = Join-Path $dist $name
 if (Test-Path -LiteralPath $dist) { [IO.Directory]::Delete($dist, $true) }
 [void][IO.Directory]::CreateDirectory($stage)
 foreach ($rel in @('src', 'install', 'docs', 'tests', 'tools')) { Copy-AtmTree -From (Join-Path $repo $rel) -To (Join-Path $stage $rel) }
+# V0.3 V2 (D1): CI-only files never ship. The harness of the real clean (it opens the deletion gate in its own process
+# and deletes the roots it plants) is left out of the stage here, and an archive that contains it is refused below.
+$ciOnly = @('tests\e2e\Invoke-CleanE2E.ps1')
+foreach ($rel in $ciOnly) { $st = Join-Path $stage $rel; if ([IO.File]::Exists($st)) { [IO.File]::Delete($st) } }
 foreach ($f in @('README.md', 'LICENSE', 'CHANGELOG.md', 'SECURITY.md', 'CONTRIBUTING.md')) { Copy-Item -LiteralPath (Join-Path $repo $f) -Destination $stage }
 Write-AtmManifest -Root (Join-Path $stage 'src') -Version $version
 # Privacy gate on exactly what will be published (optional private identifiers via ATM_PRIVATE_NEEDLES, kept
@@ -59,6 +63,12 @@ try {
     if (-not $gateOk -or $cleanTxt.Contains('AcceptProcessCoverageGap') -or -not $auditTxt.Contains("`$script:AtmVersion = '$version'")) {
         $za.Dispose(); $za = $null; [IO.File]::Delete($zip)
         throw 'Release recusada: o arquivo gerado nao contem a trava de exclusao/versao esperadas.'
+    }
+    # V0.3 V2 (D1): no CI-only file, under any folder or letter case.
+    $ciLeaves = @($ciOnly | ForEach-Object { Split-Path -Leaf $_ })
+    if (@($za.Entries | Where-Object { $ciLeaves -contains (Split-Path -Leaf $_.FullName.Replace('/', '\')) }).Count -gt 0) {
+        $za.Dispose(); $za = $null; [IO.File]::Delete($zip)
+        throw 'Release recusada: o arquivo gerado contem um arquivo exclusivo da CI (Invoke-CleanE2E.ps1).'
     }
 } finally { if ($za -and -not $script:zaClosed) { $za.Dispose() } }
 $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()

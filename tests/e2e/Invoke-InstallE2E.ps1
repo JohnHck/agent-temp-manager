@@ -12,7 +12,9 @@
     directory; uninstall (directory and PATH entry removed); then the published 0.1.0 package (GitHub Release asset,
     SHA-256 pinned) installed, updated to this package, rolled back to 0.1.0, updated again and uninstalled; then the
     same for the published 0.1.1 package (the current published version; SHA-256 pinned), with the four gates
-    checked in the installation after each update to this package.
+    checked in the installation after each update to this package. Before the uninstall, V0.3 V2: the REAL clean of
+    roots planted by tests\e2e\Invoke-CleanE2E.ps1 (CI-only, never shipped), as the standard user (leg A) and elevated
+    (leg B); only the harness summaries are kept.
   Writes summary.json and raw outputs to -OutDir. Exit code = number of failed steps (NOT TESTED is not a failure
   and not a pass).
 #>
@@ -92,6 +94,12 @@ Step 'extract-to-admin-only-folder' {
     $script:pkg
 }
 $pkg = $script:pkg
+Step 'package-excludes-ci-harness' {
+    # V0.3 V2 (D1): the CI-only harness of the real clean is never in the release package.
+    $found = @(Get-ChildItem -LiteralPath $pkg -Recurse -File -Filter 'Invoke-CleanE2E.ps1')
+    Assert ($found.Count -eq 0) 'pacote contem o harness da CI (Invoke-CleanE2E.ps1)'
+    'tests\e2e\Invoke-CleanE2E.ps1 absent from the package'
+}
 
 Step 'install' {
     & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pkg 'install\Install-AgentTempManager.ps1') *> (Join-Path $OutDir 'install.txt')
@@ -460,6 +468,49 @@ Step 'standard-user-cannot-write-install-dir' {
     } catch { $script:notTested = $true; return "processo como usuario comum nao iniciou: $($_.Exception.Message)" }
     Assert (-not (Test-Path -LiteralPath $target)) 'usuario comum conseguiu gravar no diretorio de instalacao'
     "denied (exit $($p.ExitCode))"
+}
+
+# V0.3 V2: the REAL clean of roots planted by tests\e2e\Invoke-CleanE2E.ps1 itself, against this installation, in the
+# installer's shell. The harness opens the deletion gate only in its own process memory; the installed copy stays
+# closed (checked by the harness before and after, and by the shipped-gate steps). Only its summary is kept here (D5:
+# codes, counts and labels; the raw clean logs stay in the harness's run root and are never uploaded).
+function Read-V2Summary([string]$File, [int]$Exit, [string]$Console) {
+    if (-not (Test-Path -LiteralPath $File)) {
+        # No summary: the last lines of the harness output (SIDs and the test account replaced) explain the failure.
+        $tail = $(if (Test-Path -LiteralPath $Console) { (@(Get-Content -LiteralPath $Console -Tail 15) -join ' / ') } else { '' })
+        $tail = [regex]::Replace([regex]::Replace($tail, 'S-1-5-21-[0-9-]+', '<sid>'), [regex]::Escape($userName), '<account>', 'IgnoreCase')
+        throw "harness sem resumo (exit $Exit): $tail"
+    }
+    [IO.File]::Copy($File, (Join-Path $OutDir (Split-Path -Leaf $File)), $true)
+    $s = [IO.File]::ReadAllText($File) | ConvertFrom-Json
+    $bad = @($s.cases.PSObject.Properties | Where-Object { $_.Value.status -eq 'FAIL' } | ForEach-Object { "$($_.Name): $($_.Value.detail)" })
+    $nt = @($s.cases.PSObject.Properties | Where-Object { $_.Value.status -eq 'NOT_TESTED' } | ForEach-Object { $_.Name })
+    Assert ($bad.Count -eq 0 -and $Exit -eq 0) ("V2 FAIL (exit $Exit): " + ($bad -join ' | '))
+    "$($s.passed) PASS / 0 FAIL / $($s.notTested) NOT_TESTED [$($nt -join ', ')]; $($s.shell); coverage complete=$($s.processCoverage.complete)"
+}
+Step 'v2-clean-leg-A-standard-user' {
+    # Leg A: the standard user of this VM (not elevated): B1 restricted exception. The harness is copied to a folder that
+    # user can read; the guard is passed explicitly (a process started with other credentials gets that user's
+    # environment, not the runner's variables).
+    if (-not $cred) { throw 'usuario de teste indisponivel' }
+    $copy = Join-Path $userDir 'Invoke-CleanE2E.ps1'
+    [IO.File]::Copy((Join-Path $PSScriptRoot 'Invoke-CleanE2E.ps1'), $copy, $true)
+    $sum = Join-Path $userDir 'v2-clean-A-summary.json'
+    $con = Join-Path $userDir 'v2-clean-A-console.txt'
+    $cmdLine = "/c `"`"$installerExe`" -NoProfile -ExecutionPolicy Bypass -File `"$copy`" -Leg A -InstallDir `"$installDir`" -SummaryFile `"$sum`" -WorkDir `"$(Join-Path $userDir 'v2-A')`" -DisposableMachine > `"$con`" 2>&1`""
+    try {
+        $p = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') -ArgumentList $cmdLine -Credential $cred -LoadUserProfile -WorkingDirectory $userDir -WindowStyle Hidden -PassThru -Wait
+    } catch { $script:notTested = $true; return "processo como usuario comum nao iniciou neste runner: $($_.Exception.Message)" }
+    Read-V2Summary $sum $p.ExitCode $con
+}
+Step 'v2-clean-leg-B-elevated' {
+    # Leg B: the elevated runner account: ELIGIBLE only if the process coverage measured by the harness is complete.
+    $work = Join-Path ([IO.Path]::GetTempPath()) ('atm-e2e-v2-B-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    [void][IO.Directory]::CreateDirectory($work)
+    $sum = Join-Path $work 'v2-clean-B-summary.json'
+    $con = Join-Path $work 'v2-clean-B-console.txt'
+    & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Invoke-CleanE2E.ps1') -Leg B -InstallDir $installDir -SummaryFile $sum -WorkDir (Join-Path $work 'v2-B') -DisposableMachine *> $con
+    Read-V2Summary $sum $LASTEXITCODE $con
 }
 
 Step 'uninstall' {
