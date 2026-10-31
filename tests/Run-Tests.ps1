@@ -2799,13 +2799,16 @@ exit 0
         $late = (Get-Date).AddMinutes(-1)
         $x1 = New-TestB1Context 'b1newchk' 1
         $procs1 = $x1.Procs
-        $op1 = New-TestCleanOperator -Answers @{ confirm = { param($ph) [void]$procs1.Add((New-TestRuntimeProc 870 'late.exe' $null $late)) }.GetNewClosure() }
+        # A closure copies only local variables (no script functions): the process is built here, added inside it.
+        $lateProc1 = New-TestRuntimeProc 870 'late.exe' $null $late
+        $op1 = New-TestCleanOperator -Answers @{ confirm = { param($ph) [void]$procs1.Add($lateProc1) }.GetNewClosure() }
         $w1 = New-TestCleanLogWriter; $d1 = New-TestCleanDeleter -Writer $w1
         $c1 = Invoke-AtmClean -Entries $x1.F.Entries -PlanPresenter $presenter -ConfirmationReader $op1.Reader -InventoryArgs $x1.IA -AcceptB1ResidualRisk -LogWriter $w1 -DeleteTreeImpl $d1.Delete -PathPresenceImpl $d1.Present
         Assert-True ($c1.Aborted -ceq 'PLAN_CHANGED_BEFORE_EXECUTION' -and $d1.Calls.Count -eq 0) "conferencia do plano: processo novo recusado ($($c1.Aborted))"
         $x2 = New-TestB1Context 'b1newrev' 1
         $procs2 = $x2.Procs
-        $hook2 = { param($part) [void]$procs2.Add((New-TestRuntimeProc 871 'late2.exe' $null $late)) }.GetNewClosure()
+        $lateProc2 = New-TestRuntimeProc 871 'late2.exe' $null $late
+        $hook2 = { param($part) [void]$procs2.Add($lateProc2) }.GetNewClosure()
         $d2 = New-TestCleanDeleter
         $c2 = Invoke-AtmClean -Entries $x2.F.Entries -PlanPresenter $presenter -ConfirmationReader (New-TestCleanOperator).Reader -InventoryArgs $x2.IA -AcceptB1ResidualRisk -BeforeDeleteHook $hook2 -LogWriter (New-TestCleanLogWriter) -DeleteTreeImpl $d2.Delete -PathPresenceImpl $d2.Present
         Assert-True ($c2.Aborted -ceq 'REVALIDATION_REFUSED' -and $d2.Calls.Count -eq 0 -and ((@(@($c2.Skipped)[0].Reasons) -join ' ') -match 'B1_EXCEPTION_NEW_UNINSPECTABLE_PROCESS')) "revalidacao: processo novo recusado ($($c2.Aborted); $((@(@($c2.Skipped)[0].Reasons)) -join ';'))"
