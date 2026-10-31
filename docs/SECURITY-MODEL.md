@@ -65,9 +65,22 @@ isolated sandbox.
    users require elevation + explicit switch.
 5. Liveness: no direct command-line reference, no live session in the agent registry, no recent transcript,
    no ancestor/ambiguous reference, registry and config readable, class `ORPHAN_SUSPECTED` without flags.
-6. Process coverage: must be complete. There is no override. Processes of other accounts (services,
-   automations, elevated sessions) are invisible to non-administrators, and protected processes stay
-   uninspectable even for administrators, so on a typical Windows host this gate blocks deletion.
+6. Process coverage: must be complete. Processes of other accounts (services, automations, elevated sessions) are
+   invisible to non-administrators, and protected processes stay uninspectable even for administrators, so on a
+   typical Windows host this gate blocks deletion. **B1 restricted exception (V0.3, unreleased; a change of the product
+   contract decided by the maintainer, not a technical fix):** the incomplete coverage becomes a residual risk accepted
+   per root, only when ALL hold (`Get-AtmB1ExceptionRisk`, Engine.Clean.ps1): B1 is the only V0.1 reason; own profile,
+   no `-IncludeOtherUsers`, token not elevated; a Claude Code `SessionRoot` of class `ORPHAN_SUSPECTED` without flags;
+   runtime evidence collected with no refusal for the root; `process-snapshot` COMPLETE and `processes` incomplete only
+   for `UNINSPECTABLE_PROCESSES`; every uninspectable process has an identity (`pid@creationTicksUtc`); the lock probe
+   passes. Otherwise B1 is unchanged (same text, BLOCKED). The category is `ELIGIBLE_WITH_DECLARED_RISK`
+   (`B1_EXCEPTION_RESIDUAL_RISK`), never `ELIGIBLE`: preview, audit and the TUI show it as not released; only `clean`
+   past the deletion gate with `-AcceptB1ResidualRisk` (CLI only; it answers nothing and skips no console) can act,
+   with one root per run (fixed in code), the AUT-2 questions plus `ACEITO RISCO B1` / `ACCEPT B1 RISK` for the root
+   with its count. The identities of the processes not inspected are recorded (plan, log, plan id) and any new one at
+   the plan check or the revalidation refuses, as does `process-snapshot` leaving COMPLETE. No list of "safe" processes
+   by name, account or path exists. Still unobserved: those processes, working directories, handles shared for
+   delete, IPC/environment, read-only use, writes that keep every statistic. No rollback.
 7. Measurement: complete, no read errors, no reparse points, no read-only/system files.
 8. Handle probe: every file and directory opened with `DELETE` access and share mode 0 (no data access);
    any sharing violation or access denial blocks.

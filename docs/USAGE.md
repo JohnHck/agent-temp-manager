@@ -295,7 +295,32 @@ until the end or the first stop (a `skip` ends the sequence), `run-end`. Synthet
 
 Nothing reads an AUT-1 record as permission: `authorize` stays an independent record.
 
-Administrator-only switch: `-IncludeOtherUsers`. Incomplete process coverage cannot be overridden.
+Administrator-only switch: `-IncludeOtherUsers`. Incomplete process coverage can only be accepted through the B1
+restricted exception below.
+
+### B1 restricted exception (`-AcceptB1ResidualRisk`; V0.3, unreleased; past the deletion gate only)
+
+A change of the product contract (until V0.2: "no override"). A root whose only refusal is the incomplete process
+coverage (B1) is shown as **`ELIGIBLE_WITH_DECLARED_RISK`** (never `ELIGIBLE`) when every condition holds: own profile,
+token not elevated, no `-IncludeOtherUsers`; a Claude Code session root of class `ORPHAN_SUSPECTED` without flags; no
+runtime refusal; `process-snapshot` COMPLETE and `processes` incomplete only because command lines cannot be read; every
+such process has an identity (`pid@creationTicksUtc`); the lock probe passes. RECENT is unchanged (it refuses first).
+
+* **Preview, audit, TUI:** a block of its own, "NOT RELEASED", never in the allowlist suggestions (TUI label `B1-RISK`).
+* **clean without `-AcceptB1ResidualRisk`, or with the gate closed, or from the TUI:** B1 exactly as before.
+* **clean with `-AcceptB1ResidualRisk` past the gate (CLI):** at most **one root per run** (fixed in code; a larger set
+  is refused before any question, `B1_EXCEPTION_LIMIT_EXCEEDED`). The AUT-2 questions, plus, for that root, its path and
+  the number of processes not inspected, the exact phrase `ACEITO RISCO B1` (en-US `ACCEPT B1 RISK`); a refusal or
+  cancellation aborts the run. The switch answers nothing and skips no console requirement.
+* **Bound to what was accepted:** the identities of the processes not inspected are recorded in the `plan` record
+  (`uninspectableKeys`, never names or command lines), counted in `run-start` and the `declaration`
+  (`b1ResidualRiskAccepted`), and part of the plan id. A new process that cannot be inspected, `process-snapshot` no longer
+  COMPLETE, or any other change refuses at the plan check (`PLAN_CHANGED_BEFORE_EXECUTION`) or at the revalidation
+  (`REVALIDATION_REFUSED`, `B1_EXCEPTION_NEW_UNINSPECTABLE_PROCESS` / `B1_EXCEPTION_NO_LONGER_APPLIES`). A process that
+  disappeared neither widens the acceptance nor skips the revalidation.
+* **Residual risk (not observed, accepted, no rollback):** the processes not inspected themselves (services, other
+  accounts, elevated or protected processes; the root's own session is still detected through the session registry),
+  working directories, handles shared for delete, IPC and environment, read-only use, writes that keep every statistic.
 
 ### Discard authorization (`authorize`; V0.3 AUT-1, unreleased)
 

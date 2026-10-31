@@ -12,6 +12,7 @@ param(
     [string]$Path,
     [string]$AllowListFile,
     [switch]$IncludeOtherUsers,
+    [switch]$AcceptB1ResidualRisk,
     [string]$ExportJson,
     [string]$LogFile,
     [string]$RecordFile,
@@ -179,7 +180,7 @@ $cliInvArgs['ProgressCallback'] = { param($pct, $msg) $act = Get-AtmText 'cli.pr
 
 function Show-Help {
     foreach ($k in @('help.title', 'help.blank', 'help.tui', 'help.audit', 'help.preview', 'help.diagnose', 'help.clean', 'help.clean2', 'help.authorize', 'help.verify', 'help.version', 'help.help', 'help.blank',
-            'help.drill', 'help.export', 'help.diagOpts', 'help.cleanOpts', 'help.cleanOpts2', 'help.cleanOpts3', 'help.tuiOpts', 'help.lang', 'help.blank', 'help.examples')) { Write-Host (Get-AtmText $k) }
+            'help.drill', 'help.export', 'help.diagOpts', 'help.cleanOpts', 'help.cleanOpts2', 'help.cleanOpts3', 'help.cleanOpts4', 'help.tuiOpts', 'help.lang', 'help.blank', 'help.examples')) { Write-Host (Get-AtmText $k) }
     Write-Host '  agent-temp'
     Write-Host '  agent-temp audit'
     Write-Host '  agent-temp diagnose -Lang en-US'
@@ -282,8 +283,10 @@ try {
             # interactive console is required here and observed again by the engine. With the gate closed nothing changes.
             if ($script:AtmRealDeletionEnabled -and -not (Test-AtmTuiInteractive)) { Write-Host (Get-AtmText 'cli.cleanNeedsConsole') -ForegroundColor Yellow; exit 6 }
             $presenter = { param($v, $r, $i) Show-AtmCleanPlan -Verified $v -Rejected $r -Inventory $i }
-            $reader = { param($phrase, $kind, $rootPath, $choices) Read-AtmCleanAnswer -Phrase $phrase -Kind $kind -RootPath $rootPath -Choices $choices -LineReader { param($pr) Read-Host $pr } }
-            $res = Invoke-AtmClean -Entries $entries -IncludeOtherUsers:$IncludeOtherUsers `
+            $reader = { param($phrase, $kind, $rootPath, $choices, $info) Read-AtmCleanAnswer -Phrase $phrase -Kind $kind -RootPath $rootPath -Choices $choices -Info $info -LineReader { param($pr) Read-Host $pr } }
+            # -AcceptB1ResidualRisk (B1 restricted exception): considered by the engine only past the release gate; it
+            # answers nothing and skips no console requirement (each root still needs its typed acceptance).
+            $res = Invoke-AtmClean -Entries $entries -IncludeOtherUsers:$IncludeOtherUsers -AcceptB1ResidualRisk:$AcceptB1ResidualRisk `
                 -PlanPresenter $presenter -ConfirmationReader $reader -InventoryArgs $cliInvArgs -LogFile $LogFile -Interaction @{ Caller = 'CLI'; ConsoleRequired = [bool]$script:AtmRealDeletionEnabled }
             Show-AtmCleanResult -Result $res
             if ($res.PostInventory) {

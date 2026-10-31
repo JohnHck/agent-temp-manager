@@ -14,7 +14,7 @@
 Set-StrictMode -Version 2.0
 
 $script:AtmTuiClassColor = @{ ACTIVE_EVIDENCE = 'Red'; RECENT = 'Yellow'; LIVENESS_UNKNOWN = 'DarkYellow'; ORPHAN_SUSPECTED = 'Cyan'; NOT_SCANNED = 'DarkGray' }
-$script:AtmTuiCatColor = @{ BLOCKED = 'Red'; INVESTIGATE = 'Yellow'; ELIGIBLE = 'Green' }
+$script:AtmTuiCatColor = @{ BLOCKED = 'Red'; INVESTIGATE = 'Yellow'; ELIGIBLE = 'Green'; ELIGIBLE_WITH_DECLARED_RISK = 'Magenta' }
 
 function Get-AtmTuiGlyphs {
     param([bool]$Ascii)
@@ -189,7 +189,9 @@ function Get-AtmTuiScreenRows {
             $cols = @(@{ Name = (Get-AtmText 'col.category'); Width = 11 }, @{ Name = (Get-AtmText 'col.user'); Width = 20 }, @{ Name = 'Root'; Width = 0 }, @{ Name = 'MB'; Width = 9; Right = $true }, @{ Name = (Get-AtmText 'col.reasonReq'); Width = 0 })
             foreach ($r in ($prev | Where-Object { -not $want -or $_.Gate.Category -eq $want } | Sort-Object { $_.Gate.Category }, { -$_.Partition.Bytes })) {
                 $p = $r.Partition
-                $rows.Add(@($r.Gate.Category, $p.UserName, $(if ($p.Slug) { $p.Slug + '\' + $p.Name } else { $p.Name }), (Format-AtmMB $p.Bytes), ((@($r.Gate.Reasons) + @($r.Gate.Requirements)) -join '; ')))
+                # The B1 exception category has its own short label: cut to the column it would read like ELIGIBLE.
+                $catText = $(if ([string]$r.Gate.Category -ceq 'ELIGIBLE_WITH_DECLARED_RISK') { Get-AtmText 'tui.catDeclaredRisk' } else { $r.Gate.Category })
+                $rows.Add(@($catText, $p.UserName, $(if ($p.Slug) { $p.Slug + '\' + $p.Name } else { $p.Name }), (Format-AtmMB $p.Bytes), ((@($r.Gate.Reasons) + @($r.Gate.Requirements)) -join '; ')))
                 $items.Add([pscustomobject]@{ Kind = 'root'; Partition = $p; Gate = $r.Gate })
                 $colors.Add($script:AtmTuiCatColor[$r.Gate.Category])
             }

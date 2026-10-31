@@ -16,6 +16,14 @@
   the read-only V0.2 collectors: observed use or a live session of the root blocks; ambiguous relations, unverified
   sessions and failed or timed-out collection need investigation. Nothing is ever made eligible by it, and no
   evidence is not evidence of non-use. Details and the time limits: docs/USAGE.md, "Runtime evidence in preview and plan".
+* V0.3 B1 restricted exception (**a change of the product contract**: until V0.2 incomplete process coverage had no
+  override; past the deletion gate only, no distributed copy reaches it): a root whose only refusal is B1, in the own
+  non-elevated profile, a Claude Code session root with no other refusal and complete process identities, is shown as
+  `ELIGIBLE_WITH_DECLARED_RISK` (never `ELIGIBLE`, "not released" in preview, audit and the TUI). Only
+  `clean -AcceptB1ResidualRisk` (CLI) past the gate can act: one root per run (fixed in code), the AUT-2 questions plus a
+  per-root `ACEITO RISCO B1` with the count; the identities of the processes not inspected are recorded and bound to the
+  plan id; any new one, or the process snapshot no longer complete, refuses before the deletion. Residual risk declared,
+  no rollback. Details: docs/USAGE.md, "B1 restricted exception"; docs/SECURITY-MODEL.md, gate 6.
 * V0.3 AUT-2 (past the deletion gate only; no distributed copy reaches it): the clean confirmation is bound to the plan.
   An interactive console is required (CLI) and observed by the engine; for each root of the executable set, with its
   path, the task and the content decision (AUT-1 meanings: results preserved, or nothing needed, neither verified);

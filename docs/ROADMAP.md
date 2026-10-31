@@ -23,8 +23,9 @@ never move.
   report correctly, on a machine where neither is installed.
 * **Engines decide, presentation shows.** Every decision lives in the engines; the CLI, TUI and reports cannot
   bypass them ([ARCHITECTURE.md](ARCHITECTURE.md)).
-* **Fail-closed.** Missing coverage, unreadable state, ambiguity or an unexpected change blocks the action. There
-  are no overrides for incomplete coverage.
+* **Fail-closed.** Missing coverage, unreadable state, ambiguity or an unexpected change blocks the action.
+  Incomplete process coverage blocks too, except the narrow B1 exception with a declared residual risk (V0.3, a change
+  of the product contract; SECURITY-MODEL, gate 6).
 * **Read-only by default.** Only an explicit, confirmed command may change the system, and only within the limits of
   the version that introduced it.
 * **Least privilege, UAC only.** Everything that can run without administrative rights does. Elevation is explicit,

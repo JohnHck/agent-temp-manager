@@ -63,7 +63,10 @@ needed; projects that cannot be identified safely are reported as *Unidentified 
 * Every byte belongs to exactly one partition; logical bytes and estimated on-disk size are reported separately.
 * Conservative classes: `ACTIVE_EVIDENCE`, `RECENT` (< 72 h), `LIVENESS_UNKNOWN`, `ORPHAN_SUSPECTED`
   (informational only). **No class authorises deletion.**
-* Incomplete process coverage always blocks deletion; there is no override.
+* Incomplete process coverage blocks deletion, except one narrow, explicit exception (V0.3, unreleased, a change of
+  this product contract): the own non-elevated profile, Claude Code session roots with no other refusal, past the
+  deletion gate only, with `-AcceptB1ResidualRisk` and the operator's per-root acceptance of the residual risk, one root
+  per run, no rollback. See docs/SECURITY-MODEL.md, gate 6.
 * The deleter (disabled in V0.1) pins every ancestor and directory by handle, deletes by handle and refuses any
   difference from the validated measurement.
 * The TUI and reports are presentation only; they cannot bypass the engine.

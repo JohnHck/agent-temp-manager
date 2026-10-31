@@ -369,6 +369,21 @@ function New-TestCleanLogWriter {
     return $w
 }
 function Get-TestCleanLogRecords { param($Writer) return @($Writer.Lines | ForEach-Object { $_ | ConvertFrom-Json }) }
+# B1 restricted exception tests: synthetic roots of a non-elevated identity (unless -IsAdmin) with one process whose
+# command line cannot be read (B1 incomplete), the process list as an ArrayList so a case can add a process mid-run, and the
+# preview row of one root.
+function New-TestB1Context {
+    param([string]$Name, [int]$Count = 1, [bool]$IsAdmin = $false, [object[]]$Extra = @())
+    $f = New-TestT1Fixture $Name $Count
+    # An ArrayList (PowerShell 5.1 cannot enumerate a List[object] of these objects with @()), mutable mid-run.
+    $procs = New-Object System.Collections.ArrayList
+    foreach ($x in @(New-Procs -Extra (@((New-TestRuntimeProc 860 'svc-b1-test.exe' $null ((Get-Date).AddHours(-2)))) + @($Extra)))) { [void]$procs.Add($x) }
+    $id = [pscustomobject]@{ Sid = $testOwnerSid; Name = $me.Name; IsAdmin = $IsAdmin }
+    $ia = Get-InvArgs -Profiles @($f.Profile) -Identity $id
+    $ia['ProcessesOverride'] = $procs
+    return [pscustomobject]@{ F = $f; Procs = $procs; Identity = $id; IA = $ia }
+}
+function Get-TestB1PreviewRow { param($Ctx, [string]$Path, [switch]$Others) $a = $Ctx.IA; return (Get-TestPreviewRow (Invoke-AtmPreview -Inventory (Invoke-AtmInventory @a) -InventoryArgs $a -IncludeOtherUsers:$Others) $Path) }
 # AUT-2: a simulated operator for the clean questions (tests only; the CLI has no way to pass answers). Keys: 'task#<n>'
 # and 'results#<n>' (n-th root asked), 'confirm'. A value is the text typed, $null (cancel), or a scriptblock run at that
 # step with the phrase shown: its output, if any, is typed, otherwise the default. Default: the phrase shown; for
@@ -2029,8 +2044,10 @@ exit 0
         $p = New-TestProfile 'b2partial'
         $r1 = New-TestRoot -ProfileInfo $p -Slug 'C--part-a'; $r2 = New-TestRoot -ProfileInfo $p -Slug 'C--part-b'
         $procs = New-Procs -Extra @((New-TestRuntimeProc 808 'secret.exe' $null), (New-TestRuntimeProc 809 'node.exe' "node $r1\z.js"))
-        $inv = Inv -Profiles @($p) -Procs $procs
-        $rows = Invoke-AtmPreview -Inventory $inv -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs)
+        # An elevated identity: outside the B1 restricted exception, so B1 stays exactly as it was whatever runs the suite.
+        $adm = [pscustomobject]@{ Sid = $testOwnerSid; Name = $me.Name; IsAdmin = $true }
+        $inv = Inv -Profiles @($p) -Procs $procs -Identity $adm
+        $rows = Invoke-AtmPreview -Inventory $inv -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs -Identity $adm)
         $g1 = (Get-TestPreviewRow $rows $r1).Gate; $g2 = (Get-TestPreviewRow $rows $r2).Gate
         Assert-True ($g1.Category -ceq 'BLOCKED' -and @($g1.RuntimeReasons | Where-Object { $_.Code -ceq 'RUNTIME_USE_OBSERVED' }).Count -eq 1) "uso observado com cobertura parcial ($(Get-TestRuntimeCodes $g1))"
         Assert-True ($g2.Category -ceq 'BLOCKED' -and ((@($g2.Reasons) -join ' ') -match 'COBERTURA_DE_PROCESSOS_INCOMPLETA') -and @($g2.RuntimeReasons).Count -eq 0) "B1 mantido; nenhum motivo de execucao inventado ($(Get-TestRuntimeCodes $g2))"
@@ -2505,7 +2522,9 @@ exit 0
         $blk = $cli.Substring($cli.IndexOf("'authorize' {"), $cli.IndexOf("'version' {") - $cli.IndexOf("'authorize' {"))
         Assert-True ($blk.IndexOf('Test-AtmTuiInteractive') -gt 0 -and $blk.IndexOf('Test-AtmTuiInteractive') -lt $blk.IndexOf('Invoke-AtmDiscardAuthorization') -and $blk.Contains('Read-Host')) 'console interativo antes do registro; respostas so por Read-Host'
         $param = $cli.Substring($cli.IndexOf('param('), $cli.IndexOf('$ErrorActionPreference') - $cli.IndexOf('param('))
-        foreach ($pat in @('Answer', 'Yes', 'Confirm', 'NonInteractive', 'Force', 'Accept')) { Assert-True (-not $param.Contains($pat)) "nenhum parametro publico '$pat'" }
+        # The only switch with 'Accept' is -AcceptB1ResidualRisk (maintainer's decision): it answers nothing and skips no console.
+        $paramNoB1 = $param.Replace('[switch]$AcceptB1ResidualRisk', '')
+        foreach ($pat in @('Answer', 'Yes', 'Confirm', 'NonInteractive', 'Force', 'Accept')) { Assert-True (-not $paramNoB1.Contains($pat)) "nenhum parametro publico '$pat'" }
         $clean = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Clean.ps1'))
         $auth = $clean.Substring($clean.IndexOf('$script:AtmDiscardAuthSchema ='), $clean.IndexOf('function Test-AtmOutputPathOutsideBases') - $clean.IndexOf('$script:AtmDiscardAuthSchema ='))
         foreach ($pat in @('DeleteTree', 'AtmDeleter', 'Invoke-AtmClean', 'AtmRealDeletionEnabled', 'AtmCleanLock')) { Assert-True (-not $auth.Contains($pat)) "autorizacao sem '$pat'" }
@@ -2720,6 +2739,145 @@ exit 0
         $clean = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Clean.ps1'))
         Assert-True ($clean.Contains('if (-not $Inventory.ProcessCoverageComplete) {') -and $clean.Contains("if (`$p.Class -in @('ACTIVE_EVIDENCE', 'RECENT')) { `$reasons.Add((Get-AtmText 'reason.class' `$p.Class)) }")) 'gates B1 e RECENT inalterados'
         Assert-True ([IO.Directory]::Exists($ok) -and [IO.Directory]::Exists($rec)) 'nada apagado'
+    }
+
+    # ------------------------------------------------------------------ B1 restricted exception (V0.3)
+    # Synthetic roots of a non-elevated identity with one process whose command line cannot be read (B1 incomplete);
+    # stand-in deleter (call counters); the deletion gate open only in this process.
+    Test-Case 'Excecao restrita de B1' 'Dentro do escopo, ponta a ponta com -AcceptB1ResidualRisk: categoria nova nunca ELIGIBLE; pergunta de risco por raiz com a contagem; chaves pid@criacao no plano e no planId; declaracao com o risco; nada apagado' {
+        $x = New-TestB1Context 'b1in' 1
+        $r = $x.F.Roots[0]
+        $row = Get-TestB1PreviewRow $x $r
+        Assert-True ($row.Gate.Category -ceq 'ELIGIBLE_WITH_DECLARED_RISK' -and $row.Gate.Category -cne 'ELIGIBLE' -and ([string]@($row.Gate.Reasons)[0]).StartsWith('B1_EXCEPTION_RESIDUAL_RISK') -and $row.Gate.B1Risk.Uninspectable -eq 1) "preview: categoria nova ($($row.Gate.Category))"
+        $key = @($row.Gate.B1Risk.Keys)[0]
+        Assert-True ($key -match '^860@\d+$') "chave do processo nao inspecionavel ($key)"
+        $w = New-TestCleanLogWriter; $d = New-TestCleanDeleter -Writer $w; $op = New-TestCleanOperator
+        $c = Invoke-AtmClean -Entries $x.F.Entries -PlanPresenter $presenter -ConfirmationReader $op.Reader -InventoryArgs $x.IA -AcceptB1ResidualRisk -LogWriter $w -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+        Assert-True ($null -eq $c.Aborted -and $null -eq $c.StoppedBy -and $d.Calls.Count -eq 1) "executado com o deleter simulado ($($c.Aborted) $($c.StoppedBy); chamadas $($d.Calls.Count))"
+        Assert-Eq ($op.Calls -join ',') "task|$r,results|$r,risk|$r,confirm|" 'tarefa, conteudo, risco por raiz e confirmacao'
+        $recs = Get-TestCleanLogRecords $w
+        Assert-Eq (@($recs | ForEach-Object { $_.type }) -join ',') 'run-start,plan,declaration,confirmation,plan-check,intent,result,run-end' 'log'
+        $start = $recs[0]; $plan = @($recs | Where-Object { $_.type -ceq 'plan' })[0]; $decl = @($recs | Where-Object { $_.type -ceq 'declaration' })[0]
+        Assert-True ($start.b1Exception -eq $true -and $start.uninspectableProcesses -eq 1 -and $plan.category -ceq 'ELIGIBLE_WITH_DECLARED_RISK' -and $plan.uninspectableProcesses -eq 1 -and (@($plan.uninspectableKeys) -join ',') -ceq $key) 'run-start e plan com a contagem e as chaves'
+        Assert-True ($decl.b1ResidualRiskAccepted -eq $true -and $decl.uninspectableProcesses -eq 1) 'declaracao com o risco aceito e a contagem'
+        Assert-Eq $c.PlanId (Get-AtmCleanPlanId -RunId $c.RunId -Parts @($c.Verified) -RiskKeys @($key)) 'planId deriva tambem das chaves aceitas'
+        Assert-True ($op.Phrases[2] -ceq (Get-AtmText 'clean.phrase.b1Risk')) 'frase de risco exata'
+        Assert-True (-not (($w.Lines -join "`n").Contains('svc-b1-test'))) 'nomes de processos nunca gravados'
+        Assert-True (Test-TestT1RootsIntact $x.F) 'nada apagado'
+    }
+    Test-Case 'Excecao restrita de B1' 'Fora do escopo por dimensao: elevado, -IncludeOtherUsers, RECENT (NOT_EVALUATED), outro motivo V0.1 (ACL), recusa B2-1, processo sem identidade, outra conta - B1 identico (BLOCKED com o mesmo motivo) e nunca a categoria nova' {
+        $cases = New-Object System.Collections.Generic.List[object]
+        $a = New-TestB1Context 'b1adm' 1 $true; $cases.Add(@{ Tag = 'elevado'; X = $a; Others = $false; B1 = $true })
+        $o = New-TestB1Context 'b1oth' 1; $cases.Add(@{ Tag = '-IncludeOtherUsers'; X = $o; Others = $true; B1 = $true })
+        $rc = New-TestB1Context 'b1rec' 1; [IO.File]::SetLastWriteTimeUtc((Join-Path $rc.F.Roots[0] 'a.txt'), $nowFuture.AddHours(-3)); $cases.Add(@{ Tag = 'RECENT'; X = $rc; Others = $false; B1 = $false; Gate = 'NOT_EVALUATED' })
+        $ac = New-TestB1Context 'b1acl' 1
+        $acl = Get-Acl -LiteralPath $ac.F.Roots[0]; $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier('S-1-1-0')), 'Write', 'Allow'))); Set-Acl -LiteralPath $ac.F.Roots[0] -AclObject $acl
+        $cases.Add(@{ Tag = 'outro motivo V0.1'; X = $ac; Others = $false; B1 = $true })
+        $bf = New-TestT1Fixture 'b1b2' 1
+        $bx = New-TestB1Context 'b1b2x' 1 $false @((New-TestRuntimeProc 861 'node.exe' "node $([IO.Path]::GetDirectoryName($bf.Roots[0]))"))
+        $bx.IA['ProfilesOverride'] = @($bf.Profile); $bx = [pscustomobject]@{ F = $bf; Procs = $bx.Procs; Identity = $bx.Identity; IA = $bx.IA }
+        $cases.Add(@{ Tag = 'recusa B2-1'; X = $bx; Others = $false; B1 = $null })
+        $nk = New-TestB1Context 'b1nokey' 1 $false @([pscustomobject]@{ ProcessId = 862; Name = 'nocreation.exe'; ParentProcessId = 1; CommandLine = $null; CreationDate = $null }); $cases.Add(@{ Tag = 'processo sem identidade'; X = $nk; Others = $false; B1 = $true })
+        foreach ($k in $cases) {
+            $row = Get-TestB1PreviewRow $k.X $k.X.F.Roots[0] -Others:$k.Others
+            Assert-True ($null -ne $row) "$($k.Tag): raiz presente no preview"
+            $hasB1 = @(@($row.Gate.Reasons) | Where-Object { [string]$_ -like 'COBERTURA_DE_PROCESSOS_INCOMPLETA*' }).Count -gt 0
+            Assert-True ($row.Gate.Category -cne 'ELIGIBLE_WITH_DECLARED_RISK' -and $row.Gate.Category -cne 'ELIGIBLE' -and $null -eq $row.Gate.B1Risk) "$($k.Tag): fora da excecao ($($row.Gate.Category))"
+            if ($k.B1 -eq $true) { Assert-True ($hasB1 -and $row.Gate.Category -ceq 'BLOCKED' -and $row.Gate.ProcessCoverageGate -ceq 'BLOCKED') "$($k.Tag): B1 identico (BLOCKED, mesmo motivo)" }
+            if ($k.ContainsKey('Gate')) { Assert-True ($row.Gate.ProcessCoverageGate -ceq $k['Gate'] -and -not $hasB1) "$($k.Tag): RECENT antes de B1 ($($row.Gate.ProcessCoverageGate))" }
+            $d = New-TestCleanDeleter; $op = New-TestCleanOperator
+            $c = Invoke-AtmClean -Entries $k.X.F.Entries -PlanPresenter $presenter -ConfirmationReader $op.Reader -InventoryArgs $k.X.IA -AcceptB1ResidualRisk -IncludeOtherUsers:$k.Others -LogWriter (New-TestCleanLogWriter) -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+            Assert-True ($c.Aborted -ceq 'NENHUM_CAMINHO_ELEGIVEL' -and $op.Calls.Count -eq 0 -and $d.Calls.Count -eq 0) "$($k.Tag): clean com a opcao recusa ($($c.Aborted))"
+            Assert-True (Test-TestT1RootsIntact $k.X.F) "$($k.Tag): nada apagado"
+        }
+        $po = New-TestProfile 'b1acct' -Sid 'S-1-5-21-9-9-9-1001'; $ro = New-TestRoot -ProfileInfo $po
+        $xo = New-TestB1Context 'b1acctx' 1; $xo.IA['ProfilesOverride'] = @($po); $xoIa = $xo.IA
+        $rowo = Get-TestPreviewRow (Invoke-AtmPreview -Inventory (Invoke-AtmInventory @xoIa) -InventoryArgs $xo.IA) $ro
+        Assert-True ($rowo.Gate.Category -cne 'ELIGIBLE_WITH_DECLARED_RISK' -and $null -eq $rowo.Gate.B1Risk) "outra conta: fora da excecao ($($rowo.Gate.Category))"
+    }
+    Test-Case 'Excecao restrita de B1' 'Processo nao inspecionavel novo depois da confirmacao: recusa na conferencia do plano e na revalidacao; process-snapshot PARTIAL na revalidacao: recusa; zero chamadas ao deleter' {
+        $late = (Get-Date).AddMinutes(-1)
+        $x1 = New-TestB1Context 'b1newchk' 1
+        $procs1 = $x1.Procs
+        $op1 = New-TestCleanOperator -Answers @{ confirm = { param($ph) [void]$procs1.Add((New-TestRuntimeProc 870 'late.exe' $null $late)) }.GetNewClosure() }
+        $w1 = New-TestCleanLogWriter; $d1 = New-TestCleanDeleter -Writer $w1
+        $c1 = Invoke-AtmClean -Entries $x1.F.Entries -PlanPresenter $presenter -ConfirmationReader $op1.Reader -InventoryArgs $x1.IA -AcceptB1ResidualRisk -LogWriter $w1 -DeleteTreeImpl $d1.Delete -PathPresenceImpl $d1.Present
+        Assert-True ($c1.Aborted -ceq 'PLAN_CHANGED_BEFORE_EXECUTION' -and $d1.Calls.Count -eq 0) "conferencia do plano: processo novo recusado ($($c1.Aborted))"
+        $x2 = New-TestB1Context 'b1newrev' 1
+        $procs2 = $x2.Procs
+        $hook2 = { param($part) [void]$procs2.Add((New-TestRuntimeProc 871 'late2.exe' $null $late)) }.GetNewClosure()
+        $d2 = New-TestCleanDeleter
+        $c2 = Invoke-AtmClean -Entries $x2.F.Entries -PlanPresenter $presenter -ConfirmationReader (New-TestCleanOperator).Reader -InventoryArgs $x2.IA -AcceptB1ResidualRisk -BeforeDeleteHook $hook2 -LogWriter (New-TestCleanLogWriter) -DeleteTreeImpl $d2.Delete -PathPresenceImpl $d2.Present
+        Assert-True ($c2.Aborted -ceq 'REVALIDATION_REFUSED' -and $d2.Calls.Count -eq 0 -and ((@(@($c2.Skipped)[0].Reasons) -join ' ') -match 'B1_EXCEPTION_NEW_UNINSPECTABLE_PROCESS')) "revalidacao: processo novo recusado ($($c2.Aborted); $((@(@($c2.Skipped)[0].Reasons)) -join ';'))"
+        $x3 = New-TestB1Context 'b1snap' 1
+        $procs3 = $x3.Procs
+        $hook3 = { param($part) [void]$procs3.Add([pscustomobject]@{ ProcessId = 1; Name = 'idle.exe'; ParentProcessId = 0; CommandLine = 'idle.exe'; CreationDate = (Get-Date).AddHours(-1) }) }.GetNewClosure()
+        $d3 = New-TestCleanDeleter
+        $c3 = Invoke-AtmClean -Entries $x3.F.Entries -PlanPresenter $presenter -ConfirmationReader (New-TestCleanOperator).Reader -InventoryArgs $x3.IA -AcceptB1ResidualRisk -BeforeDeleteHook $hook3 -LogWriter (New-TestCleanLogWriter) -DeleteTreeImpl $d3.Delete -PathPresenceImpl $d3.Present
+        Assert-True ($c3.Aborted -ceq 'REVALIDATION_REFUSED' -and $d3.Calls.Count -eq 0 -and ((@(@($c3.Skipped)[0].Reasons) -join ' ') -match 'B1_EXCEPTION_NO_LONGER_APPLIES')) "process-snapshot PARTIAL (PID duplicado) na revalidacao: recusa ($($c3.Aborted); $((@(@($c3.Skipped)[0].Reasons)) -join ';'))"
+        foreach ($f in @($x1.F, $x2.F, $x3.F)) { Assert-True (Test-TestT1RootsIntact $f) 'nada apagado' }
+    }
+    Test-Case 'Excecao restrita de B1' 'Limite fixo (1 raiz por execucao com a excecao): excesso recusa a execucao inteira antes de qualquer pergunta; frase de risco recusada ou cancelada aborta tudo; limites sem parametro' {
+        $x = New-TestB1Context 'b1lim' 2
+        $op = New-TestCleanOperator; $w = New-TestCleanLogWriter; $d = New-TestCleanDeleter -Writer $w
+        $c = Invoke-AtmClean -Entries $x.F.Entries -PlanPresenter $presenter -ConfirmationReader $op.Reader -InventoryArgs $x.IA -AcceptB1ResidualRisk -LogWriter $w -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+        Assert-True ($c.Aborted -ceq 'B1_EXCEPTION_LIMIT_EXCEEDED' -and $op.Calls.Count -eq 0 -and $d.Calls.Count -eq 0 -and $w.Lines.Count -eq 0) "limite: $($c.Aborted) (perguntas $($op.Calls.Count), registros $($w.Lines.Count))"
+        $txt = (@(Show-AtmCleanResult -Result $c 6>&1 | ForEach-Object { [string]$_.MessageData }) -join "`n")
+        Assert-True ($txt.Contains((Get-AtmText 'clean.b1LimitExceeded' 1 2))) 'console explica o limite'
+        foreach ($ans in @('nao', $null)) {
+            $x1 = New-TestB1Context 'b1riskno' 1
+            $op1 = New-TestCleanOperator -Answers @{ 'risk#1' = $ans }; $d1 = New-TestCleanDeleter
+            $c1 = Invoke-AtmClean -Entries $x1.F.Entries -PlanPresenter $presenter -ConfirmationReader $op1.Reader -InventoryArgs $x1.IA -AcceptB1ResidualRisk -LogWriter (New-TestCleanLogWriter) -DeleteTreeImpl $d1.Delete -PathPresenceImpl $d1.Present
+            Assert-True ($c1.Aborted -ceq $(if ($ans) { 'DECLARATION_DECLINED' } else { 'DECLARATION_CANCELLED' }) -and $c1.RefusedAt.Step -ceq 'risk' -and $d1.Calls.Count -eq 0) "frase de risco [$ans]: $($c1.Aborted)"
+        }
+        $clean = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Clean.ps1'))
+        Assert-True ([regex]::Matches($clean, '\$script:AtmB1ExceptionActiveMaxRoots\s*=').Count -eq 1 -and $clean.Contains('$script:AtmB1ExceptionActiveMaxRoots = 1') -and $clean.Contains('$script:AtmB1ExceptionLaterMaxRoots = 5') -and $clean.Contains('$script:AtmB1ExceptionLaterMaxBytes = 2GB')) 'limites fixos no codigo (1 ativo; 5/2 GiB definidos)'
+        $usesLater = [regex]::Matches($clean, 'AtmB1ExceptionLaterMax').Count
+        Assert-Eq $usesLater 2 'limites da etapa posterior definidos e nao usados'
+        $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        $param = $cli.Substring($cli.IndexOf('param('), $cli.IndexOf('$ErrorActionPreference') - $cli.IndexOf('param('))
+        Assert-True (-not ($param -match 'MaxRoots|MaxBytes|Limit')) 'nenhum parametro altera os limites'
+        foreach ($f in @($x.F, $x1.F)) { Assert-True (Test-TestT1RootsIntact $f) 'nada apagado' }
+    }
+    Test-Case 'Excecao restrita de B1' 'Sem a opcao: B1 identico mesmo dentro do escopo; trava fechada com a opcao: fluxo de plano inalterado; TUI nunca passa a opcao; nenhuma lista de nomes, contas ou caminhos' {
+        $x = New-TestB1Context 'b1noopt' 1
+        $xIa = $x.IA
+        $d = New-TestCleanDeleter; $op = New-TestCleanOperator
+        $c = Invoke-AtmClean -Entries $x.F.Entries -PlanPresenter $presenter -ConfirmationReader $op.Reader -InventoryArgs $x.IA -LogWriter (New-TestCleanLogWriter) -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+        $rej = @(@($c.Rejected)[0].Reasons)
+        Assert-True ($c.Aborted -ceq 'NENHUM_CAMINHO_ELEGIVEL' -and $rej.Count -eq 1 -and ([string]$rej[0]).StartsWith('COBERTURA_DE_PROCESSOS_INCOMPLETA') -and $op.Calls.Count -eq 0 -and $d.Calls.Count -eq 0) "sem a opcao: B1 identico ($($c.Aborted); $($rej -join ';'))"
+        $g = Test-AtmCandidate -Partition (Find-Part (Invoke-AtmInventory @xIa) $x.F.Roots[0]) -Inventory (Invoke-AtmInventory @xIa) -ForClean -RuntimeEvidence (Get-AtmCleanRuntimeEvidence -Inventory (Invoke-AtmInventory @xIa) -InventoryArgs $x.IA)
+        Assert-True ($g.Category -ceq 'BLOCKED' -and $null -eq $g.B1Risk) "gate para clean sem a opcao: BLOCKED ($($g.Category))"
+        $prev = $script:AtmRealDeletionEnabled
+        try {
+            $script:AtmRealDeletionEnabled = $false
+            $cA = Invoke-AtmClean -Entries $x.F.Entries -PlanPresenter $presenter -ConfirmationReader $op.Reader -InventoryArgs $x.IA -AcceptB1ResidualRisk -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+            $cB = Invoke-AtmClean -Entries $x.F.Entries -PlanPresenter $presenter -ConfirmationReader $op.Reader -InventoryArgs $x.IA -DeleteTreeImpl $d.Delete -PathPresenceImpl $d.Present
+        } finally { $script:AtmRealDeletionEnabled = $prev }
+        Assert-True ($cA.Aborted -ceq $cB.Aborted -and (@($cA.Rejected | ForEach-Object { @($_.Reasons) -join ';' }) -join '|') -ceq (@($cB.Rejected | ForEach-Object { @($_.Reasons) -join ';' }) -join '|') -and @($cA.Verified).Count -eq @($cB.Verified).Count -and $op.Calls.Count -eq 0 -and $d.Calls.Count -eq 0) "trava fechada: com e sem a opcao iguais ($($cA.Aborted) / $($cB.Aborted))"
+        $tui = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Tui.ps1'))
+        Assert-True (-not $tui.Contains('AcceptB1ResidualRisk')) 'TUI nunca passa a opcao (B1 identico na TUI)'
+        $clean = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Clean.ps1'))
+        $fn = $clean.Substring($clean.IndexOf('function Get-AtmB1ExceptionRisk'), $clean.IndexOf('function Test-AtmCandidate') - $clean.IndexOf('function Get-AtmB1ExceptionRisk'))
+        foreach ($pat in @('UninspectableByName', '.Name ', '.Name)', 'svchost', 'SYSTEM', 'S-1-5-18', 'Program Files', 'Windows\')) { Assert-True (-not $fn.Contains($pat)) "excecao sem lista por nome, conta ou caminho ('$pat')" }
+        Assert-True (Test-TestT1RootsIntact $x.F) 'nada apagado'
+    }
+    Test-Case 'Excecao restrita de B1' 'Preview com a trava fechada (en-US e pt-BR): bloco proprio de risco declarado, texto de nao liberada, nunca no bloco ELIGIBLE nem na lista para allowlist' {
+        $x = New-TestB1Context 'b1prev' 1
+        $xIa = $x.IA
+        $r = $x.F.Roots[0]
+        $old = Get-AtmLanguage
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                $inv = Invoke-AtmInventory @xIa
+                $rows = Invoke-AtmPreview -Inventory $inv -InventoryArgs $x.IA
+                $txt = (@(Show-AtmPreview -Inventory $inv -Rows $rows 6>&1 | ForEach-Object { [string]$_.MessageData }) -join "`n")
+                $hdr = $txt.IndexOf((Get-AtmText 'preview.declaredRisk'))
+                $line = $txt.IndexOf("[ELIGIBLE_WITH_DECLARED_RISK] $r")
+                Assert-True ($hdr -ge 0 -and $line -gt $hdr -and -not $txt.Contains("[ELIGIBLE] $r") -and -not $txt.Contains("$r|") -and $txt.Contains((Get-AtmText 'reason.b1Exception' 'B1_EXCEPTION_RESIDUAL_RISK' 1))) "$($lang): bloco proprio, nao liberada, fora da allowlist"
+            }
+        } finally { Set-AtmLanguage -Requested $old }
     }
 
     # ------------------------------------------------------------------ read-only guarantee
@@ -3013,6 +3171,19 @@ exit 0
         $all = $o.Frames -join "`n"
         Assert-True ($all -match '^[\x09\x0A\x20-\x7E]*$') 'somente ASCII imprimivel'
         foreach ($f in $o.Frames) { foreach ($ln in ($f -split "`n")) { Assert-True ($ln.Length -le 60) 'largura' } }
+    }
+    Test-Case 'TUI' 'Excecao restrita de B1 na TUI: preview mostra a categoria nova como nao liberada; a limpeza pela TUI nunca usa a excecao (B1 identico, nenhuma pergunta de risco), nada apagado' {
+        $logDir = New-TestCleanLogDir 'tuib1'
+        if (-not $logDir) { return }
+        $x = New-TestB1Context 'tuib1' 1
+        $r = $x.F.Roots[0]
+        $o = Invoke-HeadlessTui -Keys @((New-Key 'P' 'p'), (New-Key 'Escape'), (New-Key 'Q' 'q')) -InvArgs $x.IA -W 160 -H 40
+        $all = $o.Frames -join "`n"
+        Assert-True ($all.Contains((Get-AtmText 'tui.catDeclaredRisk')) -and $all.Contains('B1_EXCEPTION_RESIDUAL_RISK') -and -not ($all -match 'ELIGIBLE_\S*…')) 'preview da TUI: rotulo proprio (nunca ELIGIBLE cortado) e motivo de nao liberada'
+        $o2 = Invoke-HeadlessTui -Keys @((New-Key 'L' 'l'), (New-Key 'Q' 'q')) -InvArgs $x.IA -Lines @('', $r, (Join-Path $logDir 'tuib1.jsonl'), '@PHRASE', '@PHRASE', '@PHRASE', '@PHRASE', '')
+        $rej = @(@($o2.State.LastClean.Rejected)[0].Reasons)
+        Assert-True ($o2.State.LastClean.Aborted -ceq 'NENHUM_CAMINHO_ELEGIVEL' -and $rej.Count -eq 1 -and ([string]$rej[0]).StartsWith('COBERTURA_DE_PROCESSOS_INCOMPLETA')) "limpeza pela TUI: B1 identico ($($o2.State.LastClean.Aborted))"
+        Assert-True (Test-TestT1RootsIntact $x.F) 'nada apagado'
     }
     Test-Case 'TUI' 'Limpeza pela TUI usa o motor: allowlist, plano, frase; cancelamentos nao apagam' {
         # Both prompt flows, whatever the session: an administrator is also asked whether to include other users

@@ -285,7 +285,8 @@ function Show-AtmPreview {
     $rows = @(@($Rows) | Where-Object { $_ -and $selPaths.ContainsKey($_.Partition.Path + '|' + $_.Partition.Kind + '|' + $_.Partition.Name) })
     # One block per path (no wide table): the reason and the evidence are always printed in full, never dropped
     # by column fitting.
-    foreach ($cat in @(@('BLOCKED', 'preview.blocked', 'Red'), @('INVESTIGATE', 'preview.investigate', 'Yellow'), @('ELIGIBLE', 'preview.eligible', 'Green'))) {
+    # The B1 exception category is its own block, never counted as eligible nor listed for the allowlist.
+    foreach ($cat in @(@('BLOCKED', 'preview.blocked', 'Red'), @('INVESTIGATE', 'preview.investigate', 'Yellow'), @('ELIGIBLE', 'preview.eligible', 'Green'), @('ELIGIBLE_WITH_DECLARED_RISK', 'preview.declaredRisk', 'Magenta'))) {
         $g = @($rows | Where-Object { $_.Gate.Category -eq $cat[0] })
         Write-AtmHeader (Get-AtmText 'preview.header' (Get-AtmText $cat[1]) $g.Count (Format-AtmMB (Get-AtmSum ($g | ForEach-Object { $_.Partition }) 'Bytes')))
         if ($g.Count -eq 0) { Write-Host ('  ' + (Get-AtmText 'common.none')); continue }
@@ -368,12 +369,16 @@ function Show-AtmDiscardResult {
 function Read-AtmCleanAnswer {
     # AUT-2: one question of a clean run past the release gate (CLI and TUI). Each declaration names its root; every
     # phrase comes from the engine; the answer is returned exactly as typed.
-    param([string]$Phrase, [string]$Kind, [string]$RootPath, $Choices, [scriptblock]$LineReader)
+    param([string]$Phrase, [string]$Kind, [string]$RootPath, $Choices, [scriptblock]$LineReader, $Info = $null)
     Write-Host ''
     if ($Kind -ceq 'task' -or $Kind -ceq 'results') {
         Write-Host ('  ' + (Get-AtmText 'clean.declRoot' $RootPath)) -ForegroundColor Cyan
         $fa = @($Choices)
         Write-Host (Get-AtmText ('auth.prompt.' + $Kind) @fa) -ForegroundColor Yellow
+    } elseif ($Kind -ceq 'risk') {
+        # B1 exception: the residual risk of this root, with the number of processes not inspected.
+        Write-Host ('  ' + (Get-AtmText 'clean.declRoot' $RootPath)) -ForegroundColor Cyan
+        Write-Host (Get-AtmText 'clean.prompt.risk' $Phrase $Info) -ForegroundColor Magenta
     } else { Write-Host (Get-AtmText 'cli.typePhrase' $Phrase) -ForegroundColor Yellow }
     # The phrase just shown is passed as a second argument (Read-Host ignores it; the headless TUI tests echo it).
     return (& $LineReader (Get-AtmText 'cli.confirmPrompt') $Phrase)
@@ -395,6 +400,7 @@ function Show-AtmCleanResult {
         if ($Result.Aborted -eq 'LOG_REQUIRED') { Write-Host ('  ' + (Get-AtmText 'clean.logRequired')) -ForegroundColor Yellow }
         # AUT-2: the run stopped in the questions or before the first operation; the step and root are named.
         if ($Result.Aborted -eq 'CONSOLE_NOT_OBSERVED') { Write-Host ('  ' + (Get-AtmText 'clean.consoleRequired')) -ForegroundColor Yellow }
+        if ($Result.Aborted -eq 'B1_EXCEPTION_LIMIT_EXCEEDED') { Write-Host ('  ' + (Get-AtmText 'clean.b1LimitExceeded' $script:AtmB1ExceptionActiveMaxRoots @($Result.Verified).Count)) -ForegroundColor Yellow }
         if ($Result.RefusedAt) { Write-Host ('  ' + (Get-AtmText 'clean.refusedAt' $Result.RefusedAt.Step $(if ($Result.RefusedAt.Path) { $Result.RefusedAt.Path } else { '-' }))) -ForegroundColor Yellow }
         if ($Result.Aborted -eq 'PLAN_CHANGED_BEFORE_EXECUTION') { Write-Host ('  ' + (Get-AtmText 'clean.planChanged')) -ForegroundColor Yellow }
         if ($Result.Aborted -eq 'REVALIDATION_REFUSED') {

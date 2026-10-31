@@ -105,6 +105,86 @@ function Format-AtmRuntimeRefusal {
     return (Get-AtmText 'runtime.reason' $Refusal.Code (Get-AtmText ('runtime.code.' + $Refusal.Code)) $(if ($Refusal.Collector) { $Refusal.Collector } else { '-' }) $(if ($Refusal.Relation) { $Refusal.Relation } else { '-' }) (Get-AtmText ('runtime.nature.' + $Refusal.Nature)) $(if ($Refusal.Coverage) { $Refusal.Coverage } else { '-' }) $when $detail)
 }
 
+# ---------------------------------------------------------------------------------------------
+# B1 restricted exception (V0.3; maintainer's decision, a change of the product contract): incomplete process coverage
+# stops blocking ONE kind of root and becomes a residual risk the operator accepts per root, with no rollback. It applies
+# only when every condition of Get-AtmB1ExceptionRisk holds; otherwise B1 is unchanged (same text, BLOCKED). It never
+# classifies the processes that cannot be inspected (no list of names, accounts or paths): it records their identities
+# (pid@creationTicksUtc) so that the acceptance covers exactly those processes. Preview, audit and the TUI only show the
+# category, as not released; only clean past the release gate with -AcceptB1ResidualRisk (CLI) can act on it.
+# ---------------------------------------------------------------------------------------------
+$script:AtmB1ExceptionCategory = 'ELIGIBLE_WITH_DECLARED_RISK'
+$script:AtmB1ExceptionReason = 'B1_EXCEPTION_RESIDUAL_RISK'
+# Fixed in code, no parameter changes them. Active in this stage: one root per run with the exception.
+$script:AtmB1ExceptionActiveMaxRoots = 1
+# A later stage's limits (5 roots, 2 GiB per run): defined, NOT used in this stage.
+$script:AtmB1ExceptionLaterMaxRoots = 5
+$script:AtmB1ExceptionLaterMaxBytes = 2GB
+
+function Get-AtmCleanGateRefusal {
+    <#
+      Reasons to refuse one root of a confirmed plan, at the plan check and at its revalidation. A root confirmed as
+      ELIGIBLE must still be ELIGIBLE. A root confirmed under the B1 exception (-Risk = what was accepted) must still be
+      under it, and every process not inspected now must be among the accepted identities: a new one refuses; one that
+      disappeared neither widens the acceptance nor skips the revalidation. A root confirmed as ELIGIBLE that now falls
+      under the exception is refused (the operator never accepted that risk).
+      Returned as plain output (callers wrap it in @()): an empty refusal outputs nothing.
+    #>
+    param($Gate, $Risk)
+    if ($null -eq $Risk) {
+        if ([string]$Gate.Category -cne 'ELIGIBLE') { return @(@($Gate.Reasons) + $(if (@($Gate.Reasons).Count -eq 0) { @([string]$Gate.Category) } else { @() })) }
+        return @()
+    }
+    if ([string]$Gate.Category -cne $script:AtmB1ExceptionCategory -or $null -eq $Gate.B1Risk) {
+        return @(@($Gate.Reasons) + @('B1_EXCEPTION_NO_LONGER_APPLIES'))
+    }
+    $new = @(@($Gate.B1Risk.Keys) | Where-Object { @($Risk.Keys) -cnotcontains $_ })
+    if ($new.Count -gt 0) { return @("B1_EXCEPTION_NEW_UNINSPECTABLE_PROCESS ($($new.Count))") }
+    return @()
+}
+
+function Get-AtmUninspectableKeys {
+    # Identities of the processes whose command line could not be read (the processes behind B1): sorted keys
+    # pid@creationTicksUtc, and how many have no creation time (no identity). Names and command lines are not kept.
+    param($Inventory)
+    $keys = New-Object System.Collections.Generic.List[string]; $unkeyed = 0
+    foreach ($pr in @($Inventory.Snapshot.Processes)) {
+        if ($null -eq $pr -or $pr.CommandLine) { continue }
+        $k = ConvertTo-AtmProcessKey -ProcessId $pr.Pid -CreationUtc $pr.CreationUtc
+        if ($k) { $keys.Add($k) } else { $unkeyed++ }
+    }
+    return [pscustomobject]@{ Keys = @($keys | Sort-Object -Unique); Unkeyed = $unkeyed }
+}
+
+function Get-AtmB1ExceptionRisk {
+    <#
+      $null unless EVERY condition of the exception holds for this root in this evaluation; otherwise the residual risk:
+      Uninspectable (count) and Keys (identities of the processes not inspected). Conditions: B1 is the only V0.1 reason
+      (the gate reached it and refused only for it); own profile, no -IncludeOtherUsers, token not elevated; a Claude
+      Code SessionRoot of class ORPHAN_SUSPECTED without flags; runtime evidence collected with no refusal for the root;
+      process-snapshot COMPLETE and processes incomplete only for UNINSPECTABLE_PROCESSES; every uninspectable process
+      has an identity; the lock-probe gate passes (it is not reached by the V0.1 gate when B1 refuses).
+    #>
+    param($Partition, $Inventory, $Gate, $Refusals, $RuntimeEvidence, [switch]$IncludeOtherUsers, [switch]$SkipLockProbe)
+    $p = $Partition
+    if ([string]$Gate.ProcessCoverageGate -cne 'BLOCKED' -or @($Gate.Reasons).Count -ne 1 -or -not ([string]@($Gate.Reasons)[0]).StartsWith('COBERTURA_DE_PROCESSOS_INCOMPLETA', [StringComparison]::Ordinal)) { return $null }
+    if ($Inventory.Snapshot.Failed -or $IncludeOtherUsers -or [string]$p.Sid -cne [string]$Inventory.Identity.Sid -or $Inventory.Identity.IsAdmin) { return $null }
+    if ([string]$p.Kind -cne 'SessionRoot' -or [string]$p.Provider -cne 'claude-code' -or [string]$p.Class -cne 'ORPHAN_SUSPECTED' -or @($p.Flags).Count -gt 0) { return $null }
+    if ($null -eq $RuntimeEvidence -or $RuntimeEvidence.Failed -or @($Refusals).Count -gt 0) { return $null }
+    $snapCov = @($RuntimeEvidence.Coverage | Where-Object { [string]$_.Collector -ceq 'process-snapshot' })
+    $procCov = @($RuntimeEvidence.Coverage | Where-Object { [string]$_.Collector -ceq 'processes' })
+    if ($snapCov.Count -eq 0 -or @($snapCov | Where-Object { [string]$_.Status -cne 'COMPLETE' }).Count -gt 0) { return $null }
+    if ($procCov.Count -eq 0) { return $null }
+    foreach ($c in $procCov) {
+        if ([string]$c.Status -ceq 'COMPLETE') { continue }
+        if ([string]$c.Status -cne 'PARTIAL' -or (@($c.Reasons) -join ',') -cne 'UNINSPECTABLE_PROCESSES') { return $null }
+    }
+    $u = Get-AtmUninspectableKeys $Inventory
+    if ($u.Unkeyed -gt 0 -or @($u.Keys).Count -eq 0 -or @($u.Keys).Count -ne [int]$Inventory.Snapshot.Uninspectable) { return $null }
+    if (-not $SkipLockProbe -and @((Get-AtmLockProbeReasons $p.Path).Reasons).Count -gt 0) { return $null }
+    return [pscustomobject]@{ Code = $script:AtmB1ExceptionReason; Uninspectable = @($u.Keys).Count; Keys = @($u.Keys) }
+}
+
 function Test-AtmCandidate {
     <#
       Gates applied (in order) to one inventoried partition. Returns Category:
@@ -116,7 +196,7 @@ function Test-AtmCandidate {
       non-use. Preview and clean always pass it; without it (direct calls) only the gates below apply.
     #>
     [CmdletBinding()]
-    param($Partition, $Inventory, [switch]$IncludeOtherUsers, [switch]$SkipLockProbe, [switch]$ForClean, $RuntimeEvidence = $null)
+    param($Partition, $Inventory, [switch]$IncludeOtherUsers, [switch]$SkipLockProbe, [switch]$ForClean, $RuntimeEvidence = $null, [switch]$AcceptB1ResidualRisk)
     $g = Get-AtmCandidateGate -Partition $Partition -Inventory $Inventory -IncludeOtherUsers:$IncludeOtherUsers -SkipLockProbe:$SkipLockProbe -ForClean:$ForClean
     $refs = @()
     if ($null -ne $RuntimeEvidence) {
@@ -128,8 +208,29 @@ function Test-AtmCandidate {
     $rank = @{ 'ELIGIBLE' = 0; 'INVESTIGATE' = 1; 'BLOCKED' = 2 }
     $cat = $g.Category
     foreach ($r in $refs) { if ($rank[$r.Decision] -gt $rank[$cat]) { $cat = $r.Decision } }
+    # B1 restricted exception: shown by preview/audit (not for clean) and used by clean only with the explicit switch;
+    # anywhere else B1 is unchanged.
+    $risk = $(if ($null -ne $RuntimeEvidence -and [string]$g.ProcessCoverageGate -ceq 'BLOCKED') { Get-AtmB1ExceptionRisk -Partition $Partition -Inventory $Inventory -Gate $g -Refusals $refs -RuntimeEvidence $RuntimeEvidence -IncludeOtherUsers:$IncludeOtherUsers -SkipLockProbe:$SkipLockProbe } else { $null })
+    if ($null -ne $risk -and (-not $ForClean -or $AcceptB1ResidualRisk)) {
+        return [pscustomobject]@{ Category = $script:AtmB1ExceptionCategory; Reasons = @(@(Get-AtmText 'reason.b1Exception' $script:AtmB1ExceptionReason $risk.Uninspectable) + @($g.Reasons)); Requirements = $g.Requirements; Probe = $g.Probe
+            RuntimeReasons = @(); ProcessCoverageGate = $g.ProcessCoverageGate; B1Risk = $risk }
+    }
     return [pscustomobject]@{ Category = $cat; Reasons = @(@($g.Reasons) + @($refs | ForEach-Object { Format-AtmRuntimeRefusal $_ })); Requirements = $g.Requirements; Probe = $g.Probe; RuntimeReasons = $refs
-        ProcessCoverageGate = $g.ProcessCoverageGate }
+        ProcessCoverageGate = $g.ProcessCoverageGate; B1Risk = $null }
+}
+
+function Get-AtmLockProbeReasons {
+    # The lock-probe gate of V0.1 (read-only probe of the tree): the probe and its refusal reasons.
+    param([string]$Path)
+    $reasons = New-Object System.Collections.Generic.List[string]
+    $probe = [AgentTempManager.AtmLockProbe]::ProbeTree($Path, $script:AtmMaxSamples)
+    if (-not $probe.Ok) {
+        if ($probe.InUse -gt 0) { $reasons.Add('EM_USO: ' + (Get-AtmText 'reason.inUse' $probe.InUse)) }
+        if ($probe.Denied -gt 0) { $reasons.Add('ACESSO_NEGADO_PARA_EXCLUSAO: ' + (Get-AtmText 'reason.items' $probe.Denied)) }
+        if ($probe.ReparsePoints -gt 0) { $reasons.Add('REPARSE_POINT_NA_SONDAGEM') }
+        if ($probe.Errors -gt 0 -or -not $probe.Complete) { $reasons.Add('SONDAGEM_INCOMPLETA') }
+    }
+    return [pscustomobject]@{ Probe = $probe; Reasons = $reasons.ToArray() }
 }
 
 function Get-AtmCandidateGate {
@@ -186,13 +287,9 @@ function Get-AtmCandidateGate {
     }
 
     if ($reasons.Count -eq 0 -and -not $SkipLockProbe) {
-        $probe = [AgentTempManager.AtmLockProbe]::ProbeTree($p.Path, $script:AtmMaxSamples)
-        if (-not $probe.Ok) {
-            if ($probe.InUse -gt 0) { $reasons.Add('EM_USO: ' + (Get-AtmText 'reason.inUse' $probe.InUse)) }
-            if ($probe.Denied -gt 0) { $reasons.Add('ACESSO_NEGADO_PARA_EXCLUSAO: ' + (Get-AtmText 'reason.items' $probe.Denied)) }
-            if ($probe.ReparsePoints -gt 0) { $reasons.Add('REPARSE_POINT_NA_SONDAGEM') }
-            if ($probe.Errors -gt 0 -or -not $probe.Complete) { $reasons.Add('SONDAGEM_INCOMPLETA') }
-        }
+        $lp = Get-AtmLockProbeReasons $p.Path
+        $probe = $lp.Probe
+        foreach ($x in $lp.Reasons) { $reasons.Add($x) }
     }
     $cat = $(if ($reasons.Count -gt 0) { 'BLOCKED' } else { 'ELIGIBLE' })
     # Reached here: the B1 gate above was evaluated; its result is the condition it tested.
@@ -287,7 +384,8 @@ function Invoke-AtmClean {
         [scriptblock]$DeleteTreeImpl,
         [scriptblock]$PathPresenceImpl,
         $LogWriter,
-        [hashtable]$Interaction = @{}
+        [hashtable]$Interaction = @{},
+        [switch]$AcceptB1ResidualRisk
     )
     if (-not $script:AtmRealDeletionEnabled) { return (Invoke-AtmCleanCore @PSBoundParameters) }
     $lock = [AgentTempManager.AtmCleanLock]::TryAcquire($script:AtmCleanLockName)
@@ -349,6 +447,7 @@ function Invoke-AtmCleanCore {
         [scriptblock]$PathPresenceImpl,
         $LogWriter,
         [hashtable]$Interaction = @{},
+        [switch]$AcceptB1ResidualRisk,
         [string]$RefusedBy,
         [string]$LockReleaseError
     )
@@ -380,6 +479,10 @@ function Invoke-AtmCleanCore {
         if ($why) { $rejected.Add([pscustomobject]@{ Path = $e.Path; Source = $e.Source; Reasons = @($why) }) } else { $syntaxOk.Add($e) }
     }
     $seen = @{}
+    # B1 restricted exception: the switch has an effect only past the release gate (with the gate closed the plan-only
+    # flow is unchanged, switch or not); the TUI never passes it.
+    $acceptRisk = ([bool]$AcceptB1ResidualRisk -and $script:AtmRealDeletionEnabled)
+    $riskByPath = @{}
     $ia = @{} + $InventoryArgs
     $inv = Invoke-AtmInventory @ia
     # B2-1: one runtime collection for the plan, attached to the inventory the presenter receives (run notices).
@@ -393,11 +496,15 @@ function Invoke-AtmCleanCore {
         if ($m.Count -ne 1) { $rejected.Add([pscustomobject]@{ Path = $e.Path; Source = $e.Source; Reasons = @('FORA_DAS_ROOTS_PERMITIDAS (' + (Get-AtmText 'reason.notRoot') + ')') }); continue }
         $p = $m[0]
         if (-not [string]::Equals($p.Path, $e.Path, [StringComparison]::Ordinal)) { $rejected.Add([pscustomobject]@{ Path = $e.Path; Source = $e.Source; Reasons = @('CAIXA_DIVERGENTE (' + (Get-AtmText 'reason.useExactly' $p.Path) + ')') }); continue }
-        $g = Test-AtmCandidate -Partition $p -Inventory $inv -IncludeOtherUsers:$IncludeOtherUsers -ForClean -RuntimeEvidence $rt
+        $g = Test-AtmCandidate -Partition $p -Inventory $inv -IncludeOtherUsers:$IncludeOtherUsers -ForClean -RuntimeEvidence $rt -AcceptB1ResidualRisk:$acceptRisk
         $reasons = @($g.Reasons)
-        if ($e.Fingerprint -and $e.Fingerprint -ne $p.Fingerprint) { $reasons += "ALTERADO_DESDE_O_PREVIEW (fingerprint $($e.Fingerprint) -> $($p.Fingerprint))" }
-        if ($g.Category -ne 'ELIGIBLE' -or $reasons.Count -gt 0) { $rejected.Add([pscustomobject]@{ Path = $e.Path; Source = $e.Source; Reasons = $reasons }); continue }
+        $fpChanged = [bool]($e.Fingerprint -and $e.Fingerprint -ne $p.Fingerprint)
+        if ($fpChanged) { $reasons += "ALTERADO_DESDE_O_PREVIEW (fingerprint $($e.Fingerprint) -> $($p.Fingerprint))" }
+        # B1 restricted exception: only with the switch past the release gate; its reasons are the risk shown, not refusals.
+        $okRisk = ($acceptRisk -and [string]$g.Category -ceq $script:AtmB1ExceptionCategory -and $null -ne $g.B1Risk -and -not $fpChanged)
+        if (-not $okRisk -and ($g.Category -ne 'ELIGIBLE' -or $reasons.Count -gt 0)) { $rejected.Add([pscustomobject]@{ Path = $e.Path; Source = $e.Source; Reasons = $reasons }); continue }
         $verified.Add($p)
+        if ($okRisk) { $riskByPath[$p.Path] = $g.B1Risk }
     }
     if ($verified.Count -eq 0) { $state.Aborted = 'NENHUM_CAMINHO_ELEGIVEL'; return (& $finish) }
 
@@ -409,6 +516,9 @@ function Invoke-AtmCleanCore {
         $state.Aborted = 'EXCLUSAO_REAL_DESABILITADA_V0_1'
         return (& $finish)
     }
+    # B1 restricted exception: a run with any root under the exception is limited (fixed in code); over the limit the
+    # whole run is refused before any question.
+    if ($riskByPath.Count -gt 0 -and $verified.Count -gt $script:AtmB1ExceptionActiveMaxRoots) { $state.Aborted = 'B1_EXCEPTION_LIMIT_EXCEEDED'; return (& $finish) }
     # T1: past the release gate every run is logged in a new file, created and started before the confirmation, so the
     # operator never confirms a run that cannot be recorded.
     if (-not $LogFile -and $null -eq $LogWriter) { $state.Aborted = 'LOG_REQUIRED'; return (& $finish) }
@@ -432,19 +542,24 @@ function Invoke-AtmCleanCore {
             $log = $opened.Log
         }
         $plan = New-Object System.Collections.Generic.List[object]
-        foreach ($p in $verified) { $plan.Add([pscustomobject]@{ OpId = ('{0}:{1}' -f $state.RunId, ($plan.Count + 1)); Part = $p }) }
-        # AUT-2: the plan id identifies the exact executable set presented (paths and their statistics); the final phrase
-        # carries it and the exact number of roots.
-        $state.PlanId = Get-AtmCleanPlanId -RunId $state.RunId -Parts @($plan | ForEach-Object { $_.Part })
+        foreach ($p in $verified) { $plan.Add([pscustomobject]@{ OpId = ('{0}:{1}' -f $state.RunId, ($plan.Count + 1)); Part = $p; Risk = $(if ($riskByPath.ContainsKey($p.Path)) { $riskByPath[$p.Path] } else { $null }) }) }
+        # B1 restricted exception: the identities of the processes not inspected that the operator is asked to accept.
+        $riskKeys = @(@($plan | Where-Object { $null -ne $_.Risk } | ForEach-Object { @($_.Risk.Keys) }) | Sort-Object -Unique)
+        # AUT-2: the plan id identifies the exact executable set presented (paths and their statistics, and the accepted
+        # process identities when the exception is used); the final phrase carries its first 8 characters and the count.
+        $state.PlanId = Get-AtmCleanPlanId -RunId $state.RunId -Parts @($plan | ForEach-Object { $_.Part }) -RiskKeys $riskKeys
         $state.Phrase = "APAGAR $($plan.Count) CAMINHOS $($state.PlanId.Substring(0, 8).ToUpperInvariant())"
-        $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'run-start' -Fields ([ordered]@{ tool = $script:AtmVersion; user = $inv.Identity.Name; sid = $inv.Identity.Sid; elevated = [bool]$inv.Identity.IsAdmin; planned = $plan.Count; planId = $state.PlanId })
+        $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'run-start' -Fields ([ordered]@{ tool = $script:AtmVersion; user = $inv.Identity.Name; sid = $inv.Identity.Sid; elevated = [bool]$inv.Identity.IsAdmin; planned = $plan.Count; planId = $state.PlanId
+                b1Exception = ($riskKeys.Count -gt 0); uninspectableProcesses = $(if ($riskKeys.Count -gt 0) { $riskKeys.Count } else { $null }) })
         $stage = 'run-start'
         if ($null -eq $lc) {
             $stage = 'plan'
             foreach ($item in $plan) {
                 $p = $item.Part
                 $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'plan' -Fields ([ordered]@{ opId = $item.OpId; path = $p.Path; fingerprint = $p.Fingerprint; files = $p.Files; dirs = $p.Dirs; bytes = $p.Bytes
-                        newestWriteUtc = $(if ($p.NewestWriteTimeUtc) { ([datetime]$p.NewestWriteTimeUtc).ToUniversalTime().ToString('o') } else { $null }) })
+                        newestWriteUtc = $(if ($p.NewestWriteTimeUtc) { ([datetime]$p.NewestWriteTimeUtc).ToUniversalTime().ToString('o') } else { $null })
+                        category = $(if ($null -ne $item.Risk) { $script:AtmB1ExceptionCategory } else { 'ELIGIBLE' })
+                        uninspectableProcesses = $(if ($null -ne $item.Risk) { $item.Risk.Uninspectable } else { $null }); uninspectableKeys = $(if ($null -ne $item.Risk) { @($item.Risk.Keys) } else { $null }) })
                 if ($null -ne $lc) { break }
             }
         }
@@ -464,7 +579,14 @@ function Invoke-AtmCleanCore {
             $cd = Test-AtmTypedPhrase -Typed (& $ConfirmationReader $choices[0] 'results' $p.Path $choices) -Phrases $choices
             if ($cd.Code) { $refusal = [pscustomobject]@{ Code = 'DECLARATION_' + $cd.Code; Step = 'results'; OpId = $item.OpId; Path = $p.Path }; break }
             $dec = $decisionMap[$cd.Hit]
-            $declarations.Add([pscustomobject]@{ OpId = $item.OpId; Path = $p.Path; Fingerprint = $p.Fingerprint; TaskCompleted = $true; ContentDecision = $dec; PreservationBasis = (Get-AtmPreservationBasis $dec) })
+            # B1 restricted exception: the residual risk, accepted for this root with its count (one exact phrase).
+            if ($null -ne $item.Risk) {
+                $riskPhrase = Get-AtmText 'clean.phrase.b1Risk'
+                $rk = Test-AtmTypedPhrase -Typed (& $ConfirmationReader $riskPhrase 'risk' $p.Path @($riskPhrase) $item.Risk.Uninspectable) -Phrases @($riskPhrase)
+                if ($rk.Code) { $refusal = [pscustomobject]@{ Code = 'DECLARATION_' + $rk.Code; Step = 'risk'; OpId = $item.OpId; Path = $p.Path }; break }
+            }
+            $declarations.Add([pscustomobject]@{ OpId = $item.OpId; Path = $p.Path; Fingerprint = $p.Fingerprint; TaskCompleted = $true; ContentDecision = $dec; PreservationBasis = (Get-AtmPreservationBasis $dec)
+                    B1RiskAccepted = ($null -ne $item.Risk); Uninspectable = $(if ($null -ne $item.Risk) { $item.Risk.Uninspectable } else { $null }) })
         }
         if ($null -eq $refusal) {
             $fc = Test-AtmTypedPhrase -Typed (& $ConfirmationReader $state.Phrase 'confirm' $null @($state.Phrase)) -Phrases @($state.Phrase)
@@ -482,7 +604,8 @@ function Invoke-AtmCleanCore {
             $lc = $null; $stage = 'declaration'
             foreach ($dcl in $declarations) {
                 $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'declaration' -Fields ([ordered]@{ opId = $dcl.OpId; path = $dcl.Path; fingerprint = $dcl.Fingerprint; declaredBy = 'OPERATOR'
-                        taskCompleted = $true; contentDecision = $dcl.ContentDecision; preservation = [ordered]@{ basis = $dcl.PreservationBasis; verifiedByTool = $false } })
+                        taskCompleted = $true; contentDecision = $dcl.ContentDecision; preservation = [ordered]@{ basis = $dcl.PreservationBasis; verifiedByTool = $false }
+                        b1ResidualRiskAccepted = [bool]$dcl.B1RiskAccepted; uninspectableProcesses = $dcl.Uninspectable })
                 if ($null -ne $lc) { break }
             }
             if ($null -eq $lc) {
@@ -505,8 +628,8 @@ function Invoke-AtmCleanCore {
                     $m3 = @($invChk.Partitions | Where-Object { [string]::Equals($_.Path, $item.Part.Path, [StringComparison]::Ordinal) -and $_.Kind -ne 'NotScanned' -and $_.Kind -ne 'BaseLooseFiles' })
                     if ($m3.Count -ne 1) { $changed.Add($item.OpId); continue }
                     if ((Get-AtmCleanPlanItemKey $m3[0]) -cne (Get-AtmCleanPlanItemKey $item.Part)) { $changed.Add($item.OpId); continue }
-                    $g3 = Test-AtmCandidate -Partition $m3[0] -Inventory $invChk -IncludeOtherUsers:$IncludeOtherUsers -ForClean -RuntimeEvidence $rtChk
-                    if ($g3.Category -ne 'ELIGIBLE') { $changed.Add($item.OpId) }
+                    $g3 = Test-AtmCandidate -Partition $m3[0] -Inventory $invChk -IncludeOtherUsers:$IncludeOtherUsers -ForClean -RuntimeEvidence $rtChk -AcceptB1ResidualRisk:$acceptRisk
+                    if (@(Get-AtmCleanGateRefusal -Gate $g3 -Risk $item.Risk).Count -gt 0) { $changed.Add($item.OpId) }
                 }
                 $lc = Write-AtmCleanLogRecord -Log $log -State $state -Type 'plan-check' -Fields ([ordered]@{ planId = $state.PlanId; matched = ($changed.Count -eq 0); changed = @($changed) })
                 if ($null -ne $lc) { & $logFail 'plan-check' $null $lc; $state.Aborted = 'LOG_WRITE_FAILED' }
@@ -530,8 +653,8 @@ function Invoke-AtmCleanCore {
                 else {
                     $c = $cur[0]
                     if ($c.Fingerprint -ne $p.Fingerprint) { $why += "ALTERADO_APOS_CONFIRMACAO (fingerprint $($p.Fingerprint) -> $($c.Fingerprint))" }
-                    $g = Test-AtmCandidate -Partition $c -Inventory $re -IncludeOtherUsers:$IncludeOtherUsers -ForClean -RuntimeEvidence $rtRe
-                    if ($g.Category -ne 'ELIGIBLE') { $why += $g.Reasons }
+                    $g = Test-AtmCandidate -Partition $c -Inventory $re -IncludeOtherUsers:$IncludeOtherUsers -ForClean -RuntimeEvidence $rtRe -AcceptB1ResidualRisk:$acceptRisk
+                    $why += @(Get-AtmCleanGateRefusal -Gate $g -Risk $item.Risk)
                 }
                 if ($why.Count -gt 0) {
                     # AUT-2 (maintainer's decision): a revalidation refusal after the confirmation stops the run before
@@ -659,9 +782,11 @@ function Get-AtmCleanPlanItemKey {
 }
 
 function Get-AtmCleanPlanId {
-    # Identifies the exact executable set presented in a run: SHA-256 over the run id and every root's key, in plan order.
-    param([string]$RunId, $Parts)
+    # Identifies the exact executable set presented in a run: SHA-256 over the run id and every root's key, in plan order,
+    # and, when the B1 exception is used, the sorted identities of the processes not inspected that are accepted.
+    param([string]$RunId, $Parts, [string[]]$RiskKeys = @())
     $text = 'atm-clean-plan/1;' + $RunId + ';' + ((@($Parts) | ForEach-Object { Get-AtmCleanPlanItemKey $_ }) -join '|')
+    if (@($RiskKeys).Count -gt 0) { $text += ';b1-accepted:' + ((@($RiskKeys) | Sort-Object -Unique) -join ',') }
     $sha = [Security.Cryptography.SHA256]::Create()
     try { $h = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)) } finally { $sha.Dispose() }
     return (-join @($h | ForEach-Object { $_.ToString('x2') }))
