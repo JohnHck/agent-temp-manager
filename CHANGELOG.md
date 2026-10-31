@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (release candidate, not published)
+
+Not published: no tag, no GitHub Release. **Real deletion stays disabled in every copy**: with the deletion gate closed,
+`clean` still only validates and shows the plan. What changes for users is listed in
+[docs/release/V0.3.0-RELEASE-NOTES.md](docs/release/V0.3.0-RELEASE-NOTES.md): `ELIGIBLE_WITH_DECLARED_RISK` shown as "not
+released" in preview, audit and the TUI; the `authorize` command; the V0.2 runtime evidence in preview and the plan. The
+entries below that say "past the deletion gate" are inactive in every copy. Publication requires the operator's
+privilege-matrix rows with the gate closed (V4); a release with the gate open requires the operator's pilot (V5) and its
+own gate. Candidate record: [docs/release/V0.3-RC.md](docs/release/V0.3-RC.md).
 
 * V0.3 fix (past the deletion gate only; no distributed copy reaches it): `Invoke-AtmClean` loads the verified native
   library before taking the clean lock. The lock comes before any inventory, and the library was otherwise loaded only

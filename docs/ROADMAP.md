@@ -190,7 +190,12 @@ persistent monitoring (that is V0.5).
 **Objectives.** Enable real deletion of temporary paths that a human selected and approved, with the protections
 already built in V0.1 and the evidence gathered in V0.2.
 
-**Validation stages (unreleased; every distributed copy keeps real deletion disabled).**
+**Status: 0.3.0 is a release candidate, not published; real deletion is disabled in every copy.** It is to be published
+with the deletion gate closed, after the operator's privilege rows with the gate closed (V4). A release with the gate
+open comes only after the operator's pilot (V5) and its own gate. Candidate record and publication blockers:
+[release/V0.3-RC.md](release/V0.3-RC.md).
+
+**Validation stages (every distributed copy keeps real deletion disabled).**
 * V2, disposable CI integration: **in CI**. The real clean, end to end, on roots planted by a CI-only harness on
   disposable GitHub-hosted VMs, against the installed candidate, as a non-elevated standard user (B1 restricted
   exception) and elevated (ELIGIBLE only when the measured process coverage is complete). The confirmation there is
@@ -201,7 +206,8 @@ already built in V0.1 and the evidence gathered in V0.2.
   decision: a write keeping every statistic, a real exception inside the deleter, a real log write failure, an
   interruption in the middle of the tree; the elevated leg's in-deleter cases while its coverage is incomplete. Details
   and limits: [TESTING.md](TESTING.md#v3-as-a-whole).
-* V4 (privilege matrix) and V5 (operator pilot): not started.
+* V4 (privilege matrix, operator): not started. Its rows with the gate closed are a prerequisite for publishing 0.3.0.
+* V5 (operator pilot on one real root): not started. It is a prerequisite for any release with the gate open.
 
 **Deliverables.**
 * Release gate enabled through a reviewed change; deletion only for paths in an explicit allowlist.

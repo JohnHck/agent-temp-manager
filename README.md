@@ -3,12 +3,14 @@
 Read-only auditing and preview of the temporary directories that AI coding agents leave behind on Windows,
 across **every local user profile**, with a safety engine built for a future human-approved cleanup.
 
-> **Version 0.2.0.** Its publication is the GitHub Release `v0.2.0` only, created with the maintainer's explicit
-> approval; verify the zip against that release's `SHA256SUMS.txt` (releases:
+> **Latest published version: 0.2.0**. Its publication is the GitHub Release `v0.2.0` only, created with the
+> maintainer's explicit approval; verify the zip against that release's `SHA256SUMS.txt` (releases:
 > [GitHub Releases](https://github.com/JohnHck/agent-temp-manager/releases)). Scope: audit, preview, the interactive
-> dashboard and read-only runtime diagnostics. **Real deletion is disabled.**
-> `agent-temp clean` runs every safety gate and shows the exact plan, then stops without deleting anything.
-> Real cleanup is planned for V0.3, after the runtime diagnostics of V0.2: see the [roadmap](docs/ROADMAP.md).
+> dashboard and read-only runtime diagnostics.
+> **0.3.0 is a release candidate, not published.** It adds, behind the closed deletion gate, the safeguards a
+> human-approved cleanup needs ([candidate notes](docs/release/V0.3.0-RELEASE-NOTES.md)).
+> **Real deletion is disabled in every copy.** `agent-temp clean` runs every safety gate and shows the exact plan, then
+> stops without deleting anything. See the [roadmap](docs/ROADMAP.md).
 
 * Global command: `agent-temp` (interactive TUI + scriptable subcommands)
 * Agents (providers): **Claude Code**; V0.2 adds a runtime-only **Claude Desktop** provider
@@ -26,6 +28,7 @@ across **every local user profile**, with a safety engine built for a future hum
 | `agent-temp audit` | Full audit. **Strictly read-only.** Writes no file unless `-ExportJson` is given. |
 | `agent-temp preview` | Splits every path into *blocked*, *needs investigation* and *technically eligible*. Deletes nothing. |
 | `agent-temp clean -AllowListFile <file>` | **Plan only.** Validates an allowlist of exact paths against every gate and prints the exact plan. |
+| `agent-temp authorize -Path <root> -RecordFile <new file>` | **0.3.0 candidate.** Records the operator's discard authorization of one root, bound to the plan shown. Deletes nothing and makes nothing eligible. |
 | `agent-temp diagnose` | **V0.2.** Read-only runtime diagnostics with coverage per collector; writes no file (its JSON export is implemented but disabled by a closed security gate). |
 | `agent-temp verify` | Checks the installed files against their SHA-256 manifest. |
 | `agent-temp version` | Version, native mode, deletion state and language. |
@@ -63,8 +66,8 @@ needed; projects that cannot be identified safely are reported as *Unidentified 
 * Every byte belongs to exactly one partition; logical bytes and estimated on-disk size are reported separately.
 * Conservative classes: `ACTIVE_EVIDENCE`, `RECENT` (< 72 h), `LIVENESS_UNKNOWN`, `ORPHAN_SUSPECTED`
   (informational only). **No class authorises deletion.**
-* Incomplete process coverage blocks deletion, except one narrow, explicit exception (V0.3, unreleased, a change of
-  this product contract): the own non-elevated profile, Claude Code session roots with no other refusal, past the
+* Incomplete process coverage blocks deletion, except one narrow, explicit exception (V0.3, 0.3.0 release candidate, not
+  published; a change of this product contract): the own non-elevated profile, Claude Code session roots with no other refusal, past the
   deletion gate only, with `-AcceptB1ResidualRisk` and the operator's per-root acceptance of the residual risk, one root
   per run, no rollback. See docs/SECURITY-MODEL.md, gate 6.
 * The deleter (disabled in V0.1) pins every ancestor and directory by handle, deletes by handle and refuses any
