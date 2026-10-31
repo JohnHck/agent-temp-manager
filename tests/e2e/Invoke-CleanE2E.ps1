@@ -1522,7 +1522,9 @@ Case 'V3-L2-log-folder-pinned-during-run' {
     $r = $v3.Roots['L2'].Path
     $before = Get-V3Snap
     $v3Ren = @{ Status = $null }
-    $hook = { param($part) if ($null -eq $v3Ren.Status) { $v3s.Attacked = $true; try { [IO.Directory]::Move($ctx.LogDir, $ctx.LogDir + '-v3moved'); $v3Ren.Status = 'MOVED' } catch { $v3Ren.Status = 'REFUSED' } } }
+    # The attempt does not touch the root, so a revalidation refusal here can only be process churn of the runner: it is not
+    # marked as the attack and such a run is retried (the rename is attempted again in each run).
+    $hook = { param($part) if ($v3Ren.Status -cne 'MOVED') { try { [IO.Directory]::Move($ctx.LogDir, $ctx.LogDir + '-v3moved'); $v3Ren.Status = 'MOVED' } catch { $v3Ren.Status = 'REFUSED' } } }
     $c = Invoke-V3Churn -Paths @($r) -LogBase 'V3-L2' -Hook $hook
     if ($c.Exhausted) { return (Resolve-Exhausted $c) }
     Assert ($v3Ren.Status -ceq 'REFUSED') "pasta do log durante a execucao: $($v3Ren.Status)"
