@@ -5522,6 +5522,45 @@ try {
             Assert-True ($iElev -ge 0 -and $iEnter -gt $iElev -and $iOp -gt $iEnter -and $txt.Contains('Exit-AtmPrivateTemp')) "${w}: elevacao -> TEMP privado -> operacao -> limpeza"
         }
     }
+    Test-Case 'Instalacao' 'V0.3 INSTALL-RACE: nenhuma compilacao no processo do instalador - o aviso de ambiente compila num processo filho (System32, TEMP proprio dentro do TEMP privado) e termina antes da limpeza do TEMP privado; a verificacao de reparse da limpeza continua inteira' {
+        # Static: under Windows PowerShell 5.1 an in-process Add-Type (CodeDom) could leave temporary files that are
+        # removed after it returns, while Exit-AtmPrivateTemp walks the private TEMP. No script of install\ compiles in
+        # its own process: Add-Type appears only in the text of a child's command.
+        $instDir = Join-Path (Split-Path -Parent $testsDir) 'install'
+        $ic = [IO.File]::ReadAllText((Join-Path $instDir 'InstallCommon.ps1'))
+        foreach ($f in @(Get-ChildItem -LiteralPath $instDir -Filter '*.ps1' -File)) {
+            $lines = @([IO.File]::ReadAllText($f.FullName) -split "`r?`n" | Where-Object { $_ -match 'Add-Type' -and $_ -notmatch '^\s*#' })
+            foreach ($l in $lines) {
+                Assert-True ($l -match '^Add-Type -TypeDefinition ''using System; using System\.Runtime\.InteropServices; public static class AtmInstallNative' -or $l.Contains('-Command "Add-Type -Path ''$csQ'' -OutputAssembly')) "$($f.Name): Add-Type so no texto do processo filho ($($l.Trim().Substring(0, [Math]::Min(60, $l.Trim().Length))))"
+            }
+        }
+        $fn = $ic.Substring($ic.IndexOf('function Send-AtmEnvironmentChanged'), $ic.IndexOf('function Open-AtmPathKey') - $ic.IndexOf('function Send-AtmEnvironmentChanged'))
+        Assert-True ($fn.Contains("`$child = @'") -and $fn.Contains("`$ps = Join-Path `$env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'") -and $fn.Contains('& $ps -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand') -and -not $fn.Contains("-as [type]")) 'aviso de ambiente: processo filho pelo caminho do System32, sem tipo carregado neste processo'
+        Assert-True ($fn.Contains("Join-Path `$env:TEMP ('.broadcast-'") -and $fn.IndexOf('$env:TEMP = $tmp') -lt $fn.IndexOf('& $ps') -and $fn.Contains("if (`$LASTEXITCODE -ne 0) { throw")) 'filho com TEMP proprio dentro do TEMP atual (o privado); falha do filho continua sendo erro'
+        Assert-True ($fn.Contains('SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, ''Environment'', 2, 5000, [ref]$r)')) 'mesma mensagem e mesmos argumentos de antes'
+        $iHere = $fn.IndexOf("`$child = @'"); $iAdd = $fn.IndexOf('Add-Type -TypeDefinition'); $iEnd = [regex]::Match($fn, "`r?`n'@").Index
+        Assert-True ($iHere -ge 0 -and $iAdd -gt $iHere -and $iEnd -gt $iAdd -and $fn.IndexOf('& $ps') -gt $iEnd) 'Add-Type do aviso so dentro do texto do filho'
+        # The cleanup keeps its full reparse check (nothing tolerated).
+        $ro = $ic.Substring($ic.IndexOf('function Remove-AtmOwnTree'), $ic.IndexOf('function New-AtmNativeAssembly') - $ic.IndexOf('function Remove-AtmOwnTree'))
+        Assert-True ($ro.Contains('Get-ChildItem -LiteralPath $full -Recurse -Force') -and $ro.Contains("throw (Get-AtmText 'inst.reparseRefused'") -and -not $ro.Contains('SilentlyContinue') -and -not $ro.Contains('catch')) 'Remove-AtmOwnTree: varredura de reparse inteira, sem tolerancia'
+        $ex = $ic.Substring($ic.IndexOf('function Exit-AtmPrivateTemp'), $ic.IndexOf('function Send-AtmEnvironmentChanged') - $ic.IndexOf('function Exit-AtmPrivateTemp'))
+        Assert-True ($ex.Contains('Remove-AtmOwnTree -Path $State.Dir -InstallDir $InstallDir')) 'TEMP privado continua removido pela limpeza verificada'
+        # Behavioural (disposable CI runner only: it broadcasts a real WM_SETTINGCHANGE, which changes nothing): the real
+        # child inside a private TEMP, three times, then the cleanup with its reparse check: no error, nothing left.
+        if ($env:GITHUB_ACTIONS -ne 'true') { $script:caseSkipped = $true; $script:caseNote = 'parte comportamental so no runner descartavel (envia WM_SETTINGCHANGE real)'; return }
+        $inst = Join-Path $sandbox 'PF-race\AgentTempManager'
+        [void][IO.Directory]::CreateDirectory((Split-Path -Parent $inst))
+        for ($n = 1; $n -le 3; $n++) {
+            $st = Enter-AtmPrivateTemp -InstallDir $inst
+            try {
+                Send-AtmEnvironmentChanged
+                # Nothing is left in the private TEMP when the broadcast returns, so nothing can vanish under the cleanup's walk.
+                Assert-True (@(Get-ChildItem -LiteralPath $st.Dir -Force -Recurse).Count -eq 0) "rodada ${n}: TEMP privado vazio quando o aviso retorna (pasta do filho removida)"
+            } finally { Exit-AtmPrivateTemp -State $st -InstallDir $inst }
+            Assert-True (-not (Test-Path -LiteralPath $st.Dir)) "rodada ${n}: TEMP privado removido sem erro"
+        }
+        Assert-True (-not ('AtmInstallNative' -as [type])) 'nenhum tipo do aviso carregado no processo da suite'
+    }
 
     Test-Case 'Ambiente de teste' 'Ajuste de ACL do sandbox (sessao elevada): somente o sandbox vazio e canonico; ACL resultante verificada' {
         $fakeRoot = Join-Path $sandbox 'acl-guard'

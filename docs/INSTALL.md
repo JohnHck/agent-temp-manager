@@ -56,7 +56,10 @@ What it does:
 
 All three administrative scripts redirect the process TEMP/TMP to a private directory next to the install
 directory (administrator-only ACL), removed at the end, because the elevating account's own %TEMP% may be writable
-by other principals. Open the elevated console with `-NoProfile` so no user profile script runs elevated.
+by other principals. Nothing is compiled in the script's own process: the native library and the type that sends the
+`WM_SETTINGCHANGE` broadcast are each compiled in a child Windows PowerShell whose TEMP/TMP is a folder of its own
+(inside the staging directory, or inside the private directory), removed once the child has exited. The private
+directory is removed with its reparse-point check intact. Open the elevated console with `-NoProfile` so no user profile script runs elevated.
 
 It does not modify execution policies, ACLs of existing directories, or any agent temporary directory.
 Open a new terminal afterwards.

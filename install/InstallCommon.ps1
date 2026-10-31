@@ -224,11 +224,32 @@ function Exit-AtmPrivateTemp {
 }
 
 function Send-AtmEnvironmentChanged {
-    if (-not ('AtmInstallNative' -as [type])) {
-        Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class AtmInstallNative { [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult); }'
+    # Broadcasts WM_SETTINGCHANGE ("Environment") after the machine PATH changed. The P/Invoke type is compiled in a
+    # CHILD Windows PowerShell, never in this process: under Windows PowerShell 5.1 Add-Type compiles through CodeDom,
+    # whose temporary files can be removed after Add-Type returns, while Exit-AtmPrivateTemp walks the private TEMP
+    # (reparse check before removing it) - an intermittent "could not find a part of the path" on a fresh install.
+    # Once the child has exited nothing it started touches the private TEMP. The child's TEMP/TMP is a folder of its
+    # own inside the current (private) TEMP, removed with it.
+    $child = @'
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class AtmInstallNative { [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult); }'
+$r = [UIntPtr]::Zero
+[void][AtmInstallNative]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$r)
+exit 0
+'@
+    $tmp = Join-Path $env:TEMP ('.broadcast-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    [void][IO.Directory]::CreateDirectory($tmp)
+    $oldTemp = $env:TEMP; $oldTmp = $env:TMP
+    try {
+        $env:TEMP = $tmp; $env:TMP = $tmp
+        $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        & $ps -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($child))) | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw (Get-AtmText 'inst.compileFailed') }
+    } finally {
+        $env:TEMP = $oldTemp; $env:TMP = $oldTmp
+        # The child has exited: nothing can still be writing or removing in its folder.
+        if (Test-Path -LiteralPath $tmp) { [IO.Directory]::Delete($tmp, $true) }
     }
-    $r = [UIntPtr]::Zero
-    [void][AtmInstallNative]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$r)
 }
 
 function Open-AtmPathKey {
