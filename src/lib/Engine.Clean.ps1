@@ -363,6 +363,29 @@ $script:AtmCleanLockName = 'Global\AgentTempManager.Clean'
 # observation inside its own process; the CLI and the TUI never set it. It is read only past the release gate.
 $script:AtmCleanConsoleSource = $null
 
+function Invoke-AtmUnderSharedLock {
+    <#
+      0.3.x isolation (T-ISO-7): -Body runs under the same machine-wide lock as clean (B8), so a clean and an isolation
+      never run together, in any copy or version. Called only past a release gate. As Invoke-AtmClean: the verified native
+      library is loaded first, the lock is taken without waiting and released last. Returns Acquired, Status (the
+      refusal: BUSY, ABANDONED, DENIED, ...), Result (what -Body returned) and ReleaseError. Clean keeps its own wrapper.
+    #>
+    param([scriptblock]$Body)
+    Initialize-AtmNative
+    $lock = [AgentTempManager.AtmCleanLock]::TryAcquire($script:AtmCleanLockName)
+    if (-not $lock.Acquired) { return [pscustomobject]@{ Acquired = $false; Status = [string]$lock.Status; Result = $null; ReleaseError = $lock.ReleaseError } }
+    $out = $null; $rc = $null
+    try { $out = & $Body } finally { $rc = $lock.Release() }
+    return [pscustomobject]@{ Acquired = $true; Status = $null; Result = $out; ReleaseError = $rc }
+}
+
+function Get-AtmEngineConsoleObservation {
+    # The engine's own observation, in this call, of an interactive console (AUT-2), or the suite's replacement of it
+    # (AtmCleanConsoleSource); shared with the isolation engine. Observed, and By (ENGINE_CONSOLE_CHECK or TEST_SEAM).
+    if ($null -ne $script:AtmCleanConsoleSource) { return [pscustomobject]@{ Observed = [bool](& $script:AtmCleanConsoleSource); By = 'TEST_SEAM' } }
+    return [pscustomobject]@{ Observed = [bool](Test-AtmDiscardConsoleObserved); By = 'ENGINE_CONSOLE_CHECK' }
+}
+
 function Invoke-AtmClean {
     <#
       Entry point of clean (CLI and TUI). With the release gate closed (every distributed copy) it runs the plan-only flow

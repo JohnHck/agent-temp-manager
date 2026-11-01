@@ -77,7 +77,8 @@ SHA-256 published in that release's `SHA256SUMS.txt`, pinned in the script. The 
 
 1. install the published version and check `version` and `verify`;
 2. update to the package under test (`-Update`) and check `version` and `verify`, the older copy kept as `.previous`,
-   and the four installed gates `$false`;
+   and the five installed gates `$false` (deletion, worktree diagnostics, handle diagnostics, diagnose export and, since
+   0.3.x phase P2, isolation);
 3. roll back and check the published version again;
 4. update again;
 5. uninstall: the directories and the PATH entry are removed.
@@ -241,6 +242,37 @@ headless TUI defaults to Unicode on Windows PowerShell 5.1 too; the ASCII fallba
 environmental reasons that the product reports correctly (for example a TEMP folder that other local accounts can
 write: the sandbox then inherits that ACL and the gates block it, as they should). Those failures stay failures; the
 record of a local run and its causes is in [release/V0.2-LOCAL-TEST-ENVIRONMENT.md](release/V0.2-LOCAL-TEST-ENVIRONMENT.md).
+
+## Isolation in the suite (0.3.x phases P1 to P3a)
+
+The isolation gate stays `$false` in the suite's process; the cases past it open it only around each call and restore it.
+The quarantine is a folder of the sandbox (the `AtmIsolationQuarantineRoot` seam; the shipped value `$null` means
+`%LOCALAPPDATA%\AgentTempManager\Q`).
+
+* **P1 (native):**
+  * the mover, `CreateNewDirectory` and `OpenExisting` on sandbox trees: reparse points, open handles (measured), long
+    paths, Unicode, another volume (CI only), an existing destination, a diverging measurement;
+  * the `install e2e` step `iso-p1-rename-with-open-handles` on every image.
+* **P2 (plan only):**
+  * the gate in source, build, e2e and `version`;
+  * the 0.3.x target rule;
+  * with the gate closed: no lock (another process holds it), no question, no log, no quarantine, no move;
+  * the CLI in a child process.
+* **P3a (isolate past the gate, one session root):**
+  * the complete run: content intact in the entry, the log and manifest records, no file names in the manifest, the
+    plan id prefix;
+  * every refusal before the mover leaves no entry: wrong phrase, no log, a log inside the quarantine, no console, two
+    roots, the clean lock busy, the plan changed during the questions, the revalidation refused;
+  * the mover's outcomes through the `-MoveTreeImpl` seam and the real mover:
+    * the intent is in the log and the manifest when the mover is called;
+    * a refusal, an exception, a file open inside the tree (the real mover refuses) and a change in the window (moved,
+      not verified) each stop the run, with the outcome recorded;
+  * the B1 exception per root (its risk phrase, then the confirmation);
+  * the quarantine: created with protected DACLs, an acceptable existing one used unchanged, a junction refused;
+  * an interruption: a child process that ends itself inside the stand-in mover leaves `move-intent` without
+    `move-result` in both files (the entry is incomplete);
+  * 200,000 files (heavy: `NAO_TESTADO` with `-SkipHeavy`, as in CI);
+  * static checks: a single mover call, after the intent; the seams only in the engine.
 
 ## Future: isolation, quarantine and Recovery Mode (0.3.x and V0.4)
 

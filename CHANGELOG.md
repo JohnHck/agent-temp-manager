@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased (0.3.x, after 0.3.0)
+
+Work for 0.3.x, which comes after 0.3.0 is published (ADR-0013, ROADMAP "0.3.x"). It is not part of the 0.3.0 candidate.
+**A fifth release gate, `AtmIsolationEnabled`, is closed in every copy**: in every copy `isolate` only plans.
+
+* Isolation, phase P3a (past the isolation gate only; no distributed copy reaches it): one session root of the own
+  profile per run.
+  * The run takes the clean lock (the same name), needs an observed console and a new `-LogFile`
+    (`atm.isolatelog/1`), and asks for `ISOLAR 1 CAMINHOS <plan id>` (no discard declarations). For a root under the B1
+    exception it asks for that root's risk phrase first.
+  * The plan is checked again, then the root is revalidated immediately before the move.
+  * A new entry is created in `%LOCALAPPDATA%\AgentTempManager\Q` (created with protected DACLs, or checked and never
+    fixed), with an `atm.quarantine/1` manifest that has no file names, contents or command lines.
+  * The intent is written to the log and the manifest before the move. The move is a same-volume rename through the
+    pinned handle, measured before and after. The result is recorded in both.
+  * Anything but a moved and verified tree stops the run; nothing is undone.
+* Isolation, phase P2: `agent-temp isolate -Path <session root>` plans and stops (exit code `3`). Own profile and
+  session roots only; a scope or the whole base is refused with its own code. The same gates as clean apply, RECENT
+  included. `version` shows `isolation: DISABLED`. The build and the installation tests check the new gate.
+* Isolation, phase P1: native primitives in `Native.cs` (the mover, new directory, append to an existing record). Measured
+  on every CI image: an open handle inside a tree makes the rename fail, and nothing moves.
+
 ## 0.3.0 (release candidate, not published)
 
 Not published: no tag, no GitHub Release. **Real deletion stays disabled in every copy**: with the deletion gate closed,

@@ -54,6 +54,11 @@ $results = New-Object System.Collections.Generic.List[object]
 $cleanupActions = New-Object System.Collections.Generic.List[scriptblock]
 $sandbox = Get-AtmNormalizedPath (Join-Path ([IO.Path]::GetTempPath()) ('atm-tests-' + [guid]::NewGuid().ToString('N').Substring(0, 8)))
 [void][IO.Directory]::CreateDirectory($sandbox)
+# 0.3.x isolation: the quarantine root is a folder of the sandbox, only inside this process (dedicated tests check the
+# shipped $null, the user's %LOCALAPPDATA%\AgentTempManager\Q). The isolation gate itself stays closed here.
+$shippedQuarantineRoot = $script:AtmIsolationQuarantineRoot
+[void][IO.Directory]::CreateDirectory((Join-Path $sandbox 'quarantine-home'))
+$script:AtmIsolationQuarantineRoot = Join-Path $sandbox 'quarantine-home\AgentTempManager\Q'
 # The NTFS owner that new files actually get on this machine: the user SID for a standard account, the
 # Administrators group on an elevated Windows Server runner (CI). Test profiles and the test identity use it, so the
 # engine's owner gate (owner == profile SID) is exercised identically everywhere.
@@ -3437,7 +3442,7 @@ exit 0
             Assert-True (-not [IO.Directory]::Exists((Join-Path $other 'payload'))) 'nada no outro volume'
         } finally { $q.Dispose() }
     }
-    Test-Case 'Isolamento P1' 'Estatico: primitivas sem chamador de produto; o mover nunca copia, substitui, exclui, altera ACL/dono nem encerra processo; rename so pelo handle com ReplaceIfExists falso; NtSetInformationFile so no mover' {
+    Test-Case 'Isolamento P1' 'Estatico: primitivas chamadas so pelo motor de isolamento (P3a: uma unica chamada ao mover); o mover nunca copia, substitui, exclui, altera ACL/dono nem encerra processo; rename so pelo handle com ReplaceIfExists falso; NtSetInformationFile so no mover' {
         $ncs = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Native.cs'))
         $mv = $ncs.Substring($ncs.IndexOf('public static class AtmMover'))
         $mv = $mv.Substring(0, $mv.IndexOf('public sealed class AtmJobResult'))
@@ -3454,10 +3459,16 @@ exit 0
         $oe = $oe.Substring(0, $oe.IndexOf('internal static string CheckNewFolderSecurity'))
         Assert-True ($oe.Contains('FILE_APPEND_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE, ref oa') -and $oe.Contains('FILE_SHARE_READ, FILE_OPEN,') -and -not $oe.Contains('FILE_CREATE') -and -not $oe.Contains('FILE_WRITE_DATA')) 'abre so existente, so acrescimo, compartilhado so para leitura'
         # -Include is ignored with -LiteralPath on Windows PowerShell 5.1: filtered by extension.
-        foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1', '.cmd') })) {
+        # P3a: the isolation engine is the only product caller (one call to the mover; OpenExisting only to reopen the
+        # entry's manifest for the result).
+        foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1', '.cmd') -and $_.Name -ne 'Engine.Isolate.ps1' })) {
             $t = [IO.File]::ReadAllText($fi.FullName)
-            foreach ($api in @('AtmMover', 'CreateNewDirectory', 'OpenExisting')) { Assert-True (-not $t.Contains($api)) "$($fi.Name) nao chama $api (sem chamador de produto na P1)" }
+            foreach ($api in @('AtmMover', 'CreateNewDirectory', 'OpenExisting')) { Assert-True (-not $t.Contains($api)) "$($fi.Name) nao chama $api (so o motor de isolamento)" }
         }
+        $isoSrc = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Isolate.ps1'))
+        Assert-Eq ([regex]::Matches($isoSrc, '\[AgentTempManager\.AtmMover\]::MoveTree\(').Count) 1 'uma unica chamada de produto ao mover'
+        Assert-Eq ([regex]::Matches($isoSrc, 'OpenExisting\(').Count) 1 'OpenExisting so para reabrir o manifesto da entrada'
+        Assert-True ($isoSrc.Contains("`$man.OpenExisting('manifest.jsonl')") -and $isoSrc.IndexOf('$man.Close(); $man.Dispose(); $man = $null') -lt $isoSrc.IndexOf('[AgentTempManager.AtmMover]::MoveTree(') -and $isoSrc.IndexOf("`$man.OpenExisting('manifest.jsonl')") -gt $isoSrc.IndexOf('[AgentTempManager.AtmMover]::MoveTree(')) 'manifesto fechado antes do mover e reaberto depois (o pino da pasta impediria a renomeacao para dentro dela)'
     }
 
     # ------------------------------------------------------------------ 0.3.x isolation, phase P2: plan-only engine and gate (ISO-P2)
@@ -3497,9 +3508,31 @@ exit 0
         Assert-True (@($res.Verified).Count -eq 1 -and $res.Verified[0].Path -eq $r) "raiz aprovada ($(Get-IsoRejectedReason $res $r))"
         Assert-True ($rec.Calls.Count -eq 1 -and $rec.Calls[0].PlanId -match '^[0-9a-f]{64}$' -and $rec.Calls[0].PlanId -eq $res.PlanId) 'plano apresentado uma vez, com o plan id'
         Assert-Eq (Get-StableTreeListing $p.ProfilePath) $before 'perfil identico: nada criado, movido ou removido'
-        # The engine has no reader, lock, log, quarantine or mover in this phase.
+        # P3a: the flow past the gate exists, and none of it is reached with the gate closed. Behavioural: the lock is held
+        # by another process (a run that took it would refuse BUSY), the reader counts its calls, and neither the log nor
+        # the quarantine appears.
+        $qSaved = $script:AtmIsolationQuarantineRoot
+        $script:AtmIsolationQuarantineRoot = Join-Path $sandbox 'iso-p2-closed\AgentTempManager\Q'
+        [void][IO.Directory]::CreateDirectory((Join-Path $sandbox 'iso-p2-closed'))
+        $log = Join-Path $sandbox 'iso-p2-closed\run.jsonl'
+        $script:isoReaderCalls = 0
+        $h = Start-TestLockHolder -Name $script:AtmCleanLockName -Mode release
+        try {
+            Assert-Eq $h.Status 'ACQUIRED' 'lock ocupado por outro processo'
+            $res = Invoke-AtmIsolate -Entries @([pscustomobject]@{ Source = 't'; Path = $r; Fingerprint = $null }) -PlanPresenter (New-IsoPlanRecorder).Presenter -ConfirmationReader { param($x) $script:isoReaderCalls++; $x } -InventoryArgs (Get-InvArgs -Profiles @($p)) -LogFile $log -MoveTreeImpl { param($c, $e, $n) throw 'nunca' }
+        } finally { $null = Stop-TestLockHolderByGo $h; $script:AtmIsolationQuarantineRoot = $qSaved }
+        Assert-Eq $res.Aborted 'ISOLAMENTO_REAL_DESABILITADO' 'trava fechada: so o plano, sem tentar o lock'
+        Assert-True ($script:isoReaderCalls -eq 0 -and -not (Test-Path -LiteralPath $log) -and -not (Test-Path -LiteralPath (Join-Path $sandbox 'iso-p2-closed\AgentTempManager')) -and @($res.Results).Count -eq 0) 'nada perguntado; nenhum log; nenhuma quarentena; mover nunca chamado'
+        Assert-Eq (Get-StableTreeListing $p.ProfilePath) $before 'raiz intacta'
+        # Static: the gate is checked before the lock, and the plan-only return comes before every step that acts.
         $iso = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Isolate.ps1'))
-        foreach ($pat in @('ConfirmationReader', 'Read-Host', 'Test-AtmDiscardConsoleObserved', 'AtmCleanLock', 'TryAcquire', 'Open-AtmCleanLog', 'Write-AtmCleanLogRecord', 'AtmCleanLog', 'AtmSafeCreate', 'CreateNewDirectory', 'OpenExisting', 'AtmMover', 'AtmDeleter', 'DeleteTree', 'Remove-Item', 'Move-Item', 'New-Item', '::Move(', '::Delete(', 'CreateDirectory', 'Write-Host')) { Assert-True (-not $iso.Contains($pat)) "motor de isolamento nao contem '$pat'" }
+        $w = $iso.Substring($iso.IndexOf('function Invoke-AtmIsolate {'), $iso.IndexOf('function Invoke-AtmIsolateCore') - $iso.IndexOf('function Invoke-AtmIsolate {'))
+        Assert-True ($w.IndexOf('if (-not $script:AtmIsolationEnabled) { return (Invoke-AtmIsolateCore @PSBoundParameters) }') -gt 0 -and $w.IndexOf('if (-not $script:AtmIsolationEnabled)') -lt $w.IndexOf('Invoke-AtmUnderSharedLock') -and -not $w.Contains('Invoke-AtmInventory')) 'trava antes do lock; nenhum inventario antes do lock'
+        $core = $iso.Substring($iso.IndexOf('function Invoke-AtmIsolateCore'))
+        $iStop = $core.IndexOf("if (-not `$script:AtmIsolationEnabled) { `$state.Aborted = 'ISOLAMENTO_REAL_DESABILITADO'; return (& `$finish) }")
+        Assert-True ($iStop -gt 0) 'parada da trava no nucleo'
+        foreach ($act in @('& $ConfirmationReader', 'Open-AtmCleanLog', 'Open-AtmQuarantine -Path', '::CreateNewDirectory(', '[AgentTempManager.AtmMover]::MoveTree(', '& $MoveTreeImpl', 'Get-AtmEngineConsoleObservation')) { Assert-True ($core.IndexOf($act) -gt $iStop) "'$act' so depois da parada da trava" }
+        foreach ($pat in @('AtmDeleter', 'DeleteTree', 'Remove-Item', 'Move-Item', '::Delete(', 'Write-Host', 'Read-Host')) { Assert-True (-not $iso.Contains($pat)) "motor de isolamento nao contem '$pat'" }
     }
     Test-Case 'Isolamento P2' 'Regra de alvo da 0.3.x: escopo e base inteira recusados com codigo proprio (J-ISO-9 a); outro perfil, alvo que nao e raiz de sessao, caixa divergente, duplicado, sintaxe e caminho fora do inventario recusados; RECENT bloqueia (J-ISO-3 a); fingerprint divergente recusado' {
         $p = New-TestProfile 'isotarget'
@@ -3531,7 +3564,7 @@ exit 0
         $res = Invoke-AtmIsolate -Entries @([pscustomobject]@{ Source = 't'; Path = $upper; Fingerprint = $null }) -PlanPresenter (New-IsoPlanRecorder).Presenter -InventoryArgs (Get-InvArgs -Profiles @($p))
         Assert-True ((Get-IsoRejectedReason $res $upper) -match 'CAIXA_DIVERGENTE') "caixa divergente ($(Get-IsoRejectedReason $res $upper))"
     }
-    Test-Case 'Isolamento P2' 'Excecao B1 por raiz (J-ISO-2 b): com a trava fechada a raiz sob B1 e recusada mesmo com -AcceptB1ResidualRisk; alem da trava (so no processo da suite) entra no plano como risco declarado e a execucao para depois do plano, nada movido' {
+    Test-Case 'Isolamento P2' 'Excecao B1 por raiz (J-ISO-2 b): com a trava fechada a raiz sob B1 e recusada mesmo com -AcceptB1ResidualRisk; alem da trava (so no processo da suite) entra no plano como risco declarado; sem leitor de confirmacao a execucao para depois do plano, nada movido' {
         $ctx = New-TestB1Context 'isob1'
         $r = $ctx.F.Roots[0]
         $before = Get-StableTreeListing $r
@@ -3541,7 +3574,7 @@ exit 0
         $script:AtmIsolationEnabled = $true
         try { $res = Invoke-AtmIsolate -Entries @([pscustomobject]@{ Source = 't'; Path = $r; Fingerprint = $null }) -PlanPresenter $rec.Presenter -InventoryArgs $ctx.IA -AcceptB1ResidualRisk }
         finally { $script:AtmIsolationEnabled = $false }
-        Assert-True ($res.Aborted -eq 'ISOLAMENTO_ALEM_DA_TRAVA_NAO_IMPLEMENTADO' -and @($res.Verified).Count -eq 1) "alem da trava: plano com a raiz sob B1, depois parado ($($res.Aborted); $(Get-IsoRejectedReason $res $r))"
+        Assert-True ($res.Aborted -eq 'SEM_APRESENTACAO_OU_CONFIRMACAO' -and @($res.Verified).Count -eq 1 -and @($res.Results).Count -eq 0) "alem da trava: plano com a raiz sob B1, depois parado ($($res.Aborted); $(Get-IsoRejectedReason $res $r))"
         Assert-True ($rec.Calls.Count -eq 1 -and $rec.Calls[0].PlanId -match '^[0-9a-f]{64}$') 'plano apresentado com plan id'
         Assert-Eq (Get-StableTreeListing $r) $before 'raiz intacta'
         Assert-Eq $script:AtmIsolationEnabled $false 'trava restaurada'
@@ -3559,7 +3592,7 @@ exit 0
         Assert-True ($r.Exit -eq 3 -and $r.Text.Contains('NENHUM_CAMINHO_ISOLAVEL') -and $r.Text.Contains('Nothing was moved, created or removed.')) "fora do inventario: exit $($r.Exit)"
         Assert-True (-not (Test-Path -LiteralPath $target) -and -not (Test-Path -LiteralPath $log)) 'nada criado: nem o caminho pedido nem o log'
     }
-    Test-Case 'Isolamento P2' 'Camadas: relatorio e TUI nunca chamam o mover nem o deleter; nenhum arquivo do produto chama o mover nesta fase; so o lancador chama o motor de isolamento; o motor nao imprime nem pergunta' {
+    Test-Case 'Isolamento P2' 'Camadas: relatorio e TUI nunca chamam o mover nem o deleter; so o motor de isolamento referencia o mover (P3a); so o lancador chama o motor de isolamento' {
         foreach ($f in @('Report.ps1', 'Tui.ps1')) {
             $txt = [IO.File]::ReadAllText((Join-Path $srcDir "lib\$f"))
             foreach ($pat in @('AtmMover', 'MoveTree', 'AtmDeleter', 'DeleteTree')) { Assert-True (-not $txt.Contains($pat)) "$f contem '$pat'" }
@@ -3567,11 +3600,232 @@ exit 0
         $calls = @()
         foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1', '.cmd') })) {
             $t = [IO.File]::ReadAllText($fi.FullName)
-            Assert-True (-not $t.Contains('AtmMover')) "$($fi.Name) nao chama o mover (fase P2)"
+            if ($fi.Name -ne 'Engine.Isolate.ps1') { Assert-True (-not $t.Contains('AtmMover')) "$($fi.Name) nao chama o mover (so o motor de isolamento)" }
             if ($fi.Name -ne 'Engine.Isolate.ps1' -and $t.Contains('Invoke-AtmIsolate')) { $calls += $fi.Name }
         }
         Assert-Eq ($calls -join ',') 'agent-temp.ps1' 'so o lancador chama o motor de isolamento'
         Assert-Eq ([regex]::Matches([IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1')), 'Invoke-AtmIsolate ').Count) 1 'uma unica chamada no lancador'
+    }
+
+    # ------------------------------------------------------------------ 0.3.x isolation, phase P3a: isolate past the gate (ISO-P3a)
+    # The isolation gate is opened only around each call (Invoke-IsoOpen) and restored; the quarantine is the sandbox folder
+    # set at the top; the log folder follows the T1 folder policy (NAO_TESTADO where the sandbox cannot get it).
+    function New-IsoRun {
+        param([string]$Name, $Context = $null)
+        $dir = New-TestCleanLogDir ('iso-' + $Name)
+        if (-not $dir) { return $null }
+        if ($null -ne $Context) { return [pscustomobject]@{ Profile = $Context.F.Profile; Root = $Context.F.Roots[0]; Log = (Join-Path $dir 'isolate.jsonl'); IA = $Context.IA } }
+        $p = New-TestProfile $Name
+        $r = New-TestRoot -ProfileInfo $p
+        return [pscustomobject]@{ Profile = $p; Root = $r; Log = (Join-Path $dir 'isolate.jsonl'); IA = (Get-InvArgs -Profiles @($p)) }
+    }
+    function Invoke-IsoOpen {
+        param([hashtable]$Arguments)
+        $script:AtmIsolationEnabled = $true
+        try { return (Invoke-AtmIsolate @Arguments) } finally { $script:AtmIsolationEnabled = $false }
+    }
+    function Get-IsoLiveLastType {
+        # The type of the last record of a log or manifest still held open by its writer (read with write sharing).
+        param([string]$Path)
+        $fs = [IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
+        try { $txt = (New-Object IO.StreamReader($fs, (New-Object Text.UTF8Encoding($false)))).ReadToEnd() } finally { $fs.Dispose() }
+        $lines = @($txt.Split([char]10) | Where-Object { $_ -ne '' })
+        return ($lines[$lines.Count - 1] | ConvertFrom-Json).type
+    }
+    function Get-IsoRelativeListing { param([string]$Path) return (@((Get-StableTreeListing $Path) -split "`n" | ForEach-Object { $_.Substring($Path.Length) }) -join "`n") }
+    function Get-IsoEntryCount { $q = $script:AtmIsolationQuarantineRoot; if ([IO.Directory]::Exists($q)) { return @(Get-ChildItem -LiteralPath $q -Directory -Force).Count } else { return 0 } }
+    function Get-IsoArgs {
+        param($Run, $Operator, [hashtable]$Extra = @{})
+        $a = @{ Entries = @([pscustomobject]@{ Source = 't'; Path = $Run.Root; Fingerprint = $null }); PlanPresenter = (New-IsoPlanRecorder).Presenter; ConfirmationReader = $Operator.Reader; InventoryArgs = $Run.IA; LogFile = $Run.Log }
+        foreach ($k in $Extra.Keys) { $a[$k] = $Extra[$k] }
+        return $a
+    }
+
+    Test-Case 'Isolamento P3a' 'Isolar alem da trava: uma raiz de sessao do proprio perfil vai inteira para uma entrada nova da quarentena; confirmacao ISOLAR 1 CAMINHOS <planid8> sem declaracoes; log atm.isolatelog/1 e manifesto atm.quarantine/1 completos e sem nomes de arquivo; plan id com prefixo proprio' {
+        $x = New-IsoRun 'isofull'
+        if (-not $x) { return }
+        $before = Get-IsoRelativeListing $x.Root
+        $op = New-TestCleanOperator
+        $res = Invoke-IsoOpen (Get-IsoArgs $x $op)
+        Assert-True (-not $res.Aborted -and -not $res.StoppedBy -and @($res.Results).Count -eq 1 -and $res.Results[0].Outcome -ceq 'COMPLETE' -and $res.Results[0].Moved -and $res.Results[0].Verified) "isolado ($($res.Aborted)$($res.StoppedBy) $(@($res.Results | ForEach-Object { $_.AbortReason }) -join ';'))"
+        Assert-True ($res.Phrase -cmatch '^ISOLAR 1 CAMINHOS [0-9A-F]{8}$' -and ($op.Calls -join ',') -ceq 'confirm|') "so a confirmacao do plano, sem declaracoes AUT-2 ($($op.Calls -join ','))"
+        Assert-True (-not [IO.Directory]::Exists($x.Root)) 'a raiz saiu do ambiente ativo'
+        Assert-True ($res.EntryId -cmatch '^\d{8}T\d{6}Z-[0-9a-f]{8}$' -and $res.EntryPath -eq (Join-Path $script:AtmIsolationQuarantineRoot $res.EntryId)) "entrada nova na quarentena ($($res.EntryId))"
+        Assert-Eq (Get-IsoRelativeListing (Join-Path $res.EntryPath 'payload')) $before 'conteudo intacto: nomes, tamanhos, horarios e atributos'
+        Assert-True ((Get-Acl -LiteralPath $res.EntryPath).Sddl.Contains('D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)') -and (Get-Acl -LiteralPath $script:AtmIsolationQuarantineRoot).Sddl.Contains('D:P(')) 'entrada e quarentena com DACL protegida'
+        $lg = Read-TestCleanLogFile $x.Log
+        Assert-Eq (@($lg.Records | ForEach-Object { $_.type }) -join ',') 'run-start,plan,confirmation,plan-check,move-intent,move-result,run-end' 'registros do log'
+        Assert-True (@($lg.Records | Where-Object { $_.schema -cne 'atm.isolatelog/1' }).Count -eq 0 -and -not $lg.Bom -and $lg.EndsLf) 'esquema do log'
+        $mf = Read-TestCleanLogFile (Join-Path $res.EntryPath 'manifest.jsonl')
+        Assert-Eq (@($mf.Records | ForEach-Object { $_.type }) -join ',') 'entry,move-intent,move-result' 'registros do manifesto'
+        $e0 = $mf.Records[0]; $r2 = $mf.Records[2]
+        Assert-True ($e0.schema -ceq 'atm.quarantine/1' -and $e0.id -ceq $res.EntryId -and $e0.originalPath -eq $x.Root -and $e0.targetKind -ceq 'SessionRoot' -and $e0.planId -ceq $res.PlanId -and $e0.actor.sid -ceq $testIdentity.Sid) 'registro entry'
+        Assert-True ($r2.outcome -ceq 'COMPLETE' -and $r2.verified -and $r2.digestAfter -ceq $r2.digestPlanned -and $r2.filesAfter -eq $mf.Records[1].files) 'registro move-result: verificado, mesmo resumo'
+        $mText = [IO.File]::ReadAllText((Join-Path $res.EntryPath 'manifest.jsonl'))
+        foreach ($leaf in @('a.txt', 'b.bin')) { Assert-True (-not $mText.Contains($leaf)) "manifesto sem nome de arquivo ($leaf)" }
+        Assert-True ($res.PlanId -ceq (Get-AtmIsolatePlanId -RunId $res.RunId -Parts $res.Verified) -and $res.PlanId -cne (Get-AtmCleanPlanId -RunId $res.RunId -Parts $res.Verified)) 'plan id do isolamento nunca igual ao do clean'
+    }
+    Test-Case 'Isolamento P3a' 'Recusas antes do mover (nada movido, nenhuma entrada): frase errada, sem log, log dentro da quarentena, sem console, duas raizes, lock ocupado, plano alterado durante as perguntas, revalidacao recusada' {
+        $x = New-IsoRun 'isorefuse'
+        if (-not $x) { return }
+        $before = Get-IsoRelativeListing $x.Root
+        $n0 = Get-IsoEntryCount
+        $check = { param($Res, [string]$Code, [string]$Label) Assert-True ($Res.Aborted -ceq $Code -and @($Res.Results).Count -eq 0) "${Label}: $($Res.Aborted) (esperado $Code)"; Assert-Eq (Get-IsoRelativeListing $x.Root) $before "${Label}: raiz intacta"; Assert-Eq (Get-IsoEntryCount) $n0 "${Label}: nenhuma entrada" }
+        & $check (Invoke-IsoOpen (Get-IsoArgs $x (New-TestCleanOperator -Answers @{ confirm = 'ISOLAR ERRADO' }))) 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE' 'frase errada'
+        $a = Get-IsoArgs $x (New-TestCleanOperator); $a.Remove('LogFile')
+        & $check (Invoke-IsoOpen $a) 'LOG_REQUIRED' 'sem log'
+        & $check (Invoke-IsoOpen (Get-IsoArgs $x (New-TestCleanOperator) @{ LogFile = (Join-Path $script:AtmIsolationQuarantineRoot 'x.jsonl') })) 'LOG_DESTINATION_NOT_ALLOWED' 'log dentro da quarentena'
+        $script:AtmCleanConsoleSource = { $false }
+        try { $res = Invoke-IsoOpen (Get-IsoArgs $x (New-TestCleanOperator) @{ LogFile = ($x.Log + '.c') }) } finally { $script:AtmCleanConsoleSource = { $true } }
+        & $check $res 'CONSOLE_NOT_OBSERVED' 'sem console'
+        $r2 = New-TestRoot -ProfileInfo $x.Profile
+        $a = Get-IsoArgs $x (New-TestCleanOperator) @{ LogFile = ($x.Log + '.d') }; $a.Entries = @($a.Entries + @([pscustomobject]@{ Source = 't'; Path = $r2; Fingerprint = $null }))
+        & $check (Invoke-IsoOpen $a) 'ISOLAMENTO_UMA_RAIZ_POR_EXECUCAO' 'duas raizes'
+        $h = Start-TestLockHolder -Name $script:AtmCleanLockName -Mode release
+        try { $op = New-TestCleanOperator; $res = Invoke-IsoOpen (Get-IsoArgs $x $op @{ LogFile = ($x.Log + '.e') }) } finally { $null = Stop-TestLockHolderByGo $h }
+        & $check $res 'CLEAN_LOCK_BUSY' 'lock ocupado (o mesmo do clean)'
+        Assert-True ($op.Calls.Count -eq 0 -and -not (Test-Path -LiteralPath ($x.Log + '.e'))) 'lock ocupado: nada perguntado, nenhum log'
+        $plus = Join-Path $x.Root 'durante.txt'
+        $op = New-TestCleanOperator -Answers @{ confirm = { param($ph) [IO.File]::WriteAllText($plus, 'novo'); $null } }
+        $res = Invoke-IsoOpen (Get-IsoArgs $x $op @{ LogFile = ($x.Log + '.f') })
+        Assert-True ($res.Aborted -ceq 'PLAN_CHANGED_BEFORE_EXECUTION' -and @($res.Results).Count -eq 0 -and (Get-IsoEntryCount) -eq $n0) "plano alterado durante as perguntas ($($res.Aborted))"
+        [IO.File]::Delete($plus)
+        $hook = { param($part) [IO.File]::WriteAllText((Join-Path $part.Path 'antes-do-mover.txt'), 'novo') }
+        $res = Invoke-IsoOpen (Get-IsoArgs $x (New-TestCleanOperator) @{ LogFile = ($x.Log + '.g'); BeforeMoveHook = $hook })
+        Assert-True ($res.Aborted -ceq 'REVALIDATION_REFUSED' -and @($res.Results).Count -eq 0 -and (Get-IsoEntryCount) -eq $n0) "revalidacao recusada ($($res.Aborted))"
+        Assert-True (@((Read-TestCleanLogFile ($x.Log + '.g')).Records | ForEach-Object { $_.type }) -contains 'skip') 'skip registrado'
+        Assert-True ([IO.Directory]::Exists($x.Root)) 'raiz ainda no lugar'
+    }
+    Test-Case 'Isolamento P3a' 'Desfechos do mover (costura -MoveTreeImpl e mover real): intencao gravada no log e no manifesto ANTES da chamada; recusa, excecao, arquivo em uso (mover real recusa) e mudanca na janela (movido e nao verificado) param a execucao com o manifesto registrando o desfecho' {
+        $cases = @(
+            @{ Name = 'refused'; Want = 'REFUSED'; Impl = { param($c, $e, $n) $script:isoSeen = @((Get-IsoLiveLastType $script:isoLog), (Get-IsoLiveLastType (Join-Path $e.ParentPath 'manifest.jsonl'))); [pscustomobject]@{ Moved = $false; Verified = $false; RenameStatus = $null; AbortReason = 'SYNTHETIC_REFUSED'; FilesAfter = -1; DirsAfter = -1; BytesAfter = -1; DigestPlanned = $null; DigestAfter = $null } } },
+            @{ Name = 'exception'; Want = 'EXCEPTION'; Impl = { param($c, $e, $n) throw (New-Object IO.IOException 'synthetic') } },
+            @{ Name = 'inuse'; Want = 'REFUSED'; Impl = { param($c, $e, $n) $fs = [IO.File]::Open((Join-Path $c.Path 'a.txt'), 'Open', 'ReadWrite', 'None'); try { [AgentTempManager.AtmMover]::MoveTree($c.Path, $c.Files, $c.Dirs, $c.Bytes, $c.NewestWriteTimeUtc.Ticks, $e, $n, $null) } finally { $fs.Dispose() } } },
+            @{ Name = 'window'; Want = 'INTEGRITY_FAILED'; Impl = { param($c, $e, $n) [AgentTempManager.AtmMover]::MoveTree($c.Path, $c.Files, $c.Dirs, $c.Bytes, $c.NewestWriteTimeUtc.Ticks, $e, $n, [Action[string]]{ param($p) [IO.File]::WriteAllText((Join-Path $p 'na-janela.txt'), 'x') }) } }
+        )
+        foreach ($k in $cases) {
+            $x = New-IsoRun ('isoout-' + $k.Name)
+            if (-not $x) { return }
+            $script:isoLog = $x.Log; $script:isoSeen = $null
+            $res = Invoke-IsoOpen (Get-IsoArgs $x (New-TestCleanOperator) @{ MoveTreeImpl = $k.Impl })
+            Assert-True (@($res.Results).Count -eq 1 -and $res.Results[0].Outcome -ceq $k.Want -and $res.StoppedBy -ceq ('STOPPED_AFTER_' + $k.Want) -and -not $res.Aborted) "$($k.Name): $($res.StoppedBy) $($res.Aborted) $(@($res.Results | ForEach-Object { $_.AbortReason }) -join ';')"
+            $mf = Read-TestCleanLogFile (Join-Path $res.EntryPath 'manifest.jsonl')
+            Assert-True ((@($mf.Records | ForEach-Object { $_.type }) -join ',') -ceq 'entry,move-intent,move-result' -and $mf.Records[2].outcome -ceq $k.Want) "$($k.Name): manifesto registra o desfecho"
+            Assert-True ((@((Read-TestCleanLogFile $x.Log).Records | ForEach-Object { $_.type }) -join ',') -ceq 'run-start,plan,confirmation,plan-check,move-intent,move-result,run-end') "$($k.Name): log completo"
+            if ($k.Want -ceq 'INTEGRITY_FAILED') { Assert-True ($res.Results[0].Moved -and -not $res.Results[0].Verified -and -not [IO.Directory]::Exists($x.Root)) 'janela: movido, nao verificado' }
+            else { Assert-True ([IO.Directory]::Exists($x.Root) -and [IO.File]::Exists((Join-Path $x.Root 'a.txt'))) "$($k.Name): raiz intacta no lugar" }
+            if ($k.Name -ceq 'refused') { Assert-Eq ($script:isoSeen -join ',') 'move-intent,move-intent' 'na chamada ao mover: intencao ja no log e no manifesto' }
+            if ($k.Name -ceq 'inuse') { Assert-True ($res.Results[0].AbortReason -ceq 'MOVE_ACCESS_DENIED') "mover real recusa com arquivo aberto ($($res.Results[0].AbortReason))" }
+        }
+    }
+    Test-Case 'Isolamento P3a' 'Excecao B1 por raiz alem da trava (J-ISO-2 b): com -AcceptB1ResidualRisk a frase de risco da raiz e a confirmacao sao pedidas e a raiz e isolada; o log registra o risco aceito; sem a chave, nada' {
+        $ctx = New-TestB1Context 'isob1full'
+        $x = New-IsoRun 'isob1full' $ctx
+        if (-not $x) { return }
+        $op = New-TestCleanOperator
+        $res = Invoke-IsoOpen (Get-IsoArgs $x $op @{ AcceptB1ResidualRisk = $true })
+        Assert-True (-not $res.Aborted -and -not $res.StoppedBy -and $res.Results[0].Outcome -ceq 'COMPLETE') "isolado sob B1 ($($res.Aborted)$($res.StoppedBy))"
+        Assert-Eq ($op.Calls -join ',') ("risk|$($x.Root),confirm|") 'risco da raiz, depois a confirmacao'
+        $lg = Read-TestCleanLogFile $x.Log
+        Assert-True (@($lg.Records | Where-Object { $_.type -ceq 'plan' })[0].category -ceq 'ELIGIBLE_WITH_DECLARED_RISK' -and @($lg.Records | Where-Object { $_.type -ceq 'confirmation' })[0].b1ResidualRiskAccepted) 'risco declarado no log'
+        $ctx2 = New-TestB1Context 'isob1nokey'
+        $x2 = New-IsoRun 'isob1nokey' $ctx2
+        $res = Invoke-IsoOpen (Get-IsoArgs $x2 (New-TestCleanOperator))
+        Assert-True ($res.Aborted -ceq 'NENHUM_CAMINHO_ISOLAVEL' -and [IO.Directory]::Exists($x2.Root)) "sem -AcceptB1ResidualRisk: recusado ($($res.Aborted))"
+    }
+    Test-Case 'Isolamento P3a' 'Quarentena: criada nova com DACL protegida quando ausente; existente e aceitavel usada sem nenhuma alteracao; juncao no lugar da quarentena recusada sem mover nada' {
+        $x = New-IsoRun 'isoquar'
+        if (-not $x) { return }
+        $saved = $script:AtmIsolationQuarantineRoot
+        try {
+            # Existing, acceptable (made by this process, no other writer): used as it is, its ACL unchanged.
+            $q = Join-Path $sandbox 'iso-quar-existente\Q'; [void][IO.Directory]::CreateDirectory($q)
+            $sd = (Get-Acl -LiteralPath $q).Sddl
+            $script:AtmIsolationQuarantineRoot = $q
+            $res = Invoke-IsoOpen (Get-IsoArgs $x (New-TestCleanOperator))
+            if ($res.Aborted -like 'QUARANTINE_*' -and -not $script:sandboxAclAdjusted) { $script:caseSkipped = $true; $script:caseNote = "quarentena existente recusada pela politica de pasta neste sandbox ($($res.Aborted))"; return }
+            Assert-True ($res.Results[0].Outcome -ceq 'COMPLETE' -and $res.EntryPath.StartsWith($q + '\')) "existente usada ($($res.Aborted))"
+            Assert-Eq (Get-Acl -LiteralPath $q).Sddl $sd 'ACL da quarentena existente inalterada'
+            # A junction where the quarantine should be: refused, nothing moved, nothing in its target.
+            $y = New-IsoRun 'isoquarj'
+            $tgt = Join-Path $sandbox 'iso-quar-alvo'; [void][IO.Directory]::CreateDirectory($tgt)
+            $jq = Join-Path $sandbox 'iso-quar-juncao\Q'; New-Junction $jq $tgt
+            $script:AtmIsolationQuarantineRoot = $jq
+            $res = Invoke-IsoOpen (Get-IsoArgs $y (New-TestCleanOperator))
+            Assert-True ([string]$res.Aborted -like 'QUARANTINE_*' -and @($res.Results).Count -eq 0 -and [IO.Directory]::Exists($y.Root)) "juncao recusada ($($res.Aborted))"
+            Assert-Eq @(Get-ChildItem -LiteralPath $tgt -Force).Count 0 'nada criado no alvo da juncao'
+        } finally { $script:AtmIsolationQuarantineRoot = $saved }
+    }
+    Test-Case 'Isolamento P3a' 'Interrupcao entre a intencao e o resultado: processo filho que sai sozinho dentro do mover simulado deixa move-intent sem move-result no log e no manifesto (entrada INCOMPLETE); raiz intacta' {
+        $dir = New-TestCleanLogDir 'iso-interrupt'
+        if (-not $dir) { return }
+        $f = New-TestT1Fixture 'isointr' 1
+        $path = Join-Path $dir 'intr.jsonl'
+        $q = Join-Path $sandbox 'iso-interrupt-home\AgentTempManager\Q'; [void][IO.Directory]::CreateDirectory((Join-Path $sandbox 'iso-interrupt-home'))
+        $child = Join-Path $sandbox 'iso-interrupt-child.ps1'
+        [IO.File]::WriteAllText($child, @'
+param([string]$Src, [string]$ProfileRoot, [string]$Temp, [string]$Sid, [string]$Name, [string]$IsAdmin, [string]$Root, [string]$LogFile, [string]$NowTicks, [string]$LockName, [string]$Quarantine)
+# A fresh process: the product files as shipped, the isolation gate opened in THIS process only (as the suite does), and a
+# stand-in mover that moves nothing and ends the process itself (Environment.Exit) after the intent was written.
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 2.0
+. (Join-Path $Src 'lib\Engine.Audit.ps1')
+Initialize-AtmNative -LibDir (Join-Path $Src 'lib')
+foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $Src 'providers') -Filter '*.ps1' -File | Sort-Object Name)) { . $f.FullName }
+. (Join-Path $Src 'lib\Engine.Clean.ps1')
+. (Join-Path $Src 'lib\Engine.Isolate.ps1')
+. (Join-Path $Src 'lib\Engine.Diagnose.ps1')
+$script:AtmIsolationEnabled = $true
+$script:AtmIsolationQuarantineRoot = $Quarantine
+$script:AtmCleanLockName = $LockName
+$script:AtmRuntimeEvidenceSources = @{ ServiceSource = { param($Names) @() }; VirtualizationSource = { param($Op) @() } }
+$script:AtmCleanConsoleSource = { $true }
+$prof = [pscustomobject]@{ Sid = $Sid; UserName = 'TEST\isointr'; ProfilePath = $ProfileRoot; Loaded = $true; Special = $false; Origin = 'Test'; EnvStatus = 'OK'
+    TempCandidates = @([pscustomobject]@{ TempPath = $Temp; Source = 'test' }); EnvValues = @{}; EnvKnown = $true; Notes = @() }
+$ia = @{ ProfilesOverride = @($prof); ProcessesOverride = @([pscustomobject]@{ ProcessId = 1; Name = 'idle.exe'; ParentProcessId = 0; CommandLine = 'idle.exe'; CreationDate = (Get-Date).AddHours(-1) })
+    IdentityOverride = [pscustomobject]@{ Sid = $Sid; Name = $Name; IsAdmin = ($IsAdmin -ceq 'True') }; NowUtc = (New-Object DateTime ([long]$NowTicks), ([DateTimeKind]::Utc)); NoProgress = $true; ConfigDir = (Join-Path $Src 'config') }
+$c = Invoke-AtmIsolate -Entries @([pscustomobject]@{ Source = 't'; Path = $Root; Fingerprint = $null }) -PlanPresenter { param($v, $r, $i, $p) } -ConfirmationReader { param($x) $x } -InventoryArgs $ia -LogFile $LogFile -MoveTreeImpl { param($c, $e, $n) [Environment]::Exit(7) }
+[Console]::Out.WriteLine('NOT_EXITED ' + $c.Aborted + ' ' + $c.StoppedBy)
+exit 0
+'@, (New-Object Text.UTF8Encoding $true))
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $tp = $f.Profile.TempCandidates[0].TempPath
+        $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -ProfileRoot `"$($f.Profile.ProfilePath)`" -Temp `"$tp`" -Sid `"$($testIdentity.Sid)`" -Name `"$($testIdentity.Name)`" -IsAdmin `"$($testIdentity.IsAdmin)`" -Root `"$($f.Roots[0])`" -LogFile `"$path`" -NowTicks `"$($nowFuture.Ticks)`" -LockName `"$(New-TestLockName)`" -Quarantine `"$q`"") -TimeoutSec 300
+        Assert-True ($r.Exit -eq 7 -and -not $r.TimedOut) "o filho saiu sozinho dentro do mover simulado (saida $($r.Exit) $($r.Text))"
+        Assert-Eq (@((Read-TestCleanLogFile $path).Records | ForEach-Object { $_.type }) -join ',') 'run-start,plan,confirmation,plan-check,move-intent' 'o log termina na intencao'
+        $entries = @(Get-ChildItem -LiteralPath $q -Directory)
+        Assert-Eq $entries.Count 1 'uma entrada criada'
+        Assert-Eq (@((Read-TestCleanLogFile (Join-Path $entries[0].FullName 'manifest.jsonl')).Records | ForEach-Object { $_.type }) -join ',') 'entry,move-intent' 'manifesto termina na intencao: entrada INCOMPLETE'
+        Assert-True ([IO.File]::Exists((Join-Path $f.Roots[0] 'a.txt')) -and -not [IO.Directory]::Exists((Join-Path $entries[0].FullName 'payload'))) 'raiz intacta, nada na entrada'
+    }
+    Test-Case 'Isolamento P3a' 'Escala: 200.000 arquivos isolados e verificados (pesado; NAO_TESTADO com -SkipHeavy)' {
+        if ($SkipHeavy) { $script:caseSkipped = $true; $script:caseNote = 'pesado: rodado sem -SkipHeavy (a CI usa -SkipHeavy)'; return }
+        $x = New-IsoRun 'isoscale'
+        if (-not $x) { return }
+        $big = Join-Path $x.Root 'big'
+        for ($d = 0; $d -lt 200; $d++) { $sub = Join-Path $big ('d{0:000}' -f $d); [void][IO.Directory]::CreateDirectory($sub); for ($i = 0; $i -lt ($HeavyFiles / 200); $i++) { [IO.File]::WriteAllBytes((Join-Path $sub ('f{0:0000}.bin' -f $i)), [byte[]]@(1)) } }
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $res = Invoke-IsoOpen (Get-IsoArgs $x (New-TestCleanOperator))
+        Assert-True ($res.Results[0].Outcome -ceq 'COMPLETE') "isolado ($($res.Aborted)$($res.StoppedBy))"
+        $script:caseNote = "$HeavyFiles arquivos em $([int]$sw.Elapsed.TotalSeconds) s"
+    }
+    Test-Case 'Isolamento P3a' 'Estatico: uma unica chamada ao mover, so alem da trava e depois da intencao no log e no manifesto; costuras -MoveTreeImpl e quarentena so no motor (atribuicao unica $null), nunca na CLI; lock e console pelos helpers compartilhados do clean' {
+        $iso = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Isolate.ps1'))
+        Assert-Eq $shippedQuarantineRoot $null 'quarentena distribuida: %LOCALAPPDATA%\AgentTempManager\Q (costura $null)'
+        Assert-Eq ([regex]::Matches($iso, '\$script:AtmIsolationQuarantineRoot\s*=').Count) 1 'uma unica atribuicao da costura'
+        Assert-True ($iso.Contains("Join-Path `$la 'AgentTempManager\Q'")) 'quarentena padrao em %LOCALAPPDATA%\AgentTempManager\Q'
+        foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Name -ne 'Engine.Isolate.ps1' })) {
+            $t = [IO.File]::ReadAllText($fi.FullName)
+            foreach ($seam in @('MoveTreeImpl', 'AtmIsolationQuarantineRoot', 'BeforeMoveHook')) { Assert-True (-not $t.Contains($seam)) "$($fi.Name) usa a costura $seam" }
+        }
+        $iIntent = $iso.IndexOf("-Type 'move-intent'"); $iMove = $iso.IndexOf('[AgentTempManager.AtmMover]::MoveTree('); $iGate = $iso.IndexOf("'ISOLAMENTO_REAL_DESABILITADO'"); $iLog = $iso.IndexOf("'LOG_REQUIRED'")
+        Assert-True ($iGate -gt 0 -and $iLog -gt $iGate -and $iIntent -gt $iLog -and $iMove -gt $iIntent -and $iso.IndexOf("-Type 'move-intent'", $iIntent + 1) -lt $iMove) "ordem: trava $iGate < LOG_REQUIRED $iLog < intencao (log e manifesto) $iIntent < mover $iMove"
+        Assert-True ($iso.Contains('Invoke-AtmUnderSharedLock -Body') -and $iso.Contains('Get-AtmEngineConsoleObservation') -and $iso.Contains("'atm-isolate-plan/1;'") -and -not $iso.Contains('atm-clean-plan')) 'lock e console compartilhados; prefixo proprio do plan id'
+        $clean = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Clean.ps1'))
+        $hl = $clean.Substring($clean.IndexOf('function Invoke-AtmUnderSharedLock'), $clean.IndexOf('function Invoke-AtmClean {') - $clean.IndexOf('function Invoke-AtmUnderSharedLock'))
+        Assert-True ($hl.Contains('[AgentTempManager.AtmCleanLock]::TryAcquire($script:AtmCleanLockName)') -and $hl.Contains('try { $out = & $Body } finally { $rc = $lock.Release() }') -and $hl.IndexOf('Initialize-AtmNative') -lt $hl.IndexOf('TryAcquire')) 'lock compartilhado: mesmo nome, liberado no finally, biblioteca carregada antes'
+        $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        Assert-True ($cli.Contains("if (`$script:AtmIsolationEnabled -and -not (Test-AtmTuiInteractive)) { Write-Host (Get-AtmText 'cli.isolateNeedsConsole')") -and $cli.Contains('-ConfirmationReader $isoReader')) 'CLI: console exigido alem da trava; leitor do console'
     }
 
     # ------------------------------------------------------------------ TUI (headless) and layering
@@ -11730,7 +11984,10 @@ try {
         # Changelog: 0.3.0 as a release candidate, not published (the Unreleased entries consolidated into it); 0.2.0 and
         # 0.1.0 kept as published.
         $cl = [IO.File]::ReadAllText((Join-Path $repoRoot 'CHANGELOG.md'))
-        Assert-True ($cl -match '(?m)^## 0\.3\.0 \(release candidate, not published\)\r?$' -and $cl -notmatch '(?m)^## Unreleased' -and $cl -match '(?m)^## 0\.2\.0\r?$' -and $cl -match '(?m)^## 0\.1\.0\r?$') 'changelog: 0.3.0 candidato nao publicado, sem Unreleased, 0.2.0 e 0.1.0 preservadas'
+        # 0.3.x (ISO-P3a): work after the candidate may sit in one "Unreleased (0.3.x ...)" section above 0.3.0; no other.
+        $unrel = @([regex]::Matches($cl, '(?m)^## Unreleased.*$'))
+        $unrelOk = ($unrel.Count -eq 0) -or ($unrel.Count -eq 1 -and $unrel[0].Value -match '^## Unreleased \(0\.3\.x[^)]*\)\r?$' -and $unrel[0].Index -lt $cl.IndexOf('## 0.3.0'))
+        Assert-True ($cl -match '(?m)^## 0\.3\.0 \(release candidate, not published\)\r?$' -and $unrelOk -and $cl -match '(?m)^## 0\.2\.0\r?$' -and $cl -match '(?m)^## 0\.1\.0\r?$') 'changelog: 0.3.0 candidato nao publicado, Unreleased so a da 0.3.x acima dela, 0.2.0 e 0.1.0 preservadas'
         Assert-True ($cl.IndexOf('## 0.3.0') -lt $cl.IndexOf('## 0.2.0') -and $cl.IndexOf('## 0.2.0') -lt $cl.IndexOf('## 0.1.0') -and $cl -match 'GitHub Release `v0\.2\.0`') 'changelog: ordem 0.3.0, 0.2.0, 0.1.0; 0.2.0 publicada pela GitHub Release v0.2.0'
         $c3 = $cl.Substring($cl.IndexOf('## 0.3.0'), $cl.IndexOf('## 0.2.0') - $cl.IndexOf('## 0.3.0'))
         Assert-True (-not $c3.Contains('Published only as') -and $c3.Contains('Not published')) 'changelog: a entrada 0.3.0 nunca alega publicacao'

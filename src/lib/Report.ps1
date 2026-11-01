@@ -344,12 +344,26 @@ function Show-AtmIsolateResult {
     param($Result)
     Write-AtmHeader (Get-AtmText 'iso.resultHeader')
     if ($Result.Aborted) {
+        # Aborted: the mover was never called in this run.
         Write-Host ('  ' + (Get-AtmText 'iso.aborted' $Result.Aborted)) -ForegroundColor Yellow
         if ($Result.Aborted -eq 'ISOLAMENTO_REAL_DESABILITADO') { Write-Host ('  ' + (Get-AtmText 'iso.gateMsg' @($Result.Verified).Count)) -ForegroundColor Yellow }
-        if ($Result.Aborted -eq 'ISOLAMENTO_ALEM_DA_TRAVA_NAO_IMPLEMENTADO') { Write-Host ('  ' + (Get-AtmText 'iso.notImplemented')) -ForegroundColor Yellow }
         if ($Result.Aborted -eq 'NENHUM_CAMINHO_ISOLAVEL') { Write-AtmTable (@($Result.Rejected) | ForEach-Object { New-AtmRow ([ordered]@{ 'col.origin' = $_.Source; 'col.path' = $_.Path; 'col.reasons' = (@($_.Reasons) -join ' ; ') }) }) }
+        if ($Result.Aborted -eq 'ISOLAMENTO_UMA_RAIZ_POR_EXECUCAO') { Write-Host ('  ' + (Get-AtmText 'iso.oneRoot')) -ForegroundColor Yellow }
+        if ($Result.Aborted -eq 'LOG_REQUIRED') { Write-Host ('  ' + (Get-AtmText 'clean.logRequired')) -ForegroundColor Yellow }
+        if ($Result.Aborted -eq 'CONSOLE_NOT_OBSERVED') { Write-Host ('  ' + (Get-AtmText 'clean.consoleRequired')) -ForegroundColor Yellow }
+        if ($Result.Aborted -eq 'PLAN_CHANGED_BEFORE_EXECUTION') { Write-Host ('  ' + (Get-AtmText 'clean.planChanged')) -ForegroundColor Yellow }
+        if ($Result.RefusedAt) { Write-Host ('  ' + (Get-AtmText 'clean.refusedAt' $Result.RefusedAt.Step $(if ($Result.RefusedAt.Path) { $Result.RefusedAt.Path } else { '-' }))) -ForegroundColor Yellow }
+        if ([string]$Result.Aborted -like 'QUARANTINE_*' -or [string]$Result.Aborted -like 'MANIFEST_*') { Write-Host ('  ' + (Get-AtmText 'iso.quarantineRefused')) -ForegroundColor Yellow }
+        if ($Result.Aborted -eq 'CLEAN_LOCK_ABANDONED') { Write-Host ('  ' + (Get-AtmText 'clean.lockAbandoned')) -ForegroundColor Yellow }
+        elseif ([string]$Result.Aborted -like 'CLEAN_LOCK_*') { Write-Host ('  ' + (Get-AtmText 'clean.lockUnavailable' $Result.Aborted)) -ForegroundColor Yellow }
     }
-    Write-Host ('  ' + (Get-AtmText 'iso.nothingMoved')) -ForegroundColor Green
+    if ($Result.StoppedBy) { Write-Host ('  ' + (Get-AtmText 'iso.stopped' $Result.StoppedBy)) -ForegroundColor Red }
+    foreach ($row in @($Result.Results)) { Write-Host ('  ' + (Get-AtmText 'iso.resultRow' $row.Outcome $row.Path $row.EntryId)) -ForegroundColor $(if ($row.Outcome -ceq 'COMPLETE') { 'Green' } else { 'Red' }) }
+    foreach ($e in @($Result.LogErrors)) { Write-Host ('  ' + (Get-AtmText 'clean.logError' $e.Stage '-' $e.Code)) -ForegroundColor Red }
+    if ($Result.LockReleaseError) { Write-Host ('  ' + (Get-AtmText 'clean.lockReleaseFailed' $Result.LockReleaseError)) -ForegroundColor Red }
+    if (@($Result.Results | Where-Object { $_.Moved }).Count -gt 0) { Write-Host ('  ' + (Get-AtmText 'iso.inQuarantine' $Result.EntryPath)) -ForegroundColor Green }
+    elseif ($Result.EntryPath) { Write-Host ('  ' + (Get-AtmText 'iso.entryWithoutMove' $Result.EntryPath)) -ForegroundColor Yellow }
+    else { Write-Host ('  ' + (Get-AtmText 'iso.nothingMoved')) -ForegroundColor Green }
 }
 
 function Show-AtmDiscardPresentation {

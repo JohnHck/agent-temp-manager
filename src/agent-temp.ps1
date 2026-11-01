@@ -299,18 +299,26 @@ try {
             exit $(if ($res.Aborted -or $res.StoppedBy) { 3 } else { 0 })
         }
         'isolate' {
-            # 0.3.x isolation (docs/adr/ADR-0013), plan only: the engine applies the 0.3.x target rule (own profile, session
-            # roots) and the clean gates and shows the exact plan, then stops. It asks nothing, takes no lock, opens no log,
-            # creates no quarantine and moves nothing; with the isolation gate closed (every distributed copy) that is all
-            # it can do. -AcceptB1ResidualRisk is considered by the engine only past that gate.
+            # 0.3.x isolation (docs/adr/ADR-0013): the engine applies the 0.3.x target rule (own profile, one session root)
+            # and the clean gates and shows the exact plan. With the isolation gate closed (every distributed copy) it stops
+            # there: it asks nothing, takes no lock, opens no log, creates no quarantine and moves nothing. Past the gate
+            # (never in a distributed copy) the run needs an interactive console, a new -LogFile and the typed confirmation.
             if (-not $AllowListFile -and -not $Path) { Write-Host (Get-AtmText 'cli.isolateNeedsList') -ForegroundColor Red; exit 2 }
             if ($IncludeOtherUsers) { Write-Host (Get-AtmText 'cli.isolateOwnProfileOnly') -ForegroundColor Red; exit 2 }
             if ($AllowListFile -and -not (Test-Path -LiteralPath $AllowListFile -PathType Leaf)) { Write-Host (Get-AtmText 'cli.allowlistMissing' $AllowListFile) -ForegroundColor Red; exit 2 }
             $isoEntries = Read-AtmAllowList -File $AllowListFile -Paths @($Path)
+            if ($script:AtmIsolationEnabled -and $LogFile) {
+                $isoProbe = Invoke-AtmInventory @cliInvArgs
+                if (-not (Test-AtmOutputPathOutsideBases -Path $LogFile -Inventory $isoProbe)) { Write-Host (Get-AtmText 'cli.logRefused') -ForegroundColor Red; exit 2 }
+            }
+            if ($script:AtmIsolationEnabled -and -not (Test-AtmTuiInteractive)) { Write-Host (Get-AtmText 'cli.isolateNeedsConsole') -ForegroundColor Yellow; exit 6 }
             $isoPresenter = { param($v, $r, $i, $planId) Show-AtmIsolatePlan -Verified $v -Rejected $r -Inventory $i -PlanId $planId }
-            $isoRes = Invoke-AtmIsolate -Entries $isoEntries -PlanPresenter $isoPresenter -InventoryArgs $cliInvArgs -AcceptB1ResidualRisk:$AcceptB1ResidualRisk
+            $isoReader = { param($phrase, $kind, $rootPath, $choices, $info) Read-AtmCleanAnswer -Phrase $phrase -Kind $kind -RootPath $rootPath -Choices $choices -Info $info -LineReader { param($pr) Read-Host $pr } }
+            # -AcceptB1ResidualRisk: considered by the engine only past the isolation gate; it answers nothing.
+            $isoRes = Invoke-AtmIsolate -Entries $isoEntries -PlanPresenter $isoPresenter -ConfirmationReader $isoReader -InventoryArgs $cliInvArgs -LogFile $LogFile `
+                -AcceptB1ResidualRisk:$AcceptB1ResidualRisk -Interaction @{ Caller = 'CLI'; ConsoleRequired = [bool]$script:AtmIsolationEnabled }
             Show-AtmIsolateResult -Result $isoRes
-            exit $(if ($isoRes.Aborted) { 3 } else { 0 })
+            exit $(if ($isoRes.Aborted -or $isoRes.StoppedBy) { 3 } else { 0 })
         }
         'authorize' {
             # AUT-1: records the operator's discard authorization of ONE root and the plan shown; deletes nothing and makes

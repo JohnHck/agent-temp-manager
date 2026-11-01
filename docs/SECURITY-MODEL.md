@@ -618,9 +618,46 @@ profile in V0.4.
 Unchanged by the proposal: the clean gates, B1, RECENT, and the rule that the tool never changes an existing ACL or
 owner, never enables privileges and never terminates processes.
 
-### Native primitives (0.3.x phase P1: in the library, used by no command yet)
+### Isolation gate and flow (0.3.x phases P2 and P3a)
 
-`Native.cs` has three primitives for isolation. No script of the product calls them; a static suite test checks it.
+* **Isolation gate:** `$script:AtmIsolationEnabled`, `$false` in every shipped copy. It is a single assignment in
+  `Engine.Isolate.ps1`, with no option, environment variable or configuration file. It is the fifth gate:
+  * the build refuses an archive without it;
+  * the suite and the install e2e check it;
+  * `version` shows it.
+
+  Closed, `isolate` applies the target rule (own profile, one session root) and every clean gate, shows the plan, and
+  stops. It asks nothing, takes no lock, opens no log, creates no quarantine and moves nothing.
+* **Past the gate** (the suite only, in its own process):
+  1. The run takes the clean lock (B8, the same name: an isolation and a clean never run together). One root per run.
+  2. It needs a new log file (`atm.isolatelog/1`, the T1 writer, outside the audited directories and the quarantine)
+     and an interactive console observed by the engine.
+  3. The operator types `ISOLAR 1 CAMINHOS <plan id>`; the plan id has an isolation prefix of its own. A root under
+     the B1 exception needs its risk phrase first. No discard declaration is asked: nothing is discarded.
+  4. The plan is checked again (a fresh inventory, the same gates and statistics). The root is revalidated
+     immediately before the move.
+  5. The quarantine `%LOCALAPPDATA%\AgentTempManager\Q` is opened:
+     * when missing, it is created with new folders and protected DACLs, relative to pinned parents;
+     * when present, it is checked with the log's folder rule (owner, no other writer, no reparse point on the way)
+       and **never fixed**;
+     * it stays pinned for the run.
+  6. A new entry `<yyyyMMddTHHmmssZ>-<8 hex>` is created, with protected DACLs, and its manifest
+     (`atm.quarantine/1`). The manifest holds the original path and the acting SID, never file names, contents or
+     command lines.
+  7. The intent is written and flushed in the log and in the manifest **before** the mover. The manifest is then
+     closed: its writer pins the entry folder shared for reading only, which would make the rename into it fail
+     (`STATUS_SHARING_VIOLATION`, measured). The mover is called once, moving the root to `<entry>\payload`, and the
+     result is recorded in the log and in the manifest. The manifest is reopened with `OpenExisting`, under the same
+     checks.
+  8. Anything but a moved and verified tree stops the run, and nothing is undone. A refusal before the mover leaves no
+     entry. A refusal by the mover leaves an entry whose manifest records the attempt.
+
+  Purge (a deletion) is not part of this flow.
+
+### Native primitives (0.3.x phase P1)
+
+`Native.cs` has three primitives for isolation. Since P3a, only `Engine.Isolate.ps1` calls them, with exactly one call to
+the mover; a static suite test checks it.
 
 * **`AtmMover.MoveTree`**:
   * **Pins and checks before moving.** The ancestors of the source are pinned without `FILE_SHARE_DELETE`, as the

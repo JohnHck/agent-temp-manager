@@ -467,7 +467,7 @@ elevation level) holds the named kernel mutex `Global\AgentTempManager.Clean`:
   first or keep it, which refuses every clean run (denial of service; never two runs at once). The automated tests run
   two processes of the same identity; other users, sessions and elevation levels are not tested.
 
-## Isolate (plan only; 0.3.x, unreleased)
+## Isolate (0.3.x, unreleased; plan only in every copy)
 
 ```
 agent-temp isolate -Path <exact session root> [-AllowListFile <file>] [-AcceptB1ResidualRisk]
@@ -507,8 +507,28 @@ What it does not do, in any copy:
   reads no data.
 * It creates no quarantine and moves, creates or removes nothing.
 
-The confirmed, locked and logged move, and the quarantine commands (`list`, `inspect`, `verify`, `restore`, `purge`), are
-later phases.
+### Past the isolation gate (not in any copy; tested in the suite)
+
+`agent-temp isolate -Path <session root> -LogFile <new file>`, from an interactive console (exit code `6` otherwise). One
+session root per run.
+
+1. **Lock and log.** The run takes the clean lock (one clean or isolation at a time). Its log is a new file outside the
+   audited directories and the quarantine (`atm.isolatelog/1`).
+2. **Confirmation.** You type `ISOLAR 1 CAMINHOS <first 8 characters of the plan id>`. For a root under the B1
+   exception (with `-AcceptB1ResidualRisk`), you type that root's risk phrase first. No discard declaration is asked:
+   nothing is discarded.
+3. **Checks.** The plan is checked again, and the root is revalidated immediately before the move. Any difference
+   stops the run with nothing moved.
+4. **Quarantine.** The root is moved, intact, on the same volume, to a new entry
+   `%LOCALAPPDATA%\AgentTempManager\Q\<yyyyMMddTHHmmssZ>-<8 hex>\payload`. Next to it is a `manifest.jsonl`
+   (`atm.quarantine/1`), which records the original path, the acting identity, the intent and the result, with no file
+   names or contents. A quarantine folder that already exists is checked and used as it is, never changed.
+5. **Outcome.** The output names the entry. A refusal by the mover (for example a file open inside the root) leaves the
+   root where it was and an entry whose manifest records the attempt. Any outcome other than moved and verified stops
+   the run (exit code `3`), and nothing is undone.
+
+The quarantine commands are later phases: `list`, `inspect`, `verify` and `restore` (with the TUI area), then
+`purge`.
 
 ## Exit codes
 

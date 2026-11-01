@@ -74,7 +74,17 @@ Collection -> normalization -> evidence -> correlation -> presentation:
 4. **Presentation**: the text report (`Report.ps1`), the JSON export (`ConvertTo-AtmDiagnoseJson`, schema
    `atm.diagnose/2`) and the TUI area (rendered from that same export). None of them collects anything.
 
-## Planned: isolation engine (0.3.x and V0.4, not implemented)
+## Isolation engine (0.3.x; `lib\Engine.Isolate.ps1`)
+
+**In place (phases P1 to P3a):**
+* `isolate` (CLI only) plans one session root of the own profile against the clean gates. With the isolation gate closed
+  (every copy) that is all it does.
+* Past the gate (tests only), `Invoke-AtmIsolate` runs under the clean lock. Only the engine calls the mover, once, after
+  the intent is recorded in the log and in the entry's manifest. The lock and console helpers live in `Engine.Clean.ps1`.
+
+**Later phases:** quarantine `list`, `inspect`, `verify`, `restore` (P3b, with the TUI area) and `purge` (P4).
+
+### Planned layering (ADR-0013)
 
 [ADR-0013](adr/ADR-0013-isolation-quarantine-recovery-mode.md) (PARTIALLY ACCEPTED) adds a third operation next to
 audit and delete: **isolate**, with restore, inspect, verify and purge. Isolation is the default operation (ISO-D5).
@@ -90,5 +100,3 @@ layering:
 * Presentation never moves anything: the CLI and the TUI only collect the exact targets and forward them, as they do
   for clean.
 * The diagnose engine stays read-only and never uses the isolation engine.
-
-Nothing here exists in the code.
