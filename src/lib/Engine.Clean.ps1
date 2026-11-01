@@ -56,7 +56,8 @@ function Read-AtmAllowList {
 }
 
 # Principals allowed to hold write-type rights on a session root and its scope/base besides the profile owner:
-# SYSTEM, Administrators, TrustedInstaller, CREATOR OWNER, OWNER RIGHTS.
+# SYSTEM, Administrators, TrustedInstaller, CREATOR OWNER, OWNER RIGHTS. This name belongs to the clean engine (gate 4,
+# reused by isolation); the diagnose engine's Git location rule has its own list (AtmGitTrustedWriterSids).
 $script:AtmTrustedWriterSids = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464', 'S-1-3-0', 'S-1-3-4')
 
 function Get-AtmAclProblems {

@@ -3835,6 +3835,56 @@ exit 0
         Assert-True ($cli.Contains("if (`$script:AtmIsolationEnabled -and -not (Test-AtmTuiInteractive)) { Write-Host (Get-AtmText 'cli.isolateNeedsConsole')") -and $cli.Contains('-ConfirmationReader $isoReader')) 'CLI: console exigido alem da trava; leitor do console'
     }
 
+    # ------------------------------------------------------------------ trusted accounts per engine (FIX-TRUSTED-SIDS)
+    Test-Case 'Contas confiaveis' 'Cada motor com a sua lista: com Clean, Isolate e Diagnose carregados na ordem do lancador, o gate 4 usa a lista declarada no Engine.Clean (com OWNER RIGHTS) e a regra de local do Git a sua propria (sem OWNER RIGHTS); nenhum arquivo atribui a lista de outro motor' {
+        $declared = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464', 'S-1-3-0', 'S-1-3-4')
+        $git = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464', 'S-1-3-0')
+        # The suite loads the engines in the launcher's order (Clean, Isolate, Diagnose), as the launcher itself does.
+        $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        Assert-True ($cli.IndexOf(". (Join-Path `$here 'lib\Engine.Clean.ps1')") -lt $cli.IndexOf(". (Join-Path `$here 'lib\Engine.Diagnose.ps1')")) 'lancador: Clean antes de Diagnose'
+        Assert-Eq (@($script:AtmTrustedWriterSids) -join ',') ($declared -join ',') 'lista efetiva do gate 4 = a declarada no Engine.Clean'
+        Assert-Eq (@($script:AtmGitTrustedWriterSids) -join ',') ($git -join ',') 'lista da regra de local do Git inalterada'
+        $assign = @{}
+        foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1') })) {
+            $t = [IO.File]::ReadAllText($fi.FullName)
+            foreach ($n in @('AtmTrustedWriterSids', 'AtmGitTrustedWriterSids')) { foreach ($m in [regex]::Matches($t, '\$script:' + $n + '\s*=')) { $assign[$n] = @($assign[$n]) + @($fi.Name) } }
+            if ($fi.Name -ne 'Engine.Clean.ps1') { Assert-True (-not [regex]::IsMatch($t, '\$script:AtmTrustedWriterSids\b')) "$($fi.Name) nao usa a lista do gate 4" }
+            if ($fi.Name -ne 'Engine.Diagnose.ps1') { Assert-True (-not $t.Contains('$script:AtmGitTrustedWriterSids')) "$($fi.Name) nao usa a lista do Git" }
+        }
+        Assert-Eq (@($assign['AtmTrustedWriterSids'] | Where-Object { $_ }) -join ',') 'Engine.Clean.ps1' 'lista do gate 4 atribuida uma vez, so no Engine.Clean'
+        Assert-Eq (@($assign['AtmGitTrustedWriterSids'] | Where-Object { $_ }) -join ',') 'Engine.Diagnose.ps1' 'lista do Git atribuida uma vez, so no Engine.Diagnose'
+    }
+    Test-Case 'Contas confiaveis' 'Gate 4: uma ACE OWNER RIGHTS numa pasta cujo dono e o SID do perfil nao gera ESCRITA_CONCEDIDA_A_TERCEIROS; uma ACE de escrita de outro SID continua gerando; a regra de local do Git continua recusando OWNER RIGHTS' {
+        $mk = {
+            param([string]$Name, [string[]]$Extra)
+            # A new folder created WITH its security (no existing ACL changed): the owner, SYSTEM, Administrators, plus -Extra.
+            $sec = New-Object Security.AccessControl.DirectorySecurity
+            $sec.SetAccessRuleProtection($true, $false)
+            foreach ($s in @(@($testOwnerSid, 'S-1-5-18', 'S-1-5-32-544') + @($Extra) | Select-Object -Unique)) { $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier($s)), 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))) }
+            $d = Join-Path $sandbox ('trusted-sids\' + $Name)
+            [void][IO.Directory]::CreateDirectory((Split-Path -Parent $d))
+            [void][IO.Directory]::CreateDirectory($d, $sec)
+            return $d
+        }
+        $ow = & $mk 'owner-rights' @('S-1-3-4')
+        Assert-Eq ((Get-Acl -LiteralPath $ow).GetOwner([Security.Principal.SecurityIdentifier]).Value) $testOwnerSid 'dono = SID do perfil de teste'
+        $pb = @(Get-AtmAclProblems -Path $ow -OwnerSid $testOwnerSid)
+        Assert-Eq $pb.Count 0 "OWNER RIGHTS aceito no gate 4 ($($pb -join ' ; '))"
+        $other = & $mk 'authenticated-users' @('S-1-5-11')
+        $pb = @(Get-AtmAclProblems -Path $other -OwnerSid $testOwnerSid)
+        Assert-True ($pb.Count -eq 1 -and $pb[0] -eq (Get-AtmText 'reason.thirdPartyWrite' 'S-1-5-11' $other)) "outro SID com escrita: recusado ($($pb -join ' ; '))"
+        # The Git location rule is unchanged: OWNER RIGHTS with write is not trusted there. Its owner rule asks for SYSTEM,
+        # Administrators, TrustedInstaller or CREATOR OWNER, so the ACE is reached only when the test owner is one of them.
+        if ($testOwnerSid -ceq 'S-1-5-32-544') {
+            $clean = & $mk 'git-clean' @()
+            Assert-True (Test-AtmTrustedLocationAcl -Path $clean) 'Git: so contas confiaveis -> confiavel'
+            Assert-True (-not (Test-AtmTrustedLocationAcl -Path $ow)) 'Git: OWNER RIGHTS com escrita -> nao confiavel (como antes)'
+        } else {
+            Assert-True (-not (Test-AtmTrustedLocationAcl -Path $ow)) 'Git: dono que nao e conta confiavel -> nao confiavel (como antes)'
+            $script:caseNote = 'regra do Git com ACE OWNER RIGHTS so alcancavel com dono Administradores (CI elevada); aqui o dono e o usuario'
+        }
+    }
+
     # ------------------------------------------------------------------ TUI (headless) and layering
     function New-Key { param([string]$Key, [char]$Char = [char]0) return New-Object ConsoleKeyInfo($Char, [ConsoleKey]$Key, $false, $false, $false) }
     function Invoke-HeadlessTui {

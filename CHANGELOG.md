@@ -5,6 +5,12 @@
 Work for 0.3.x, which comes after 0.3.0 is published (ADR-0013, ROADMAP "0.3.x"). It is not part of the 0.3.0 candidate.
 **A fifth release gate, `AtmIsolationEnabled`, is closed in every copy**: in every copy `isolate` only plans.
 
+* Fix (FIX-TRUSTED-SIDS): each engine now has its own list of trusted accounts.
+  * The diagnose engine's Git location rule had reused the name of the clean engine's list (gate 4) without OWNER
+    RIGHTS. Being loaded later, it replaced that list, so gate 4 refused an OWNER RIGHTS entry as a third-party writer.
+  * Gate 4, and isolation through it, now uses the list declared in `Engine.Clean.ps1`. OWNER RIGHTS only grants rights
+    to the owner, which the gate requires to be the profile SID, so no other writer is accepted.
+  * The Git rule keeps its stricter list unchanged (`AtmGitTrustedWriterSids`).
 * Isolation, phase P3a (past the isolation gate only; no distributed copy reaches it): one session root of the own
   profile per run.
   * The run takes the clean lock (the same name), needs an observed console and a new `-LogFile`

@@ -1396,21 +1396,22 @@ $script:AtmGitGlobalArguments = @('--no-pager', '--no-optional-locks', '-c', 'co
 # Test spy: when it is a list, every argument vector that reaches the native runner is added to it.
 $script:AtmGitInvocationLog = $null
 # Same rule as the installer's Test-AtmInstallAcl: only SYSTEM, Administrators, TrustedInstaller and CREATOR OWNER
-# may own the item or hold write-type rights.
-$script:AtmTrustedWriterSids = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464', 'S-1-3-0')
+# may own the item or hold write-type rights. A list of its own (FIX-TRUSTED-SIDS): it used to share the name of the
+# clean engine's list (AtmTrustedWriterSids, Engine.Clean.ps1), and, loaded after it, replaced that list for gate 4.
+$script:AtmGitTrustedWriterSids = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464', 'S-1-3-0')
 $script:AtmGitRevisionPattern = '^\^?(HEAD|[0-9a-fA-F]{4,64}|refs/[A-Za-z0-9._/\-]+)$'
 
 function Test-AtmTrustedLocationAcl {
-    # $true when the item's owner and every account with a write-type right are trusted (AtmTrustedWriterSids):
+    # $true when the item's owner and every account with a write-type right are trusted (AtmGitTrustedWriterSids):
     # an elevated run must not start a binary a standard user could replace (ADR-0006 rule 2).
     param([string]$Path)
     try {
         $acl = Get-Acl -LiteralPath $Path
-        if ($script:AtmTrustedWriterSids -cnotcontains $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value) { return $false }
+        if ($script:AtmGitTrustedWriterSids -cnotcontains $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value) { return $false }
         $writeMask = [Security.AccessControl.FileSystemRights]'WriteData, AppendData, WriteExtendedAttributes, WriteAttributes, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'
         foreach ($ace in @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))) {
             if ($ace.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
-            if ($script:AtmTrustedWriterSids -ccontains $ace.IdentityReference.Value) { continue }
+            if ($script:AtmGitTrustedWriterSids -ccontains $ace.IdentityReference.Value) { continue }
             if (($ace.FileSystemRights -band $writeMask) -ne 0) { return $false }
         }
         return $true

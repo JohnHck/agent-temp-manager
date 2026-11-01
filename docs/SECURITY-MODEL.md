@@ -63,6 +63,12 @@ isolated sandbox.
    not grant write/delete/re-permission rights to anyone except that SID, SYSTEM, Administrators,
    TrustedInstaller, CREATOR OWNER and OWNER RIGHTS. `%WINDIR%\Temp` is always treated as shared. Other
    users require elevation + explicit switch.
+   * **OWNER RIGHTS** grants rights only to the current owner, and this gate requires that owner to be the profile SID,
+     so it adds no other writer.
+   * **The list is the clean engine's own** (`AtmTrustedWriterSids`, `Engine.Clean.ps1`). The diagnose engine's Git
+     location rule keeps a stricter list of its own, without OWNER RIGHTS (`AtmGitTrustedWriterSids`).
+   * **Fixed in FIX-TRUSTED-SIDS:** until then, the diagnose engine reassigned the same name and was loaded after clean,
+     so this gate actually ran without OWNER RIGHTS and refused it as a third-party writer.
 5. Liveness: no direct command-line reference, no live session in the agent registry, no recent transcript,
    no ancestor/ambiguous reference, registry and config readable, class `ORPHAN_SUSPECTED` without flags.
 6. Process coverage: must be complete. Processes of other accounts (services, automations, elevated sessions) are
