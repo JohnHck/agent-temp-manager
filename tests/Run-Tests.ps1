@@ -3863,7 +3863,10 @@ exit 0
             foreach ($s in @(@($testOwnerSid, 'S-1-5-18', 'S-1-5-32-544') + @($Extra) | Select-Object -Unique)) { $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier($s)), 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))) }
             $d = Join-Path $sandbox ('trusted-sids\' + $Name)
             [void][IO.Directory]::CreateDirectory((Split-Path -Parent $d))
-            [void][IO.Directory]::CreateDirectory($d, $sec)
+            # Created with its security: Directory.CreateDirectory(path, security) on .NET Framework (PowerShell 5.1),
+            # FileSystemAclExtensions.Create(DirectoryInfo, security) on .NET (PowerShell 7).
+            if ($PSVersionTable.PSEdition -eq 'Core') { [IO.FileSystemAclExtensions]::Create((New-Object IO.DirectoryInfo $d), $sec) }
+            else { [void][IO.Directory]::CreateDirectory($d, $sec) }
             return $d
         }
         $ow = & $mk 'owner-rights' @('S-1-3-4')
