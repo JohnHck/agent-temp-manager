@@ -1,8 +1,10 @@
 # ADR-0013: Isolation, quarantine and Recovery Mode
 
-Status: PROPOSED (nothing implemented; open decisions ISO-D1 to ISO-D6 belong to the maintainer)
+Status: PARTIALLY ACCEPTED. The maintainer decided ISO-D1, ISO-D4 and ISO-D5 on 2026-11-01; ISO-D2, ISO-D3 and
+ISO-D6 are still PROPOSED. Nothing is implemented.
 Date: 2026-11-01
-Phase: V0.4 (proposed placement, see "Roadmap placement")
+Phase: 0.3.x after the publication of 0.3.0 (isolation and quarantine of the own profile, ISO-D1); V0.4 (Recovery Mode
+and every operation on another user's profile)
 
 ## Context
 
@@ -30,10 +32,18 @@ Phase: V0.4 (proposed placement, see "Roadmap placement")
 
 Around isolation: **restore** (back to where it was), **inspect** (read-only summary of a quarantine entry),
 **verify** (the entry still matches its manifest) and **purge** (delete a quarantine entry). Purge is a deletion: it
-is irreversible, refused by default and goes through the deletion gates (section 8).
+is irreversible, confirmed by default (automatic only as an explicit opt-in, ISO-D4) and goes through the deletion
+gates (section 8).
 
 Isolation never makes anything eligible for deletion, and deletion never isolates. They are separate commands,
 separate gates and separate confirmations.
+
+**Isolation is the default operation (ISO-D5, decided).** Removing agent temporary data from the active environment
+is done by isolating it. A deletion happens only in one of two ways:
+
+* **(a) as a purge** of a quarantine entry, after the quarantine (section 8);
+* **(b) directly**, when the user confirms with certainty, through the V0.3 deletion flow. That flow is unchanged:
+  every clean gate, the AUT-2 confirmation, B1 and RECENT.
 
 ### 2. The request's vocabulary, mapped onto the product
 
@@ -154,18 +164,30 @@ the artifact sanitizer and privacy scanner apply as they do today.
 ### 8. Quarantine management
 
 * Commands: **list**, **inspect**, **verify**, **restore**, **purge**. All read-only except restore and purge.
-* **Retention** is configurable and only marks an entry as **expired**. 7, 15 or 30 days are examples, not defaults.
-  Nothing is purged automatically.
+* **Retention** is configurable and marks an entry as **expired**. 7, 15 or 30 days are examples, not defaults.
+  Nothing is purged automatically unless the opt-in automatic purge below is configured.
 * **Quotas**: an optional size limit for the quarantine. Reaching it warns and refuses new isolations; it never purges
   older entries.
 * **Abandoned** entries (the original profile no longer exists, or the manifest's owner cannot be identified) and
   **incomplete** entries (an intent without a result, or a manifest that does not match the content) are reported,
   never purged automatically.
-* **Purge** is irreversible:
-  * refused by default;
+* **Purge** is irreversible. By default it is **confirmed** (ISO-D4, decided):
   * one entry per run, with its own typed confirmation bound to the entry id and its totals;
-  * through the V0.3 deleter, its pinning and its gate, so it is not available while the deletion gate is closed;
-  * no automatic, scheduled or bulk purge without an explicit decision of the maintainer (ISO-D4).
+  * through the V0.3 deleter, its pinning and its gate, so it is not available while the deletion gate is closed.
+* **Automatic purge** exists only as an explicit, opt-in configuration, never as the default (ISO-D4). Any
+  implementation must respect at least these limits:
+  * **Expired entries only:** only quarantine entries whose retention has expired.
+  * **Intact manifest required:** only entries whose manifest is intact and still matches the content (verify passes
+    in the same run). Incomplete, abandoned or damaged entries are never purged automatically; they are reported.
+  * **Never the active environment:** only inside the quarantine, never a base, root or any path outside it.
+  * **Off by default:** enabled only by an explicit administrator configuration in the administrator-only area. It is
+    visible in `version` and in every report while it is on.
+  * **Logged:** every automatic purge is recorded with the entry id, its totals and the outcome.
+  * **Fail closed:** any error, doubt or failed check skips that entry. Nothing is retried in a weaker way.
+  * **Same deleter, same gates:** the V0.3 deleter, pinning and gates. A closed deletion gate means no automatic purge.
+
+  The scheduling mechanism (a task, a run at the next command, or something else) is not decided here. It belongs to
+  the technical contract of the implementation and must meet PRIV-3 (no stored credentials).
 
 ### 9. Recovery Mode
 
@@ -226,38 +248,55 @@ services, policies or user settings.
 
 ## Roadmap placement
 
-**Proposed: V0.4 "Assisted recovery".** V0.4 already requires operations that are reversible, authorized one by one,
-with before/after state and an undo path, a recovery log, and per-operation elevation (PRIV-2, PRIV-8, PRIV-9).
-Isolation and restore are exactly that.
+**Decided (ISO-D1, 2026-11-01, maintainer's decision).** The work is split in two:
 
-Four points of V0.4's current text conflict with this proposal and are stated, not hidden:
+* **0.3.x, after 0.3.0 is published and depending on it:** Groups A and B for the **own profile** only, meaning
+  isolation, restore, inspect, verify and quarantine management including purge. No Recovery Mode and no operation on
+  another user's profile.
+* **V0.4 "Assisted recovery":** Group C, Recovery Mode, and every operation on another user's profile. V0.4 already
+  requires operations that are reversible, authorized one by one, with before/after state, an undo path, a recovery
+  log and per-operation elevation (PRIV-2, PRIV-8, PRIV-9).
 
-1. Its safety limit says "no changes to ... other users' sessions". Recovery Mode never touches a session, but it
-   moves files **in another user's profile**. That needs an explicit amendment.
-2. It says "no ... ACLs". The quarantine folder is a new object with its own DACL; no existing ACL changes. The
-   amendment has to say so.
-3. "Reversible, or refused by default": isolation and restore are reversible. Purge is not, so it is refused by
-   default and gated by the deletion gate.
-4. "Versions are delivered in order": in V0.4, isolation waits for V0.2.1 and V0.3. Moving it earlier is a real
-   alternative (ISO-D1).
+Points that each part must still settle, stated rather than hidden:
+
+1. **0.3.x, own profile.** Without elevation, process coverage is incomplete on a real machine, as it is for clean.
+   The technical contract of the 0.3.x implementation must define the activity rule for the own profile. It must be
+   at least as strict as clean, and the B1 exception does not extend to isolation by itself. Any widening is a
+   decision of the maintainer.
+2. **0.3.x, quarantine location.** ISO-D2's recommendation (a fixed, administrator-only folder per volume) cannot be
+   created by a standard user. Unless ISO-D2 is decided otherwise, 0.3.x needs elevation, or a folder prepared by the
+   installer, for its quarantine.
+3. **V0.4, another user's profile.** V0.4's safety limit says "no changes to ... other users' sessions". Recovery Mode
+   never touches a session, but it moves files in another user's profile, so that limit needs an explicit amendment.
+4. **Both, ACLs.** "No ... ACLs" must state that the quarantine folder is a new object with its own DACL, and that no
+   existing ACL changes.
+5. **Both, purge.** Isolation and restore are reversible; purge is not. It is confirmed by default and behind the
+   deletion gate, and automatic purge is opt-in only (ISO-D4).
 
 **Dependencies:**
 
-* V0.3 published, with its confirmation and re-validation model, T1, B8 and the pinning deleter;
-* the V0.2 diagnostics (activity evidence);
-* the elevation-model decision (manual or on demand, [ELEVATION.md](../ELEVATION.md)) and PRIV-5, for acting on
-  another user's profile;
+* 0.3.0 published, with its confirmation and re-validation model, T1, B8 and the pinning deleter (both parts);
+* the V0.2 diagnostics, for activity evidence (both parts);
+* V0.4 only: the elevation-model decision (manual or on demand, [ELEVATION.md](../ELEVATION.md)), PRIV-5 and ISO-D3,
+  for acting on another user's profile;
 * the dedicated base runbook (prevention, before containment).
 
-## Open decisions (maintainer)
+## Decisions (maintainer)
+
+Decided on 2026-11-01 by the maintainer:
+
+| Id | Decision | Recorded as |
+|---|---|---|
+| ISO-D1 | Roadmap placement | Isolation and quarantine management of the **own profile** in a 0.3.x release right after 0.3.0 is published, without Recovery Mode. Recovery Mode (Group C, another user's profile) stays in V0.4 |
+| ISO-D4 | Retention and purge policy | Purge at the end of the quarantine is **confirmed by default**. An automatic mode exists only as an explicit, opt-in configuration, never the default, within the limits of section 8 |
+| ISO-D5 | Isolation and deletion | **Isolation is the default operation.** Deletion happens (a) as a purge after the quarantine, or (b) directly, when the user confirms with certainty, through the V0.3 deletion flow, unchanged |
+
+Still open (PROPOSED, recommendations only):
 
 | Id | Decision | Alternatives | Recommendation |
 |---|---|---|---|
-| ISO-D1 | Roadmap placement | (a) V0.4, in order; (b) an earlier V0.3.x release with isolation only (no Recovery Mode, own profile), as a safer alternative to deletion | (a), unless the incident's risk is judged urgent; (b) still needs V0.3's mechanisms published first |
-| ISO-D2 | Default quarantine location | (a) a fixed administrator-only folder per volume, outside every profile; (b) inside the profile, next to the base; (c) chosen per run | (a): same volume, outside the active tree, one ACL to verify |
-| ISO-D3 | Acting on another user's profile | (a) manual elevation only, from another account (PRIV-5 first); (b) elevation on demand for this single operation | (a) |
-| ISO-D4 | Retention and purge policy | (a) mark expired only, purge always manual and one entry at a time; (b) opt-in scheduled purge | (a) |
-| ISO-D5 | Isolation as the preferred alternative to deletion | (a) offered next to deletion, never instead of it; (b) preferred for whole bases and user targets; (c) preferred everywhere | (b): deletion keeps its narrower targets |
+| ISO-D2 | Default quarantine location | (a) a fixed administrator-only folder per volume, outside every profile; (b) inside the profile, next to the base; (c) chosen per run | (a): same volume, outside the active tree, one ACL to verify. For 0.3.x this needs elevation or a folder prepared by the installer (see "Roadmap placement") |
+| ISO-D3 | Acting on another user's profile (V0.4) | (a) manual elevation only, from another account (PRIV-5 first); (b) elevation on demand for this single operation | (a) |
 | ISO-D6 | Recreating the empty base after an isolation | (a) never; the agent recreates it as the user; (b) offered, with the owner question solved first | (a) |
 
 ## Rejected alternatives
@@ -269,7 +308,8 @@ Four points of V0.4's current text conflict with this proposal and are stated, n
 * **Terminating processes** that hold the target: never; the operation refuses instead.
 * **Reusing the clean allowlist and gate 2:** it forbids the base, which is the main Recovery Mode target. A separate
   target rule is clearer than widening gate 2.
-* **Automatic quarantine purge by age:** irreversible without a human decision.
+* **Automatic quarantine purge by default:** irreversible without a human decision. ISO-D4 allows it only as an
+  explicit opt-in, within the limits of section 8.
 * **A general profile repair mode:** out of scope; the product only handles agent temporary data.
 
 ## Consequences (including new limits)
@@ -288,5 +328,5 @@ Four points of V0.4's current text conflict with this proposal and are stated, n
 
 ## Verification
 
-Criteria before any implementation is accepted: [TESTING.md](../TESTING.md#future-isolation-quarantine-and-recovery-mode-v04-proposed).
+Criteria before any implementation is accepted: [TESTING.md](../TESTING.md#future-isolation-quarantine-and-recovery-mode-03x-and-v04).
 Destructive cases run only on disposable VMs through the V2/V3 harness pattern, never on a real profile.

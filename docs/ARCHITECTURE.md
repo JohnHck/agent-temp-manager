@@ -74,17 +74,19 @@ Collection -> normalization -> evidence -> correlation -> presentation:
 4. **Presentation**: the text report (`Report.ps1`), the JSON export (`ConvertTo-AtmDiagnoseJson`, schema
    `atm.diagnose/2`) and the TUI area (rendered from that same export). None of them collects anything.
 
-## Planned: isolation engine (V0.4, PROPOSED, not implemented)
+## Planned: isolation engine (0.3.x and V0.4, not implemented)
 
-[ADR-0013](adr/ADR-0013-isolation-quarantine-recovery-mode.md) proposes a third operation next to audit and delete:
-**isolate**, with restore, inspect, verify and purge, and a guided Recovery Mode. If it is accepted, the layering would
-be:
+[ADR-0013](adr/ADR-0013-isolation-quarantine-recovery-mode.md) (PARTIALLY ACCEPTED) adds a third operation next to
+audit and delete: **isolate**, with restore, inspect, verify and purge. Isolation is the default operation (ISO-D5).
+The own profile comes in 0.3.x; the guided Recovery Mode for another user's profile in V0.4 (ISO-D1). The planned
+layering:
 
 * An isolation engine of its own. It reuses the inventory, the clean gates other than gate 2 (it has its own target
   rule), the B2-1 evidence, the AUT-2 confirmation, the T1 log and pinned writer, and the B8 lock. It contains the
   only call that moves a target, through a pinned handle, behind its own closed release gate.
 * **Purge**, a deletion of a quarantine entry, goes through the clean engine's single deleter call and the deletion
-  gate. The isolation engine never deletes.
+  gate. That holds for a confirmed purge and for an opted-in automatic one (ISO-D4). The isolation engine never
+  deletes.
 * Presentation never moves anything: the CLI and the TUI only collect the exact targets and forward them, as they do
   for clean.
 * The diagnose engine stays read-only and never uses the isolation engine.

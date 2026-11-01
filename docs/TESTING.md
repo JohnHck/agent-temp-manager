@@ -242,10 +242,11 @@ environmental reasons that the product reports correctly (for example a TEMP fol
 write: the sandbox then inherits that ACL and the gates block it, as they should). Those failures stay failures; the
 record of a local run and its causes is in [release/V0.2-LOCAL-TEST-ENVIRONMENT.md](release/V0.2-LOCAL-TEST-ENVIRONMENT.md).
 
-## Future: isolation, quarantine and Recovery Mode (V0.4, proposed)
+## Future: isolation, quarantine and Recovery Mode (0.3.x and V0.4)
 
 Criteria proposed by [ADR-0013](adr/ADR-0013-isolation-quarantine-recovery-mode.md) for accepting an implementation.
-Nothing here runs today. Destructive cases run **only** on disposable VMs, through the pattern of the V2/V3 harness:
+The rows about another user's profile apply to V0.4 (Recovery Mode); every other row applies from 0.3.x (own profile,
+ISO-D1). Nothing here runs today. Destructive cases run **only** on disposable VMs, through the pattern of the V2/V3 harness:
 CI-only, never shipped, planted targets under a run root with a nonce, the installed copy's gates checked by SHA-256,
 only a sanitized summary uploaded. They never run on a real profile. The cross-profile rows that need a real second
 administrator or a real sign-in belong to the operator, like the V4 rows.
@@ -263,7 +264,9 @@ administrator or a real sign-in belong to the operator, like the V4 rows.
 | Interruption and concurrency | the process ends after the `intent` record (the entry reported incomplete, never restorable as complete); a second isolation, or a clean, while the lock is held (`BUSY`); the same isolation repeated (idempotent refusal, no second move) |
 | Integrity | a change inside the target between the plan and the move refuses; the manifest compared with the content after the move; a damaged manifest or entry reported as failed |
 | Restore | to a free original location; with a conflict (the base or root recreated by a new session) refused by default and the conflicts listed; to another free location; a partial restore reported exactly; old and new sessions never mixed |
-| Quarantine management | list, inspect and verify are read-only (byte and timestamp identical); expired, abandoned and incomplete entries reported, never purged; a quota refuses new isolations; purge refused by default, refused while the deletion gate is closed, one entry per run with its own confirmation |
+| Quarantine management | list, inspect and verify are read-only (byte and timestamp identical); expired, abandoned and incomplete entries reported; a quota refuses new isolations; purge confirmed by default, refused while the deletion gate is closed, one entry per run with its own confirmation |
+| Automatic purge (opt-in, ISO-D4) | off by default and shown as off; once enabled by an administrator, shown in `version` and the reports; purges only expired entries whose manifest verifies in the same run; skips incomplete, abandoned, damaged and unexpired entries; never touches the active environment; each purge logged; any failure skips the entry (fail closed); nothing purged while the deletion gate is closed |
+| Isolation as the default (ISO-D5) | isolation offered as the default action; direct deletion only through the unchanged V0.3 flow with its own confirmation |
 | Worktrees and evidence | a Git worktree or a folder of preserved evidence inside a target: reported, and the target refused unless the person names it explicitly |
 | Privacy | manifest and summary without file names, contents, command lines, account names or SIDs; exports pseudonymized (ADR-0010); the artifact sanitizer and the privacy scanner pass |
 | Layering | presentation never moves or deletes; only the isolation engine moves, and only the clean engine's deleter deletes (purge) |
