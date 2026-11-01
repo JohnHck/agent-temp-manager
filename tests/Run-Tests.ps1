@@ -3219,6 +3219,246 @@ exit 0
         Assert-True ($cmdTxt -match '-ExecutionPolicy Bypass -File') 'politica apenas no escopo do processo filho'
     }
 
+    # ------------------------------------------------------------------ 0.3.x isolation, phase P1: native primitives (ISO-P1)
+    # AtmMover, AtmSafeCreate.CreateNewDirectory and AtmCleanLog.OpenExisting, on sandbox fixtures only (no product caller
+    # yet). A destination is a folder created by CreateNewDirectory inside a pinned sandbox folder.
+    function New-IsoFixture {
+        param([string]$Name, [hashtable]$Files = @{ 'a.txt' = 3; 'sub\b.bin' = 5 })
+        $base = Join-Path $sandbox ('iso-' + $Name)
+        $root = Join-Path $base 'src\root'
+        foreach ($k in $Files.Keys) {
+            $f = Join-Path $root $k
+            [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($f))
+            [IO.File]::WriteAllBytes($f, (New-Object byte[] $Files[$k]))
+        }
+        [void][IO.Directory]::CreateDirectory((Join-Path $base 'q'))
+        $q = [AgentTempManager.AtmSafeCreate]::Pin((Join-Path $base 'q'))
+        $e = [AgentTempManager.AtmSafeCreate]::CreateNewDirectory($q, 'e', (Get-AtmCurrentIdentity).Sid)
+        $cleanupActions.Add({ $e.Dispose(); $q.Dispose() }.GetNewClosure())
+        return [pscustomobject]@{ Base = $base; Root = $root; Q = $q; E = $e }
+    }
+    function Get-IsoMeasure {
+        param([string]$Root)
+        $null = Get-StableTreeListing $Root
+        return [AgentTempManager.AtmScanner]::ScanTree($Root, 3, 4096)
+    }
+    function Invoke-IsoMove {
+        param($Fx, [string]$Root, [string]$Name = 'payload', $Hook = $null, $Measure = $null)
+        $s = $(if ($null -ne $Measure) { $Measure } else { Get-IsoMeasure $Root })
+        return [AgentTempManager.AtmMover]::MoveTree($Root, $s.Files, $s.Dirs, $s.Bytes, $s.NewestWriteTimeUtc.Ticks, $Fx.E, $Name, $Hook)
+    }
+
+    Test-Case 'Isolamento P1' 'CreateNewDirectory: diretorio novo pela handle do pai fixado, DACL protegida e herdavel (dono, SYSTEM, Administradores); nome existente, juncao e nome invalido recusados; ACL existente intacta' {
+        $base = Join-Path $sandbox 'iso-newdir'
+        [void][IO.Directory]::CreateDirectory((Join-Path $base 'q'))
+        $before = (Get-Acl -LiteralPath (Join-Path $base 'q')).Sddl
+        $sid = (Get-AtmCurrentIdentity).Sid
+        $q = [AgentTempManager.AtmSafeCreate]::Pin((Join-Path $base 'q'))
+        try {
+            Assert-True $q.IsPinned "pasta fixada ($($q.Error))"
+            $e = [AgentTempManager.AtmSafeCreate]::CreateNewDirectory($q, 'entrada', $sid)
+            try {
+                Assert-True ($e.IsPinned -and $null -eq $e.Error) "criado e fixado ($($e.Error))"
+                Assert-Eq $e.ParentPath (Join-Path $base 'q\entrada') 'caminho do novo diretorio'
+                $sddl = (Get-Acl -LiteralPath (Join-Path $base 'q\entrada')).Sddl
+                Assert-True ($sddl.Contains('D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')) 'DACL protegida, herdavel, so dono, SYSTEM e Administradores'
+                # Pinned without FILE_SHARE_DELETE: no one renames it while held.
+                $renamed = $true; try { [IO.Directory]::Move((Join-Path $base 'q\entrada'), (Join-Path $base 'q\outra')) } catch { $renamed = $false }
+                Assert-True (-not $renamed) 'diretorio fixado nao pode ser renomeado'
+            } finally { $e.Dispose() }
+            Assert-Eq ([AgentTempManager.AtmSafeCreate]::CreateNewDirectory($q, 'entrada', $sid)).Error 'EXISTS' 'nome existente nunca reutilizado'
+            [void][IO.Directory]::CreateDirectory((Join-Path $base 'alvo'))
+            New-Junction (Join-Path $base 'q\j') (Join-Path $base 'alvo')
+            Assert-Eq ([AgentTempManager.AtmSafeCreate]::CreateNewDirectory($q, 'j', $sid)).Error 'EXISTS' 'juncao com o nome: recusada, nada criado no alvo'
+            Assert-Eq @(Get-ChildItem -LiteralPath (Join-Path $base 'alvo') -Force).Count 0 'alvo da juncao intacto'
+            Assert-Eq ([AgentTempManager.AtmSafeCreate]::CreateNewDirectory($q, 'CON', $sid)).Error 'DIR_NAME_INVALID' 'nome de dispositivo recusado'
+            Assert-Eq ([AgentTempManager.AtmSafeCreate]::CreateNewDirectory($q, 'x', 'nao-sid')).Error 'PROCESS_USER_UNKNOWN' 'usuario do processo obrigatorio'
+        } finally { $q.Dispose() }
+        Assert-Eq (Get-Acl -LiteralPath (Join-Path $base 'q')).Sddl $before 'ACL da pasta existente inalterada'
+    }
+    Test-Case 'Isolamento P1' 'OpenExisting: acrescenta a um manifesto existente com as checagens do escritor; ausente, aberto por outro escritor, diretorio e arquivo sem DACL protegida recusados sem escrever' {
+        $fx = New-IsoFixture 'openexisting'
+        $sid = (Get-AtmCurrentIdentity).Sid
+        $dir = $fx.E.ParentPath
+        $l = [AgentTempManager.AtmCleanLog]::Pin($dir, $sid)
+        try { Assert-Eq $l.Error $null "pasta da entrada aceita ($($l.Error))"; Assert-Eq $l.Create('manifest.jsonl') $null 'manifesto criado'; Assert-Eq $l.AppendLine('{"r":1}') $null 'registro 1'; Assert-Eq $l.Close() $null 'fechado' } finally { $l.Dispose() }
+        $l = [AgentTempManager.AtmCleanLog]::Pin($dir, $sid)
+        try { Assert-Eq $l.OpenExisting('manifest.jsonl') $null 'reaberto'; Assert-True (-not $l.Created) 'nao foi criado'; Assert-Eq $l.AppendLine('{"r":2}') $null 'registro 2'; Assert-Eq $l.Close() $null 'fechado' } finally { $l.Dispose() }
+        Assert-Eq ([IO.File]::ReadAllText((Join-Path $dir 'manifest.jsonl'))) ("{`"r`":1}`n{`"r`":2}`n") 'so acrescimo, na ordem'
+        $l = [AgentTempManager.AtmCleanLog]::Pin($dir, $sid)
+        try { Assert-Eq $l.OpenExisting('ausente.jsonl') 'NOT_FOUND' 'ausente: nunca criado'; Assert-True (-not [IO.File]::Exists((Join-Path $dir 'ausente.jsonl'))) 'nada criado' } finally { $l.Dispose() }
+        $w = [IO.File]::Open((Join-Path $dir 'manifest.jsonl'), 'Open', 'Write', 'ReadWrite')
+        try {
+            $l = [AgentTempManager.AtmCleanLog]::Pin($dir, $sid)
+            try { Assert-Eq $l.OpenExisting('manifest.jsonl') 'IN_USE' 'outro escritor aberto: recusado' } finally { $l.Dispose() }
+        } finally { $w.Dispose() }
+        [void][IO.Directory]::CreateDirectory((Join-Path $dir 'pasta'))
+        $l = [AgentTempManager.AtmCleanLog]::Pin($dir, $sid)
+        try { Assert-Eq $l.OpenExisting('pasta') 'NOT_A_FILE' 'diretorio recusado' } finally { $l.Dispose() }
+        # A file that inherited the entry's DACL (not protected): refused after opening, nothing written.
+        [IO.File]::WriteAllText((Join-Path $dir 'herdado.jsonl'), 'x')
+        $l = [AgentTempManager.AtmCleanLog]::Pin($dir, $sid)
+        try { Assert-Eq $l.OpenExisting('herdado.jsonl') 'OPENED_DACL_NOT_PROTECTED' 'DACL nao protegida: recusado'; Assert-Eq $l.AppendLine('y') 'LOG_STOPPED' 'nada escrito depois da recusa' } finally { $l.Dispose() }
+        Assert-Eq ([IO.File]::ReadAllText((Join-Path $dir 'herdado.jsonl'))) 'x' 'arquivo recusado intacto'
+    }
+    Test-Case 'Isolamento P1' 'AtmMover: move pelo handle no mesmo volume, medicao conferida antes e depois, nomes Unicode; sem medicao, medicao divergente, destino existente e destino dentro da origem recusados sem mover' {
+        $u = [string]::new([char[]]@(0x00E7, 0x00E3, 0x65E5, 0x672C))
+        $fx = New-IsoFixture 'move' @{ 'a.txt' = 3; 'sub\b.bin' = 5; "$u\$u.txt" = 7 }
+        $listing = { param($p) @((Get-StableTreeListing $p) -split "`n" | ForEach-Object { $_.Substring($p.Length) }) -join "`n" }
+        $before = & $listing $fx.Root
+        $s = Get-IsoMeasure $fx.Root
+        $r = [AgentTempManager.AtmMover]::MoveTree($fx.Root, -1, -1, -1, -1, $fx.E, 'payload', $null)
+        Assert-True (-not $r.Attempted -and $r.AbortReason -eq 'NO_VALIDATED_MEASUREMENT') "sem medicao: recusado ($($r.AbortReason))"
+        $r = [AgentTempManager.AtmMover]::MoveTree($fx.Root, $s.Files + 1, $s.Dirs, $s.Bytes, $s.NewestWriteTimeUtc.Ticks, $fx.E, 'payload', $null)
+        Assert-True (-not $r.Attempted -and $r.AbortReason -like 'PLAN_DIFFERS_FROM_VALIDATED_MEASUREMENT*') "medicao divergente: recusado ($($r.AbortReason))"
+        Assert-Eq (& $listing $fx.Root) $before 'origem intacta depois das recusas'
+        $r = Invoke-IsoMove $fx $fx.Root -Measure $s
+        Assert-True ($r.Attempted -and $r.Moved -and $r.Verified -and $null -eq $r.AbortReason) "movido e verificado ($($r.AbortReason))"
+        Assert-True ($r.RenameStatus -eq '0x00000000' -and $r.FilesAfter -eq $s.Files -and $r.BytesAfter -eq $s.Bytes -and $r.DigestAfter -ceq $r.DigestPlanned) 'mesma medicao e mesmo resumo no destino'
+        Assert-True (-not [IO.Directory]::Exists($fx.Root)) 'origem nao existe mais'
+        $dst = Join-Path $fx.E.ParentPath 'payload'
+        Assert-Eq (& $listing $dst) $before 'mesmo conteudo, nomes, tamanhos e horarios no destino'
+        # A second tree into the same name: never replaced.
+        $root2 = Join-Path $fx.Base 'src\root2'; [void][IO.Directory]::CreateDirectory($root2); [IO.File]::WriteAllText((Join-Path $root2 'x.txt'), 'x')
+        $b2 = & $listing $root2
+        $r = Invoke-IsoMove $fx $root2
+        Assert-True ($r.Attempted -and -not $r.Moved -and $r.AbortReason -eq 'MOVE_DEST_EXISTS') "destino existente ($($r.AbortReason))"
+        Assert-True ((& $listing $root2) -eq $b2 -and (& $listing $dst) -eq $before) 'origem e destino intactos'
+        # The destination folder inside the source tree.
+        $root3 = Join-Path $fx.Base 'src\root3'; [void][IO.Directory]::CreateDirectory((Join-Path $root3 'q')); [IO.File]::WriteAllText((Join-Path $root3 'x.txt'), 'x')
+        $q3 = [AgentTempManager.AtmSafeCreate]::Pin((Join-Path $root3 'q'))
+        try {
+            $s3 = Get-IsoMeasure $root3
+            $r = [AgentTempManager.AtmMover]::MoveTree($root3, $s3.Files, $s3.Dirs, $s3.Bytes, $s3.NewestWriteTimeUtc.Ticks, $q3, 'payload', $null)
+            Assert-True (-not $r.Attempted -and $r.AbortReason -eq 'DESTINATION_INSIDE_SOURCE') "destino dentro da origem ($($r.AbortReason))"
+        } finally { $q3.Dispose() }
+    }
+    Test-Case 'Isolamento P1' 'AtmMover: pontos de reparse - raiz, interior e ancestral recusados sem mover; juncao trocada na janela e detectada depois do movimento (nada fora da arvore e seguido)' {
+        $fx = New-IsoFixture 'reparse'
+        $outside = Join-Path $fx.Base 'fora'; [void][IO.Directory]::CreateDirectory($outside); [IO.File]::WriteAllText((Join-Path $outside 'alvo.txt'), 'fora')
+        # The root itself is a junction.
+        $jr = Join-Path $fx.Base 'src\jroot'; New-Junction $jr $outside
+        $r = [AgentTempManager.AtmMover]::MoveTree($jr, 1, 0, 4, 0, $fx.E, 'p1', $null)
+        Assert-True (-not $r.Attempted -and $r.AbortReason -eq 'ROOT_REPARSE_POINT') "raiz juncao ($($r.AbortReason))"
+        # A junction inside the tree.
+        New-Junction (Join-Path $fx.Root 'sub\j') $outside
+        $s = Get-IsoMeasure $fx.Root
+        $r = [AgentTempManager.AtmMover]::MoveTree($fx.Root, $s.Files, $s.Dirs, $s.Bytes, $s.NewestWriteTimeUtc.Ticks, $fx.E, 'p2', $null)
+        Assert-True (-not $r.Attempted -and $r.AbortReason -eq 'REPARSE_POINT_FOUND') "juncao interna ($($r.AbortReason))"
+        Assert-True ([IO.Directory]::Exists($fx.Root)) 'origem no lugar'
+        # An ancestor is a junction.
+        $real = Join-Path $fx.Base 'real'; [void][IO.Directory]::CreateDirectory((Join-Path $real 'arvore')); [IO.File]::WriteAllText((Join-Path $real 'arvore\x.txt'), 'x')
+        $via = Join-Path $fx.Base 'via'; New-Junction $via $real
+        $r = [AgentTempManager.AtmMover]::MoveTree((Join-Path $via 'arvore'), 1, 0, 1, 0, $fx.E, 'p3', $null)
+        Assert-True (-not $r.Attempted -and $r.AbortReason -eq 'ANCESTOR_REPARSE_POINT') "ancestral juncao ($($r.AbortReason))"
+        Assert-True ([IO.File]::Exists((Join-Path $real 'arvore\x.txt'))) 'arvore real intacta'
+        # Swapped in the window (after the measurement, before the rename): the move happens, the verification refuses it.
+        $root2 = Join-Path $fx.Base 'src\root2'; [void][IO.Directory]::CreateDirectory((Join-Path $root2 'a\sub')); [IO.File]::WriteAllText((Join-Path $root2 'a\sub\y.txt'), 'y')
+        $hook = [Action[string]]{ param($p) [IO.Directory]::Move((Join-Path $p 'a\sub'), (Join-Path $p 'a\sub-antes')); $o = cmd /c mklink /J "`"$(Join-Path $p 'a\sub')`"" "`"$outside`"" 2>&1; $null = $o }.GetNewClosure()
+        $r = Invoke-IsoMove $fx $root2 -Name 'p4' -Hook $hook
+        $movedLink = Join-Path $fx.E.ParentPath 'p4\a\sub'
+        $cleanupActions.Add([scriptblock]::Create("try { [IO.Directory]::Delete('$($movedLink.Replace("'", "''"))', `$false) } catch { }"))
+        Assert-True ($r.Moved -and -not $r.Verified -and $r.AbortReason -eq 'VERIFY_REPARSE_POINT_FOUND') "troca na janela detectada depois ($($r.AbortReason))"
+        Assert-True ([IO.File]::ReadAllText((Join-Path $outside 'alvo.txt')) -eq 'fora' -and @(Get-ChildItem -LiteralPath $outside -Force).Count -eq 1) 'nada fora da arvore foi seguido ou alterado'
+    }
+    Test-Case 'Isolamento P1' 'AtmMover: entradas abertas dentro da arvore (medicao do limite): ou recusado sem mover, ou movido e verificado; o resultado de cada caso e registrado' {
+        $outcomes = New-Object System.Collections.Generic.List[string]
+        $cases = @(
+            @{ Label = 'arquivo exclusivo'; Open = { param($root) [IO.File]::Open((Join-Path $root 'sub\b.bin'), 'Open', 'ReadWrite', 'None') } },
+            @{ Label = 'arquivo compartilhado (ReadWrite|Delete)'; Open = { param($root) [IO.File]::Open((Join-Path $root 'sub\b.bin'), 'Open', 'Read', ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)) } },
+            @{ Label = 'diretorio corrente de processo'; Open = { param($root) Start-AtmTestHelperProcess -File "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Arguments '-NoProfile -Command Start-Sleep 60' -WorkingDirectory (Join-Path $root 'sub') } }
+        )
+        $n = 0
+        foreach ($c in $cases) {
+            $n++
+            $fx = New-IsoFixture ('inuse' + $n)
+            $before = Get-StableTreeListing $fx.Root
+            $s = Get-IsoMeasure $fx.Root
+            $h = & $c.Open $fx.Root
+            if ($h -is [Diagnostics.Process]) { $cleanupActions.Add({ Stop-AtmTestHelperProcess -Process $h }.GetNewClosure()); Start-Sleep -Milliseconds 1500 }
+            try { $r = Invoke-IsoMove $fx $fx.Root -Measure $s }
+            finally { if ($h -is [Diagnostics.Process]) { Stop-AtmTestHelperProcess -Process $h } else { $h.Dispose() } }
+            if ($r.Moved) { Assert-True $r.Verified "$($c.Label): movido e verificado ($($r.AbortReason))"; $outcomes.Add("$($c.Label): MOVED") }
+            else {
+                Assert-True ($r.AbortReason -like 'MOVE_*' -or $r.AbortReason -like 'ROOT_*') "$($c.Label): recusado com codigo ($($r.AbortReason))"
+                Assert-Eq (Get-StableTreeListing $fx.Root) $before "$($c.Label): origem intacta"
+                $outcomes.Add("$($c.Label): $($r.AbortReason) $($r.RenameStatus)")
+            }
+        }
+        $os = [Environment]::OSVersion.Version.ToString(); $arch = $env:PROCESSOR_ARCHITECTURE
+        $script:caseNote = "medido ($os $arch, $($PSVersionTable.PSEdition)): " + ($outcomes -join '; ')
+    }
+    Test-Case 'Isolamento P1' 'AtmMover: caminho que passaria do limite classico so por causa do destino e recusado antes de mover; abaixo do limite move' {
+        $base = Join-Path $sandbox 'iso-long'
+        $root = Join-Path $base 's'
+        [void][IO.Directory]::CreateDirectory((Join-Path $base 'q'))
+        $q = [AgentTempManager.AtmSafeCreate]::Pin((Join-Path $base 'q'))
+        $e = [AgentTempManager.AtmSafeCreate]::CreateNewDirectory($q, 'entrada-com-nome-mais-longo', (Get-AtmCurrentIdentity).Sid)
+        try {
+            $growth = ($e.ParentPath + '\payload').Length - $root.Length
+            Assert-True ($growth -gt 0) 'o destino alonga os caminhos'
+            # The longest file path at the source is 259 (below the classic limit); after the move it would pass it.
+            $need = 259 - ($root.Length + 1)
+            $rel = ''
+            # Directory parts of 50 characters; the file name keeps 60 to 110, so every folder stays below 248 characters.
+            while ($need - $rel.Length -gt 110) { $rel += ('d' * 50) + '\' }
+            $rel += ('f' * ($need - $rel.Length))
+            $file = Join-Path $root $rel
+            [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($file)); [IO.File]::WriteAllText($file, 'x')
+            Assert-Eq $file.Length 259 'caminho de teste com 259 caracteres'
+            $s = Get-IsoMeasure $root
+            $r = [AgentTempManager.AtmMover]::MoveTree($root, $s.Files, $s.Dirs, $s.Bytes, $s.NewestWriteTimeUtc.Ticks, $e, 'payload', $null)
+            Assert-True (-not $r.Attempted -and $r.AbortReason -like 'PATH_TOO_LONG_AFTER_MOVE*' -and $r.MaxPathPlanned -eq 259) "recusado antes ($($r.AbortReason))"
+            Assert-True ([IO.File]::Exists($file)) 'origem intacta'
+            # Shortened below the limit: moved and verified.
+            $short = Join-Path $base 't'; [void][IO.Directory]::CreateDirectory((Join-Path $short 'dd')); [IO.File]::WriteAllText((Join-Path $short 'dd\f.txt'), 'x')
+            $s = Get-IsoMeasure $short
+            $r = [AgentTempManager.AtmMover]::MoveTree($short, $s.Files, $s.Dirs, $s.Bytes, $s.NewestWriteTimeUtc.Ticks, $e, 'payload', $null)
+            Assert-True ($r.Moved -and $r.Verified) "abaixo do limite: movido ($($r.AbortReason))"
+        } finally { $e.Dispose(); $q.Dispose() }
+        $script:caseNote = 'origem ja com caminho >= 260: NAO_TESTADO (o Windows PowerShell 5.1 nao enumera; a regra so aceita quando a origem ja provou)'
+    }
+    Test-Case 'Isolamento P1' 'AtmMover: outro volume recusado antes do rename (runner com segundo volume fixo)' {
+        $fx = New-IsoFixture 'xvol'
+        $other = $null
+        $sysDrive = [IO.Path]::GetPathRoot($fx.Root)
+        if ($env:GITHUB_ACTIONS -eq 'true' -and $env:RUNNER_TEMP -and -not [string]::Equals([IO.Path]::GetPathRoot($env:RUNNER_TEMP), $sysDrive, [StringComparison]::OrdinalIgnoreCase)) { $other = Join-Path $env:RUNNER_TEMP ('atm-tests-xvol-' + [guid]::NewGuid().ToString('N').Substring(0, 8)) }
+        if (-not $other) { $script:caseSkipped = $true; $script:caseNote = 'sem segundo volume fixo disponivel (fora da CI, ou runner com um volume so)'; return }
+        [void][IO.Directory]::CreateDirectory($other)
+        $q = [AgentTempManager.AtmSafeCreate]::Pin($other)
+        try {
+            if (-not $q.IsPinned) { $script:caseSkipped = $true; $script:caseNote = "segundo volume nao fixavel ($($q.Error))"; return }
+            $before = Get-StableTreeListing $fx.Root
+            $s = Get-IsoMeasure $fx.Root
+            $r = [AgentTempManager.AtmMover]::MoveTree($fx.Root, $s.Files, $s.Dirs, $s.Bytes, $s.NewestWriteTimeUtc.Ticks, $q, 'payload', $null)
+            Assert-True (-not $r.Attempted -and $r.AbortReason -eq 'OTHER_VOLUME') "outro volume ($($r.AbortReason))"
+            Assert-Eq (Get-StableTreeListing $fx.Root) $before 'origem intacta'
+            Assert-True (-not [IO.Directory]::Exists((Join-Path $other 'payload'))) 'nada no outro volume'
+        } finally { $q.Dispose() }
+    }
+    Test-Case 'Isolamento P1' 'Estatico: primitivas sem chamador de produto; o mover nunca copia, substitui, exclui, altera ACL/dono nem encerra processo; rename so pelo handle com ReplaceIfExists falso; NtSetInformationFile so no mover' {
+        $ncs = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Native.cs'))
+        $mv = $ncs.Substring($ncs.IndexOf('public static class AtmMover'))
+        $mv = $mv.Substring(0, $mv.IndexOf('public sealed class AtmJobResult'))
+        foreach ($pat in @('DeleteFile', 'DeleteTree', 'Dispose(fh)', 'FileDispositionInfo', 'DELETE_ON_CLOSE', 'CopyFile', 'MoveFileEx', 'File.Copy', 'File.Move', 'Directory.Move', 'SetSecurityInfo', 'SetNamedSecurityInfo', 'SetFileAttributes', 'TerminateProcess', 'OpenProcess', 'AdjustTokenPrivileges')) { Assert-True (-not $mv.Contains($pat)) "mover nao usa $pat" }
+        Assert-True ($mv.Contains('for (int i = 0; i < size; i++) Marshal.WriteByte(buf, i, 0);   // ReplaceIfExists = FALSE') -and $mv.Contains('int st = NtSetInformationFile(rh, out io, buf, (uint)size, FileRenameInformation);') -and $mv.Contains('const int FileRenameInformation = 10;')) 'rename pelo handle da raiz, sem substituir'
+        Assert-True ($mv.Contains('if (rinfo.VolumeSerialNumber != destination.VolumeSerial) { r.AbortReason = "OTHER_VOLUME"; return r; }') -and $mv.IndexOf('"OTHER_VOLUME"') -lt $mv.IndexOf('NtSetInformationFile(rh')) 'mesmo volume conferido antes do rename'
+        Assert-True ($mv.IndexOf('PLAN_DIFFERS_FROM_VALIDATED_MEASUREMENT') -lt $mv.IndexOf('NtSetInformationFile(rh') -and $mv.Contains('"NO_VALIDATED_MEASUREMENT"')) 'medicao obrigatoria e conferida antes do rename'
+        Assert-Eq ([regex]::Matches($ncs, 'extern int NtSetInformationFile\(').Count) 1 'NtSetInformationFile declarado uma vez'
+        Assert-True ($ncs.IndexOf('extern int NtSetInformationFile(') -gt $ncs.IndexOf('public static class AtmMover') -and $ncs.IndexOf('extern int NtSetInformationFile(') -lt $ncs.IndexOf('public sealed class AtmJobResult')) 'NtSetInformationFile so dentro do mover'
+        $nd = $ncs.Substring($ncs.IndexOf('public static AtmSafeCreateSession CreateNewDirectory'))
+        $nd = $nd.Substring(0, $nd.IndexOf('public static bool ValidName'))
+        Assert-True ($nd.Contains('FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_CREATE, FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT') -and $nd.Contains('OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE') -and $nd.Contains('"D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"') -and -not $nd.Contains('SetSecurityInfo')) 'diretorio novo relativo ao pai, sem seguir reparse, DACL so do objeto novo'
+        $oe = $ncs.Substring($ncs.IndexOf('public string OpenExisting('))
+        $oe = $oe.Substring(0, $oe.IndexOf('internal static string CheckNewFolderSecurity'))
+        Assert-True ($oe.Contains('FILE_APPEND_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE, ref oa') -and $oe.Contains('FILE_SHARE_READ, FILE_OPEN,') -and -not $oe.Contains('FILE_CREATE') -and -not $oe.Contains('FILE_WRITE_DATA')) 'abre so existente, so acrescimo, compartilhado so para leitura'
+        # -Include is ignored with -LiteralPath on Windows PowerShell 5.1: filtered by extension.
+        foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1', '.cmd') })) {
+            $t = [IO.File]::ReadAllText($fi.FullName)
+            foreach ($api in @('AtmMover', 'CreateNewDirectory', 'OpenExisting')) { Assert-True (-not $t.Contains($api)) "$($fi.Name) nao chama $api (sem chamador de produto na P1)" }
+        }
+    }
+
     # ------------------------------------------------------------------ TUI (headless) and layering
     function New-Key { param([string]$Key, [char]$Char = [char]0) return New-Object ConsoleKeyInfo($Char, [ConsoleKey]$Key, $false, $false, $false) }
     function Invoke-HeadlessTui {

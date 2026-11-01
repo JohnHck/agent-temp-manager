@@ -618,6 +618,59 @@ profile in V0.4.
 Unchanged by the proposal: the clean gates, B1, RECENT, and the rule that the tool never changes an existing ACL or
 owner, never enables privileges and never terminates processes.
 
+### Native primitives (0.3.x phase P1: in the library, used by no command yet)
+
+`Native.cs` has three primitives for isolation. No script of the product calls them; a static suite test checks it.
+
+* **`AtmMover.MoveTree`**:
+  * **Pins and checks before moving.** The ancestors of the source are pinned without `FILE_SHARE_DELETE`, as the
+    deleter pins them. The source root is opened with `DELETE`, shared for reading only, and checked: a directory, not a
+    reparse point, its final path as expected.
+  * **Validated measurement required.** The tree is measured as the deleter plans it: files, directories, bytes and
+    newest write. A reparse point, a read-only or system file, or an enumeration error refuses. The tree also gets a
+    SHA-256 digest of its metadata: names, kinds, sizes, write times and attributes, never content. The measurement
+    must equal the validated one passed in.
+  * **Refusals before the rename.** Another volume refuses (the volume serial numbers differ). So does a path that
+    would only pass 259 characters because the destination is longer: unless the source already held such a path, the
+    runtime has not shown it can enumerate one.
+  * **The rename.** It goes through the root's handle (`NtSetInformationFile`, `FileRenameInformation`) into the pinned
+    destination folder, with `ReplaceIfExists = FALSE`.
+  * **Verification after the rename.** The final path is checked, and the tree is measured again where it moved.
+    `Verified` holds only when everything is equal.
+  * **What it never does:** it never copies, replaces a name, deletes, changes attributes, ACLs or owners, enables a
+    privilege or touches a process.
+* **`AtmSafeCreate.CreateNewDirectory`**:
+  * a new directory created relative to the pinned parent's handle, without following reparse points, never under an
+    existing name;
+  * a protected DACL that what is created in it inherits: owner rights, SYSTEM and Administrators;
+  * checked through its handle, then returned pinned, so it cannot be renamed or deleted while held.
+  * Only the new object's security is set.
+* **`AtmCleanLog.OpenExisting`**:
+  * appends to an existing record file, which is never created here;
+  * the same access as a new clean log: append only, write-through, shared for reading only;
+  * the same checks through the handle: a plain file with one link, the same volume, the final path as expected, the
+    owner and a protected DACL.
+  * A refusal writes nothing.
+
+**Measured limits of the mover:**
+
+* **Open handles inside the tree.** A handle open inside the tree makes the rename fail with `STATUS_ACCESS_DENIED`
+  (`MOVE_ACCESS_DENIED`), and the tree stays where it was. That held for a file open exclusively, a file open with full
+  sharing, and a process's working directory. It was measured on Windows 10 x64 with Windows PowerShell 5.1 (local, on
+  the scratch trees of the native code). CI repeats it on every run:
+  * the suite case "entradas abertas dentro da arvore" on Windows Server 2025 and Windows 11 ARM64;
+  * the `install e2e` step `iso-p1-rename-with-open-handles` on Windows Server 2022 and 2025 and Windows 11 ARM64, with
+    the installed library.
+  
+  Either outcome is accepted there: refused with the source intact, or moved and verified. The pull request records
+  what each image gave.
+* **Handles opened between the check and the rename.** A writer that opens a file between the measurement and the
+  rename either makes the rename fail (above) or, if the rename wins, keeps writing into the moved tree. The second
+  measurement then differs (`VERIFY_MEASUREMENT_DIFFERS`), and the move is reported as not verified.
+* **A swap inside the tree.** The tree's own directories are not pinned (pins would block the rename). A swap inside it
+  after the measurement is caught by the second measurement (`VERIFY_REPARSE_POINT_FOUND`). The reparse point moves
+  with the tree and is never followed.
+
 ## Execution policy
 
 The launcher runs `powershell.exe -NoProfile -ExecutionPolicy Bypass -File <installed script>` with

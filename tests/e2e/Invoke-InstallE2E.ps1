@@ -230,6 +230,55 @@ $b = $T::Open($f, $false); $c = $T::Open($f, $true)
     "$($summary.arch): clean $($line.Split('|')[0]), junction without flag $($line.Split('|')[1]), with OBJ_DONT_REPARSE $($line.Split('|')[2])"
 }
 
+Step 'iso-p1-rename-with-open-handles' {
+    # 0.3.x isolation, ISO-P1 (contract section 6.1): the installed mover on this image and architecture, in a separate
+    # process, on trees it creates in the runner's temporary folder (never a real root). Measured: a rename of a tree
+    # with nothing open, with a file open exclusively, with a file open with full sharing, and with a process whose
+    # working directory is inside the tree. Each outcome must be refused with nothing moved, or moved and verified.
+    $dll = Join-Path $installDir 'lib\AgentTempManager.Native.dll'
+    $probe = @'
+param($Dll, $Dir)
+Add-Type -Path $Dll
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$run = Join-Path $Dir ('iso-p1-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+[void][IO.Directory]::CreateDirectory((Join-Path $run 'q'))
+$q = [AgentTempManager.AtmSafeCreate]::Pin((Join-Path $run 'q'))
+$e = [AgentTempManager.AtmSafeCreate]::CreateNewDirectory($q, 'e', $sid)
+if (-not $e.IsPinned) { "SETUP|$($q.Error)|$($e.Error)"; return }
+$out = New-Object System.Collections.Generic.List[string]
+$n = 0
+foreach ($case in @('none', 'file-exclusive', 'file-shared', 'cwd')) {
+    $n++
+    $r = Join-Path $run "t$n\root"
+    [void][IO.Directory]::CreateDirectory((Join-Path $r 'd')); [IO.File]::WriteAllText((Join-Path $r 'd\f.txt'), 'x'); [IO.File]::WriteAllText((Join-Path $r 'g.txt'), 'yy')
+    Start-Sleep -Milliseconds 500
+    $s = [AgentTempManager.AtmScanner]::ScanTree($r, 3, 4096)
+    $h = $null; $c = $null
+    if ($case -eq 'file-exclusive') { $h = [IO.File]::Open((Join-Path $r 'd\f.txt'), 'Open', 'ReadWrite', 'None') }
+    if ($case -eq 'file-shared') { $h = [IO.File]::Open((Join-Path $r 'd\f.txt'), 'Open', 'Read', ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)) }
+    if ($case -eq 'cwd') {
+        # Process.Start: the object holds the creation handle, so Kill() below can only reach this helper.
+        $psi = New-Object Diagnostics.ProcessStartInfo((Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -Command Start-Sleep 60')
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.WorkingDirectory = (Join-Path $r 'd')
+        $c = [Diagnostics.Process]::Start($psi); Start-Sleep -Milliseconds 2000
+    }
+    try { $m = [AgentTempManager.AtmMover]::MoveTree($r, $s.Files, $s.Dirs, $s.Bytes, $s.NewestWriteTimeUtc.Ticks, $e, "p$n", $null) }
+    finally { if ($null -ne $h) { $h.Dispose() }; if ($null -ne $c -and -not $c.HasExited) { $c.Kill() } }
+    $state = $(if ($m.Moved -and $m.Verified) { 'MOVED_VERIFIED' } elseif ($m.Moved) { 'MOVED_' + $m.AbortReason } elseif ([IO.File]::Exists((Join-Path $r 'd\f.txt'))) { $m.AbortReason + '_SOURCE_INTACT' } else { $m.AbortReason + '_SOURCE_MISSING' })
+    $out.Add("$case=$state")
+}
+$out -join '|'
+'@
+    $probeFile = Join-Path $OutDir 'iso-p1-mover-probe.ps1'
+    [IO.File]::WriteAllText($probeFile, $probe)
+    $dir = $(if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $OutDir })
+    $line = (& $ps51 -NoProfile -ExecutionPolicy Bypass -File $probeFile -Dll $dll -Dir $dir 2>&1 | Select-Object -Last 1) -as [string]
+    $p = @($line.Split('|'))
+    Assert ($p.Count -eq 4 -and $p[0] -eq 'none=MOVED_VERIFIED') "mover: $line"
+    foreach ($x in $p[1..3]) { Assert ($x -match '=(MOVED_VERIFIED|MOVE_[A-Z_]+_SOURCE_INTACT)$') "outcome: $x" }
+    "$($summary.os) $($summary.arch): $line"
+}
+
 Step 'services-read-only' {
     # P2-A (ADR-0005): the installed engine queries two services that every Windows has and one name that does not
     # exist, read-only, in the installer's shell; State and StartMode are identical before and after, and the process

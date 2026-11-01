@@ -17,6 +17,10 @@
 //    (no FILE_SHARE_DELETE) so names cannot be redirected, deletes by handle, aborts
 //    before deleting anything on reparse points or protected files, and stops at the
 //    first failure.
+//  * The mover (0.3.x isolation) renames one directory THROUGH ITS HANDLE into a pinned
+//    folder on the same volume, after pinning its ancestors and checking the validated
+//    measurement; it never copies, replaces a name, deletes, or changes attributes,
+//    ACLs or owners, and it measures the tree again where it moved it.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -609,6 +613,226 @@ namespace AgentTempManager
         }
     }
 
+    public sealed class AtmMoveResult
+    {
+        public string Source;
+        public string Destination;
+        public bool Attempted;          // the rename was requested
+        public bool Moved;              // the rename succeeded: the tree is at Destination
+        public bool Verified;           // moved, and the tree measured again at Destination equals the plan
+        public long FilesPlanned = -1, DirsPlanned = -1, BytesPlanned = -1, NewestTicksPlanned = -1;
+        public long FilesAfter = -1, DirsAfter = -1, BytesAfter = -1, NewestTicksAfter = -1;
+        public string DigestPlanned;
+        public string DigestAfter;
+        public int MaxPathPlanned;      // longest full path of the tree (root included) at the source
+        public string RenameStatus;     // NTSTATUS of the rename, when it was requested
+        public string AbortReason;      // no path in it
+    }
+
+    // Moves one directory tree to a new name inside a pinned destination folder ON THE SAME VOLUME (0.3.x isolation,
+    // ISO-P1; no product caller yet). It never copies, never replaces an existing name and never trusts names between
+    // checks:
+    //  1. Every ancestor of the source (volume root excluded) is opened top-down and kept open WITHOUT FILE_SHARE_DELETE,
+    //     so none of them can be renamed, deleted or replaced while the move runs. The source root is opened with DELETE,
+    //     shared for reading only, and checked (directory, not a reparse point, final path as expected).
+    //  2. The tree is measured as the deleter plans it (files, descendant directories, logical bytes, newest write; a
+    //     reparse point, a read-only or system file or an enumeration error refuses) plus a digest of its metadata
+    //     (relative name, kind, size, write time and the read-only/hidden/system/directory attributes; never content). It
+    //     must equal the validated measurement, which is mandatory.
+    //  3. The longest path after the move must stay within what this runtime has shown it can enumerate, and the source
+    //     root and the destination folder must report the same volume serial number (another volume is refused).
+    //  4. The source root is renamed THROUGH ITS HANDLE into the pinned destination folder (FileRenameInformation,
+    //     RootDirectory = the destination handle, ReplaceIfExists = FALSE). The directories of the tree are NOT pinned: a
+    //     handle open inside the tree may make the rename fail (measured in CI, docs/SECURITY-MODEL.md), and a writer that
+    //     opened a file before the move keeps writing into the moved tree. Integrity comes from measuring before and after.
+    //  5. After the rename the root's final path must be the destination, and the tree is measured again there: Verified
+    //     only when everything equals the plan. A move that succeeded but cannot be verified is reported as such.
+    // Nothing is deleted, no attribute, ACL or owner is changed, no privilege is enabled and no process is touched.
+    public static class AtmMover
+    {
+        const uint DELETE = 0x00010000, FILE_LIST_DIRECTORY = 0x0001, FILE_READ_ATTRIBUTES = 0x0080, SYNCHRONIZE = 0x00100000;
+        const uint FILE_SHARE_READ = 1, FILE_SHARE_WRITE = 2;
+        const int FileRenameInformation = 10;
+        // A path at least this long is accepted after the move only when the source already held one (the runtime has
+        // then enumerated it); the second is the Windows limit for an extended-length path.
+        const int ClassicMaxPath = 260;
+        const int MaxPathLength = 32000;
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct IO_STATUS_BLOCK { public IntPtr Status; public IntPtr Information; }
+
+        [DllImport("ntdll.dll")]
+        static extern int NtSetInformationFile(SafeFileHandle fileHandle, out IO_STATUS_BLOCK ioStatusBlock, IntPtr fileInformation, uint length, int fileInformationClass);
+
+        sealed class Measure { public long Files; public long Dirs; public long Bytes; public long Newest; public string Digest; public int MaxPath; public string Error; }
+
+        // afterMeasure: test hook invoked once the source is measured and everything is pinned, before the rename.
+        public static AtmMoveResult MoveTree(string sourceRoot, long expectedFiles, long expectedDirs, long expectedBytes, long expectedNewestTicksUtc, AtmSafeCreateSession destination, string destName, Action<string> afterMeasure)
+        {
+            AtmMoveResult r = new AtmMoveResult();
+            r.Source = sourceRoot;
+            List<SafeFileHandle> ancestors = new List<SafeFileHandle>();
+            SafeFileHandle rh = null;
+            string why;
+            try
+            {
+                if (sourceRoot == null || sourceRoot.Length < 4 || sourceRoot[1] != ':' || sourceRoot[2] != '\\') { r.AbortReason = "ROOT_INVALID"; return r; }
+                string full = Path.GetFullPath(sourceRoot).TrimEnd('\\');
+                if (!string.Equals(full, sourceRoot.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)) { r.AbortReason = "ROOT_NOT_CANONICAL"; return r; }
+                if (expectedFiles < 0 || expectedDirs < 0 || expectedBytes < 0 || expectedNewestTicksUtc < 0) { r.AbortReason = "NO_VALIDATED_MEASUREMENT"; return r; }
+                if (destination == null || !destination.IsPinned) { r.AbortReason = "DESTINATION_NOT_PINNED"; return r; }
+                if (!AtmSafeCreate.ValidName(destName)) { r.AbortReason = "DESTINATION_NAME_INVALID"; return r; }
+                string target = destination.ParentPath + "\\" + destName;
+                r.Destination = target;
+                if (string.Equals(destination.ParentPath, full, StringComparison.OrdinalIgnoreCase) || destination.ParentPath.StartsWith(full + "\\", StringComparison.OrdinalIgnoreCase)) { r.AbortReason = "DESTINATION_INSIDE_SOURCE"; return r; }
+
+                // 1. Pin the ancestors top-down (volume root excluded), then open and check the source root.
+                string[] parts = full.Substring(3).Split('\\');
+                string cur = full.Substring(0, 3);
+                for (int i = 0; i < parts.Length - 1; i++)
+                {
+                    cur = Path.Combine(cur, parts[i]);
+                    SafeFileHandle h = AtmDeleter.OpenChecked(cur, true, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE, out why);
+                    if (h == null) { r.AbortReason = "ANCESTOR_" + Code(why); return r; }
+                    ancestors.Add(h);
+                }
+                AtmDeleter.BY_HANDLE_FILE_INFORMATION rinfo;
+                rh = AtmDeleter.OpenChecked(full, true, DELETE | FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE, FILE_SHARE_READ, out why, out rinfo);
+                if (rh == null) { r.AbortReason = "ROOT_" + Code(why); return r; }
+
+                // 2. Measure and compare with the validated measurement.
+                Measure m = MeasureTree(full);
+                if (m.Error != null) { r.AbortReason = m.Error; return r; }
+                r.FilesPlanned = m.Files; r.DirsPlanned = m.Dirs; r.BytesPlanned = m.Bytes; r.NewestTicksPlanned = m.Newest; r.DigestPlanned = m.Digest; r.MaxPathPlanned = m.MaxPath;
+                if (m.Files != expectedFiles || m.Dirs != expectedDirs || m.Bytes != expectedBytes || m.Newest != expectedNewestTicksUtc)
+                {
+                    r.AbortReason = "PLAN_DIFFERS_FROM_VALIDATED_MEASUREMENT (files " + m.Files + "/" + expectedFiles + ", dirs " + m.Dirs + "/" + expectedDirs + ", bytes " + m.Bytes + "/" + expectedBytes + ", newest " + m.Newest + "/" + expectedNewestTicksUtc + ")";
+                    return r;
+                }
+
+                // 3. Path length after the move, and the same volume.
+                int maxAfter = m.MaxPath + (target.Length - full.Length);
+                if (maxAfter > MaxPathLength || (maxAfter >= ClassicMaxPath && m.MaxPath < ClassicMaxPath)) { r.AbortReason = "PATH_TOO_LONG_AFTER_MOVE (" + maxAfter + ")"; return r; }
+                if (rinfo.VolumeSerialNumber != destination.VolumeSerial) { r.AbortReason = "OTHER_VOLUME"; return r; }
+
+                if (afterMeasure != null) afterMeasure(full);
+                if (!AtmDeleter.StillPlainDirectory(rh)) { r.AbortReason = "ROOT_CHANGED"; return r; }
+                if (!AtmDeleter.StillPlainDirectory(destination.Parent)) { r.AbortReason = "DESTINATION_CHANGED"; return r; }
+
+                // 4. Rename through the handle into the pinned destination folder, never replacing a name.
+                byte[] nb = Encoding.Unicode.GetBytes(destName);
+                int offRoot = IntPtr.Size, offLen = 2 * IntPtr.Size, offName = 2 * IntPtr.Size + 4;
+                int size = offName + nb.Length + 2;
+                IntPtr buf = Marshal.AllocHGlobal(size);
+                bool destRef = false;
+                try
+                {
+                    for (int i = 0; i < size; i++) Marshal.WriteByte(buf, i, 0);   // ReplaceIfExists = FALSE
+                    destination.Parent.DangerousAddRef(ref destRef);
+                    Marshal.WriteIntPtr(buf, offRoot, destination.Parent.DangerousGetHandle());
+                    Marshal.WriteInt32(buf, offLen, nb.Length);
+                    Marshal.Copy(nb, 0, new IntPtr(buf.ToInt64() + offName), nb.Length);
+                    r.Attempted = true;
+                    IO_STATUS_BLOCK io;
+                    int st = NtSetInformationFile(rh, out io, buf, (uint)size, FileRenameInformation);
+                    r.RenameStatus = "0x" + st.ToString("X8");
+                    if (st != 0) { r.AbortReason = RenameCode(st); return r; }
+                }
+                finally
+                {
+                    if (destRef) destination.Parent.DangerousRelease();
+                    Marshal.FreeHGlobal(buf);
+                }
+                r.Moved = true;
+
+                // 5. Where it is now, and what it holds.
+                string fp = AtmDeleter.FinalPath(rh);
+                if (fp == null || !string.Equals(fp.TrimEnd('\\'), target, StringComparison.OrdinalIgnoreCase)) { r.AbortReason = "VERIFY_ELSEWHERE"; return r; }
+                if (!AtmDeleter.StillPlainDirectory(rh)) { r.AbortReason = "VERIFY_ROOT_CHANGED"; return r; }
+                Measure a = MeasureTree(target);
+                r.FilesAfter = a.Files; r.DirsAfter = a.Dirs; r.BytesAfter = a.Bytes; r.NewestTicksAfter = a.Newest; r.DigestAfter = a.Digest;
+                if (a.Error != null) { r.AbortReason = "VERIFY_" + a.Error; return r; }
+                if (a.Files != m.Files || a.Dirs != m.Dirs || a.Bytes != m.Bytes || a.Newest != m.Newest || !string.Equals(a.Digest, m.Digest, StringComparison.Ordinal)) { r.AbortReason = "VERIFY_MEASUREMENT_DIFFERS"; return r; }
+                r.Verified = true;
+                return r;
+            }
+            catch (Exception ex) { r.AbortReason = (r.Moved ? "VERIFY_" : "MOVE_") + "EXCEPTION_" + ex.GetType().Name; return r; }
+            finally
+            {
+                if (rh != null) rh.Dispose();
+                foreach (SafeFileHandle h in ancestors) h.Dispose();
+            }
+        }
+
+        // The deleter's plan of a tree, plus a digest of its metadata. No content is read and no path is kept.
+        static Measure MeasureTree(string root)
+        {
+            Measure m = new Measure();
+            List<string> lines = new List<string>();
+            List<string> dirs = new List<string>();
+            try { m.Newest = new DirectoryInfo(root).LastWriteTimeUtc.Ticks; } catch (Exception ex) { m.Error = "ROOT_TIME_UNREADABLE_" + ex.GetType().Name; return m; }
+            m.MaxPath = root.Length;
+            dirs.Add(root);
+            FileAttributes kept = FileAttributes.ReadOnly | FileAttributes.Hidden | FileAttributes.System | FileAttributes.Directory;
+            for (int k = 0; k < dirs.Count; k++)
+            {
+                try
+                {
+                    foreach (FileSystemInfo fi in new DirectoryInfo(dirs[k]).EnumerateFileSystemInfos())
+                    {
+                        FileAttributes a = fi.Attributes;
+                        if ((a & FileAttributes.ReparsePoint) != 0) { m.Error = "REPARSE_POINT_FOUND"; return m; }
+                        string full = fi.FullName;
+                        if (full.Length > m.MaxPath) m.MaxPath = full.Length;
+                        long wt = fi.LastWriteTimeUtc.Ticks;
+                        if (wt > m.Newest) m.Newest = wt;
+                        string rel = full.Substring(root.Length + 1);
+                        int attrs = (int)(a & kept);
+                        if ((a & FileAttributes.Directory) != 0)
+                        {
+                            m.Dirs++;
+                            dirs.Add(full);
+                            lines.Add(rel + "\tD\t0\t" + wt + "\t" + attrs);
+                        }
+                        else
+                        {
+                            if ((a & (FileAttributes.ReadOnly | FileAttributes.System)) != 0) { m.Error = "PROTECTED_FILE_FOUND"; return m; }
+                            long len = ((FileInfo)fi).Length;
+                            m.Files++;
+                            m.Bytes += len;
+                            lines.Add(rel + "\tF\t" + len + "\t" + wt + "\t" + attrs);
+                        }
+                    }
+                }
+                catch (Exception ex) { m.Error = "ENUMERATION_FAILED_" + ex.GetType().Name; return m; }
+            }
+            lines.Sort(StringComparer.Ordinal);
+            using (System.Security.Cryptography.SHA256 sha = System.Security.Cryptography.SHA256.Create())
+            {
+                byte[] h = sha.ComputeHash(new UTF8Encoding(false).GetBytes(string.Join("\n", lines.ToArray())));
+                m.Digest = BitConverter.ToString(h).Replace("-", "");
+            }
+            return m;
+        }
+
+        static string RenameCode(int st)
+        {
+            if (st == unchecked((int)0xC0000035)) return "MOVE_DEST_EXISTS";
+            if (st == unchecked((int)0xC0000043)) return "MOVE_REFUSED_IN_USE";
+            if (st == unchecked((int)0xC0000022)) return "MOVE_ACCESS_DENIED";
+            if (st == unchecked((int)0xC00000D4)) return "MOVE_OTHER_VOLUME";
+            if (st == unchecked((int)0xC0000034) || st == unchecked((int)0xC000003A)) return "MOVE_DESTINATION_NOT_FOUND";
+            return "MOVE_NTSTATUS_0x" + st.ToString("X8");
+        }
+
+        static string Code(string why)
+        {
+            if (why == null) return "UNKNOWN";
+            int i = why.IndexOf(':');
+            return i > 0 ? why.Substring(0, i) : why;
+        }
+    }
+
     public sealed class AtmJobResult
     {
         public bool Started;
@@ -693,6 +917,7 @@ namespace AgentTempManager
         const uint OBJ_CASE_INSENSITIVE = 0x40, OBJ_DONT_REPARSE = 0x1000;
         const uint FILE_CREATE = 2;
         const uint FILE_SYNCHRONOUS_IO_NONALERT = 0x20, FILE_NON_DIRECTORY_FILE = 0x40, FILE_OPEN_REPARSE_POINT = 0x00200000;
+        const uint FILE_DIRECTORY_FILE = 0x1;
         const uint FILE_ATTRIBUTE_NORMAL = 0x80;
         const uint ATTR_DIRECTORY = 0x10, ATTR_REPARSE = 0x400;
 
@@ -819,6 +1044,84 @@ namespace AgentTempManager
             }
         }
 
+        // Creates dirName in the pinned folder (0.3.x isolation, ISO-P1; no product caller yet): a NEW directory, created
+        // RELATIVE TO THE PARENT HANDLE (NtCreateFile, RootDirectory, OBJ_DONT_REPARSE, FILE_OPEN_REPARSE_POINT,
+        // FILE_DIRECTORY_FILE, FILE_CREATE: never an existing name, never through a reparse point) with a protected DACL
+        // that what is later created in it inherits (its owner, SYSTEM, Administrators). Only the new object's security is
+        // set; no existing ACL is changed. The directory is verified through its handle (a directory, not a reparse point,
+        // same volume, final path as expected; owner and DACL as created: AtmCleanLog's folder rule) and returned as a new
+        // session pinned on it, shared for reading and writing but never for deletion, so it cannot be renamed, deleted or
+        // replaced while held. The parent session must stay open for as long as the new one is used; dispose both. Check
+        // Error: a code that starts with CREATED_ means the directory exists (it may remain, empty; it is never removed).
+        // processUserSid: the user SID of this process's token.
+        public static AtmSafeCreateSession CreateNewDirectory(AtmSafeCreateSession s, string dirName, string processUserSid)
+        {
+            AtmSafeCreateSession n = new AtmSafeCreateSession();
+            if (s == null || !s.IsPinned) { n.Error = "NOT_PINNED"; return n; }
+            if (string.IsNullOrEmpty(processUserSid) || !processUserSid.StartsWith("S-1-", StringComparison.Ordinal)) { n.Error = "PROCESS_USER_UNKNOWN"; return n; }
+            if (!ValidName(dirName)) { n.Error = "DIR_NAME_INVALID"; return n; }
+            if (!AtmDeleter.StillPlainDirectory(s.Parent)) { n.Error = "PARENT_CHANGED"; return n; }
+            IntPtr sd = IntPtr.Zero, namePtr = IntPtr.Zero, objName = IntPtr.Zero, raw = IntPtr.Zero;
+            SafeFileHandle dh = null;
+            bool parentRef = false, keep = false;
+            try
+            {
+                // Protected DACL, inherited by files and folders created in it: owner rights, SYSTEM and Administrators only.
+                uint sdSize;
+                if (!ConvertStringSecurityDescriptorToSecurityDescriptorW("D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", 1, out sd, out sdSize)) { n.Error = "SECURITY_DESCRIPTOR_FAILED"; return n; }
+                namePtr = Marshal.StringToHGlobalUni(dirName);
+                UNICODE_STRING us = new UNICODE_STRING();
+                us.Length = (ushort)(dirName.Length * 2); us.MaximumLength = (ushort)(dirName.Length * 2); us.Buffer = namePtr;
+                objName = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UNICODE_STRING)));
+                Marshal.StructureToPtr(us, objName, false);
+                s.Parent.DangerousAddRef(ref parentRef);
+                OBJECT_ATTRIBUTES oa = new OBJECT_ATTRIBUTES();
+                oa.Length = Marshal.SizeOf(typeof(OBJECT_ATTRIBUTES));
+                oa.RootDirectory = s.Parent.DangerousGetHandle();
+                oa.ObjectName = objName;
+                oa.Attributes = OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE;
+                oa.SecurityDescriptor = sd;
+                IO_STATUS_BLOCK io;
+                int st = NtCreateFile(out raw, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE, ref oa, out io, IntPtr.Zero, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_CREATE, FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT, IntPtr.Zero, 0);
+                if (st != 0)
+                {
+                    // Name already taken (a file, a directory, a junction or a symbolic link): never reused.
+                    if (st == unchecked((int)0xC0000035) || st == unchecked((int)0xC00000BA)) { n.Error = "EXISTS"; return n; }
+                    if (st == unchecked((int)0xC0000022)) { n.Error = "ACCESS_DENIED"; return n; }
+                    if (st == unchecked((int)0xC000050B) || st == unchecked((int)0xC0000280)) { n.Error = "REPARSE_REFUSED"; return n; }
+                    n.Error = "NTSTATUS_0x" + st.ToString("X8");
+                    return n;
+                }
+                dh = new SafeFileHandle(raw, true);
+                raw = IntPtr.Zero;
+                AtmDeleter.BY_HANDLE_FILE_INFORMATION di;
+                if (!AtmDeleter.GetFileInformationByHandle(dh, out di)) { n.Error = "CREATED_NO_INFO"; return n; }
+                if ((di.FileAttributes & ATTR_DIRECTORY) == 0 || (di.FileAttributes & ATTR_REPARSE) != 0) { n.Error = "CREATED_NOT_PLAIN_DIRECTORY"; return n; }
+                if (di.VolumeSerialNumber != s.VolumeSerial) { n.Error = "CREATED_OTHER_VOLUME"; return n; }
+                string expected = s.ParentPath + "\\" + dirName;
+                string fp = AtmDeleter.FinalPath(dh);
+                if (fp == null || !string.Equals(fp.TrimEnd('\\'), expected, StringComparison.OrdinalIgnoreCase)) { n.Error = "CREATED_ELSEWHERE"; return n; }
+                string sec = AtmCleanLog.CheckNewFolderSecurity(dh, processUserSid);
+                if (sec != null) { n.Error = "CREATED_" + sec; return n; }
+                if (!AtmDeleter.StillPlainDirectory(s.Parent)) { n.Error = "CREATED_PARENT_CHANGED"; return n; }
+                n.Parent = dh;
+                n.ParentPath = expected;
+                n.VolumeSerial = di.VolumeSerialNumber;
+                keep = true;
+                return n;
+            }
+            catch (Exception ex) { n.Error = (dh != null ? "CREATED_" : "CREATE_") + ex.GetType().Name; return n; }
+            finally
+            {
+                if (!keep && dh != null) dh.Dispose();
+                if (raw != IntPtr.Zero) { SafeFileHandle tmp = new SafeFileHandle(raw, true); tmp.Dispose(); }
+                if (parentRef) s.Parent.DangerousRelease();
+                if (objName != IntPtr.Zero) Marshal.FreeHGlobal(objName);
+                if (namePtr != IntPtr.Zero) Marshal.FreeHGlobal(namePtr);
+                if (sd != IntPtr.Zero) LocalFree(sd);
+            }
+        }
+
         // One plain name: no separator, stream, wildcard, control character, trailing dot or space, dot names or DOS
         // device names (CON, NUL, AUX, PRN, COM1-9, LPT1-9, with or without an extension).
         public static bool ValidName(string n)
@@ -856,7 +1159,7 @@ namespace AgentTempManager
         const uint FILE_APPEND_DATA = 0x0004, FILE_READ_ATTRIBUTES = 0x0080, READ_CONTROL = 0x00020000, SYNCHRONIZE = 0x00100000;
         const uint FILE_SHARE_READ = 1, FILE_SHARE_WRITE = 2;
         const uint OBJ_CASE_INSENSITIVE = 0x40, OBJ_DONT_REPARSE = 0x1000;
-        const uint FILE_CREATE = 2;
+        const uint FILE_OPEN = 1, FILE_CREATE = 2;
         const uint FILE_WRITE_THROUGH = 0x2, FILE_SYNCHRONOUS_IO_NONALERT = 0x20, FILE_NON_DIRECTORY_FILE = 0x40, FILE_OPEN_REPARSE_POINT = 0x00200000;
         const uint FILE_ATTRIBUTE_NORMAL = 0x80;
         const uint ATTR_DIRECTORY = 0x10, ATTR_REPARSE = 0x400;
@@ -1002,6 +1305,74 @@ namespace AgentTempManager
                 if (namePtr != IntPtr.Zero) Marshal.FreeHGlobal(namePtr);
                 if (sd != IntPtr.Zero) LocalFree(sd);
             }
+        }
+
+        // Opens fileName, an EXISTING record file of the pinned folder (a quarantine manifest, 0.3.x isolation, ISO-P1; no
+        // product caller yet), to append to it: relative to the pinned folder handle (OBJ_DONT_REPARSE,
+        // FILE_OPEN_REPARSE_POINT, FILE_OPEN: never created here, never through a reparse point), with the same access as
+        // Create (FILE_APPEND_DATA without FILE_WRITE_DATA, write-through, shared for reading only, so a handle that can
+        // write it already makes the open fail), and verified through the handle exactly as Create verifies a new file (a
+        // plain file with one link, same volume, final path as expected, owner and protected DACL) before the first byte.
+        // Returns null when open, otherwise a code; a code that starts with OPENED_ means the file was opened and refused:
+        // nothing is written to it and it is left as it was.
+        public string OpenExisting(string fileName)
+        {
+            if (Error != null) return Error;
+            if (session == null || !session.IsPinned) return Stop("NOT_PINNED");
+            if (Created || file != null) return Stop("ALREADY_OPEN");
+            if (!AtmSafeCreate.ValidName(fileName)) return Stop("FILE_NAME_INVALID");
+            if (!AtmDeleter.StillPlainDirectory(session.Parent)) return Stop("PARENT_CHANGED");
+            IntPtr namePtr = IntPtr.Zero, objName = IntPtr.Zero, raw = IntPtr.Zero;
+            bool parentRef = false;
+            try
+            {
+                namePtr = Marshal.StringToHGlobalUni(fileName);
+                UNICODE_STRING us = new UNICODE_STRING();
+                us.Length = (ushort)(fileName.Length * 2); us.MaximumLength = (ushort)(fileName.Length * 2); us.Buffer = namePtr;
+                objName = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UNICODE_STRING)));
+                Marshal.StructureToPtr(us, objName, false);
+                session.Parent.DangerousAddRef(ref parentRef);
+                OBJECT_ATTRIBUTES oa = new OBJECT_ATTRIBUTES();
+                oa.Length = Marshal.SizeOf(typeof(OBJECT_ATTRIBUTES));
+                oa.RootDirectory = session.Parent.DangerousGetHandle();
+                oa.ObjectName = objName;
+                oa.Attributes = OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE;
+                IO_STATUS_BLOCK io;
+                int st = NtCreateFile(out raw, FILE_APPEND_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE, ref oa, out io, IntPtr.Zero, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_OPEN, FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT | FILE_WRITE_THROUGH, IntPtr.Zero, 0);
+                if (st != 0)
+                {
+                    if (st == unchecked((int)0xC0000034) || st == unchecked((int)0xC000003A)) return Stop("NOT_FOUND");
+                    if (st == unchecked((int)0xC0000043)) return Stop("IN_USE");
+                    if (st == unchecked((int)0xC0000022)) return Stop("ACCESS_DENIED");
+                    if (st == unchecked((int)0xC00000BA)) return Stop("NOT_A_FILE");
+                    if (st == unchecked((int)0xC000050B) || st == unchecked((int)0xC0000280)) return Stop("REPARSE_REFUSED");
+                    return Stop("NTSTATUS_0x" + st.ToString("X8"));
+                }
+                file = new SafeFileHandle(raw, true);
+                raw = IntPtr.Zero;
+                expected = session.ParentPath + "\\" + fileName;
+                string why = CheckFile();
+                if (why == null) why = CheckSecurity(file, new string[] { userSid, AdministratorsSid }, new string[] { userSid, SystemSid, AdministratorsSid, OwnerRightsSid }, FileChangeRights, true, "");
+                if (why == null && !AtmDeleter.StillPlainDirectory(session.Parent)) why = "PARENT_CHANGED";
+                if (why != null) return Stop("OPENED_" + why);
+                return null;
+            }
+            catch (Exception ex) { return Stop((file != null ? "OPENED_" : "OPEN_") + ex.GetType().Name); }
+            finally
+            {
+                if (raw != IntPtr.Zero) { SafeFileHandle tmp = new SafeFileHandle(raw, true); tmp.Dispose(); }
+                if (parentRef) session.Parent.DangerousRelease();
+                if (objName != IntPtr.Zero) Marshal.FreeHGlobal(objName);
+                if (namePtr != IntPtr.Zero) Marshal.FreeHGlobal(namePtr);
+            }
+        }
+
+        // The security of a folder just created by AtmSafeCreate.CreateNewDirectory, read through its handle: owned by the
+        // process user (or Administrators, the default owner of an elevated administrator), a protected DACL, and no
+        // principal outside the process user, SYSTEM, Administrators and OWNER RIGHTS that can change it.
+        internal static string CheckNewFolderSecurity(SafeFileHandle h, string processUserSid)
+        {
+            return CheckSecurity(h, new string[] { processUserSid, AdministratorsSid }, new string[] { processUserSid, SystemSid, AdministratorsSid, OwnerRightsSid }, FolderChangeRights, true, "");
         }
 
         // Writes one record (one line; the LF is added here) through the handle, then flushes it. Returns null when the
