@@ -502,7 +502,9 @@ It then stops, with exit code `3`:
 
 What it does not do, in any copy:
 * It asks nothing.
-* It takes no lock and opens no log (`-LogFile` is not used).
+* It takes no lock (the B8 clean lock is not used) and opens no log (`-LogFile` is not used). Like clean's plan, the
+  gates' in-use probe still opens each entry of a candidate root for a moment, with `DELETE` access and no sharing, and
+  reads no data.
 * It creates no quarantine and moves, creates or removes nothing.
 
 The confirmed, locked and logged move, and the quarantine commands (`list`, `inspect`, `verify`, `restore`, `purge`), are

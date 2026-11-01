@@ -3467,7 +3467,7 @@ exit 0
         $st.Presenter = { param($v, $r, $i, $planId) $st.Calls.Add([pscustomobject]@{ Verified = @($v); Rejected = @($r); PlanId = $planId }) }.GetNewClosure()
         return $st
     }
-    function Get-IsoRejectedReasons { param($Result, [string]$Path) return (@(@($Result.Rejected) | Where-Object { $_.Path -eq $Path } | ForEach-Object { @($_.Reasons) }) -join ' ; ') }
+    function Get-IsoRejectedReason { param($Result, [string]$Path) return (@(@($Result.Rejected) | Where-Object { $_.Path -eq $Path } | ForEach-Object { @($_.Reasons) }) -join ' ; ') }
 
     Test-Case 'Isolamento P2' 'Trava do isolamento: uma unica atribuicao a $false na fonte, conferida pelo build, pelo e2e da instalacao e mostrada em version; nenhum outro arquivo a altera; o motor e obrigatorio e carregado pelo lancador' {
         $iso = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Isolate.ps1'))
@@ -3494,7 +3494,7 @@ exit 0
         $rec = New-IsoPlanRecorder
         $res = Invoke-AtmIsolate -Entries @([pscustomobject]@{ Source = 't'; Path = $r; Fingerprint = $null }) -PlanPresenter $rec.Presenter -InventoryArgs (Get-InvArgs -Profiles @($p))
         Assert-Eq $res.Aborted 'ISOLAMENTO_REAL_DESABILITADO' 'parado pela trava'
-        Assert-True (@($res.Verified).Count -eq 1 -and $res.Verified[0].Path -eq $r) "raiz aprovada ($(Get-IsoRejectedReasons $res $r))"
+        Assert-True (@($res.Verified).Count -eq 1 -and $res.Verified[0].Path -eq $r) "raiz aprovada ($(Get-IsoRejectedReason $res $r))"
         Assert-True ($rec.Calls.Count -eq 1 -and $rec.Calls[0].PlanId -match '^[0-9a-f]{64}$' -and $rec.Calls[0].PlanId -eq $res.PlanId) 'plano apresentado uma vez, com o plan id'
         Assert-Eq (Get-StableTreeListing $p.ProfilePath) $before 'perfil identico: nada criado, movido ou removido'
         # The engine has no reader, lock, log, quarantine or mover in this phase.
@@ -3512,36 +3512,36 @@ exit 0
         $ia = Get-InvArgs -Profiles @($p, $p2)
         $paths = @($scope, $base, $r2, $odd, $r, $r, 'relativo\x', (Join-Path $sandbox 'nao-inventariado'))
         $res = Invoke-AtmIsolate -Entries @($paths | ForEach-Object { [pscustomobject]@{ Source = 't'; Path = $_; Fingerprint = $null } }) -PlanPresenter (New-IsoPlanRecorder).Presenter -InventoryArgs $ia
-        Assert-True ((Get-IsoRejectedReasons $res $scope) -match '^ISOLAMENTO_ESCOPO_NAO_LIBERADO_0_3X') "escopo ($(Get-IsoRejectedReasons $res $scope))"
-        Assert-True ((Get-IsoRejectedReasons $res $base) -match '^ISOLAMENTO_BASE_NAO_LIBERADA_0_3X') "base ($(Get-IsoRejectedReasons $res $base))"
-        Assert-True ((Get-IsoRejectedReasons $res $r2) -match 'ALVO_FORA_DO_PROPRIO_PERFIL') "outro perfil ($(Get-IsoRejectedReasons $res $r2))"
-        Assert-True ((Get-IsoRejectedReasons $res $odd) -match 'ALVO_NAO_ISOLAVEL_0_3X \(UnrecognizedDir\)') "nao e raiz de sessao ($(Get-IsoRejectedReasons $res $odd))"
-        Assert-True ((Get-IsoRejectedReasons $res $r) -match 'DUPLICADO_NA_ALLOWLIST') 'duplicado recusado'
-        Assert-True ((Get-IsoRejectedReasons $res 'relativo\x') -match 'NOT_ABSOLUTE_LOCAL_PATH') 'sintaxe recusada'
-        Assert-True ((Get-IsoRejectedReasons $res (Join-Path $sandbox 'nao-inventariado')) -match '^FORA_DAS_ROOTS_PERMITIDAS') 'fora do inventario recusado'
+        Assert-True ((Get-IsoRejectedReason $res $scope) -match '^ISOLAMENTO_ESCOPO_NAO_LIBERADO_0_3X') "escopo ($(Get-IsoRejectedReason $res $scope))"
+        Assert-True ((Get-IsoRejectedReason $res $base) -match '^ISOLAMENTO_BASE_NAO_LIBERADA_0_3X') "base ($(Get-IsoRejectedReason $res $base))"
+        Assert-True ((Get-IsoRejectedReason $res $r2) -match 'ALVO_FORA_DO_PROPRIO_PERFIL') "outro perfil ($(Get-IsoRejectedReason $res $r2))"
+        Assert-True ((Get-IsoRejectedReason $res $odd) -match 'ALVO_NAO_ISOLAVEL_0_3X \(UnrecognizedDir\)') "nao e raiz de sessao ($(Get-IsoRejectedReason $res $odd))"
+        Assert-True ((Get-IsoRejectedReason $res $r) -match 'DUPLICADO_NA_ALLOWLIST') 'duplicado recusado'
+        Assert-True ((Get-IsoRejectedReason $res 'relativo\x') -match 'NOT_ABSOLUTE_LOCAL_PATH') 'sintaxe recusada'
+        Assert-True ((Get-IsoRejectedReason $res (Join-Path $sandbox 'nao-inventariado')) -match '^FORA_DAS_ROOTS_PERMITIDAS') 'fora do inventario recusado'
         Assert-True (@($res.Verified).Count -eq 1 -and $res.Verified[0].Path -eq $r -and $res.Aborted -eq 'ISOLAMENTO_REAL_DESABILITADO') 'so a raiz de sessao exata do proprio perfil passa'
         # RECENT: the same root seen now (not ten days later) is recent and blocked.
         $iaNow = Get-InvArgs -Profiles @($p); $iaNow['NowUtc'] = [datetime]::UtcNow
         $res = Invoke-AtmIsolate -Entries @([pscustomobject]@{ Source = 't'; Path = $r; Fingerprint = $null }) -PlanPresenter (New-IsoPlanRecorder).Presenter -InventoryArgs $iaNow
-        Assert-True ($res.Aborted -eq 'NENHUM_CAMINHO_ISOLAVEL' -and (Get-IsoRejectedReasons $res $r) -match 'RECENT') "RECENT bloqueia ($(Get-IsoRejectedReasons $res $r))"
+        Assert-True ($res.Aborted -eq 'NENHUM_CAMINHO_ISOLAVEL' -and (Get-IsoRejectedReason $res $r) -match 'RECENT') "RECENT bloqueia ($(Get-IsoRejectedReason $res $r))"
         $res = Invoke-AtmIsolate -Entries @([pscustomobject]@{ Source = 't'; Path = $r; Fingerprint = 'diferente' }) -PlanPresenter (New-IsoPlanRecorder).Presenter -InventoryArgs (Get-InvArgs -Profiles @($p))
-        Assert-True ((Get-IsoRejectedReasons $res $r) -match 'ALTERADO_DESDE_O_PREVIEW') 'fingerprint divergente recusado'
+        Assert-True ((Get-IsoRejectedReason $res $r) -match 'ALTERADO_DESDE_O_PREVIEW') 'fingerprint divergente recusado'
         # The exact case of the inventoried path is required (the same rule as clean).
         $last = Split-Path -Leaf $r; $upper = (Split-Path -Parent $r) + '\' + $last.ToUpperInvariant()
         $res = Invoke-AtmIsolate -Entries @([pscustomobject]@{ Source = 't'; Path = $upper; Fingerprint = $null }) -PlanPresenter (New-IsoPlanRecorder).Presenter -InventoryArgs (Get-InvArgs -Profiles @($p))
-        Assert-True ((Get-IsoRejectedReasons $res $upper) -match 'CAIXA_DIVERGENTE') "caixa divergente ($(Get-IsoRejectedReasons $res $upper))"
+        Assert-True ((Get-IsoRejectedReason $res $upper) -match 'CAIXA_DIVERGENTE') "caixa divergente ($(Get-IsoRejectedReason $res $upper))"
     }
     Test-Case 'Isolamento P2' 'Excecao B1 por raiz (J-ISO-2 b): com a trava fechada a raiz sob B1 e recusada mesmo com -AcceptB1ResidualRisk; alem da trava (so no processo da suite) entra no plano como risco declarado e a execucao para depois do plano, nada movido' {
         $ctx = New-TestB1Context 'isob1'
         $r = $ctx.F.Roots[0]
         $before = Get-StableTreeListing $r
         $res = Invoke-AtmIsolate -Entries @([pscustomobject]@{ Source = 't'; Path = $r; Fingerprint = $null }) -PlanPresenter (New-IsoPlanRecorder).Presenter -InventoryArgs $ctx.IA -AcceptB1ResidualRisk
-        Assert-True ($res.Aborted -eq 'NENHUM_CAMINHO_ISOLAVEL' -and (Get-IsoRejectedReasons $res $r) -match 'COBERTURA_DE_PROCESSOS_INCOMPLETA') "trava fechada: B1 recusa ($(Get-IsoRejectedReasons $res $r))"
+        Assert-True ($res.Aborted -eq 'NENHUM_CAMINHO_ISOLAVEL' -and (Get-IsoRejectedReason $res $r) -match 'COBERTURA_DE_PROCESSOS_INCOMPLETA') "trava fechada: B1 recusa ($(Get-IsoRejectedReason $res $r))"
         $rec = New-IsoPlanRecorder
         $script:AtmIsolationEnabled = $true
         try { $res = Invoke-AtmIsolate -Entries @([pscustomobject]@{ Source = 't'; Path = $r; Fingerprint = $null }) -PlanPresenter $rec.Presenter -InventoryArgs $ctx.IA -AcceptB1ResidualRisk }
         finally { $script:AtmIsolationEnabled = $false }
-        Assert-True ($res.Aborted -eq 'ISOLAMENTO_ALEM_DA_TRAVA_NAO_IMPLEMENTADO' -and @($res.Verified).Count -eq 1) "alem da trava: plano com a raiz sob B1, depois parado ($($res.Aborted); $(Get-IsoRejectedReasons $res $r))"
+        Assert-True ($res.Aborted -eq 'ISOLAMENTO_ALEM_DA_TRAVA_NAO_IMPLEMENTADO' -and @($res.Verified).Count -eq 1) "alem da trava: plano com a raiz sob B1, depois parado ($($res.Aborted); $(Get-IsoRejectedReason $res $r))"
         Assert-True ($rec.Calls.Count -eq 1 -and $rec.Calls[0].PlanId -match '^[0-9a-f]{64}$') 'plano apresentado com plan id'
         Assert-Eq (Get-StableTreeListing $r) $before 'raiz intacta'
         Assert-Eq $script:AtmIsolationEnabled $false 'trava restaurada'
