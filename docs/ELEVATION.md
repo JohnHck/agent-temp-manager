@@ -77,3 +77,15 @@ and asks for its own confirmation (PRIV-8).
 question as a documented decision before V0.3: elevation on demand is acceptable only as an explicit, opt-in
 option for a single destructive operation that meets PRIV-2 to PRIV-9, with the plan rebuilt and confirmed in the
 elevated window. If those conditions cannot all be met and tested, manual elevation stays.
+
+**Acting on another user's profile (V0.4, PROPOSED).** The Recovery Mode proposed in
+[ADR-0013](adr/ADR-0013-isolation-quarantine-recovery-mode.md) runs from another, elevated administrator account and
+moves agent temporary data out of a profile that cannot be used. That is the `-IncludeOtherUsers` case of this
+document, and it depends on:
+
+* this elevation-model decision;
+* PRIV-5 (showing the requester next to the acting identity);
+* PRIV-6, PRIV-8 and PRIV-9 inside the acting process.
+
+Its own open decision is ISO-D3: manual elevation only (recommended), or elevation on demand for that single
+operation. Nothing in the current behaviour changes.

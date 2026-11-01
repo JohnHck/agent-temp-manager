@@ -241,3 +241,29 @@ headless TUI defaults to Unicode on Windows PowerShell 5.1 too; the ASCII fallba
 environmental reasons that the product reports correctly (for example a TEMP folder that other local accounts can
 write: the sandbox then inherits that ACL and the gates block it, as they should). Those failures stay failures; the
 record of a local run and its causes is in [release/V0.2-LOCAL-TEST-ENVIRONMENT.md](release/V0.2-LOCAL-TEST-ENVIRONMENT.md).
+
+## Future: isolation, quarantine and Recovery Mode (V0.4, proposed)
+
+Criteria proposed by [ADR-0013](adr/ADR-0013-isolation-quarantine-recovery-mode.md) for accepting an implementation.
+Nothing here runs today. Destructive cases run **only** on disposable VMs, through the pattern of the V2/V3 harness:
+CI-only, never shipped, planted targets under a run root with a nonce, the installed copy's gates checked by SHA-256,
+only a sanitized summary uploaded. They never run on a real profile. The cross-profile rows that need a real second
+administrator or a real sign-in belong to the operator, like the V4 rows.
+
+| Area | Cases |
+|---|---|
+| Scale | 200,000 files in one target (the suite's scale fixture); time and managed memory bounded; counts, bytes and newest write equal before and after the move |
+| Shells and identities | Windows PowerShell 5.1 and PowerShell 7; Windows 10 and 11; standard user, elevated administrator, administrator acting on **another** profile (the VM's second account) |
+| Paths | long paths (beyond `MAX_PATH`); Unicode (Latin and CJK), spaces, apostrophe; traversal, relative, UNC and device paths refused; a profile, TEMP root, drive root or `%WINDIR%\Temp` as a target refused |
+| Reparse points | junction, directory symlink and file symlink as the target, inside it and in an ancestor: refused, never followed; a swap between the plan and the move refused |
+| In use | a locked file, an open directory and a process working directory inside the target: the move refuses or fails cleanly, the target stays in place, nothing is partially moved |
+| Activity | a live agent session; recent activity; an interactive session of the target user; a process of that user, elevated or not; development processes (an editor, a build, Git) holding the target; a loaded profile with no visible session: refused, or the loaded state confirmed explicitly, as ADR-0013 section 10 says |
+| Ownership and ACL | an owner that cannot be identified; a third-party write ACE; a restrictive ACL that denies the acting account (refused, never taken over); the quarantine folder's DACL verified after creation; no existing ACL or owner changed (before/after comparison) |
+| Destination | an existing destination name refused; insufficient free space refused before anything moves; another volume refused; a non-NTFS or removable volume refused |
+| Interruption and concurrency | the process ends after the `intent` record (the entry reported incomplete, never restorable as complete); a second isolation, or a clean, while the lock is held (`BUSY`); the same isolation repeated (idempotent refusal, no second move) |
+| Integrity | a change inside the target between the plan and the move refuses; the manifest compared with the content after the move; a damaged manifest or entry reported as failed |
+| Restore | to a free original location; with a conflict (the base or root recreated by a new session) refused by default and the conflicts listed; to another free location; a partial restore reported exactly; old and new sessions never mixed |
+| Quarantine management | list, inspect and verify are read-only (byte and timestamp identical); expired, abandoned and incomplete entries reported, never purged; a quota refuses new isolations; purge refused by default, refused while the deletion gate is closed, one entry per run with its own confirmation |
+| Worktrees and evidence | a Git worktree or a folder of preserved evidence inside a target: reported, and the target refused unless the person names it explicitly |
+| Privacy | manifest and summary without file names, contents, command lines, account names or SIDs; exports pseudonymized (ADR-0010); the artifact sanitizer and the privacy scanner pass |
+| Layering | presentation never moves or deletes; only the isolation engine moves, and only the clean engine's deleter deletes (purge) |

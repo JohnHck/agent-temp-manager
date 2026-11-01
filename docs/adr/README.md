@@ -5,7 +5,8 @@ rewritten after they are accepted: a later record supersedes an earlier one and 
 
 Status values: `PROPOSED` (written, waiting for the maintainer), `ACCEPTED`, `SUPERSEDED by ADR-nnnn`, `REJECTED`.
 A record marked `PROPOSED` with an open decision (`D-n`) is not implemented until the maintainer decides it; the
-open decisions are listed in [V0.2-PLAN.md](../release/V0.2-PLAN.md#open-decisions-human_gate).
+open decisions are listed in [V0.2-PLAN.md](../release/V0.2-PLAN.md#open-decisions-human_gate). From ADR-0013 on, a
+record lists its own open decisions, with an id prefix of its own (`ISO-D1`...).
 
 | Id | Title | Status | Phase |
 |---|---|---|---|
@@ -21,6 +22,7 @@ open decisions are listed in [V0.2-PLAN.md](../release/V0.2-PLAN.md#open-decisio
 | [ADR-0010](ADR-0010-pseudonymization-of-exported-identifiers.md) | Pseudonymization of exported identifiers | ACCEPTED (D-7 = K1: no persistent key; D-8: partition findings ordered by pseudonym) | P1 |
 | [ADR-0011](ADR-0011-file-based-worktree-diagnostics.md) | File-based worktree diagnostics without Git (file gate and Git gate) | PROPOSED (architecture approved in principle; nothing activated) | P3 |
 | [ADR-0012](ADR-0012-service-account-privacy.md) | Service account privacy (replaces ADR-0005 rule 6) | ACCEPTED (maintainer decision, PR #42 gate) | P2 |
+| [ADR-0013](ADR-0013-isolation-quarantine-recovery-mode.md) | Isolation, quarantine and Recovery Mode | PROPOSED (nothing implemented; open decisions ISO-D1 to ISO-D6) | V0.4 (proposed) |
 
 ## Template
 

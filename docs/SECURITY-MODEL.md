@@ -594,6 +594,26 @@ called by `Invoke-AtmGitCommand`):
   loading, no remote registry; static test).
 * The agent itself may run its own periodic cleanup independently of this tool.
 
+## Future limits: isolation and quarantine (V0.4, PROPOSED, not implemented)
+
+None of this is a gate today. The product moves nothing and keeps no quarantine. If
+[ADR-0013](adr/ADR-0013-isolation-quarantine-recovery-mode.md) is accepted, these limits are to be declared and tested
+like the ones above:
+
+* **Non-atomic tree move:** one rename is atomic only for the name of one directory. Writers that already hold handles
+  inside the tree keep writing into it after the move.
+* **Open files:** an open entry below a target can make the move fail; the target then stays where it was.
+* **Same volume only:** a move to another volume would be a copy plus a deletion, and is refused.
+* **Inherited permissions:** a same-volume rename keeps the security descriptor. Inherited entries are not recomputed
+  from the quarantine folder.
+* **A loaded profile:** a loaded user hive neither proves nor rules out activity. Any process or session of that user,
+  or any unknown, refuses.
+* **The quarantine holds sensitive data** for as long as it is kept. Its DACL and its retention are part of the design.
+* **Purge is a deletion:** irreversible, behind the deletion gate, never automatic.
+
+Unchanged by the proposal: the clean gates, B1, RECENT, and the rule that the tool never changes an existing ACL or
+owner, never enables privileges and never terminates processes.
+
 ## Execution policy
 
 The launcher runs `powershell.exe -NoProfile -ExecutionPolicy Bypass -File <installed script>` with

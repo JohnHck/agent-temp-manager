@@ -12,7 +12,7 @@ never move.
 | [V0.2](#v02--windows-runtime-diagnostics) | Windows Runtime Diagnostics, including Git worktrees | No (read-only) |
 | [V0.2.1](#v021--desktop-gui-and-live-monitoring) | Desktop GUI and live monitoring (while the window is open) | No (read-only presentation) |
 | [V0.3](#v03--selective-real-cleanup) | Selective real cleanup | Yes: deletes approved temporary paths only |
-| [V0.4](#v04--assisted-recovery) | Assisted recovery of services and environments | Yes: reversible operations, each authorized individually |
+| [V0.4](#v04--assisted-recovery) | Assisted recovery of services and environments; isolation, quarantine and Recovery Mode (proposed, ADR-0013) | Yes: reversible operations, each authorized individually |
 | [V0.5](#v05--preventive-monitoring) | Persistent preventive monitoring, alerts, growth trends | No (observes and alerts) |
 | [V1.0](#v10--stabilization-and-multi-agent-support) | Stabilization and extensible multi-agent support | Same limits as V0.3 and V0.4 |
 
@@ -277,6 +277,64 @@ operation; refusal without authorization; both shells.
 
 **Safety limits.** Only documented, reversible operations on agent-related services and environments. No changes to
 unrelated services, other users' sessions, ACLs or system configuration.
+
+### Isolation, quarantine and Recovery Mode (proposed, not decided)
+
+**Status: PROPOSED** ([ADR-0013](adr/ADR-0013-isolation-quarantine-recovery-mode.md)). Nothing is implemented, and
+the placement in V0.4 is itself an open decision (ISO-D1). Origin: the
+[2026-11-01 incident](incidents/2026-11-01-profile-login-temp-isolation.md), observed operational evidence, not a
+root cause. **Isolation is containment and recovery, not prevention:** the dedicated base (`CLAUDE_CODE_TMPDIR`)
+still comes first, and the system TEMP stays an exception.
+
+**Three operations, kept apart:** **audit** (exists), **isolate** (new: take a target out of the active environment
+and keep it intact in a controlled quarantine, with a manifest and a restore path) and **delete** (V0.3). Around
+isolation: restore, inspect, verify, and purge (purge is a deletion).
+
+* **Group A, controlled isolation.**
+  * Targets: a file or directory, a session root, a project, a user, or the whole `<TEMP>\claude` base. The whole
+    base needs its own explicit confirmation.
+  * Isolation has its own target rule: clean gate 2 refuses the base, and isolation does not widen it.
+  * It reuses the clean gates, the B2-1 evidence, the AUT-2 confirmation, the T1 log, the B8 lock and the handle
+    pinning.
+  * Same-volume move through the target's handle, with documented atomicity limits; another volume is refused.
+  * A minimal manifest (no file names, contents or command lines), and a restore that never overwrites or mixes old
+    and new sessions.
+* **Group B, quarantine management.**
+  * List, inspect, verify, restore and purge.
+  * Retention only marks entries as expired (7, 15 or 30 days are examples), and quotas only warn and refuse new
+    isolations.
+  * Abandoned and incomplete entries are reported.
+  * Purge is irreversible: refused by default, one entry per run, through the V0.3 deleter and its gate, and never
+    automatic.
+* **Group C, Recovery Mode.**
+  * A guided 13-step flow, run by an administrator from another account, for a profile that cannot be used.
+  * A loaded profile neither proves an interactive session nor authorizes moving its files: any process or session
+    of that user, or any unknown, refuses.
+  * It never terminates anything, never recreates the base in that profile and never repairs Windows.
+
+**Fit with V0.4.** V0.4 already requires reversible operations, authorized one at a time, with before/after state, an
+undo path and a log. Isolation and restore meet that. These points need an explicit amendment of V0.4's limits when
+the maintainer decides:
+
+* moving files inside **another user's profile**, while never touching that user's sessions;
+* creating the quarantine folder with its own DACL, which changes no existing ACL;
+* purge, which is irreversible and therefore refused by default.
+
+**Dependencies.**
+* V0.3 published (confirmation and re-validation model, T1, B8, pinning deleter).
+* V0.2 (activity evidence).
+* The elevation-model decision and PRIV-5, to act on another user's profile ([ELEVATION.md](ELEVATION.md)).
+* The dedicated base runbook.
+* Maintainer decisions ISO-D1 to ISO-D6 (ADR-0013).
+
+**Acceptance criteria (proposed).**
+* Nothing is moved without an exact, individually confirmed plan, and every gate is re-validated immediately before
+  the move.
+* Any activity evidence or unknown refuses. No process is terminated and no existing ACL or owner is changed.
+* Every isolation can be restored, or its manifest states exactly why not. No restore overwrites newer content.
+* Nothing in the quarantine is purged without its own confirmation, and never while the deletion gate is closed.
+* The criteria in [TESTING.md](TESTING.md#future-isolation-quarantine-and-recovery-mode-v04-proposed) pass on
+  disposable VMs, and on the operator's controlled machine for the cross-profile rows.
 
 ---
 
