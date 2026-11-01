@@ -6,6 +6,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)][string]$Command = 'tui',
+    # quarantine only: list | inspect | verify | restore.
+    [Parameter(Position = 1)][string]$SubCommand,
     [string]$User,
     [string]$Project,
     [string]$Root,
@@ -16,6 +18,8 @@ param(
     [string]$ExportJson,
     [string]$LogFile,
     [string]$RecordFile,
+    [string]$Entry,
+    [switch]$All,
     [switch]$NoProgress,
     [switch]$Ascii,
     [string]$Lang,
@@ -180,7 +184,7 @@ $cliInvArgs['NoProgress'] = [bool]$NoProgress
 $cliInvArgs['ProgressCallback'] = { param($pct, $msg) $act = Get-AtmText 'cli.progressActivity'; if ($pct -ge 100) { Write-Progress -Activity $act -Completed } else { Write-Progress -Activity $act -Status $msg -PercentComplete $pct } }
 
 function Show-Help {
-    foreach ($k in @('help.title', 'help.blank', 'help.tui', 'help.audit', 'help.preview', 'help.diagnose', 'help.clean', 'help.clean2', 'help.isolate', 'help.isolate2', 'help.authorize', 'help.verify', 'help.version', 'help.help', 'help.blank',
+    foreach ($k in @('help.title', 'help.blank', 'help.tui', 'help.audit', 'help.preview', 'help.diagnose', 'help.clean', 'help.clean2', 'help.isolate', 'help.isolate2', 'help.quarantine', 'help.quarantine2', 'help.authorize', 'help.verify', 'help.version', 'help.help', 'help.blank',
             'help.drill', 'help.export', 'help.diagOpts', 'help.cleanOpts', 'help.cleanOpts2', 'help.cleanOpts3', 'help.cleanOpts4', 'help.tuiOpts', 'help.lang', 'help.blank', 'help.examples')) { Write-Host (Get-AtmText $k) }
     Write-Host '  agent-temp'
     Write-Host '  agent-temp audit'
@@ -319,6 +323,45 @@ try {
                 -AcceptB1ResidualRisk:$AcceptB1ResidualRisk -Interaction @{ Caller = 'CLI'; ConsoleRequired = [bool]$script:AtmIsolationEnabled }
             Show-AtmIsolateResult -Result $isoRes
             exit $(if ($isoRes.Aborted -or $isoRes.StoppedBy) { 3 } else { 0 })
+        }
+        'quarantine' {
+            # 0.3.x quarantine (contract section 8). list, inspect and verify only read (bytes and times unchanged, manifests
+            # included), with the isolation gate open or closed. restore: with the gate closed (every distributed copy) only
+            # the plan; past it, an interactive console, a new -LogFile and the phrases bound to the entry. -Entry takes only
+            # an entry id, never a path; the destination is never given by the user (T-ISO-8).
+            $qSub = $(if ($SubCommand) { $SubCommand.ToLowerInvariant() } else { '' })
+            if ($Entry -and $Entry -cnotmatch $script:AtmQuarantineEntryIdPattern) { Write-Host (Get-AtmText 'cli.quarantineEntryInvalid') -ForegroundColor Red; exit 2 }
+            switch ($qSub) {
+                'list' { Show-AtmQuarantineList -List (Get-AtmQuarantineList); exit 0 }
+                'inspect' {
+                    if (-not $Entry) { Write-Host (Get-AtmText 'cli.quarantineUsage') -ForegroundColor Red; exit 2 }
+                    $qEntry = Get-AtmQuarantineEntry -Id $Entry
+                    if ($null -eq $qEntry) { Write-Host (Get-AtmText 'cli.quarantineEntryNotFound' $Entry) -ForegroundColor Yellow; exit 3 }
+                    Show-AtmQuarantineEntry -Entry $qEntry
+                    exit 0
+                }
+                'verify' {
+                    if (-not $Entry -and -not $All) { Write-Host (Get-AtmText 'cli.quarantineUsage') -ForegroundColor Red; exit 2 }
+                    $qIds = $(if ($Entry) { @($Entry) } else { @((Get-AtmQuarantineList).Entries | Where-Object { $_.Id -cmatch $script:AtmQuarantineEntryIdPattern } | ForEach-Object { $_.Id }) })
+                    Show-AtmQuarantineVerify -Results @($qIds | ForEach-Object { Test-AtmQuarantineEntry -Id $_ })
+                    exit 0
+                }
+                'restore' {
+                    if (-not $Entry) { Write-Host (Get-AtmText 'cli.quarantineUsage') -ForegroundColor Red; exit 2 }
+                    if ($script:AtmIsolationEnabled -and $LogFile) {
+                        $rstProbe = Invoke-AtmInventory @cliInvArgs
+                        if (-not (Test-AtmOutputPathOutsideBases -Path $LogFile -Inventory $rstProbe)) { Write-Host (Get-AtmText 'cli.logRefused') -ForegroundColor Red; exit 2 }
+                    }
+                    if ($script:AtmIsolationEnabled -and -not (Test-AtmTuiInteractive)) { Write-Host (Get-AtmText 'cli.restoreNeedsConsole') -ForegroundColor Yellow; exit 6 }
+                    $rstPresenter = { param($plan, $i, $planId) Show-AtmRestorePlan -Plan $plan -Inventory $i -PlanId $planId }
+                    $rstReader = { param($phrase, $kind, $rootPath, $choices) Read-AtmCleanAnswer -Phrase $phrase -Kind $kind -RootPath $rootPath -Choices $choices -LineReader { param($pr) Read-Host $pr } }
+                    $rstRes = Invoke-AtmRestore -Id $Entry -PlanPresenter $rstPresenter -ConfirmationReader $rstReader -InventoryArgs $cliInvArgs -LogFile $LogFile `
+                        -Interaction @{ Caller = 'CLI'; ConsoleRequired = [bool]$script:AtmIsolationEnabled }
+                    Show-AtmRestoreResult -Result $rstRes
+                    exit $(if ($rstRes.Aborted -or $rstRes.StoppedBy) { 3 } else { 0 })
+                }
+                default { Write-Host (Get-AtmText 'cli.quarantineUsage') -ForegroundColor Red; exit 2 }
+            }
         }
         'authorize' {
             # AUT-1: records the operator's discard authorization of ONE root and the plan shown; deletes nothing and makes

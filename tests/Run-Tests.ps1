@@ -3459,15 +3459,15 @@ exit 0
         $oe = $oe.Substring(0, $oe.IndexOf('internal static string CheckNewFolderSecurity'))
         Assert-True ($oe.Contains('FILE_APPEND_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE, ref oa') -and $oe.Contains('FILE_SHARE_READ, FILE_OPEN,') -and -not $oe.Contains('FILE_CREATE') -and -not $oe.Contains('FILE_WRITE_DATA')) 'abre so existente, so acrescimo, compartilhado so para leitura'
         # -Include is ignored with -LiteralPath on Windows PowerShell 5.1: filtered by extension.
-        # P3a: the isolation engine is the only product caller (one call to the mover; OpenExisting only to reopen the
-        # entry's manifest for the result).
+        # P3a: the isolation engine is the only product caller. P3b: two calls to the mover (isolate, and restore: the move back
+        # is the same mover, on the same volume); OpenExisting only to reopen an entry's manifest (isolate and restore).
         foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1', '.cmd') -and $_.Name -ne 'Engine.Isolate.ps1' })) {
             $t = [IO.File]::ReadAllText($fi.FullName)
             foreach ($api in @('AtmMover', 'CreateNewDirectory', 'OpenExisting')) { Assert-True (-not $t.Contains($api)) "$($fi.Name) nao chama $api (so o motor de isolamento)" }
         }
         $isoSrc = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Isolate.ps1'))
-        Assert-Eq ([regex]::Matches($isoSrc, '\[AgentTempManager\.AtmMover\]::MoveTree\(').Count) 1 'uma unica chamada de produto ao mover'
-        Assert-Eq ([regex]::Matches($isoSrc, 'OpenExisting\(').Count) 1 'OpenExisting so para reabrir o manifesto da entrada'
+        Assert-Eq ([regex]::Matches($isoSrc, '\[AgentTempManager\.AtmMover\]::MoveTree\(').Count) 2 'duas chamadas de produto ao mover: isolar e restaurar (P3b)'
+        Assert-Eq ([regex]::Matches($isoSrc, 'OpenExisting\(').Count) 2 'OpenExisting so para reabrir o manifesto de uma entrada (isolar e restaurar)'
         Assert-True ($isoSrc.Contains("`$man.OpenExisting('manifest.jsonl')") -and $isoSrc.IndexOf('$man.Close(); $man.Dispose(); $man = $null') -lt $isoSrc.IndexOf('[AgentTempManager.AtmMover]::MoveTree(') -and $isoSrc.IndexOf("`$man.OpenExisting('manifest.jsonl')") -gt $isoSrc.IndexOf('[AgentTempManager.AtmMover]::MoveTree(')) 'manifesto fechado antes do mover e reaberto depois (o pino da pasta impediria a renomeacao para dentro dela)'
     }
 
@@ -3592,7 +3592,7 @@ exit 0
         Assert-True ($r.Exit -eq 3 -and $r.Text.Contains('NENHUM_CAMINHO_ISOLAVEL') -and $r.Text.Contains('Nothing was moved, created or removed.')) "fora do inventario: exit $($r.Exit)"
         Assert-True (-not (Test-Path -LiteralPath $target) -and -not (Test-Path -LiteralPath $log)) 'nada criado: nem o caminho pedido nem o log'
     }
-    Test-Case 'Isolamento P2' 'Camadas: relatorio e TUI nunca chamam o mover nem o deleter; so o motor de isolamento referencia o mover (P3a); so o lancador chama o motor de isolamento' {
+    Test-Case 'Isolamento P2' 'Camadas: relatorio e TUI nunca chamam o mover nem o deleter; so o motor de isolamento referencia o mover (P3a); so o lancador e a TUI (P3b, acao padrao sobre uma raiz) chamam o motor de isolamento' {
         foreach ($f in @('Report.ps1', 'Tui.ps1')) {
             $txt = [IO.File]::ReadAllText((Join-Path $srcDir "lib\$f"))
             foreach ($pat in @('AtmMover', 'MoveTree', 'AtmDeleter', 'DeleteTree')) { Assert-True (-not $txt.Contains($pat)) "$f contem '$pat'" }
@@ -3603,7 +3603,7 @@ exit 0
             if ($fi.Name -ne 'Engine.Isolate.ps1') { Assert-True (-not $t.Contains('AtmMover')) "$($fi.Name) nao chama o mover (so o motor de isolamento)" }
             if ($fi.Name -ne 'Engine.Isolate.ps1' -and $t.Contains('Invoke-AtmIsolate')) { $calls += $fi.Name }
         }
-        Assert-Eq ($calls -join ',') 'agent-temp.ps1' 'so o lancador chama o motor de isolamento'
+        Assert-Eq (($calls | Sort-Object) -join ',') 'agent-temp.ps1,Tui.ps1' 'so o lancador e a TUI chamam o motor de isolamento'
         Assert-Eq ([regex]::Matches([IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1')), 'Invoke-AtmIsolate ').Count) 1 'uma unica chamada no lancador'
     }
 
@@ -3835,6 +3835,375 @@ exit 0
         Assert-True ($cli.Contains("if (`$script:AtmIsolationEnabled -and -not (Test-AtmTuiInteractive)) { Write-Host (Get-AtmText 'cli.isolateNeedsConsole')") -and $cli.Contains('-ConfirmationReader $isoReader')) 'CLI: console exigido alem da trava; leitor do console'
     }
 
+    # ------------------------------------------------------------------ 0.3.x isolation, phase P3b: quarantine management and restore (ISO-P3b)
+    # Entries come from real isolations in the sandbox (New-IsoRun + Invoke-IsoOpen). The engine judges them by the identity
+    # of the inventory (the test identity here; the process user in the CLI). The isolation gate opens only around each
+    # call (Invoke-IsoOpen, Invoke-RstOpen) and is restored.
+    function New-RstEntry {
+        # One isolated entry: the run, the isolation result, the entry id and path, and the relative listing of the root.
+        param([string]$Name, [hashtable]$Extra = @{})
+        $x = New-IsoRun $Name
+        if (-not $x) { return $null }
+        $before = Get-IsoRelativeListing $x.Root
+        $res = Invoke-IsoOpen (Get-IsoArgs $x (New-TestCleanOperator) $Extra)
+        return [pscustomobject]@{ Run = $x; Iso = $res; Id = $res.EntryId; Path = $res.EntryPath; Before = $before; Manifest = $(if ($res.EntryPath) { Join-Path $res.EntryPath 'manifest.jsonl' } else { $null })
+            Id8 = $(if ($res.EntryId) { $res.EntryId.Substring($res.EntryId.Length - 8) } else { $null }) }
+    }
+    function Invoke-RstOpen {
+        param([hashtable]$Arguments)
+        Assert-True ([string]$script:AtmIsolationQuarantineRoot -and ([string]$script:AtmIsolationQuarantineRoot).StartsWith($sandbox + '\', [StringComparison]::OrdinalIgnoreCase)) "quarentena dentro do sandbox ($($script:AtmIsolationQuarantineRoot))"
+        $script:AtmIsolationEnabled = $true
+        try { return (Invoke-AtmRestore @Arguments) } finally { $script:AtmIsolationEnabled = $false }
+    }
+    function New-RstPlanRecorder {
+        $st = @{ Calls = (New-Object System.Collections.Generic.List[object]) }
+        $st.Presenter = { param($plan, $inv, $planId) $st.Calls.Add([pscustomobject]@{ Plan = $plan; PlanId = $planId }) }.GetNewClosure()
+        return $st
+    }
+    function Get-RstArgs {
+        param($E, $Operator, [string]$Log, [hashtable]$Extra = @{})
+        $a = @{ Id = $E.Id; PlanPresenter = (New-RstPlanRecorder).Presenter; ConfirmationReader = $Operator.Reader; InventoryArgs = $E.Run.IA; LogFile = $Log }
+        foreach ($k in $Extra.Keys) { $a[$k] = $Extra[$k] }
+        return $a
+    }
+    function Get-RstSnapshot {
+        # Bytes and times of everything under a folder: names, creation and write times, attributes, SHA-256 of each file.
+        param([string]$Path)
+        $out = New-Object System.Collections.Generic.List[string]
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            foreach ($i in @(Get-ChildItem -LiteralPath $Path -Recurse -Force)) {
+                $h = $(if ($i.PSIsContainer) { '' } else { [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($i.FullName))) })
+                $out.Add(('{0}|{1}|{2}|{3}|{4}' -f $i.FullName, $i.CreationTimeUtc.Ticks, $i.LastWriteTimeUtc.Ticks, [int]$i.Attributes, $h))
+            }
+        } finally { $sha.Dispose() }
+        return (($out | Sort-Object) -join "`n")
+    }
+    function Get-RstTypes { param([string]$Path) return (@((Read-TestCleanLogFile $Path).Records | ForEach-Object { $_.type }) -join ',') }
+    function Set-RstManifestLines {
+        # Test fixture only: keeps the first -Keep lines of a manifest and appends records, as the writer would have left them
+        # (an interruption between an intent and its result).
+        param([string]$Path, [int]$Keep, [object[]]$Append = @())
+        $lines = @(([IO.File]::ReadAllText($Path)).Split([char]10) | Where-Object { $_ -ne '' })
+        $new = @(@($lines | Select-Object -First $Keep) + @($Append | ForEach-Object { ConvertTo-Json -InputObject $_ -Compress -Depth 5 }))
+        [IO.File]::WriteAllText($Path, (($new -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
+    }
+    function Get-RstHost {
+        # The text a report function writes to the host (information stream), for assertions.
+        param([scriptblock]$Block)
+        return ((& $Block 6>&1 | ForEach-Object { [string]$_ }) -join "`n")
+    }
+    $rstRefused = { param($plan, $dest, $n) [pscustomobject]@{ Moved = $false; Verified = $false; RenameStatus = $null; AbortReason = 'SYNTHETIC_REFUSED'; FilesAfter = -1; DirsAfter = -1; BytesAfter = -1; DigestPlanned = $null; DigestAfter = $null } }
+    $isoRefused = { param($c, $e, $n) [pscustomobject]@{ Moved = $false; Verified = $false; RenameStatus = $null; AbortReason = 'SYNTHETIC_REFUSED'; FilesAfter = -1; DirsAfter = -1; BytesAfter = -1; DigestPlanned = $null; DigestAfter = $null } }
+
+    Test-Case 'Isolamento P3b' 'Gestao so leitura com a trava fechada: list, inspect e verify de uma entrada ISOLATED (estado, medicao, resumo dos metadados, registros); bytes e horarios identicos antes e depois, manifesto incluido; quarentena ausente nunca criada; id que nao e de entrada nunca vira caminho' {
+        $e = New-RstEntry 'rstro'
+        if (-not $e) { return }
+        Assert-True ($e.Iso.Results[0].Outcome -ceq 'COMPLETE') "isolado ($($e.Iso.Aborted)$($e.Iso.StoppedBy))"
+        Assert-Eq $script:AtmIsolationEnabled $false 'trava fechada durante a gestao'
+        $q = $script:AtmIsolationQuarantineRoot
+        $snap = Get-RstSnapshot $q
+        $list = Get-AtmQuarantineList -OwnSid $testIdentity.Sid
+        $mine = @($list.Entries | Where-Object { $_.Id -ceq $e.Id })
+        Assert-True ($list.Exists -and $mine.Count -eq 1 -and $mine[0].State -ceq 'ISOLATED' -and $mine[0].OriginalPath -eq $e.Run.Root -and $mine[0].TargetKind -ceq 'SessionRoot' -and $mine[0].PayloadPresent) "list: ISOLATED ($(@($mine | ForEach-Object { Format-AtmQuarantineState $_ }) -join ','))"
+        $one = Get-AtmQuarantineEntry -Id $e.Id -OwnSid $testIdentity.Sid
+        Assert-True ($one.Files -eq 2 -and $one.Dirs -eq 1 -and $one.Verified.Files -eq 2 -and $one.Verified.Digest -cmatch '^[0-9A-F]{64}$' -and (@($one.Records | ForEach-Object { $_.Type }) -join ',') -ceq 'entry,move-intent,move-result') 'inspect: medicao, conferencia e registros'
+        $v = Test-AtmQuarantineEntry -Id $e.Id -OwnSid $testIdentity.Sid
+        Assert-True ($v.Result -ceq 'OK' -and $v.State -ceq 'ISOLATED' -and $null -eq $v.Reconcilable) "verify: OK ($($v.Result) $($v.Reason))"
+        $old = Get-AtmLanguage
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                $t = Get-RstHost { Show-AtmQuarantineList -List $list; Show-AtmQuarantineEntry -Entry $one; Show-AtmQuarantineVerify -Results @($v) }
+                Assert-True ($t.Contains($e.Id) -and $t.Contains((Get-AtmText 'q.readOnly')) -and $t.Contains((Get-AtmText 'q.cliOnly' $e.Id)) -and $t.Contains('ISOLATED')) "$lang`: textos de list, inspect e verify"
+            }
+        } finally { Set-AtmLanguage -Requested $old }
+        Assert-Eq (Get-RstSnapshot $q) $snap 'bytes e horarios identicos (manifesto incluido)'
+        $missing = Join-Path $sandbox 'rst-sem-quarentena\AgentTempManager\Q'
+        $l2 = Get-AtmQuarantineList -Root $missing -OwnSid $testIdentity.Sid
+        Assert-True (-not $l2.Exists -and @($l2.Entries).Count -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $sandbox 'rst-sem-quarentena'))) 'quarentena ausente: listada como ausente, nada criado'
+        Assert-Eq (Test-AtmQuarantineEntry -Id '20260101T000000Z-0badf00d' -OwnSid $testIdentity.Sid).Result 'ENTRY_NOT_FOUND' 'entrada inexistente'
+        foreach ($bad in @('..\x', $e.Path, ($e.Id + '\payload'), ('x' + $e.Id))) { Assert-True ($null -eq (Get-AtmQuarantineEntry -Id $bad -OwnSid $testIdentity.Sid)) "id invalido nao e aceito: $bad" }
+    }
+    Test-Case 'Isolamento P3b' 'Estados derivados (secao 7.4): a entrada que o mover deixa ao recusar aparece FAILED; intencao sem resultado INCOMPLETE; outra identidade ABANDONED; manifesto ausente, recSeq fora de ordem, id divergente, primeiro registro errado e payload depois de RESTORED dao ENTRY_MANIFEST_INVALID; pasta que nao e entrada e juncao UNRECOGNIZED, nunca abertas' {
+        $f = New-RstEntry 'rstfail' @{ MoveTreeImpl = $isoRefused }
+        if (-not $f) { return }
+        Assert-Eq $f.Iso.StoppedBy 'STOPPED_AFTER_REFUSED' 'isolamento recusado pelo mover'
+        $s = Get-AtmQuarantineEntry -Id $f.Id -OwnSid $testIdentity.Sid
+        Assert-True ($s.State -ceq 'FAILED' -and $s.LastOutcome -ceq 'REFUSED' -and -not $s.PayloadPresent) "entrada da recusa: FAILED ($(Format-AtmQuarantineState $s))"
+        Assert-Eq (Test-AtmQuarantineEntry -Id $f.Id -OwnSid $testIdentity.Sid).Result 'NOT_VERIFIABLE' 'FAILED: nada a conferir'
+        $other = Get-AtmQuarantineEntry -Id $f.Id -OwnSid 'S-1-5-21-1-2-3-4444'
+        Assert-Eq $other.State 'ABANDONED' 'manifesto de outra identidade: ABANDONED'
+        Set-RstManifestLines -Path $f.Manifest -Keep 2
+        $s = Get-AtmQuarantineEntry -Id $f.Id -OwnSid $testIdentity.Sid
+        Assert-True ($s.State -ceq 'INCOMPLETE' -and $s.Pending -ceq 'move') "intencao sem resultado: INCOMPLETE ($(Format-AtmQuarantineState $s))"
+        # Hand-made folders in a quarantine of their own.
+        $qc = Join-Path $sandbox 'rst-states\Q'
+        [void][IO.Directory]::CreateDirectory((Join-Path $qc 'nao-e-entrada'))
+        $mk = {
+            param([string]$Id, [object[]]$Recs, [switch]$Payload)
+            $d = Join-Path $qc $Id; [void][IO.Directory]::CreateDirectory($d)
+            if ($Payload) { [void][IO.Directory]::CreateDirectory((Join-Path $d 'payload')) }
+            if ($null -ne $Recs) { [IO.File]::WriteAllText((Join-Path $d 'manifest.jsonl'), ((@($Recs | ForEach-Object { ConvertTo-Json -InputObject $_ -Compress -Depth 5 }) -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false))) }
+        }
+        $rec = { param([string]$Id, [int]$Seq, [string]$Type, [hashtable]$More = @{}) $o = [ordered]@{ schema = 'atm.quarantine/1'; type = $Type; id = $Id; recSeq = $Seq; utc = '2026-01-01T00:00:00.0000000Z' }; foreach ($k in $More.Keys) { $o[$k] = $More[$k] }; $o }
+        $act = @{ actor = [ordered]@{ sid = $testIdentity.Sid; elevated = $false }; targetKind = 'SessionRoot'; originalPath = 'C:\x\y'; provider = 'claude-code' }
+        $i1 = '20260101T000000Z-00000001'; & $mk $i1 $null
+        $i2 = '20260101T000000Z-00000002'; & $mk $i2 @((& $rec $i2 1 'entry' $act), (& $rec $i2 3 'move-intent'))
+        $i3 = '20260101T000000Z-00000003'; & $mk $i3 @((& $rec '20260101T000000Z-0000000f' 1 'entry' $act))
+        $i4 = '20260101T000000Z-00000004'; & $mk $i4 @((& $rec $i4 1 'move-intent'))
+        $i5 = '20260101T000000Z-00000005'; & $mk $i5 @((& $rec $i5 1 'entry' $act), (& $rec $i5 2 'move-intent' @{ files = 0; dirs = 0; bytes = 0 }), (& $rec $i5 3 'move-result' @{ outcome = 'COMPLETE' }), (& $rec $i5 4 'restore-intent'), (& $rec $i5 5 'restore-result' @{ outcome = 'COMPLETE'; moved = $true })) -Payload
+        $tgt = Join-Path $sandbox 'rst-states-alvo'; [void][IO.Directory]::CreateDirectory($tgt); [IO.File]::WriteAllText((Join-Path $tgt 'manifest.jsonl'), 'x')
+        $i6 = '20260101T000000Z-00000006'; New-Junction (Join-Path $qc $i6) $tgt
+        $snap = Get-RstSnapshot $qc
+        $l = Get-AtmQuarantineList -Root $qc -OwnSid $testIdentity.Sid
+        $by = @{}; foreach ($x in @($l.Entries)) { $by[$x.Id] = (Format-AtmQuarantineState $x) }
+        Assert-Eq $by['nao-e-entrada'] 'UNRECOGNIZED (NOT_AN_ENTRY)' 'pasta que nao e entrada'
+        Assert-Eq $by[$i1] 'ENTRY_MANIFEST_INVALID (MANIFEST_MISSING)' 'manifesto ausente'
+        Assert-Eq $by[$i2] 'ENTRY_MANIFEST_INVALID (MANIFEST_INVALID)' 'recSeq fora de ordem'
+        Assert-Eq $by[$i3] 'ENTRY_MANIFEST_INVALID (MANIFEST_INVALID)' 'id divergente do nome da pasta'
+        Assert-Eq $by[$i4] 'ENTRY_MANIFEST_INVALID (MANIFEST_INVALID)' 'primeiro registro nao e entry'
+        Assert-Eq $by[$i5] 'ENTRY_MANIFEST_INVALID (PAYLOAD_AFTER_RESTORE)' 'payload depois de RESTORED'
+        Assert-Eq $by[$i6] 'UNRECOGNIZED (REPARSE_POINT)' 'juncao no lugar de uma entrada'
+        Assert-Eq (Get-RstSnapshot $qc) $snap 'nada alterado'
+        $saved = $script:AtmIsolationQuarantineRoot
+        $script:AtmIsolationQuarantineRoot = $qc
+        try {
+            $v = Test-AtmQuarantineEntry -Id $i2 -OwnSid $testIdentity.Sid
+            Assert-True ($v.Result -ceq 'ENTRY_MANIFEST_INVALID' -and $v.Reason -ceq 'MANIFEST_INVALID') "verify: ENTRY_MANIFEST_INVALID ($($v.Result))"
+            Assert-Eq (Test-AtmQuarantineEntry -Id $i6 -OwnSid $testIdentity.Sid).Result 'ENTRY_NOT_FOUND' 'juncao nunca aberta como entrada'
+            $rr = Invoke-AtmRestore -Id $i2 -PlanPresenter (New-RstPlanRecorder).Presenter -InventoryArgs $f.Run.IA
+            Assert-True ($rr.Aborted -ceq 'RESTAURACAO_RECUSADA' -and (@($rr.Plan.Reasons) -join ';') -like 'ENTRY_MANIFEST_INVALID*') "restauracao recusa manifesto invalido ($(@($rr.Plan.Reasons) -join ';'))"
+        } finally { $script:AtmIsolationQuarantineRoot = $saved }
+        Assert-Eq @(Get-ChildItem -LiteralPath $tgt -Force).Count 1 'nada criado no alvo da juncao'
+    }
+    Test-Case 'Isolamento P3b' 'Verificacao: arquivo acrescentado ao payload da DIFFERS (com o motivo); payload ausente da PAYLOAD_MISSING; nenhuma das duas grava nada; a restauracao recusa a entrada divergente antes de qualquer pergunta ou log' {
+        $e = New-RstEntry 'rstdiff'
+        if (-not $e) { return }
+        [IO.File]::WriteAllText((Join-Path $e.Path 'payload\depois.txt'), 'x')
+        $h0 = Get-RstSnapshot $e.Path
+        $v = Test-AtmQuarantineEntry -Id $e.Id -OwnSid $testIdentity.Sid
+        Assert-True ($v.Result -ceq 'DIFFERS' -and $v.Reason.Contains('FILES 3/2') -and $v.Reason.Contains('META_DIGEST')) "DIFFERS ($($v.Result) $($v.Reason))"
+        Assert-Eq (Get-RstSnapshot $e.Path) $h0 'verify nao grava nada'
+        $dir = New-TestCleanLogDir 'rst-diff'
+        if (-not $dir) { return }
+        $op = New-TestCleanOperator
+        $res = Invoke-RstOpen (Get-RstArgs $e $op (Join-Path $dir 'r.jsonl'))
+        Assert-True ($res.Aborted -ceq 'RESTAURACAO_RECUSADA' -and (@($res.Plan.Reasons) -join ';') -like '*ENTRY_VERIFY_DIFFERS*' -and $op.Calls.Count -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $dir 'r.jsonl'))) "restauracao recusada ($($res.Aborted) $(@($res.Plan.Reasons) -join ';'))"
+        [IO.Directory]::Move((Join-Path $e.Path 'payload'), (Join-Path $e.Path 'payload-fora'))
+        Assert-Eq (Test-AtmQuarantineEntry -Id $e.Id -OwnSid $testIdentity.Sid).Result 'PAYLOAD_MISSING' 'payload ausente'
+        Assert-Eq (Get-AtmQuarantineEntry -Id $e.Id -OwnSid $testIdentity.Sid).State 'ISOLATED' 'o estado continua derivado do manifesto'
+    }
+    Test-Case 'Isolamento P3b' 'Restauracao com a trava fechada: so o plano (plan id com prefixo proprio, frase RESTAURAR <id8>); nada perguntado, nenhum lock, nenhum log, nada movido; quarentena e manifesto identicos' {
+        $e = New-RstEntry 'rstclosed'
+        if (-not $e) { return }
+        $snap = Get-RstSnapshot $script:AtmIsolationQuarantineRoot
+        $rec = New-RstPlanRecorder
+        $log = Join-Path $sandbox 'rst-closed.jsonl'
+        $script:rstReaderCalls = 0
+        $h = Start-TestLockHolder -Name $script:AtmCleanLockName -Mode release
+        try {
+            Assert-Eq $h.Status 'ACQUIRED' 'lock ocupado por outro processo'
+            $res = Invoke-AtmRestore -Id $e.Id -PlanPresenter $rec.Presenter -ConfirmationReader { param($x) $script:rstReaderCalls++; $x } -InventoryArgs $e.Run.IA -LogFile $log -MoveTreeImpl { param($a, $b, $c) throw 'nunca' }
+        } finally { $null = Stop-TestLockHolderByGo $h }
+        Assert-Eq $res.Aborted 'RESTAURACAO_REAL_DESABILITADA' 'parado pela trava, sem tentar o lock'
+        Assert-True ($rec.Calls.Count -eq 1 -and $rec.Calls[0].PlanId -match '^[0-9a-f]{64}$' -and $rec.Calls[0].PlanId -ceq $res.PlanId -and $rec.Calls[0].Plan.Destination -eq $e.Run.Root -and -not $rec.Calls[0].Plan.Conflict) 'plano apresentado uma vez, com o plan id e o destino original'
+        Assert-Eq (@($res.Phrases) -join ',') ('RESTAURAR ' + $e.Id8.ToUpperInvariant()) 'frase ligada a entrada'
+        Assert-True ($script:rstReaderCalls -eq 0 -and -not (Test-Path -LiteralPath $log) -and @($res.Results).Count -eq 0 -and -not [IO.Directory]::Exists($e.Run.Root)) 'nada perguntado; nenhum log; nada movido'
+        Assert-Eq (Get-RstSnapshot $script:AtmIsolationQuarantineRoot) $snap 'quarentena e manifesto identicos'
+        $iso = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Isolate.ps1'))
+        $w = $iso.Substring($iso.IndexOf('function Invoke-AtmRestore {'), $iso.IndexOf('function Invoke-AtmRestoreCore') - $iso.IndexOf('function Invoke-AtmRestore {'))
+        Assert-True ($w.IndexOf('if (-not $script:AtmIsolationEnabled) { return (Invoke-AtmRestoreCore @PSBoundParameters) }') -gt 0 -and $w.IndexOf('if (-not $script:AtmIsolationEnabled)') -lt $w.IndexOf('Invoke-AtmUnderSharedLock') -and -not $w.Contains('Invoke-AtmInventory')) 'trava antes do lock'
+        $core = $iso.Substring($iso.IndexOf('function Invoke-AtmRestoreCore'))
+        $iStop = $core.IndexOf("if (-not `$script:AtmIsolationEnabled) { `$state.Aborted = 'RESTAURACAO_REAL_DESABILITADA'; return (& `$finish) }")
+        Assert-True ($iStop -gt 0) 'parada da trava no nucleo da restauracao'
+        foreach ($act in @('& $ConfirmationReader', 'Open-AtmCleanLog', '::PinForMove(', '[AgentTempManager.AtmMover]::MoveTree(', '& $MoveTreeImpl', 'Get-AtmEngineConsoleObservation', "& `$writeManifest 'reconcile'", "& `$writeManifest 'restore-intent'")) { Assert-True ($core.IndexOf($act) -gt $iStop) "'$act' so depois da parada da trava" }
+        $iMi = $core.IndexOf("& `$writeManifest 'restore-intent'"); $iLi = $core.IndexOf("-Type 'restore-intent'"); $iMv = $core.IndexOf('[AgentTempManager.AtmMover]::MoveTree(')
+        Assert-True ($iMi -gt 0 -and $iLi -gt $iMi -and $iMv -gt $iLi) "intencao no manifesto ($iMi) e no log ($iLi) antes do mover ($iMv)"
+        Assert-True ($iso.Contains("'atm-restore-plan/1;'")) 'prefixo proprio do plan id da restauracao'
+    }
+    Test-Case 'Isolamento P3b' 'Restaurar alem da trava, destino livre: a raiz volta inteira ao caminho original (nomes, tamanhos, horarios e atributos), pelo mesmo mover; frase RESTAURAR <id8>; manifesto (OpenExisting) e log completos e sem nomes de arquivo; entrada RESTORED com o manifesto como trilha; restaurar de novo e recusado' {
+        $e = New-RstEntry 'rstfull'
+        if (-not $e) { return }
+        $dir = New-TestCleanLogDir 'rst-full'
+        if (-not $dir) { return }
+        $log = Join-Path $dir 'restore.jsonl'
+        $op = New-TestCleanOperator
+        $res = Invoke-RstOpen (Get-RstArgs $e $op $log)
+        Assert-True (-not $res.Aborted -and -not $res.StoppedBy -and @($res.Results).Count -eq 1 -and $res.Results[0].Outcome -ceq 'COMPLETE' -and $res.Results[0].Moved -and $res.Results[0].Verified) "restaurado ($($res.Aborted)$($res.StoppedBy) $(@($res.Results | ForEach-Object { $_.AbortReason; $_.ExceptionType }) -join ';'))"
+        Assert-Eq ($op.Calls -join ',') ("restore|" + $e.Run.Root) 'uma frase, ligada a entrada e ao destino'
+        Assert-Eq (@($op.Phrases) -join ',') ('RESTAURAR ' + $e.Id8.ToUpperInvariant()) 'frase RESTAURAR <id8>'
+        Assert-Eq (Get-IsoRelativeListing $e.Run.Root) $e.Before 'raiz de volta intacta: nomes, tamanhos, horarios e atributos'
+        Assert-True (-not [IO.Directory]::Exists((Join-Path $e.Path 'payload')) -and [IO.File]::Exists($e.Manifest)) 'payload saiu; a entrada e o manifesto ficam'
+        $mf = Read-TestCleanLogFile $e.Manifest
+        Assert-Eq (@($mf.Records | ForEach-Object { $_.type }) -join ',') 'entry,move-intent,move-result,restore-intent,restore-result' 'registros do manifesto'
+        $rr = $mf.Records[4]
+        Assert-True ($rr.outcome -ceq 'COMPLETE' -and $rr.verified -and $rr.destination -eq $e.Run.Root -and $rr.digestAfter -ceq $mf.Records[2].digestAfter -and @($mf.Records | Where-Object { $_.schema -cne 'atm.quarantine/1' -or $_.id -cne $e.Id }).Count -eq 0 -and -not $mf.Bom -and $mf.EndsLf) 'restore-result verificado, mesmo resumo dos metadados do isolamento'
+        $lg = Read-TestCleanLogFile $log
+        Assert-Eq (@($lg.Records | ForEach-Object { $_.type }) -join ',') 'run-start,confirmation,plan-check,restore-intent,restore-result,run-end' 'registros do log'
+        Assert-True ($lg.Records[0].operation -ceq 'restore' -and $lg.Records[0].entryId -ceq $e.Id -and @($lg.Records | Where-Object { $_.schema -cne 'atm.isolatelog/1' }).Count -eq 0) 'log atm.isolatelog/1 da restauracao'
+        foreach ($t in @([IO.File]::ReadAllText($e.Manifest), [IO.File]::ReadAllText($log))) { foreach ($leaf in @('a.txt', 'b.bin')) { Assert-True (-not $t.Contains($leaf)) "sem nome de arquivo ($leaf)" } }
+        $s = Get-AtmQuarantineEntry -Id $e.Id -OwnSid $testIdentity.Sid
+        Assert-True ($s.State -ceq 'RESTORED' -and (Test-AtmQuarantineEntry -Id $e.Id -OwnSid $testIdentity.Sid).Result -ceq 'NOT_VERIFIABLE') "entrada RESTORED ($(Format-AtmQuarantineState $s))"
+        $again = Invoke-RstOpen (Get-RstArgs $e (New-TestCleanOperator) ($log + '.2'))
+        Assert-True ($again.Aborted -ceq 'RESTAURACAO_RECUSADA' -and (@($again.Plan.Reasons) -join ';') -ceq 'ENTRY_ALREADY_RESTORED' -and -not (Test-Path -LiteralPath ($log + '.2'))) "restaurar de novo: recusado ($(@($again.Plan.Reasons) -join ';'))"
+    }
+    Test-Case 'Isolamento P3b' 'Conflito (T-ISO-8): o original recriado nunca e sobrescrito nem mesclado; RESTORE_CONFLICT com contagens e o destino alternativo <nome>.restored-<id8> gerado pelo motor, com frase propria (errada: nada movido); alternativo ocupado: recusado' {
+        $e = New-RstEntry 'rstconf'
+        if (-not $e) { return }
+        $dir = New-TestCleanLogDir 'rst-conf'
+        if (-not $dir) { return }
+        [void][IO.Directory]::CreateDirectory($e.Run.Root); [IO.File]::WriteAllText((Join-Path $e.Run.Root 'novo.txt'), 'novo')
+        $orig = Get-IsoRelativeListing $e.Run.Root
+        $alt = $e.Run.Root + '.restored-' + $e.Id8
+        $rec = New-RstPlanRecorder
+        $res = Invoke-AtmRestore -Id $e.Id -PlanPresenter $rec.Presenter -InventoryArgs $e.Run.IA
+        $pl = $rec.Calls[0].Plan
+        Assert-True ($res.Aborted -ceq 'RESTAURACAO_REAL_DESABILITADA' -and $pl.Conflict -and $pl.ConflictFiles -eq 1 -and $pl.Destination -eq $alt -and @($pl.Reasons).Count -eq 0) "plano: conflito com o alternativo gerado ($($pl.Destination) $(@($pl.Reasons) -join ';'))"
+        Assert-Eq (@($res.Phrases) -join ',') ("RESTAURAR {0},RESTAURAR {0} EM DESTINO ALTERNATIVO" -f $e.Id8.ToUpperInvariant()) 'frase propria para o destino alternativo'
+        $t = Get-RstHost { Show-AtmRestorePlan -Plan $pl -Inventory $null -PlanId $res.PlanId }
+        Assert-True ($t.Contains('RESTORE_CONFLICT') -and $t.Contains($alt) -and -not $t.Contains('novo.txt')) 'relatorio: RESTORE_CONFLICT, contagens e alternativo, sem nomes'
+        $op = New-TestCleanOperator -Answers @{ 'alternative#1' = 'RESTAURAR ERRADO' }
+        $res = Invoke-RstOpen (Get-RstArgs $e $op (Join-Path $dir 'wrong.jsonl'))
+        Assert-True ($res.Aborted -ceq 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE' -and $res.RefusedAt.Step -ceq 'alternative' -and @($res.Results).Count -eq 0 -and -not [IO.Directory]::Exists($alt) -and [IO.Directory]::Exists((Join-Path $e.Path 'payload'))) "frase errada do alternativo: nada movido ($($res.Aborted))"
+        $op = New-TestCleanOperator
+        $res = Invoke-RstOpen (Get-RstArgs $e $op (Join-Path $dir 'ok.jsonl'))
+        Assert-True ($res.Results[0].Outcome -ceq 'COMPLETE' -and $res.Results[0].Destination -eq $alt) "restaurado no alternativo ($($res.Aborted)$($res.StoppedBy))"
+        Assert-Eq ($op.Calls -join ',') ("restore|$alt,alternative|$alt") 'duas frases, ambas com o destino'
+        Assert-Eq (Get-IsoRelativeListing $alt) $e.Before 'alternativo com a raiz intacta'
+        Assert-Eq (Get-IsoRelativeListing $e.Run.Root) $orig 'original recriado intocado: sem mescla nem sobrescrita'
+        # The alternative already taken: refused.
+        $e2 = New-RstEntry 'rstconf2'
+        [void][IO.Directory]::CreateDirectory($e2.Run.Root); [void][IO.Directory]::CreateDirectory($e2.Run.Root + '.restored-' + $e2.Id8)
+        $rec = New-RstPlanRecorder
+        $res = Invoke-AtmRestore -Id $e2.Id -PlanPresenter $rec.Presenter -InventoryArgs $e2.Run.IA
+        Assert-True ($res.Aborted -ceq 'RESTAURACAO_RECUSADA' -and (@($rec.Calls[0].Plan.Reasons) -join ';') -like '*RESTORE_CONFLICT (ALTERNATIVE_EXISTS)*') "alternativo ocupado: recusado ($(@($rec.Calls[0].Plan.Reasons) -join ';'))"
+    }
+    Test-Case 'Isolamento P3b' 'Interrupcao e reconciliacao (T-ISO-5): move-intent sem resultado com payload integro e origem ausente e reconciliado pela propria restauracao (verify so informa); restore-intent sem resultado tambem; INCOMPLETE sem payload ou com a origem presente: a restauracao recusa sem reconciliar' {
+        $dir = New-TestCleanLogDir 'rst-rec'
+        if (-not $dir) { return }
+        $a = New-RstEntry 'rstreca'
+        if (-not $a) { return }
+        Set-RstManifestLines -Path $a.Manifest -Keep 2
+        $h0 = [IO.File]::ReadAllText($a.Manifest)
+        $v = Test-AtmQuarantineEntry -Id $a.Id -OwnSid $testIdentity.Sid
+        Assert-True ($v.State -ceq 'INCOMPLETE' -and $v.Result -ceq 'OK' -and $v.Reconcilable -eq $true) "verify: INCOMPLETE reconciliavel ($($v.State) $($v.Result) $($v.Reconcilable))"
+        Assert-Eq ([IO.File]::ReadAllText($a.Manifest)) $h0 'verify nao grava a reconciliacao (T-ISO-4)'
+        $res = Invoke-RstOpen (Get-RstArgs $a (New-TestCleanOperator) (Join-Path $dir 'a.jsonl'))
+        Assert-True ($res.Results[0].Outcome -ceq 'COMPLETE') "restaurado ($($res.Aborted)$($res.StoppedBy))"
+        Assert-Eq (Get-RstTypes $a.Manifest) 'entry,move-intent,reconcile,restore-intent,restore-result' 'reconcile gravado pela restauracao antes da intencao'
+        Assert-True ((Get-RstTypes (Join-Path $dir 'a.jsonl')).Contains('plan-check,reconcile,restore-intent') -and (Get-IsoRelativeListing $a.Run.Root) -eq $a.Before) 'reconciliacao no log; raiz de volta intacta'
+        $b = New-RstEntry 'rstrecb'
+        Set-RstManifestLines -Path $b.Manifest -Keep 3 -Append @([ordered]@{ schema = 'atm.quarantine/1'; type = 'restore-intent'; id = $b.Id; recSeq = 4; utc = [datetime]::UtcNow.ToString('o'); opId = 'interrompido:1'; destination = $b.Run.Root; alternative = $false })
+        Assert-True ((Get-AtmQuarantineEntry -Id $b.Id -OwnSid $testIdentity.Sid).Pending -ceq 'restore') 'restore-intent sem resultado: INCOMPLETE (restore)'
+        $res = Invoke-RstOpen (Get-RstArgs $b (New-TestCleanOperator) (Join-Path $dir 'b.jsonl'))
+        Assert-True ($res.Results[0].Outcome -ceq 'COMPLETE' -and (Get-RstTypes $b.Manifest) -ceq 'entry,move-intent,move-result,restore-intent,reconcile,restore-intent,restore-result') "restauracao interrompida reconciliada ($(Get-RstTypes $b.Manifest))"
+        $c = New-RstEntry 'rstrecc' @{ MoveTreeImpl = $isoRefused }
+        Set-RstManifestLines -Path $c.Manifest -Keep 2
+        $h0 = [IO.File]::ReadAllText($c.Manifest)
+        $v = Test-AtmQuarantineEntry -Id $c.Id -OwnSid $testIdentity.Sid
+        Assert-True ($v.Result -ceq 'PAYLOAD_MISSING' -and $v.Reconcilable -eq $false) "sem payload: nao reconciliavel ($($v.Result) $($v.Reconcilable))"
+        $op = New-TestCleanOperator
+        $res = Invoke-RstOpen (Get-RstArgs $c $op (Join-Path $dir 'c.jsonl'))
+        Assert-True ($res.Aborted -ceq 'RESTAURACAO_RECUSADA' -and (@($res.Plan.Reasons) -join ';') -like 'ENTRY_INCOMPLETE*' -and $op.Calls.Count -eq 0 -and [IO.File]::ReadAllText($c.Manifest) -ceq $h0 -and [IO.Directory]::Exists($c.Run.Root)) "sem payload: recusado sem reconciliar ($(@($res.Plan.Reasons) -join ';'))"
+        $d = New-RstEntry 'rstrecd'
+        Set-RstManifestLines -Path $d.Manifest -Keep 2
+        [void][IO.Directory]::CreateDirectory($d.Run.Root)
+        $res = Invoke-RstOpen (Get-RstArgs $d (New-TestCleanOperator) (Join-Path $dir 'd.jsonl'))
+        Assert-True ($res.Aborted -ceq 'RESTAURACAO_RECUSADA' -and (@($res.Plan.Reasons) -join ';') -like '*ENTRY_INCOMPLETE (ORIGINAL_PRESENT)*') "origem presente: recusado sem reconciliar ($(@($res.Plan.Reasons) -join ';'))"
+    }
+    Test-Case 'Isolamento P3b' 'Desfechos do mover na restauracao (costura -MoveTreeImpl e mover real): intencao no manifesto e no log ANTES da chamada, com o pai fixado; recusa, excecao e arquivo em uso deixam a entrada ISOLATED; mudanca na janela: RESTORED_INTEGRITY_FAILED e entrada FAILED; nada desfeito' {
+        $dir = New-TestCleanLogDir 'rst-out'
+        if (-not $dir) { return }
+        $cases = @(
+            @{ Name = 'refused'; Want = 'REFUSED'; Stop = 'STOPPED_AFTER_REFUSED'; State = 'ISOLATED'; Impl = { param($plan, $dest, $n) $script:rstSeen = @((Get-IsoLiveLastType $script:rstLog), (Get-IsoLiveLastType (Join-Path $plan.Entry.Path 'manifest.jsonl')), [string]$dest.IsPinned, $dest.ParentPath); & $rstRefused $plan $dest $n } },
+            @{ Name = 'exception'; Want = 'EXCEPTION'; Stop = 'STOPPED_AFTER_EXCEPTION'; State = 'ISOLATED'; Impl = { param($plan, $dest, $n) throw (New-Object IO.IOException 'synthetic') } },
+            @{ Name = 'inuse'; Want = 'REFUSED'; Stop = 'STOPPED_AFTER_REFUSED'; State = 'ISOLATED'; Impl = { param($plan, $dest, $n) $pp = Join-Path $plan.Entry.Path 'payload'; $fs = [IO.File]::Open((Join-Path $pp 'a.txt'), 'Open', 'ReadWrite', 'None'); try { [AgentTempManager.AtmMover]::MoveTree($pp, $plan.Entry.Files, $plan.Entry.Dirs, $plan.Entry.Bytes, (ConvertTo-AtmUtcTicks $plan.Entry.NewestWriteUtc), $dest, $n, $null) } finally { $fs.Dispose() } } },
+            @{ Name = 'window'; Want = 'INTEGRITY_FAILED'; Stop = 'RESTORED_INTEGRITY_FAILED'; State = 'FAILED'; Impl = { param($plan, $dest, $n) [AgentTempManager.AtmMover]::MoveTree((Join-Path $plan.Entry.Path 'payload'), $plan.Entry.Files, $plan.Entry.Dirs, $plan.Entry.Bytes, (ConvertTo-AtmUtcTicks $plan.Entry.NewestWriteUtc), $dest, $n, [Action[string]]{ param($p) [IO.File]::WriteAllText((Join-Path $p 'na-janela.txt'), 'x') }) } }
+        )
+        foreach ($k in $cases) {
+            $e = New-RstEntry ('rstout-' + $k.Name)
+            if (-not $e) { return }
+            $script:rstLog = Join-Path $dir ($k.Name + '.jsonl'); $script:rstSeen = $null
+            $res = Invoke-RstOpen (Get-RstArgs $e (New-TestCleanOperator) $script:rstLog @{ MoveTreeImpl = $k.Impl })
+            Assert-True (@($res.Results).Count -eq 1 -and $res.Results[0].Outcome -ceq $k.Want -and $res.StoppedBy -ceq $k.Stop -and -not $res.Aborted) "$($k.Name): $($res.StoppedBy) $($res.Aborted) $(@($res.Results | ForEach-Object { $_.AbortReason; $_.ExceptionType }) -join ';')"
+            Assert-Eq (Get-RstTypes $e.Manifest) 'entry,move-intent,move-result,restore-intent,restore-result' "$($k.Name): manifesto registra o desfecho"
+            Assert-Eq (Get-RstTypes $script:rstLog) 'run-start,confirmation,plan-check,restore-intent,restore-result,run-end' "$($k.Name): log completo"
+            Assert-Eq (Get-AtmQuarantineEntry -Id $e.Id -OwnSid $testIdentity.Sid).State $k.State "$($k.Name): estado derivado"
+            if ($k.State -ceq 'ISOLATED') { Assert-True ([IO.Directory]::Exists((Join-Path $e.Path 'payload')) -and -not [IO.Directory]::Exists($e.Run.Root)) "$($k.Name): payload continua na entrada" }
+            else { Assert-True ($res.Results[0].Moved -and -not $res.Results[0].Verified -and [IO.Directory]::Exists($e.Run.Root)) 'janela: movido, nao verificado, nada desfeito' }
+            if ($k.Name -ceq 'refused') { Assert-Eq ($script:rstSeen -join ',') ('restore-intent,restore-intent,True,' + [IO.Path]::GetDirectoryName($e.Run.Root)) 'na chamada ao mover: intencao no log e no manifesto (fechado), pai do destino fixado' }
+            if ($k.Name -ceq 'inuse') { Assert-True ($res.Results[0].AbortReason -ceq 'MOVE_ACCESS_DENIED') "mover real recusa com arquivo aberto ($($res.Results[0].AbortReason))" }
+        }
+    }
+    Test-Case 'Isolamento P3b' 'Recusas antes do mover na restauracao (manifesto intacto): id invalido, frase errada, sem log, log dentro da quarentena, sem console, lock ocupado (o mesmo do clean), outra identidade; mudanca no payload depois das perguntas: revalidacao recusada' {
+        $e = New-RstEntry 'rstrefuse'
+        if (-not $e) { return }
+        $dir = New-TestCleanLogDir 'rst-refuse'
+        if (-not $dir) { return }
+        $h0 = [IO.File]::ReadAllText($e.Manifest)
+        $n = 0
+        $check = { param($Res, [string]$Code, [string]$Label) Assert-True ($Res.Aborted -ceq $Code -and @($Res.Results).Count -eq 0) "${Label}: $($Res.Aborted) (esperado $Code)"; Assert-Eq ([IO.File]::ReadAllText($e.Manifest)) $h0 "${Label}: manifesto intacto"; Assert-True ([IO.Directory]::Exists((Join-Path $e.Path 'payload')) -and -not [IO.Directory]::Exists($e.Run.Root)) "${Label}: nada movido" }
+        $next = { $script:rstN++; Join-Path $dir ('r' + $script:rstN + '.jsonl') }
+        $script:rstN = 0
+        & $check (Invoke-RstOpen (Get-RstArgs $e (New-TestCleanOperator) (& $next) @{ Id = '..\x' })) 'ENTRY_ID_INVALID' 'id invalido'
+        & $check (Invoke-RstOpen (Get-RstArgs $e (New-TestCleanOperator -Answers @{ 'restore#1' = 'RESTAURAR ERRADO' }) (& $next))) 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE' 'frase errada'
+        $a = Get-RstArgs $e (New-TestCleanOperator) $null; $a.Remove('LogFile')
+        & $check (Invoke-RstOpen $a) 'LOG_REQUIRED' 'sem log'
+        & $check (Invoke-RstOpen (Get-RstArgs $e (New-TestCleanOperator) (Join-Path $script:AtmIsolationQuarantineRoot 'x.jsonl'))) 'LOG_DESTINATION_NOT_ALLOWED' 'log dentro da quarentena'
+        $script:AtmCleanConsoleSource = { $false }
+        try { $res = Invoke-RstOpen (Get-RstArgs $e (New-TestCleanOperator) (& $next)) } finally { $script:AtmCleanConsoleSource = { $true } }
+        & $check $res 'CONSOLE_NOT_OBSERVED' 'sem console'
+        $h = Start-TestLockHolder -Name $script:AtmCleanLockName -Mode release
+        try { $op = New-TestCleanOperator; $lg = & $next; $res = Invoke-RstOpen (Get-RstArgs $e $op $lg) } finally { $null = Stop-TestLockHolderByGo $h }
+        & $check $res 'CLEAN_LOCK_BUSY' 'lock ocupado'
+        Assert-True ($op.Calls.Count -eq 0 -and -not (Test-Path -LiteralPath $lg)) 'lock ocupado: nada perguntado, nenhum log'
+        $otherIa = Get-InvArgs -Profiles @($e.Run.Profile) -Identity ([pscustomobject]@{ Sid = 'S-1-5-21-1-2-3-4444'; Name = 'outro'; IsAdmin = $false })
+        $res = Invoke-RstOpen (Get-RstArgs $e (New-TestCleanOperator) (& $next) @{ InventoryArgs = $otherIa })
+        & $check $res 'RESTAURACAO_RECUSADA' 'outra identidade'
+        Assert-True ((@($res.Plan.Reasons) -join ';') -like ('*' + $script:AtmIsolationOwnProfileOnly + '*')) "outra identidade: so o proprio perfil ($(@($res.Plan.Reasons) -join ';'))"
+        $hook = { param($plan) [IO.File]::WriteAllText((Join-Path $plan.Entry.Path 'payload\antes-do-mover.txt'), 'novo') }
+        $lg = & $next
+        $res = Invoke-RstOpen (Get-RstArgs $e (New-TestCleanOperator) $lg @{ BeforeMoveHook = $hook })
+        Assert-True ($res.Aborted -ceq 'REVALIDATION_REFUSED' -and @($res.Results).Count -eq 0 -and [IO.File]::ReadAllText($e.Manifest) -ceq $h0) "revalidacao recusada ($($res.Aborted))"
+        Assert-True ((Get-RstTypes $lg) -ceq 'run-start,confirmation,plan-check,run-end' -and -not (Read-TestCleanLogFile $lg).Records[2].matched) 'plan-check nao confere, registrado'
+    }
+    Test-Case 'Isolamento P3b' 'CLI quarantine (processo filho, origem; trava fechada): sem subcomando ou sem -Entry sai com 2; -Entry com caminho sai com 2; entrada inexistente: inspect sai com 3 e restore mostra a recusa e sai com 3; list e verify -All so leem (nada criado); help lista os comandos' {
+        $shell = (Get-Process -Id $PID).Path
+        $cli = Join-Path $srcDir 'agent-temp.ps1'
+        $run = { param([string]$ArgLine, [int]$T = 180) Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -ExecutionPolicy Bypass -File `"$cli`" $ArgLine -Lang en-US -NoProgress") -TimeoutSec $T }
+        $usage = 'quarantine requires: list'
+        $r = & $run 'quarantine'; Assert-True ($r.Exit -eq 2 -and $r.Text.Contains($usage)) "sem subcomando: exit $($r.Exit)"
+        $r = & $run 'quarantine inspect'; Assert-True ($r.Exit -eq 2 -and $r.Text.Contains($usage)) "inspect sem -Entry: exit $($r.Exit)"
+        $r = & $run 'quarantine restore'; Assert-True ($r.Exit -eq 2 -and $r.Text.Contains($usage)) "restore sem -Entry: exit $($r.Exit)"
+        $r = & $run 'quarantine verify'; Assert-True ($r.Exit -eq 2 -and $r.Text.Contains($usage)) "verify sem -Entry nem -All: exit $($r.Exit)"
+        $r = & $run ("quarantine restore -Entry `"$sandbox\x`""); Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('never a path')) "-Entry com caminho: exit $($r.Exit)"
+        $la = [Environment]::GetFolderPath('LocalApplicationData'); $home0 = [IO.Directory]::Exists((Join-Path $la 'AgentTempManager'))
+        $r = & $run 'quarantine inspect -Entry 20260101T000000Z-0badf00d'; Assert-True ($r.Exit -eq 3 -and $r.Text.Contains('There is no quarantine entry 20260101T000000Z-0badf00d')) "inspect inexistente: exit $($r.Exit)"
+        $r = & $run 'quarantine restore -Entry 20260101T000000Z-0badf00d' 300
+        Assert-True ($r.Exit -eq 3 -and $r.Text.Contains('ENTRY_NOT_FOUND') -and $r.Text.Contains('RESTAURACAO_RECUSADA') -and $r.Text.Contains('Nothing was moved')) "restore inexistente: exit $($r.Exit)"
+        $r = & $run 'quarantine list'; Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('QUARANTINE: ENTRIES') -and $r.Text.Contains('Read only')) "list: exit $($r.Exit)"
+        $r = & $run 'quarantine verify -All'; Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('QUARANTINE: VERIFY')) "verify -All: exit $($r.Exit)"
+        Assert-Eq ([IO.Directory]::Exists((Join-Path $la 'AgentTempManager'))) $home0 'list e verify nunca criam a quarentena'
+        $r = & $run 'help'; Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('agent-temp quarantine list')) "help: exit $($r.Exit)"
+    }
+    Test-Case 'Isolamento P3b' 'Camadas e estatico: duas chamadas de produto ao mover (isolar e restaurar, so no motor) e OpenExisting so para os manifestos; funcoes de gestao sem escrita; TUI so chama o isolamento e as funcoes de leitura, nunca restaura (T-ISO-6); um unico ponto de restauracao, no lancador; console exigido alem da trava' {
+        $iso = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Isolate.ps1'))
+        $ro = $iso.Substring($iso.IndexOf('function Read-AtmQuarantineManifest'), $iso.IndexOf('function Get-AtmRestorePlanId') - $iso.IndexOf('function Read-AtmQuarantineManifest'))
+        foreach ($pat in @('AtmCleanLog', 'OpenExisting', 'AtmSafeCreate', 'AtmMover', 'MoveTree(', 'WriteAll', 'AppendAll', 'File]::Create(', 'CreateDirectory', 'FileAccess]::Write', 'FileAccess]::ReadWrite', '::Move(', 'SetAttributes', 'Set-Content', 'Out-File', 'Write-AtmIsolationRecord')) { Assert-True (-not $ro.Contains($pat)) "list/inspect/verify sem escrita ('$pat')" }
+        $tui = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Tui.ps1'))
+        foreach ($pat in @('Invoke-AtmRestore', 'PinForMove', 'restore -Entry', 'Read-AtmQuarantineManifest', 'Get-AtmRestorePlan')) { Assert-True (-not $tui.Contains($pat)) "TUI nao restaura ('$pat')" }
+        Assert-True ($tui.Contains('Get-AtmQuarantineList -OwnSid') -and $tui.Contains('Test-AtmQuarantineEntry -Id') -and [regex]::Matches($tui, 'Invoke-AtmIsolate ').Count -eq 1) 'TUI: leitura pela engine; um unico ponto de isolamento'
+        $rep = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Report.ps1'))
+        Assert-True (-not $rep.Contains('Invoke-AtmRestore') -and -not $rep.Contains('Invoke-AtmIsolate')) 'relatorio so apresenta'
+        $calls = @()
+        foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1', '.cmd') -and $_.Name -ne 'Engine.Isolate.ps1' })) { if ([IO.File]::ReadAllText($fi.FullName).Contains('Invoke-AtmRestore')) { $calls += $fi.Name } }
+        Assert-Eq ($calls -join ',') 'agent-temp.ps1' 'so o lancador chama a restauracao'
+        $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        Assert-True ([regex]::Matches($cli, 'Invoke-AtmRestore ').Count -eq 1 -and $cli.Contains("if (`$script:AtmIsolationEnabled -and -not (Test-AtmTuiInteractive)) { Write-Host (Get-AtmText 'cli.restoreNeedsConsole')") -and $cli.Contains('-ConfirmationReader $rstReader')) 'CLI: uma chamada; console exigido alem da trava'
+        foreach ($l in @('en-US', 'pt-BR')) { foreach ($k in @('help.quarantine', 'cli.quarantineUsage', 'q.cliOnly', 'rst.planOnly', 'rst.conflict', 'menu.isolate', 'menu.quarantine', 'tuiiso.askLog', 'tui.q.cliOnly', 'foot.qdetail')) { Assert-True $script:AtmMessages[$l].ContainsKey($k) "$k ($l)" } }
+    }
+
     # ------------------------------------------------------------------ trusted accounts per engine (FIX-TRUSTED-SIDS)
     Test-Case 'Contas confiaveis' 'Cada motor com a sua lista: com Clean, Isolate e Diagnose carregados na ordem do lancador, o gate 4 usa a lista declarada no Engine.Clean (com OWNER RIGHTS) e a regra de local do Git a sua propria (sem OWNER RIGHTS); nenhum arquivo atribui a lista de outro motor' {
         $declared = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464', 'S-1-3-0', 'S-1-3-4')
@@ -3904,6 +4273,39 @@ exit 0
         if ($null -ne $DiagRunner) { $tuiArgs['DiagnoseRunner'] = $DiagRunner; $tuiArgs['DiagnoseArgs'] = @{} }
         $st = Start-AtmTui @tuiArgs
         return [pscustomobject]@{ State = $st; Frames = $script:tuiFrames.ToArray(); Prompts = $script:tuiPrompts.ToArray() }
+    }
+    Test-Case 'TUI' 'Isolamento 0.3.x headless (en-US e pt-BR): I sobre a raiz selecionada mostra so o plano com a trava fechada (sem pergunta de log, nada movido); area Quarentena (Z) so leitura: lista, inspect e V verify sem gravar nada; mostra o comando da CLI e nunca restaura (T-ISO-6)' {
+        $saved = $script:AtmIsolationQuarantineRoot
+        [void][IO.Directory]::CreateDirectory((Join-Path $sandbox 'tuiq-home'))
+        $script:AtmIsolationQuarantineRoot = Join-Path $sandbox 'tuiq-home\AgentTempManager\Q'
+        $old = Get-AtmLanguage
+        try {
+            $e = New-RstEntry 'tuiq'
+            if (-not $e) { return }
+            Assert-True ($e.Iso.Results[0].Outcome -ceq 'COMPLETE') "entrada para a area ($($e.Iso.Aborted)$($e.Iso.StoppedBy))"
+            $p = New-TestProfile 'tuiiso'; $r = New-TestRoot -ProfileInfo $p
+            $before = Get-IsoRelativeListing $r
+            $snap = Get-RstSnapshot $script:AtmIsolationQuarantineRoot
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                # The quarantine area judges entries by the inventory's identity: the run's profile is in this inventory.
+                $ia = Get-InvArgs -Profiles @($p, $e.Run.Profile)
+                $keys = @((New-Key 'Z' 'z'), (New-Key 'Enter'), (New-Key 'V' 'v'), (New-Key 'Escape'), (New-Key 'Escape'), (New-Key 'D4' '4'), (New-Key 'I' 'i'), (New-Key 'Escape'), (New-Key 'Q' 'q'))
+                $o = Invoke-HeadlessTui -Keys $keys -InvArgs $ia -Lines @('') -H 40
+                $all = $o.Frames -join "`n=====`n"
+                # Without Unicode output the frames fall back to ASCII: either form of a text counts.
+                $has = { param([string]$T) $all.Contains($T) -or $all.Contains((ConvertTo-AtmAscii $T)) }
+                Assert-True ((& $has ('[I] ' + (Get-AtmText 'menu.isolate'))) -and (& $has ('[Z] ' + (Get-AtmText 'menu.quarantine')))) "$lang`: menu com I e Z"
+                Assert-True ($all.Contains($e.Id) -and $all.Contains('ISOLATED')) "$lang`: entrada listada com o estado"
+                Assert-True ((& $has (Get-AtmText 'q.cliOnly' $e.Id)) -and (& $has (Get-AtmText 'tui.q.cliOnly'))) "$lang`: comando da CLI mostrado, sem restaurar"
+                Assert-True (& $has ((Get-AtmText 'tui.q.verifyResult' 'OK' '').Trim())) "$lang`: V verificou (OK)"
+                Assert-True ($o.Prompts -contains (Get-AtmText 'tuiclean.enterPanel') -and -not ($o.Prompts -contains (Get-AtmText 'tuiiso.askLog'))) "$lang`: isolar com a trava fechada: nenhuma pergunta de log ($($o.Prompts -join ' | '))"
+                foreach ($fr in $o.Frames) { foreach ($ln in ($fr -split "`n")) { Assert-True ($ln.Length -le 120) "$lang`: linha excede a largura: $($ln.Length)" } }
+            }
+            Assert-Eq (Get-IsoRelativeListing $r) $before 'raiz intacta: so o plano'
+            Assert-Eq (Get-RstSnapshot $script:AtmIsolationQuarantineRoot) $snap 'quarentena e manifesto identicos: a TUI so leu'
+            Assert-Eq (Get-IsoEntryCount) 1 'nenhuma entrada nova'
+        } finally { $script:AtmIsolationQuarantineRoot = $saved; Set-AtmLanguage -Requested $old }
     }
     Test-Case 'TUI' 'Navegacao headless: dashboard, usuarios, roots, detalhe, classes, erros, preview, ajuda' {
         $p = New-TestProfile 'tui'
@@ -11609,7 +12011,7 @@ try {
         }
         Assert-Eq ([regex]::Matches($tui, 'Invoke-AtmDiagnose @').Count) 1 'um unico ponto que executa o diagnose'
         $keysV01 = @(Get-AtmTuiMenuItems | ForEach-Object { $_.Key }) -join ''
-        Assert-Eq $keysV01 '123456789PDLRHQ' '33: menu V0.1 preservado (D acrescentado)'
+        Assert-Eq $keysV01 '123456789PDILZRHQ' '33: menu V0.1 preservado (D acrescentado; I e Z da 0.3.x)'
         Assert-True ($script:AtmRealDeletionEnabled -eq $true -and $shippedDeletionGate -eq $false -and $script:AtmHandleDiagnosticsEnabled -eq $false -and $script:AtmWorktreeDiagnosticsEnabled -eq $false) '34: travas distribuidas fechadas (a suite so abre a de exclusao no sandbox)'
         foreach ($l in @('en-US', 'pt-BR')) { foreach ($k in @('menu.diagnose', 'tui.diag.noAuth', 'tui.diag.failed', 'tui.diag.stale', 'foot.diagList', 'foot.diagText', 'tui.diag.finding.no', 'tui.diag.elevUnknown')) { Assert-True $script:AtmMessages[$l].ContainsKey($k) "$k ($l)" } }
     }

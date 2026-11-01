@@ -527,8 +527,29 @@ session root per run.
    root where it was and an entry whose manifest records the attempt. Any outcome other than moved and verified stops
    the run (exit code `3`), and nothing is undone.
 
-The quarantine commands are later phases: `list`, `inspect`, `verify` and `restore` (with the TUI area), then
-`purge`.
+### Quarantine (0.3.x, unreleased)
+
+```
+agent-temp quarantine list
+agent-temp quarantine inspect -Entry <id>
+agent-temp quarantine verify  -Entry <id> | -All
+agent-temp quarantine restore -Entry <id> -LogFile <new file>
+```
+
+* `-Entry` takes only an entry id (`yyyyMMddTHHmmssZ-<8 hex>`), never a path (exit code `2` otherwise).
+* `list`, `inspect` and `verify` only read, with the isolation gate open or closed: bytes and times stay identical,
+  manifests included, and a missing quarantine is not created. Each entry shows its derived state (`ISOLATED`,
+  `INCOMPLETE`, `FAILED`, `RESTORED`, `ABANDONED`, or `ENTRY_MANIFEST_INVALID`). `verify` compares the payload with the
+  measurement and metadata digest the manifest recorded (`OK`, `DIFFERS`, `PAYLOAD_MISSING`, ...); a differing entry is a
+  result (exit code `0`).
+* `restore`, with the isolation gate closed (every copy), shows the plan and stops (exit code `3`). Past the gate it needs a
+  console, a new log and the phrase `RESTAURAR <id8>`. When the original path exists (`RESTORE_CONFLICT`) the engine
+  offers `<name>.restored-<id8>` next to it, with its own phrase; nothing is ever overwritten or merged. An `INCOMPLETE`
+  entry is reconciled by the restore itself when its payload matches the intent and the original is absent.
+* The TUI: **I** isolates the selected root (the default action; plan only in every copy), **Z** opens the read-only
+  Quarantine area (list, detail, **V** verify). The TUI never restores: it shows the CLI command.
+
+`purge` is a later phase.
 
 ## Exit codes
 

@@ -82,7 +82,12 @@ Collection -> normalization -> evidence -> correlation -> presentation:
 * Past the gate (tests only), `Invoke-AtmIsolate` runs under the clean lock. Only the engine calls the mover, once, after
   the intent is recorded in the log and in the entry's manifest. The lock and console helpers live in `Engine.Clean.ps1`.
 
-**Later phases:** quarantine `list`, `inspect`, `verify`, `restore` (P3b, with the TUI area) and `purge` (P4).
+* P3b: `quarantine list`, `inspect` and `verify` are read-only engine functions (no record is written, T-ISO-4).
+  `Invoke-AtmRestore` (CLI only) is the second and last product call to the mover, behind the same gate and lock, with
+  the intent recorded before it. The TUI calls `Invoke-AtmIsolate` and the read-only functions only; it never restores
+  (T-ISO-6).
+
+**Later phases:** `purge` (P4).
 
 ### Planned layering (ADR-0013)
 

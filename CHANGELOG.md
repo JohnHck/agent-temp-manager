@@ -5,6 +5,11 @@
 Work for 0.3.x, which comes after 0.3.0 is published (ADR-0013, ROADMAP "0.3.x"). It is not part of the 0.3.0 candidate.
 **A fifth release gate, `AtmIsolationEnabled`, is closed in every copy**: in every copy `isolate` only plans.
 
+* Isolation, phase P3b: `agent-temp quarantine list | inspect | verify | restore`.
+  * list, inspect and verify only read, in every copy. restore shows the plan only while the isolation gate is closed.
+  * Past the gate: lock, console, new log, `RESTAURAR <id8>`, revalidation, the same mover back; on a conflict an
+    engine-generated `<name>.restored-<id8>` with its own phrase; reconciliation of an `INCOMPLETE` entry (T-ISO-5).
+  * TUI: I isolates a root (plan only), Z shows the read-only Quarantine area and the restore CLI command.
 * Fix (FIX-TRUSTED-SIDS): each engine now has its own list of trusted accounts.
   * The diagnose engine's Git location rule had reused the name of the clean engine's list (gate 4) without OWNER
     RIGHTS. Being loaded later, it replaced that list, so gate 4 refused an OWNER RIGHTS entry as a third-party writer.

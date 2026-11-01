@@ -11,6 +11,9 @@
 #  * Rendering is a pure function (state -> frame lines); keys come from an injectable source (headless tests).
 #  * The diagnostics area (V0.2 P5-A) only calls Invoke-AtmDiagnose, on an explicit action, and shows the diagnose JSON
 #    export of its result (schema fields only); it never calls a collector, opens a gate or changes a state.
+#  * 0.3.x isolation: I (menu, root lists, root detail) delegates one exact root to Invoke-AtmIsolate, the default action
+#    over a root (plan only with the isolation gate closed). The Quarantine area (Z) only lists, inspects and verifies,
+#    through the isolation engine's read-only functions; it never restores (T-ISO-6) and shows the CLI command instead.
 Set-StrictMode -Version 2.0
 
 $script:AtmTuiClassColor = @{ ACTIVE_EVIDENCE = 'Red'; RECENT = 'Yellow'; LIVENESS_UNKNOWN = 'DarkYellow'; ORPHAN_SUSPECTED = 'Cyan'; NOT_SCANNED = 'DarkGray' }
@@ -126,6 +129,13 @@ function Format-AtmTuiTable {
 
 function Get-AtmTuiParts { param($State) return @($State.Inventory.Partitions | Where-Object { $_.Kind -ne 'NotScanned' }) }
 
+function Get-AtmTuiOwnSid {
+    # The identity the quarantine entries are judged by: the inventory's (the process user, or the suite's test identity).
+    param($State)
+    if ($State.Inventory -and $State.Inventory.Identity) { return [string]$State.Inventory.Identity.Sid }
+    return [string](Get-AtmCurrentIdentity).Sid
+}
+
 function Get-AtmTuiPreviewRows {
     # Preview gates come from the CLEAN ENGINE (Test-AtmCandidate); the TUI only caches the result.
     param($State)
@@ -194,6 +204,15 @@ function Get-AtmTuiScreenRows {
                 $rows.Add(@($catText, $p.UserName, $(if ($p.Slug) { $p.Slug + '\' + $p.Name } else { $p.Name }), (Format-AtmMB $p.Bytes), ((@($r.Gate.Reasons) + @($r.Gate.Requirements)) -join '; ')))
                 $items.Add([pscustomobject]@{ Kind = 'root'; Partition = $p; Gate = $r.Gate })
                 $colors.Add($script:AtmTuiCatColor[$r.Gate.Category])
+            }
+        }
+        'quarantine' {
+            # 0.3.x quarantine area (read only): the list read by the isolation engine when the area was opened.
+            $cols = @(@{ Name = (Get-AtmText 'col.entry'); Width = 26 }, @{ Name = (Get-AtmText 'col.state'); Width = 30 }, @{ Name = (Get-AtmText 'col.target'); Width = 12 }, @{ Name = (Get-AtmText 'col.files'); Width = 9; Right = $true }, @{ Name = 'MB'; Width = 9; Right = $true }, @{ Name = (Get-AtmText 'col.original'); Width = 0 })
+            foreach ($e in @(if ($State.Quarantine) { $State.Quarantine.Entries })) {
+                $rows.Add(@($e.Id, (Format-AtmQuarantineState $e), $e.TargetKind, $(if ($null -ne $e.Files) { '{0:N0}' -f $e.Files } else { '-' }), $(if ($null -ne $e.Bytes) { Format-AtmMB $e.Bytes } else { '-' }), $e.OriginalPath))
+                $items.Add([pscustomobject]@{ Kind = 'qentry'; Entry = $e })
+                $colors.Add($(if ($e.State -ceq 'ISOLATED') { 'Gray' } elseif ($e.State -ceq 'RESTORED') { 'DarkGray' } else { 'Yellow' }))
             }
         }
     }
@@ -269,10 +288,26 @@ function Get-AtmTuiTextLines {
             foreach ($x in $p.ErrorSamples) { & $add ('  - ' + (Get-AtmText 'audit.err' $x)) 'Yellow' }
             foreach ($x in $p.ReparseSamples) { & $add ('  - ' + (Get-AtmText 'audit.reparse' $x)) 'Yellow' }
             & $add ''
+            & $add (Get-AtmText 'tui.isoHint') 'Cyan'
             & $add (Get-AtmText 'tui.moreDetail') 'DarkGray'
         }
         'help' {
             foreach ($k in @('tui.help1', 'tui.help2', 'tui.help3', 'tui.help4', 'tui.help5')) { & $add (Get-AtmText $k); & $add '' }
+        }
+        'qdetail' {
+            # inspect, and verify on request (V): both only read. Restoring is not offered here (T-ISO-6): the CLI command.
+            $e = $Screen.Filter.Entry
+            foreach ($ql in (Get-AtmQuarantineEntryLines -Entry $e)) { & $add $ql }
+            & $add ''
+            $v = $Screen.Filter.Verify
+            if ($null -ne $v) {
+                & $add (Get-AtmText 'tui.q.verifyResult' $v.Result $(if ($v.Reason) { $v.Reason } else { '' })) $(if ($v.Result -ceq 'OK') { 'Green' } else { 'Yellow' })
+                if ($null -ne $v.Reconcilable) { & $add (Get-AtmText 'tui.q.reconcilable' (Get-AtmYesNo ([bool]$v.Reconcilable))) }
+            } else { & $add (Get-AtmText 'tui.q.verifyHint') 'DarkGray' }
+            & $add ''
+            & $add (Get-AtmText 'tui.q.cliOnly') 'Cyan'
+            & $add ('  ' + (Get-AtmText 'q.cliOnly' $e.Id)) 'Cyan'
+            & $add (Get-AtmText 'tui.q.readOnly') 'Green'
         }
     }
     return $L.ToArray()
@@ -325,7 +360,10 @@ function Get-AtmTuiMenuItems {
         @{ Key = '9'; Label = (Get-AtmText 'menu.errors'); Screen = @{ Name = 'errors'; Title = (Get-AtmText 'menu.errorsTitle') } }
         @{ Key = 'P'; Label = (Get-AtmText 'menu.preview'); Screen = @{ Name = 'gates'; Title = 'Preview'; Filter = @{ Category = $null } } }
         @{ Key = 'D'; Label = (Get-AtmText 'menu.diagnose'); Screen = @{ Name = 'diag'; Title = (Get-AtmText 'tui.diag.title') } }
+        # 0.3.x (ISO-D5): isolating is the default action over a root; the V0.3 cleanup stays under L.
+        @{ Key = 'I'; Label = (Get-AtmText 'menu.isolate'); Screen = @{ Name = 'isolate'; Path = $null } }
         @{ Key = 'L'; Label = (Get-AtmText 'menu.clean'); Screen = @{ Name = 'clean'; Title = (Get-AtmText 'menu.cleanTitle') } }
+        @{ Key = 'Z'; Label = (Get-AtmText 'menu.quarantine'); Screen = @{ Name = 'quarantine'; Title = (Get-AtmText 'menu.quarantineTitle') } }
         @{ Key = 'R'; Label = (Get-AtmText 'menu.reaudit'); Screen = @{ Name = 'reaudit' } }
         @{ Key = 'H'; Label = (Get-AtmText 'menu.help'); Screen = @{ Name = 'help'; Title = (Get-AtmText 'menu.help') } }
         @{ Key = 'Q'; Label = (Get-AtmText 'menu.quit'); Screen = @{ Name = 'quit' } }
@@ -407,7 +445,7 @@ function Get-AtmTuiFrame {
             $footer = Get-AtmText 'foot.menu'
         }
         'dashboard' { foreach ($l in (Get-AtmTuiDashboardLines $State)) { $lines.Add($l) }; $footer = Get-AtmText 'foot.dashboard' }
-        { $_ -in @('users', 'projects', 'roots', 'gates') } {
+        { $_ -in @('users', 'projects', 'roots', 'gates', 'quarantine') } {
             $data = Get-AtmTuiScreenRows -State $State -Screen $scr
             $scr.Count = $data.Rows.Count
             $tbl = Format-AtmTuiTable -Columns $data.Columns -Rows $data.Rows -Width $w -G $G
@@ -421,7 +459,7 @@ function Get-AtmTuiFrame {
                 $txt = $(if ($i -eq $scr.Sel) { $G.Sel } else { ' ' }) + $tbl.Lines[$i]
                 if ($i -eq $scr.Sel) { $lines.Add(@(New-AtmSeg (Limit-AtmText $txt ($w - 1) $G.Ell) 'Black' 'Cyan')) } else { $lines.Add(@(New-AtmSeg (Limit-AtmText $txt ($w - 1) $G.Ell) $data.Colors[$i])) }
             }
-            $footer = Get-AtmText 'foot.list' $(if ($data.Rows.Count) { $scr.Sel + 1 } else { 0 }) $data.Rows.Count
+            $footer = Get-AtmText $(if ($scr.Name -eq 'quarantine') { 'foot.quarantine' } else { 'foot.list' }) $(if ($data.Rows.Count) { $scr.Sel + 1 } else { 0 }) $data.Rows.Count
         }
         { $_ -in @('diag', 'dcov', 'dlist', 'dnodes', 'dissues') } {
             $data = Get-AtmTuiDiagList -State $State -Screen $scr
@@ -470,13 +508,13 @@ function Get-AtmTuiFrame {
             # Where the visible lines are, so more content is never hidden silently.
             $footer = Get-AtmText 'foot.diagText' $(if ($tl.Count) { $scr.Top + 1 } else { 0 }) $last $tl.Count
         }
-        { $_ -in @('errors', 'detail', 'help') } {
+        { $_ -in @('errors', 'detail', 'help', 'qdetail') } {
             $tl = Get-AtmTuiTextLines -State $State -Screen $scr -Width $w
             $scr.Count = $tl.Count
             $vis = [math]::Max(1, $bodyH - 1)
             if ($scr.Top -gt [math]::Max(0, $tl.Count - $vis)) { $scr.Top = [math]::Max(0, $tl.Count - $vis) }
             for ($i = $scr.Top; $i -lt [math]::Min($tl.Count, $scr.Top + $vis); $i++) { $lines.Add(@(New-AtmSeg (' ' + $tl[$i].Text) $tl[$i].Fg)) }
-            $footer = Get-AtmText 'foot.text'
+            $footer = Get-AtmText $(if ($scr.Name -eq 'qdetail') { 'foot.qdetail' } else { 'foot.text' })
         }
     }
     # The message and the footer (keys) always stay on screen: the body gives way when the frame is taller.
@@ -526,8 +564,8 @@ function Write-AtmTuiFrameToConsole {
 # paging and details never run anything again. Only an explicit action (entering the area the first time, or U) runs
 # the diagnose.
 
-$script:AtmTuiListScreens = @('users', 'projects', 'roots', 'gates', 'diag', 'dcov', 'dlist', 'dnodes', 'dissues')
-$script:AtmTuiTextScreens = @('errors', 'detail', 'help', 'dsum', 'dcovdet', 'dfind', 'dnode')
+$script:AtmTuiListScreens = @('users', 'projects', 'roots', 'gates', 'quarantine', 'diag', 'dcov', 'dlist', 'dnodes', 'dissues')
+$script:AtmTuiTextScreens = @('errors', 'detail', 'help', 'qdetail', 'dsum', 'dcovdet', 'dfind', 'dnode')
 $script:AtmTuiDiagScreens = @('diag', 'dcov', 'dlist', 'dnodes', 'dissues', 'dsum', 'dcovdet', 'dfind', 'dnode')
 $script:AtmTuiDiagStateColor = @{ IN_USE = 'Red'; UNKNOWN = 'Yellow'; NO_DEPENDENCY_OBSERVED = 'Green'; RUNTIME_NOT_DIAGNOSED = 'DarkGray' }
 # Strength is told by its marker, not by color alone.
@@ -877,6 +915,36 @@ function Invoke-AtmTuiClean {
     [void](& $tuiRead (Get-AtmText 'tuiclean.enterPanel'))
 }
 
+function Invoke-AtmTuiIsolate {
+    # 0.3.x (ISO-D5): the default action over a root. Leaves the full-screen view and delegates EVERYTHING to the
+    # isolation engine, with the one exact path chosen (or typed). With the isolation gate closed (every distributed copy)
+    # the engine shows the plan and stops. Restoring is never offered here (T-ISO-6).
+    param($State, [string]$Path)
+    $tuiRead = $State.ReadLine
+    $State.Leave.Invoke()
+    Write-Host ''
+    Write-Host (Get-AtmText 'tuiiso.title') -ForegroundColor Cyan
+    if (-not $script:AtmIsolationEnabled) { Write-Host (Get-AtmText 'tuiiso.planOnly') -ForegroundColor Yellow }
+    Write-Host (Get-AtmText 'tuiiso.intro')
+    Write-Host ''
+    if ($Path) { Write-Host (Get-AtmText 'tuiiso.root' $Path) }
+    else { $Path = & $tuiRead (Get-AtmText 'tuiiso.askPath') }
+    if (-not $Path) { Write-Host (Get-AtmText 'tuiiso.cancelled') -ForegroundColor Green; [void](& $tuiRead (Get-AtmText 'tuiclean.enterBack')); return }
+    $entries = Read-AtmAllowList -File $null -Paths @($Path)
+    $presenter = { param($v, $r, $i, $planId) Show-AtmIsolatePlan -Verified $v -Rejected $r -Inventory $i -PlanId $planId }
+    $reader = { param($phrase, $kind, $rootPath, $choices, $info) Read-AtmCleanAnswer -Phrase $phrase -Kind $kind -RootPath $rootPath -Choices $choices -Info $info -LineReader $tuiRead }
+    # Past the isolation gate only (never in a distributed copy) the engine requires a new log file: the TUI asks for it
+    # and never picks one. An empty answer passes none and the engine refuses the run (LOG_REQUIRED).
+    $logFile = $null
+    if ($script:AtmIsolationEnabled) { $logFile = & $tuiRead (Get-AtmText 'tuiiso.askLog') }
+    $a = @{} + $State.InventoryArgs
+    $a['NoProgress'] = $true
+    $res = Invoke-AtmIsolate -Entries $entries -PlanPresenter $presenter -ConfirmationReader $reader -InventoryArgs $a -LogFile $logFile -Interaction @{ Caller = 'TUI'; ConsoleRequired = $true }
+    Show-AtmIsolateResult -Result $res
+    if (@($res.Results).Count -gt 0) { $State.Preview = $null; $State.Quarantine = $null; $State.Message = (Get-AtmText 'tuiiso.reaudit') }
+    [void](& $tuiRead (Get-AtmText 'tuiclean.enterPanel'))
+}
+
 function Start-AtmTui {
     <#
       -InventoryArgs : splatted into Invoke-AtmInventory (self markers, config dir; overrides in tests)
@@ -895,7 +963,7 @@ function Start-AtmTui {
     # cannot resolve script-scope functions).
     $tuiState = @{
         G = (Get-AtmTuiGlyphs $useAscii); Width = 120; Height = 36; Stack = New-Object System.Collections.Generic.List[object]
-        Inventory = $Inventory; Preview = $null; Message = $null; InventoryArgs = $InventoryArgs; LastClean = $null; Frames = 0
+        Inventory = $Inventory; Preview = $null; Message = $null; InventoryArgs = $InventoryArgs; LastClean = $null; Frames = 0; Quarantine = $null
         Diag = $null; DiagRuns = 0
         DiagnoseArgs = $(if ($null -ne $DiagnoseArgs) { $DiagnoseArgs } else { @{ InventoryArgs = (@{} + $InventoryArgs) } })
         DiagnoseRunner = $(if ($null -ne $DiagnoseRunner) { $DiagnoseRunner } else { { param($a) Invoke-AtmDiagnose @a } })
@@ -968,7 +1036,7 @@ function Start-AtmTui {
                             }
                         }
                     }
-                    elseif ($scr.Name -in @('users', 'projects', 'roots', 'gates')) {
+                    elseif ($scr.Name -in @('users', 'projects', 'roots', 'gates', 'quarantine')) {
                         $data = Get-AtmTuiScreenRows -State $state -Screen $scr
                         if ($data.Items.Count -gt 0) {
                             $it = $data.Items[[math]::Min($scr.Sel, $data.Items.Count - 1)]
@@ -976,6 +1044,7 @@ function Start-AtmTui {
                                 'user' { $push = @{ Name = 'roots'; Title = (Get-AtmText 'tui.rootsOf' $it.Profile.UserName); Filter = @{ Sid = $it.Profile.Sid; ProfilePath = $it.Profile.ProfilePath } } }
                                 'project' { $push = @{ Name = 'roots'; Title = (Get-AtmText 'tui.rootsOfProject' $it.Project $it.UserName); Filter = @{ Sid = $it.Sid; ProfilePath = $it.ProfilePath; Project = $it.Project; Slug = $it.Slug } } }
                                 'root' { $gate = $null; if ($it.PSObject.Properties.Name -contains 'Gate') { $gate = $it.Gate }; $push = @{ Name = 'detail'; Title = (Get-AtmText 'tui.detailOf' $it.Partition.Name); Filter = @{ Partition = $it.Partition; Gate = $gate } } }
+                                'qentry' { $push = @{ Name = 'qdetail'; Title = $it.Entry.Id; Filter = @{ Entry = $it.Entry; Verify = $null } } }
                             }
                         }
                     }
@@ -988,6 +1057,18 @@ function Start-AtmTui {
                     if ($inDiag -and $ch -match '^[uU]$') { $push = @{ Name = 'diagrefresh' } }
                     elseif ($inDiag) { $null = $ch }
                     elseif ($ch -match '^[rR]$') { $push = @{ Name = 'reaudit' } }
+                    elseif ($ch -match '^[iI]$' -and $scr.Name -in @('detail', 'roots', 'gates')) {
+                        # I over a root (its detail, or the selected row): the isolation engine, with that exact path.
+                        $isoPart = $null
+                        if ($scr.Name -eq 'detail') { $isoPart = $scr.Filter.Partition }
+                        else {
+                            $data = Get-AtmTuiScreenRows -State $state -Screen $scr
+                            if ($data.Items.Count -gt 0) { $isoPart = $data.Items[[math]::Min($scr.Sel, $data.Items.Count - 1)].Partition }
+                        }
+                        if ($null -ne $isoPart) { $push = @{ Name = 'isolate'; Path = $isoPart.Path } }
+                    }
+                    # V (an entry of the quarantine area): verify, read only (T-ISO-4).
+                    elseif ($ch -match '^[vV]$' -and $scr.Name -eq 'qdetail') { $scr.Filter.Verify = Test-AtmQuarantineEntry -Id $scr.Filter.Entry.Id -OwnSid (Get-AtmTuiOwnSid $state) }
                     elseif ($scr.Name -eq 'menu') {
                         $m = @(Get-AtmTuiMenuItems | Where-Object { $_.Key -eq $ch.ToUpperInvariant() })
                         if ($m.Count -eq 1) { $push = $m[0].Screen }
@@ -1012,6 +1093,14 @@ function Start-AtmTui {
                     }
                     # Cursor visibility is cosmetic; consoles without it are fine.
                     'clean' { Invoke-AtmTuiClean -State $state; if (-not $headless) { try { [Console]::CursorVisible = $false } catch { $null = $_ }; Clear-Host } }
+                    'isolate' { Invoke-AtmTuiIsolate -State $state -Path $push.Path; if (-not $headless) { try { [Console]::CursorVisible = $false } catch { $null = $_ }; Clear-Host } }
+                    'quarantine' {
+                        # Read on entering the area (read only; a missing quarantine is not created).
+                        $state.Quarantine = Get-AtmQuarantineList -OwnSid (Get-AtmTuiOwnSid $state)
+                        if ($state.Quarantine.RootProblem) { $state.Message = (Get-AtmText 'q.rootProblem' $state.Quarantine.RootProblem) }
+                        elseif (@($state.Quarantine.Entries).Count -eq 0) { $state.Message = (Get-AtmText 'tui.q.empty') }
+                        $state.Stack.Add(@{ Name = 'quarantine'; Title = $push.Title; Sel = 0; Top = 0; Count = 0; Filter = $null })
+                    }
                     default {
                         $s = @{} + $push
                         foreach ($dk in @('Sel', 'Top', 'Count')) { if (-not $s.ContainsKey($dk)) { $s[$dk] = 0 } }

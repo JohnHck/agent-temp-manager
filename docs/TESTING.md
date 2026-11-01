@@ -273,6 +273,13 @@ The quarantine is a folder of the sandbox (the `AtmIsolationQuarantineRoot` seam
     `move-result` in both files (the entry is incomplete);
   * 200,000 files (heavy: `NAO_TESTADO` with `-SkipHeavy`, as in CI);
   * static checks: a single mover call, after the intent; the seams only in the engine.
+* **P3b (quarantine management and restore):**
+  * list, inspect and verify with the gate closed: bytes and times identical, manifests included;
+  * derived states (FAILED from a refused move, INCOMPLETE, ABANDONED, invalid manifests, junctions never opened);
+  * verify: `DIFFERS`, `PAYLOAD_MISSING`; the restore refuses a differing entry;
+  * restore with the gate closed (plan only), past it (original path), on a conflict (the generated alternative, its own
+    phrase, no merge), with reconciliation of an interrupted entry (T-ISO-5), the mover's outcomes, every refusal;
+  * the CLI in a child process; the TUI headless in both languages; static layering (two mover calls).
 
 ## Future: isolation, quarantine and Recovery Mode (0.3.x and V0.4)
 
