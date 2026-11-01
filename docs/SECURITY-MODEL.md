@@ -658,7 +658,8 @@ owner, never enables privileges and never terminates processes.
   (`MOVE_ACCESS_DENIED`), and the tree stays where it was. That held for a file open exclusively, a file open with full
   sharing, and a process's working directory. It was measured on Windows 10 x64 with Windows PowerShell 5.1 (local, on
   the scratch trees of the native code). CI repeats it on every run:
-  * the suite case "entradas abertas dentro da arvore" on Windows Server 2025 and Windows 11 ARM64;
+  * the suite case "entradas abertas dentro da arvore" on the test jobs' images (`windows-latest` and Windows 11
+    ARM64);
   * the `install e2e` step `iso-p1-rename-with-open-handles` on Windows Server 2022 and 2025 and Windows 11 ARM64, with
     the installed library.
   

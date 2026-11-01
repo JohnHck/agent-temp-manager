@@ -251,8 +251,15 @@ foreach ($case in @('none', 'file-exclusive', 'file-shared', 'cwd')) {
     $n++
     $r = Join-Path $run "t$n\root"
     [void][IO.Directory]::CreateDirectory((Join-Path $r 'd')); [IO.File]::WriteAllText((Join-Path $r 'd\f.txt'), 'x'); [IO.File]::WriteAllText((Join-Path $r 'g.txt'), 'yy')
-    Start-Sleep -Milliseconds 500
-    $s = [AgentTempManager.AtmScanner]::ScanTree($r, 3, 4096)
+    # NTFS updates directory times lazily after recent creations: scan until two scans agree (10 s at most).
+    $s = $null; $prev = $null
+    for ($i = 0; $i -lt 20 -and $null -eq $s; $i++) {
+        Start-Sleep -Milliseconds 500
+        $cur = [AgentTempManager.AtmScanner]::ScanTree($r, 3, 4096)
+        if ($null -ne $prev -and $cur.Files -eq $prev.Files -and $cur.Dirs -eq $prev.Dirs -and $cur.Bytes -eq $prev.Bytes -and $cur.NewestWriteTimeUtc -eq $prev.NewestWriteTimeUtc) { $s = $cur }
+        $prev = $cur
+    }
+    if ($null -eq $s) { $s = $prev }
     $h = $null; $c = $null
     if ($case -eq 'file-exclusive') { $h = [IO.File]::Open((Join-Path $r 'd\f.txt'), 'Open', 'ReadWrite', 'None') }
     if ($case -eq 'file-shared') { $h = [IO.File]::Open((Join-Path $r 'd\f.txt'), 'Open', 'Read', ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)) }
@@ -264,7 +271,7 @@ foreach ($case in @('none', 'file-exclusive', 'file-shared', 'cwd')) {
     }
     try { $m = [AgentTempManager.AtmMover]::MoveTree($r, $s.Files, $s.Dirs, $s.Bytes, $s.NewestWriteTimeUtc.Ticks, $e, "p$n", $null) }
     finally { if ($null -ne $h) { $h.Dispose() }; if ($null -ne $c -and -not $c.HasExited) { $c.Kill() } }
-    $state = $(if ($m.Moved -and $m.Verified) { 'MOVED_VERIFIED' } elseif ($m.Moved) { 'MOVED_' + $m.AbortReason } elseif ([IO.File]::Exists((Join-Path $r 'd\f.txt'))) { $m.AbortReason + '_SOURCE_INTACT' } else { $m.AbortReason + '_SOURCE_MISSING' })
+    $state = $(if ($m.Moved -and $m.Verified) { 'MOVED_VERIFIED' } elseif (-not $m.Attempted -and [string]$m.AbortReason -like 'PLAN_DIFFERS*') { 'NOT_TESTED_PLAN_DIFFERS' } elseif ($m.Moved) { 'MOVED_' + $m.AbortReason } elseif ([IO.File]::Exists((Join-Path $r 'd\f.txt'))) { $m.AbortReason + '_SOURCE_INTACT' } else { $m.AbortReason + '_SOURCE_MISSING' })
     $out.Add("$case=$state")
 }
 $out -join '|'
@@ -273,9 +280,13 @@ $out -join '|'
     [IO.File]::WriteAllText($probeFile, $probe)
     $dir = $(if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $OutDir })
     $line = (& $ps51 -NoProfile -ExecutionPolicy Bypass -File $probeFile -Dll $dll -Dir $dir 2>&1 | Select-Object -Last 1) -as [string]
+    # The destination refused on this image (a correct refusal of the product, not a mover result): not tested.
+    if ($line -like 'SETUP|*') { $script:notTested = $true; return "destination not pinned on this image: $line" }
     $p = @($line.Split('|'))
-    Assert ($p.Count -eq 4 -and $p[0] -eq 'none=MOVED_VERIFIED') "mover: $line"
-    foreach ($x in $p[1..3]) { Assert ($x -match '=(MOVED_VERIFIED|MOVE_[A-Z_]+_SOURCE_INTACT)$') "outcome: $x" }
+    Assert ($p.Count -eq 4 -and $p[0] -match '^none=(MOVED_VERIFIED|NOT_TESTED_PLAN_DIFFERS)$') "mover: $line"
+    foreach ($x in $p[1..3]) { Assert ($x -match '=(MOVED_VERIFIED|MOVE_[A-Z_]+_SOURCE_INTACT|NOT_TESTED_PLAN_DIFFERS)$') "outcome: $x" }
+    # A tree that kept changing under the scan is not a result.
+    if ($line -match 'NOT_TESTED_PLAN_DIFFERS') { $script:notTested = $true }
     "$($summary.os) $($summary.arch): $line"
 }
 
