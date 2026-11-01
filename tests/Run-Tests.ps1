@@ -3614,13 +3614,19 @@ exit 0
         param([string]$Name, $Context = $null)
         $dir = New-TestCleanLogDir ('iso-' + $Name)
         if (-not $dir) { return $null }
-        if ($null -ne $Context) { return [pscustomobject]@{ Profile = $Context.F.Profile; Root = $Context.F.Roots[0]; Log = (Join-Path $dir 'isolate.jsonl'); IA = $Context.IA } }
-        $p = New-TestProfile $Name
-        $r = New-TestRoot -ProfileInfo $p
-        return [pscustomobject]@{ Profile = $p; Root = $r; Log = (Join-Path $dir 'isolate.jsonl'); IA = (Get-InvArgs -Profiles @($p)) }
+        if ($null -ne $Context) { $run = [pscustomobject]@{ Profile = $Context.F.Profile; Root = $Context.F.Roots[0]; Log = (Join-Path $dir 'isolate.jsonl'); IA = $Context.IA } }
+        else {
+            $p = New-TestProfile $Name
+            $run = [pscustomobject]@{ Profile = $p; Root = (New-TestRoot -ProfileInfo $p); Log = (Join-Path $dir 'isolate.jsonl'); IA = (Get-InvArgs -Profiles @($p)) }
+        }
+        # Every run compares exact measurements several times: NTFS updates directory times lazily after recent creations.
+        $null = Get-StableTreeListing $run.Profile.ProfilePath
+        return $run
     }
     function Invoke-IsoOpen {
         param([hashtable]$Arguments)
+        # Past the gate the quarantine must be the sandbox's (never the runner's or a developer's %LOCALAPPDATA%).
+        Assert-True ([string]$script:AtmIsolationQuarantineRoot -and ([string]$script:AtmIsolationQuarantineRoot).StartsWith($sandbox + '\', [StringComparison]::OrdinalIgnoreCase)) "quarentena dentro do sandbox ($($script:AtmIsolationQuarantineRoot))"
         $script:AtmIsolationEnabled = $true
         try { return (Invoke-AtmIsolate @Arguments) } finally { $script:AtmIsolationEnabled = $false }
     }

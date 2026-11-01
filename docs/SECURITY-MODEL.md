@@ -649,8 +649,10 @@ owner, never enables privileges and never terminates processes.
      (`STATUS_SHARING_VIOLATION`, measured). The mover is called once, moving the root to `<entry>\payload`, and the
      result is recorded in the log and in the manifest. The manifest is reopened with `OpenExisting`, under the same
      checks.
-  8. Anything but a moved and verified tree stops the run, and nothing is undone. A refusal before the mover leaves no
-     entry. A refusal by the mover leaves an entry whose manifest records the attempt.
+  8. Anything but a moved and verified tree stops the run, and nothing is undone:
+     * a refusal before the quarantine step (confirmation, plan check, revalidation) leaves no entry;
+     * a later failure (the manifest, the intent) or a refusal by the mover leaves an entry whose manifest records how
+       far the run got: an incomplete or failed entry.
 
   Purge (a deletion) is not part of this flow.
 
