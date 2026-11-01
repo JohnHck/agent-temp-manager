@@ -56,8 +56,8 @@ $sandbox = Get-AtmNormalizedPath (Join-Path ([IO.Path]::GetTempPath()) ('atm-tes
 [void][IO.Directory]::CreateDirectory($sandbox)
 # 0.3.x isolation: the quarantine root is a folder of the sandbox, only inside this process (dedicated tests check the
 # shipped $null, the user's %LOCALAPPDATA%\AgentTempManager\Q). The isolation gate itself stays closed here.
+# Only the path is set here: the sandbox must stay empty until its ACL is adjusted; New-IsoRun creates the folder.
 $shippedQuarantineRoot = $script:AtmIsolationQuarantineRoot
-[void][IO.Directory]::CreateDirectory((Join-Path $sandbox 'quarantine-home'))
 $script:AtmIsolationQuarantineRoot = Join-Path $sandbox 'quarantine-home\AgentTempManager\Q'
 # The NTFS owner that new files actually get on this machine: the user SID for a standard account, the
 # Administrators group on an elevated Windows Server runner (CI). Test profiles and the test identity use it, so the
@@ -3614,6 +3614,7 @@ exit 0
         param([string]$Name, $Context = $null)
         $dir = New-TestCleanLogDir ('iso-' + $Name)
         if (-not $dir) { return $null }
+        [void][IO.Directory]::CreateDirectory((Join-Path $sandbox 'quarantine-home'))
         if ($null -ne $Context) { $run = [pscustomobject]@{ Profile = $Context.F.Profile; Root = $Context.F.Roots[0]; Log = (Join-Path $dir 'isolate.jsonl'); IA = $Context.IA } }
         else {
             $p = New-TestProfile $Name
