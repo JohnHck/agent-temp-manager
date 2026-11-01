@@ -35,7 +35,7 @@ $here = $PSScriptRoot
 # Source checkouts (neither file) load as-is. Hashes are computed with .NET and messages are printed in both
 # languages, because no code (not even the message catalog) is loaded before the check passes. A file or directory
 # that cannot be read is a problem too, reported by its relative name only (no exception text, no absolute path).
-$loadedLibs = @('lib\Engine.Audit.ps1', 'lib\I18n.ps1', 'lib\Engine.Clean.ps1', 'lib\Engine.Diagnose.ps1', 'lib\Report.ps1', 'lib\Tui.ps1')
+$loadedLibs = @('lib\Engine.Audit.ps1', 'lib\I18n.ps1', 'lib\Engine.Clean.ps1', 'lib\Engine.Isolate.ps1', 'lib\Engine.Diagnose.ps1', 'lib\Report.ps1', 'lib\Tui.ps1')
 $providersDir = Join-Path $here 'providers'
 
 function Get-AtmLauncherSha256 {
@@ -167,6 +167,7 @@ else { $providerFiles = @(Get-ChildItem -LiteralPath $providersDir -Filter '*.ps
 Set-AtmLanguage -Requested $Lang
 foreach ($providerFile in $providerFiles) { . $providerFile.FullName }
 . (Join-Path $here 'lib\Engine.Clean.ps1')
+. (Join-Path $here 'lib\Engine.Isolate.ps1')
 . (Join-Path $here 'lib\Engine.Diagnose.ps1')
 . (Join-Path $here 'lib\Report.ps1')
 . (Join-Path $here 'lib\Tui.ps1')
@@ -179,7 +180,7 @@ $cliInvArgs['NoProgress'] = [bool]$NoProgress
 $cliInvArgs['ProgressCallback'] = { param($pct, $msg) $act = Get-AtmText 'cli.progressActivity'; if ($pct -ge 100) { Write-Progress -Activity $act -Completed } else { Write-Progress -Activity $act -Status $msg -PercentComplete $pct } }
 
 function Show-Help {
-    foreach ($k in @('help.title', 'help.blank', 'help.tui', 'help.audit', 'help.preview', 'help.diagnose', 'help.clean', 'help.clean2', 'help.authorize', 'help.verify', 'help.version', 'help.help', 'help.blank',
+    foreach ($k in @('help.title', 'help.blank', 'help.tui', 'help.audit', 'help.preview', 'help.diagnose', 'help.clean', 'help.clean2', 'help.isolate', 'help.isolate2', 'help.authorize', 'help.verify', 'help.version', 'help.help', 'help.blank',
             'help.drill', 'help.export', 'help.diagOpts', 'help.cleanOpts', 'help.cleanOpts2', 'help.cleanOpts3', 'help.cleanOpts4', 'help.tuiOpts', 'help.lang', 'help.blank', 'help.examples')) { Write-Host (Get-AtmText $k) }
     Write-Host '  agent-temp'
     Write-Host '  agent-temp audit'
@@ -297,6 +298,20 @@ try {
             # A run stopped after a deletion (T1) is never reported as a success.
             exit $(if ($res.Aborted -or $res.StoppedBy) { 3 } else { 0 })
         }
+        'isolate' {
+            # 0.3.x isolation (docs/adr/ADR-0013), plan only: the engine applies the 0.3.x target rule (own profile, session
+            # roots) and the clean gates and shows the exact plan, then stops. It asks nothing, takes no lock, opens no log,
+            # creates no quarantine and moves nothing; with the isolation gate closed (every distributed copy) that is all
+            # it can do. -AcceptB1ResidualRisk is considered by the engine only past that gate.
+            if (-not $AllowListFile -and -not $Path) { Write-Host (Get-AtmText 'cli.isolateNeedsList') -ForegroundColor Red; exit 2 }
+            if ($IncludeOtherUsers) { Write-Host (Get-AtmText 'cli.isolateOwnProfileOnly') -ForegroundColor Red; exit 2 }
+            if ($AllowListFile -and -not (Test-Path -LiteralPath $AllowListFile -PathType Leaf)) { Write-Host (Get-AtmText 'cli.allowlistMissing' $AllowListFile) -ForegroundColor Red; exit 2 }
+            $isoEntries = Read-AtmAllowList -File $AllowListFile -Paths @($Path)
+            $isoPresenter = { param($v, $r, $i, $planId) Show-AtmIsolatePlan -Verified $v -Rejected $r -Inventory $i -PlanId $planId }
+            $isoRes = Invoke-AtmIsolate -Entries $isoEntries -PlanPresenter $isoPresenter -InventoryArgs $cliInvArgs -AcceptB1ResidualRisk:$AcceptB1ResidualRisk
+            Show-AtmIsolateResult -Result $isoRes
+            exit $(if ($isoRes.Aborted) { 3 } else { 0 })
+        }
         'authorize' {
             # AUT-1: records the operator's discard authorization of ONE root and the plan shown; deletes nothing and makes
             # nothing eligible. Only from an interactive console: piped or scripted input never records an acceptance
@@ -326,6 +341,7 @@ try {
             Write-Host ("providers: {0}" -f ((Get-AtmProviders | ForEach-Object { $_.DisplayName }) -join ', '))
             Write-Host (Get-AtmText 'cli.native' (Get-AtmText "native.$script:AtmNativeMode"))
             Write-Host (Get-AtmText 'cli.realDeletion' $(if ($script:AtmRealDeletionEnabled) { Get-AtmText 'cli.enabled' } else { Get-AtmText 'cli.disabledV01' }))
+            Write-Host (Get-AtmText 'cli.isolation' $(if ($script:AtmIsolationEnabled) { Get-AtmText 'cli.enabled' } else { Get-AtmText 'cli.isolationDisabled' }))
             Write-Host (Get-AtmText 'cli.language' (Get-AtmLanguage))
             $idState = Get-AtmIdentityState
             Write-Host (Get-AtmText 'cli.identity' $idState.Name (Get-AtmYesNo ([bool]$idState.IsElevatedAdministrator)) $idState.ElevationType $idState.IntegrityLevel $idState.SessionId)

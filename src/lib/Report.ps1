@@ -325,6 +325,33 @@ function Show-AtmCleanPlan {
     Write-Host ('  ' + (Get-AtmText 'clean.nothingYet')) -ForegroundColor Black -BackgroundColor Yellow
 }
 
+function Show-AtmIsolatePlan {
+    # 0.3.x isolation (plan only): the refused paths, the exact set that passed every gate, its plan id and totals.
+    param($Verified, $Rejected, $Inventory, [string]$PlanId)
+    if ($null -ne $Inventory -and $Inventory.PSObject.Properties['RuntimeEvidence']) { Show-AtmRuntimeNotices -Runtime $Inventory.RuntimeEvidence }
+    Write-AtmHeader (Get-AtmText 'iso.rejectedHeader')
+    Write-AtmTable (@($Rejected) | ForEach-Object { New-AtmRow ([ordered]@{ 'col.origin' = $_.Source; 'col.path' = $_.Path; 'col.reasons' = (@($_.Reasons) -join ' ; ') }) })
+    Write-AtmHeader (Get-AtmText 'iso.approvedHeader')
+    Write-AtmTable (@($Verified) | ForEach-Object { New-AtmRow ([ordered]@{ 'col.project' = $_.Project; 'col.path' = $_.Path; 'col.mb' = (Format-AtmMB $_.Bytes); 'col.filesShort' = $_.Files; 'col.dirs' = $_.Dirs; 'col.newest' = (Format-AtmTime $_.NewestWriteTimeUtc); 'col.fingerprint' = $_.Fingerprint }) })
+    Write-Host ('  ' + (Get-AtmText 'iso.total' @($Verified).Count (Format-AtmMB (Get-AtmSum $Verified 'Bytes'))))
+    Write-Host ('  ' + (Get-AtmText 'iso.planId' $PlanId))
+    if (-not $script:AtmIsolationEnabled) { Write-Host ('  ' + (Get-AtmText 'iso.planOnly')) -ForegroundColor Yellow }
+    Write-Host ''
+    Write-Host ('  ' + (Get-AtmText 'iso.nothingYet')) -ForegroundColor Black -BackgroundColor Yellow
+}
+
+function Show-AtmIsolateResult {
+    param($Result)
+    Write-AtmHeader (Get-AtmText 'iso.resultHeader')
+    if ($Result.Aborted) {
+        Write-Host ('  ' + (Get-AtmText 'iso.aborted' $Result.Aborted)) -ForegroundColor Yellow
+        if ($Result.Aborted -eq 'ISOLAMENTO_REAL_DESABILITADO') { Write-Host ('  ' + (Get-AtmText 'iso.gateMsg' @($Result.Verified).Count)) -ForegroundColor Yellow }
+        if ($Result.Aborted -eq 'ISOLAMENTO_ALEM_DA_TRAVA_NAO_IMPLEMENTADO') { Write-Host ('  ' + (Get-AtmText 'iso.notImplemented')) -ForegroundColor Yellow }
+        if ($Result.Aborted -eq 'NENHUM_CAMINHO_ISOLAVEL') { Write-AtmTable (@($Result.Rejected) | ForEach-Object { New-AtmRow ([ordered]@{ 'col.origin' = $_.Source; 'col.path' = $_.Path; 'col.reasons' = (@($_.Reasons) -join ' ; ') }) }) }
+    }
+    Write-Host ('  ' + (Get-AtmText 'iso.nothingMoved')) -ForegroundColor Green
+}
+
 function Show-AtmDiscardPresentation {
     # AUT-1: what the operator is asked to authorize, then the technical result apart from it (a root can be authorized
     # by the operator and stay technically blocked), then the limits. Age is information only.

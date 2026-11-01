@@ -359,6 +359,19 @@ Step 'shipped-release-gate' {
     Assert ($clean -match '\$script:AtmRealDeletionEnabled = \$false') 'trava instalada nao e $false'
     'installed gate = $false (single assignment)'
 }
+Step 'shipped-isolation-gate' {
+    # 0.3.x isolation, phase P2: the installed gate is a single assignment to $false, version shows it disabled, and
+    # isolate from a new process (machine PATH) only plans: a path that is not an inventoried root is refused, exit 3.
+    $iso = [IO.File]::ReadAllText((Join-Path $installDir 'lib\Engine.Isolate.ps1'))
+    Assert ([regex]::Matches($iso, '\$script:AtmIsolationEnabled\s*=').Count -eq 1 -and $iso -match '(?m)^\$script:AtmIsolationEnabled = \$false\r?$') 'trava de isolamento instalada nao e uma unica atribuicao a $false'
+    $r = Invoke-Agent 'version -Lang en-US' 'version-isolation'
+    Assert ($r.Code -eq 0 -and $r.Text -match 'isolation: DISABLED') "version: exit $($r.Code)"
+    $probe = Join-Path $env:SystemDrive ('atm-iso-p2-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $r = Invoke-Agent "isolate -Path $probe -Lang en-US -NoProgress" 'isolate-plan-only'
+    Assert ($r.Code -eq 3 -and $r.Text.Contains('NENHUM_CAMINHO_ISOLAVEL') -and $r.Text.Contains('Nothing was moved, created or removed.')) "isolate: exit $($r.Code)"
+    Assert (-not (Test-Path -LiteralPath $probe)) 'isolate criou o caminho pedido'
+    'installed isolation gate = $false; version shows it disabled; isolate plan-only, exit 3'
+}
 Step 'shipped-worktree-diagnostics-gate' {
     # P3-B0: reading repositories and running Git in them stay closed in every shipped copy.
     $diag = [IO.File]::ReadAllText((Join-Path $installDir 'lib\Engine.Diagnose.ps1'))
@@ -770,12 +783,12 @@ $v011Url = 'https://github.com/JohnHck/agent-temp-manager/releases/download/v0.1
 $v011Dir = Join-Path $env:ProgramFiles 'AgentTempManager-v011'
 $script:v011Pkg = $null
 $installedGates = {
-    $files = @{ AtmRealDeletionEnabled = 'lib\Engine.Clean.ps1'; AtmWorktreeDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmHandleDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmDiagnoseExportEnabled = 'lib\Report.ps1' }
+    $files = @{ AtmRealDeletionEnabled = 'lib\Engine.Clean.ps1'; AtmWorktreeDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmHandleDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmDiagnoseExportEnabled = 'lib\Report.ps1'; AtmIsolationEnabled = 'lib\Engine.Isolate.ps1' }
     foreach ($g in $files.Keys) {
         $t = [IO.File]::ReadAllText((Join-Path $installDir $files[$g]))
         Assert ([regex]::Matches($t, ('\$script:' + $g + '\s*=')).Count -eq 1 -and $t -match ('\$script:' + $g + ' = \$false')) "trava instalada $g nao e uma unica atribuicao a `$false"
     }
-    'four installed gates $false'
+    'five installed gates $false'
 }
 Step 'xversion-0.1.1-package' {
     [void][IO.Directory]::CreateDirectory($v011Dir)

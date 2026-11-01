@@ -467,10 +467,52 @@ elevation level) holds the named kernel mutex `Global\AgentTempManager.Clean`:
   first or keep it, which refuses every clean run (denial of service; never two runs at once). The automated tests run
   two processes of the same identity; other users, sessions and elevation levels are not tested.
 
+## Isolate (plan only; 0.3.x, unreleased)
+
+```
+agent-temp isolate -Path <exact session root> [-AllowListFile <file>] [-AcceptB1ResidualRisk]
+```
+
+Isolation takes an agent's temporary data out of the active environment and keeps it intact in a quarantine
+([ADR-0013](adr/ADR-0013-isolation-quarantine-recovery-mode.md)). In this version the command **only plans**. A new
+release gate, `AtmIsolationEnabled`, is closed in every copy. Like the other gates, it is a single assignment to `$false`
+that no option, variable or file changes, and the build, the installation tests and `agent-temp version`
+(`isolation: DISABLED`) all check it.
+
+What `isolate` does:
+
+1. It checks the syntax of each exact path, with the same rules as the clean allowlist.
+2. It takes a fresh inventory and runtime evidence.
+3. It applies the 0.3.x target rule:
+   * **your own profile only** (`ALVO_FORA_DO_PROPRIO_PERFIL`; `-IncludeOtherUsers` is refused with exit code `2`);
+   * **a session root only**;
+   * a project's scope directory is refused with `ISOLAMENTO_ESCOPO_NAO_LIBERADO_0_3X`, the whole `<TEMP>\claude` base
+     with `ISOLAMENTO_BASE_NAO_LIBERADA_0_3X`, and any other entry with `ALVO_NAO_ISOLAVEL_0_3X`.
+4. It runs **the same gates as clean**:
+   * nothing is relaxed because isolation is reversible;
+   * RECENT blocks;
+   * runtime evidence blocks or needs investigation;
+   * the B1 restricted exception per root, with `-AcceptB1ResidualRisk`, is considered only past the isolation gate, as
+     clean considers it only past the deletion gate.
+5. It shows the exact plan with its plan id, followed by `NOTHING HAS BEEN MOVED`.
+
+It then stops, with exit code `3`:
+* `ISOLAMENTO_REAL_DESABILITADO` when a path passed every check;
+* `NENHUM_CAMINHO_ISOLAVEL` when none did.
+
+What it does not do, in any copy:
+* It asks nothing.
+* It takes no lock and opens no log (`-LogFile` is not used).
+* It creates no quarantine and moves, creates or removes nothing.
+
+The confirmed, locked and logged move, and the quarantine commands (`list`, `inspect`, `verify`, `restore`, `purge`), are
+later phases.
+
 ## Exit codes
 
 `0` ok (for `diagnose`, partial coverage included) · `1` unknown command · `2` invalid clean invocation, or a refused
-`-PseudonymKeyFile`, or `authorize` without `-Path`/`-RecordFile` · `3` clean aborted (nothing deleted) or, only with
+`-PseudonymKeyFile`, or `authorize` without `-Path`/`-RecordFile`, or `isolate` without a path or with
+`-IncludeOtherUsers` · `3` clean aborted (nothing deleted), `isolate` stopped after the plan (nothing moved), or, only with
 deletion enabled (not in any published copy), stopped before completing (Clean log, above); `authorize`: nothing recorded ·
 `4` no manifest (source checkout, `verify` only) · `5` integrity mismatch (a listed file missing, altered or
 unreadable, a missing or unreadable `providers` directory, an unlisted library or provider, an unreadable or

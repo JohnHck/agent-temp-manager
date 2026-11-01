@@ -25,6 +25,7 @@ $srcDir = Join-Path (Split-Path -Parent $testsDir) 'src'
 . (Join-Path $srcDir 'lib\Engine.Audit.ps1')
 . (Join-Path $srcDir 'providers\ClaudeCode.ps1')
 . (Join-Path $srcDir 'lib\Engine.Clean.ps1')
+. (Join-Path $srcDir 'lib\Engine.Isolate.ps1')
 . (Join-Path $srcDir 'lib\Engine.Diagnose.ps1')
 . (Join-Path $srcDir 'lib\Report.ps1')
 . (Join-Path $srcDir 'lib\Tui.ps1')
@@ -3457,6 +3458,120 @@ exit 0
             $t = [IO.File]::ReadAllText($fi.FullName)
             foreach ($api in @('AtmMover', 'CreateNewDirectory', 'OpenExisting')) { Assert-True (-not $t.Contains($api)) "$($fi.Name) nao chama $api (sem chamador de produto na P1)" }
         }
+    }
+
+    # ------------------------------------------------------------------ 0.3.x isolation, phase P2: plan-only engine and gate (ISO-P2)
+    # The isolation gate stays $false in this process except inside the one case that flips it (and restores it).
+    function New-IsoPlanRecorder {
+        $st = @{ Calls = (New-Object System.Collections.Generic.List[object]) }
+        $st.Presenter = { param($v, $r, $i, $planId) $st.Calls.Add([pscustomobject]@{ Verified = @($v); Rejected = @($r); PlanId = $planId }) }.GetNewClosure()
+        return $st
+    }
+    function Get-IsoRejectedReasons { param($Result, [string]$Path) return (@(@($Result.Rejected) | Where-Object { $_.Path -eq $Path } | ForEach-Object { @($_.Reasons) }) -join ' ; ') }
+
+    Test-Case 'Isolamento P2' 'Trava do isolamento: uma unica atribuicao a $false na fonte, conferida pelo build, pelo e2e da instalacao e mostrada em version; nenhum outro arquivo a altera; o motor e obrigatorio e carregado pelo lancador' {
+        $iso = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Isolate.ps1'))
+        Assert-Eq ([regex]::Matches($iso, '\$script:AtmIsolationEnabled\s*=').Count) 1 'uma unica atribuicao no motor'
+        Assert-True ($iso -match '(?m)^\$script:AtmIsolationEnabled = \$false\r?$') 'a trava distribuida e $false (linha inteira)'
+        Assert-Eq $script:AtmIsolationEnabled $false 'trava fechada neste processo'
+        foreach ($f in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Name -ne 'Engine.Isolate.ps1' })) {
+            Assert-True (-not ([regex]::IsMatch([IO.File]::ReadAllText($f.FullName), 'AtmIsolationEnabled\s*='))) "$($f.Name) nao pode alterar a trava"
+        }
+        $root = Split-Path -Parent $testsDir
+        $br = [IO.File]::ReadAllText((Join-Path $root 'tools\Build-Release.ps1'))
+        Assert-True ($br.Contains("`$isoTxt = & `$read 'src/lib/Engine.Isolate.ps1'") -and $br.Contains("@(`$isoTxt, 'AtmIsolationEnabled')")) 'build recusa o pacote sem a trava fechada (atribuicao unica)'
+        $e2e = [IO.File]::ReadAllText((Join-Path $testsDir 'e2e\Invoke-InstallE2E.ps1'))
+        Assert-True ($e2e.Contains("AtmIsolationEnabled = 'lib\Engine.Isolate.ps1'") -and $e2e.Contains("Step 'shipped-isolation-gate'")) 'e2e confere a trava instalada'
+        $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        Assert-True ($cli.Contains("Get-AtmText 'cli.isolation' `$(if (`$script:AtmIsolationEnabled)") -and $cli.Contains("'lib\Engine.Isolate.ps1'") -and $cli.Contains(". (Join-Path `$here 'lib\Engine.Isolate.ps1')")) 'version mostra a trava; o lancador lista e carrega o motor'
+        Assert-True ($script:AtmRequiredFiles -contains 'lib\Engine.Isolate.ps1') 'motor de isolamento obrigatorio na instalacao'
+        Assert-Eq (Get-AtmText 'cli.isolation' 'X') 'isolamento: X' 'texto de version (pt-BR)'
+    }
+    Test-Case 'Isolamento P2' 'Plano com a trava fechada: raiz de sessao elegivel do proprio perfil aprovada e mostrada com plan id; nada perguntado, nenhum lock, nenhum log, nada criado, movido ou removido' {
+        $p = New-TestProfile 'isoplan'
+        $r = New-TestRoot -ProfileInfo $p
+        $before = Get-StableTreeListing $p.ProfilePath
+        $rec = New-IsoPlanRecorder
+        $res = Invoke-AtmIsolate -Entries @([pscustomobject]@{ Source = 't'; Path = $r; Fingerprint = $null }) -PlanPresenter $rec.Presenter -InventoryArgs (Get-InvArgs -Profiles @($p))
+        Assert-Eq $res.Aborted 'ISOLAMENTO_REAL_DESABILITADO' 'parado pela trava'
+        Assert-True (@($res.Verified).Count -eq 1 -and $res.Verified[0].Path -eq $r) "raiz aprovada ($(Get-IsoRejectedReasons $res $r))"
+        Assert-True ($rec.Calls.Count -eq 1 -and $rec.Calls[0].PlanId -match '^[0-9a-f]{64}$' -and $rec.Calls[0].PlanId -eq $res.PlanId) 'plano apresentado uma vez, com o plan id'
+        Assert-Eq (Get-StableTreeListing $p.ProfilePath) $before 'perfil identico: nada criado, movido ou removido'
+        # The engine has no reader, lock, log, quarantine or mover in this phase.
+        $iso = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Isolate.ps1'))
+        foreach ($pat in @('ConfirmationReader', 'Read-Host', 'Test-AtmDiscardConsoleObserved', 'AtmCleanLock', 'TryAcquire', 'Open-AtmCleanLog', 'Write-AtmCleanLogRecord', 'AtmCleanLog', 'AtmSafeCreate', 'CreateNewDirectory', 'OpenExisting', 'AtmMover', 'AtmDeleter', 'DeleteTree', 'Remove-Item', 'Move-Item', 'New-Item', '::Move(', '::Delete(', 'CreateDirectory', 'Write-Host')) { Assert-True (-not $iso.Contains($pat)) "motor de isolamento nao contem '$pat'" }
+    }
+    Test-Case 'Isolamento P2' 'Regra de alvo da 0.3.x: escopo e base inteira recusados com codigo proprio (J-ISO-9 a); outro perfil, alvo que nao e raiz de sessao, caixa divergente, duplicado, sintaxe e caminho fora do inventario recusados; RECENT bloqueia (J-ISO-3 a); fingerprint divergente recusado' {
+        $p = New-TestProfile 'isotarget'
+        $r = New-TestRoot -ProfileInfo $p
+        $scope = [IO.Path]::GetDirectoryName($r)
+        $base = Get-Base $p
+        $odd = Join-Path $scope 'nao-e-uma-sessao'; [void][IO.Directory]::CreateDirectory($odd); [IO.File]::WriteAllText((Join-Path $odd 'x.txt'), 'x')
+        $p2 = New-TestProfile 'isooutro' -Sid 'S-1-5-21-1-2-3-4444'
+        $r2 = New-TestRoot -ProfileInfo $p2
+        $ia = Get-InvArgs -Profiles @($p, $p2)
+        $paths = @($scope, $base, $r2, $odd, $r, $r, 'relativo\x', (Join-Path $sandbox 'nao-inventariado'))
+        $res = Invoke-AtmIsolate -Entries @($paths | ForEach-Object { [pscustomobject]@{ Source = 't'; Path = $_; Fingerprint = $null } }) -PlanPresenter (New-IsoPlanRecorder).Presenter -InventoryArgs $ia
+        Assert-True ((Get-IsoRejectedReasons $res $scope) -match '^ISOLAMENTO_ESCOPO_NAO_LIBERADO_0_3X') "escopo ($(Get-IsoRejectedReasons $res $scope))"
+        Assert-True ((Get-IsoRejectedReasons $res $base) -match '^ISOLAMENTO_BASE_NAO_LIBERADA_0_3X') "base ($(Get-IsoRejectedReasons $res $base))"
+        Assert-True ((Get-IsoRejectedReasons $res $r2) -match 'ALVO_FORA_DO_PROPRIO_PERFIL') "outro perfil ($(Get-IsoRejectedReasons $res $r2))"
+        Assert-True ((Get-IsoRejectedReasons $res $odd) -match 'ALVO_NAO_ISOLAVEL_0_3X \(UnrecognizedDir\)') "nao e raiz de sessao ($(Get-IsoRejectedReasons $res $odd))"
+        Assert-True ((Get-IsoRejectedReasons $res $r) -match 'DUPLICADO_NA_ALLOWLIST') 'duplicado recusado'
+        Assert-True ((Get-IsoRejectedReasons $res 'relativo\x') -match 'NOT_ABSOLUTE_LOCAL_PATH') 'sintaxe recusada'
+        Assert-True ((Get-IsoRejectedReasons $res (Join-Path $sandbox 'nao-inventariado')) -match '^FORA_DAS_ROOTS_PERMITIDAS') 'fora do inventario recusado'
+        Assert-True (@($res.Verified).Count -eq 1 -and $res.Verified[0].Path -eq $r -and $res.Aborted -eq 'ISOLAMENTO_REAL_DESABILITADO') 'so a raiz de sessao exata do proprio perfil passa'
+        # RECENT: the same root seen now (not ten days later) is recent and blocked.
+        $iaNow = Get-InvArgs -Profiles @($p); $iaNow['NowUtc'] = [datetime]::UtcNow
+        $res = Invoke-AtmIsolate -Entries @([pscustomobject]@{ Source = 't'; Path = $r; Fingerprint = $null }) -PlanPresenter (New-IsoPlanRecorder).Presenter -InventoryArgs $iaNow
+        Assert-True ($res.Aborted -eq 'NENHUM_CAMINHO_ISOLAVEL' -and (Get-IsoRejectedReasons $res $r) -match 'RECENT') "RECENT bloqueia ($(Get-IsoRejectedReasons $res $r))"
+        $res = Invoke-AtmIsolate -Entries @([pscustomobject]@{ Source = 't'; Path = $r; Fingerprint = 'diferente' }) -PlanPresenter (New-IsoPlanRecorder).Presenter -InventoryArgs (Get-InvArgs -Profiles @($p))
+        Assert-True ((Get-IsoRejectedReasons $res $r) -match 'ALTERADO_DESDE_O_PREVIEW') 'fingerprint divergente recusado'
+        # The exact case of the inventoried path is required (the same rule as clean).
+        $last = Split-Path -Leaf $r; $upper = (Split-Path -Parent $r) + '\' + $last.ToUpperInvariant()
+        $res = Invoke-AtmIsolate -Entries @([pscustomobject]@{ Source = 't'; Path = $upper; Fingerprint = $null }) -PlanPresenter (New-IsoPlanRecorder).Presenter -InventoryArgs (Get-InvArgs -Profiles @($p))
+        Assert-True ((Get-IsoRejectedReasons $res $upper) -match 'CAIXA_DIVERGENTE') "caixa divergente ($(Get-IsoRejectedReasons $res $upper))"
+    }
+    Test-Case 'Isolamento P2' 'Excecao B1 por raiz (J-ISO-2 b): com a trava fechada a raiz sob B1 e recusada mesmo com -AcceptB1ResidualRisk; alem da trava (so no processo da suite) entra no plano como risco declarado e a execucao para depois do plano, nada movido' {
+        $ctx = New-TestB1Context 'isob1'
+        $r = $ctx.F.Roots[0]
+        $before = Get-StableTreeListing $r
+        $res = Invoke-AtmIsolate -Entries @([pscustomobject]@{ Source = 't'; Path = $r; Fingerprint = $null }) -PlanPresenter (New-IsoPlanRecorder).Presenter -InventoryArgs $ctx.IA -AcceptB1ResidualRisk
+        Assert-True ($res.Aborted -eq 'NENHUM_CAMINHO_ISOLAVEL' -and (Get-IsoRejectedReasons $res $r) -match 'COBERTURA_DE_PROCESSOS_INCOMPLETA') "trava fechada: B1 recusa ($(Get-IsoRejectedReasons $res $r))"
+        $rec = New-IsoPlanRecorder
+        $script:AtmIsolationEnabled = $true
+        try { $res = Invoke-AtmIsolate -Entries @([pscustomobject]@{ Source = 't'; Path = $r; Fingerprint = $null }) -PlanPresenter $rec.Presenter -InventoryArgs $ctx.IA -AcceptB1ResidualRisk }
+        finally { $script:AtmIsolationEnabled = $false }
+        Assert-True ($res.Aborted -eq 'ISOLAMENTO_ALEM_DA_TRAVA_NAO_IMPLEMENTADO' -and @($res.Verified).Count -eq 1) "alem da trava: plano com a raiz sob B1, depois parado ($($res.Aborted); $(Get-IsoRejectedReasons $res $r))"
+        Assert-True ($rec.Calls.Count -eq 1 -and $rec.Calls[0].PlanId -match '^[0-9a-f]{64}$') 'plano apresentado com plan id'
+        Assert-Eq (Get-StableTreeListing $r) $before 'raiz intacta'
+        Assert-Eq $script:AtmIsolationEnabled $false 'trava restaurada'
+    }
+    Test-Case 'Isolamento P2' 'CLI isolate (processo filho, origem): sem -Path sai com 2; -IncludeOtherUsers sai com 2; caminho fora do inventario: plano, resultado e saida 3, -LogFile nunca criado, nada criado no caminho pedido' {
+        $shell = (Get-Process -Id $PID).Path
+        $cli = Join-Path $srcDir 'agent-temp.ps1'
+        $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -ExecutionPolicy Bypass -File `"$cli`" isolate -Lang en-US -NoProgress") -TimeoutSec 180
+        Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('isolate requires -Path')) "sem -Path: exit $($r.Exit)"
+        $target = Join-Path $sandbox 'iso-cli-alvo'
+        $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -ExecutionPolicy Bypass -File `"$cli`" isolate -Path `"$target`" -IncludeOtherUsers -Lang en-US -NoProgress") -TimeoutSec 180
+        Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('-IncludeOtherUsers is not accepted')) "-IncludeOtherUsers: exit $($r.Exit)"
+        $log = Join-Path $sandbox 'iso-cli-log.jsonl'
+        $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -ExecutionPolicy Bypass -File `"$cli`" isolate -Path `"$target`" -LogFile `"$log`" -Lang en-US -NoProgress") -TimeoutSec 300
+        Assert-True ($r.Exit -eq 3 -and $r.Text.Contains('NENHUM_CAMINHO_ISOLAVEL') -and $r.Text.Contains('Nothing was moved, created or removed.')) "fora do inventario: exit $($r.Exit)"
+        Assert-True (-not (Test-Path -LiteralPath $target) -and -not (Test-Path -LiteralPath $log)) 'nada criado: nem o caminho pedido nem o log'
+    }
+    Test-Case 'Isolamento P2' 'Camadas: relatorio e TUI nunca chamam o mover nem o deleter; nenhum arquivo do produto chama o mover nesta fase; so o lancador chama o motor de isolamento; o motor nao imprime nem pergunta' {
+        foreach ($f in @('Report.ps1', 'Tui.ps1')) {
+            $txt = [IO.File]::ReadAllText((Join-Path $srcDir "lib\$f"))
+            foreach ($pat in @('AtmMover', 'MoveTree', 'AtmDeleter', 'DeleteTree')) { Assert-True (-not $txt.Contains($pat)) "$f contem '$pat'" }
+        }
+        $calls = @()
+        foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1', '.cmd') })) {
+            $t = [IO.File]::ReadAllText($fi.FullName)
+            Assert-True (-not $t.Contains('AtmMover')) "$($fi.Name) nao chama o mover (fase P2)"
+            if ($fi.Name -ne 'Engine.Isolate.ps1' -and $t.Contains('Invoke-AtmIsolate')) { $calls += $fi.Name }
+        }
+        Assert-Eq ($calls -join ',') 'agent-temp.ps1' 'so o lancador chama o motor de isolamento'
+        Assert-Eq ([regex]::Matches([IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1')), 'Invoke-AtmIsolate ').Count) 1 'uma unica chamada no lancador'
     }
 
     # ------------------------------------------------------------------ TUI (headless) and layering
