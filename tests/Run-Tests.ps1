@@ -3868,16 +3868,23 @@ exit 0
     }
     function Get-RstSnapshot {
         # Bytes and times of everything under a folder: names, creation and write times, attributes, SHA-256 of each file.
+        # NTFS updates directory times lazily after recent creations (the fixtures write just before): the snapshot is
+        # taken again until two in a row agree, as Get-StableTreeListing does.
         param([string]$Path)
-        $out = New-Object System.Collections.Generic.List[string]
-        $sha = [Security.Cryptography.SHA256]::Create()
-        try {
-            foreach ($i in @(Get-ChildItem -LiteralPath $Path -Recurse -Force)) {
-                $h = $(if ($i.PSIsContainer) { '' } else { [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($i.FullName))) })
-                $out.Add(('{0}|{1}|{2}|{3}|{4}' -f $i.FullName, $i.CreationTimeUtc.Ticks, $i.LastWriteTimeUtc.Ticks, [int]$i.Attributes, $h))
-            }
-        } finally { $sha.Dispose() }
-        return (($out | Sort-Object) -join "`n")
+        $take = {
+            $out = New-Object System.Collections.Generic.List[string]
+            $sha = [Security.Cryptography.SHA256]::Create()
+            try {
+                foreach ($i in @(Get-ChildItem -LiteralPath $Path -Recurse -Force)) {
+                    $h = $(if ($i.PSIsContainer) { '' } else { [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($i.FullName))) })
+                    $out.Add(('{0}|{1}|{2}|{3}|{4}' -f $i.FullName, $i.CreationTimeUtc.Ticks, $i.LastWriteTimeUtc.Ticks, [int]$i.Attributes, $h))
+                }
+            } finally { $sha.Dispose() }
+            return (($out | Sort-Object) -join "`n")
+        }
+        $a = & $take
+        for ($w = 0; $w -lt 20; $w++) { Start-Sleep -Milliseconds 500; $b = & $take; if ($b -ceq $a) { break }; $a = $b }
+        return $a
     }
     function Get-RstTypes { param([string]$Path) return (@((Read-TestCleanLogFile $Path).Records | ForEach-Object { $_.type }) -join ',') }
     function Set-RstManifestLines {
