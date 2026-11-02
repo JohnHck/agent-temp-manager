@@ -4119,7 +4119,10 @@ exit 0
             @{ Name = 'refused'; Want = 'REFUSED'; Stop = 'STOPPED_AFTER_REFUSED'; State = 'ISOLATED'; Impl = { param($plan, $dest, $n) $script:rstSeen = @((Get-IsoLiveLastType $script:rstLog), (Get-IsoLiveLastType (Join-Path $plan.Entry.Path 'manifest.jsonl')), [string]$dest.IsPinned, $dest.ParentPath); & $rstRefused $plan $dest $n } },
             @{ Name = 'exception'; Want = 'EXCEPTION'; Stop = 'STOPPED_AFTER_EXCEPTION'; State = 'ISOLATED'; Impl = { param($plan, $dest, $n) throw (New-Object IO.IOException 'synthetic') } },
             @{ Name = 'inuse'; Want = 'REFUSED'; Stop = 'STOPPED_AFTER_REFUSED'; State = 'ISOLATED'; Impl = { param($plan, $dest, $n) $pp = Join-Path $plan.Entry.Path 'payload'; $fs = [IO.File]::Open((Join-Path $pp 'a.txt'), 'Open', 'ReadWrite', 'None'); try { [AgentTempManager.AtmMover]::MoveTree($pp, $plan.Entry.Files, $plan.Entry.Dirs, $plan.Entry.Bytes, (ConvertTo-AtmUtcTicks $plan.Entry.NewestWriteUtc), $dest, $n, $null) } finally { $fs.Dispose() } } },
-            @{ Name = 'window'; Want = 'INTEGRITY_FAILED'; Stop = 'RESTORED_INTEGRITY_FAILED'; State = 'FAILED'; Impl = { param($plan, $dest, $n) [AgentTempManager.AtmMover]::MoveTree((Join-Path $plan.Entry.Path 'payload'), $plan.Entry.Files, $plan.Entry.Dirs, $plan.Entry.Bytes, (ConvertTo-AtmUtcTicks $plan.Entry.NewestWriteUtc), $dest, $n, [Action[string]]{ param($p) [IO.File]::WriteAllText((Join-Path $p 'na-janela.txt'), 'x') }) } }
+            @{ Name = 'window'; Want = 'INTEGRITY_FAILED'; Stop = 'RESTORED_INTEGRITY_FAILED'; State = 'FAILED'; Impl = { param($plan, $dest, $n) [AgentTempManager.AtmMover]::MoveTree((Join-Path $plan.Entry.Path 'payload'), $plan.Entry.Files, $plan.Entry.Dirs, $plan.Entry.Bytes, (ConvertTo-AtmUtcTicks $plan.Entry.NewestWriteUtc), $dest, $n, [Action[string]]{ param($p) [IO.File]::WriteAllText((Join-Path $p 'na-janela.txt'), 'x') }) } },
+            # PinForMove: a name created by someone else after the plan, between the measurement and the rename. The rename
+            # keeps ReplaceIfExists = FALSE: it fails closed and the other folder is never overwritten or merged.
+            @{ Name = 'collision'; Want = 'REFUSED'; Stop = 'STOPPED_AFTER_REFUSED'; State = 'ISOLATED'; Impl = { param($plan, $dest, $n) $script:rstTaken = Join-Path $dest.ParentPath $n; [AgentTempManager.AtmMover]::MoveTree((Join-Path $plan.Entry.Path 'payload'), $plan.Entry.Files, $plan.Entry.Dirs, $plan.Entry.Bytes, (ConvertTo-AtmUtcTicks $plan.Entry.NewestWriteUtc), $dest, $n, [Action[string]]{ param($p) [void][IO.Directory]::CreateDirectory($script:rstTaken); [IO.File]::WriteAllText((Join-Path $script:rstTaken 'outro.txt'), 'outro') }) } }
         )
         foreach ($k in $cases) {
             $e = New-RstEntry ('rstout-' + $k.Name)
@@ -4130,7 +4133,11 @@ exit 0
             Assert-Eq (Get-RstTypes $e.Manifest) 'entry,move-intent,move-result,restore-intent,restore-result' "$($k.Name): manifesto registra o desfecho"
             Assert-Eq (Get-RstTypes $script:rstLog) 'run-start,confirmation,plan-check,restore-intent,restore-result,run-end' "$($k.Name): log completo"
             Assert-Eq (Get-AtmQuarantineEntry -Id $e.Id -OwnSid $testIdentity.Sid).State $k.State "$($k.Name): estado derivado"
-            if ($k.State -ceq 'ISOLATED') { Assert-True ([IO.Directory]::Exists((Join-Path $e.Path 'payload')) -and -not [IO.Directory]::Exists($e.Run.Root)) "$($k.Name): payload continua na entrada" }
+            if ($k.Name -ceq 'collision') {
+                Assert-True ($res.Results[0].AbortReason -ceq 'MOVE_DEST_EXISTS' -and [IO.Directory]::Exists((Join-Path $e.Path 'payload'))) "nome criado na janela: rename recusado ($($res.Results[0].AbortReason))"
+                Assert-True ((@(Get-ChildItem -LiteralPath $e.Run.Root -Force | ForEach-Object { $_.Name }) -join ',') -ceq 'outro.txt' -and [IO.File]::ReadAllText((Join-Path $e.Run.Root 'outro.txt')) -ceq 'outro') 'a pasta do outro processo ficou como estava: nada sobrescrito nem mesclado'
+            }
+            elseif ($k.State -ceq 'ISOLATED') { Assert-True ([IO.Directory]::Exists((Join-Path $e.Path 'payload')) -and -not [IO.Directory]::Exists($e.Run.Root)) "$($k.Name): payload continua na entrada" }
             else { Assert-True ($res.Results[0].Moved -and -not $res.Results[0].Verified -and [IO.Directory]::Exists($e.Run.Root)) 'janela: movido, nao verificado, nada desfeito' }
             if ($k.Name -ceq 'refused') { Assert-Eq ($script:rstSeen -join ',') ('restore-intent,restore-intent,True,' + [IO.Path]::GetDirectoryName($e.Run.Root)) 'na chamada ao mover: intencao no log e no manifesto (fechado), pai do destino fixado' }
             if ($k.Name -ceq 'inuse') { Assert-True ($res.Results[0].AbortReason -ceq 'MOVE_ACCESS_DENIED') "mover real recusa com arquivo aberto ($($res.Results[0].AbortReason))" }
@@ -4202,6 +4209,43 @@ exit 0
         $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
         Assert-True ([regex]::Matches($cli, 'Invoke-AtmRestore ').Count -eq 1 -and $cli.Contains("if (`$script:AtmIsolationEnabled -and -not (Test-AtmTuiInteractive)) { Write-Host (Get-AtmText 'cli.restoreNeedsConsole')") -and $cli.Contains('-ConfirmationReader $rstReader')) 'CLI: uma chamada; console exigido alem da trava'
         foreach ($l in @('en-US', 'pt-BR')) { foreach ($k in @('help.quarantine', 'cli.quarantineUsage', 'q.cliOnly', 'rst.planOnly', 'rst.conflict', 'menu.isolate', 'menu.quarantine', 'tuiiso.askLog', 'tui.q.cliOnly', 'foot.qdetail')) { Assert-True $script:AtmMessages[$l].ContainsKey($k) "$k ($l)" } }
+    }
+    Test-Case 'Isolamento P3b' 'PinForMove (Native.cs): a mesma validacao do Pin, so o compartilhamento do pai difere (leitura e escrita, nunca exclusao); Pin inalterado; um unico chamador, como destino do mover na restauracao; no sandbox: renomear para dentro de uma pasta fixada por Pin falha, por PinForMove passa e e conferido; a pasta fixada nao pode ser renomeada' {
+        $ncs = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Native.cs'))
+        $cut = { param([string]$Sig) $t = $ncs.Substring($ncs.IndexOf($Sig)); return $t.Substring($t.IndexOf('{'), $t.IndexOf('catch (Exception ex) { s.Error = "PIN_"') - $t.IndexOf('{')) }
+        $pin = & $cut 'public static AtmSafeCreateSession Pin(string parentDir)'
+        $pfm = & $cut 'public static AtmSafeCreateSession PinForMove(string parentDir)'
+        $parentOpen = 'SafeFileHandle p = AtmDeleter.OpenChecked(full, true, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE, '
+        Assert-True ($pin.Contains($parentOpen + 'FILE_SHARE_READ, out why, out info);')) 'Pin: pai compartilhado so para leitura (inalterado)'
+        Assert-True ($pfm.Contains($parentOpen + 'FILE_SHARE_READ | FILE_SHARE_WRITE, out why, out info);')) 'PinForMove: pai compartilhado para leitura e escrita'
+        Assert-True (-not $pfm.Contains('SHARE_DELETE') -and -not $pin.Contains('SHARE_DELETE') -and -not $pfm.Contains('DELETE |')) 'nunca compartilhado nem aberto para exclusao'
+        Assert-Eq $pfm.Replace('FILE_SHARE_READ | FILE_SHARE_WRITE, out why, out info);', 'FILE_SHARE_READ, out why, out info);') $pin 'mesma validacao do Pin (unidade fixa, sem subst, canonico, ancestrais fixados, sem reparse, caminho final)'
+        $hits = @()
+        foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1', '.cmd', '.cs') })) { $n = [regex]::Matches([IO.File]::ReadAllText($fi.FullName), 'PinForMove\(').Count; if ($n -gt 0) { $hits += ('{0}:{1}' -f $fi.Name, $n) } }
+        Assert-Eq (($hits | Sort-Object) -join ',') 'Engine.Isolate.ps1:1,Native.cs:1' 'uma definicao e um unico chamador'
+        $iso = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Isolate.ps1'))
+        $core = $iso.Substring($iso.IndexOf('function Invoke-AtmRestoreCore'))
+        Assert-True ($core.IndexOf('::PinForMove(') -gt 0 -and $core.IndexOf('::PinForMove(') -lt $core.IndexOf('[AgentTempManager.AtmMover]::MoveTree(') -and $iso.IndexOf('::PinForMove(') -gt $iso.IndexOf('function Invoke-AtmRestoreCore')) 'so como destino do mover, na restauracao'
+        $base = Join-Path $sandbox 'pinformove'; $dst = Join-Path $base 'dest'; [void][IO.Directory]::CreateDirectory($dst)
+        $t = Join-Path $base 'src'; [void][IO.Directory]::CreateDirectory((Join-Path $t 'sub')); [IO.File]::WriteAllText((Join-Path $t 'a.txt'), 'a'); [IO.File]::WriteAllText((Join-Path $t 'sub\b.txt'), 'bb')
+        $null = Get-StableTreeListing $base
+        $s = [AgentTempManager.AtmScanner]::ScanTree($t, 3, 4096)
+        $pin = [AgentTempManager.AtmSafeCreate]::Pin($dst)
+        try { $r = [AgentTempManager.AtmMover]::MoveTree($t, $s.Files, $s.Dirs, $s.Bytes, $s.NewestWriteTimeUtc.Ticks, $pin, 'com-pin', $null) } finally { $pin.Dispose() }
+        Assert-True (-not $r.Moved -and $r.AbortReason -ceq 'MOVE_REFUSED_IN_USE' -and [IO.File]::Exists((Join-Path $t 'a.txt'))) "Pin: renomear para dentro da pasta recusado ($($r.AbortReason))"
+        $pm = [AgentTempManager.AtmSafeCreate]::PinForMove($dst)
+        try {
+            Assert-True ($pm.IsPinned) "PinForMove fixou a pasta ($($pm.Error))"
+            $renamed = $true
+            try { [IO.Directory]::Move($dst, $dst + '-x') } catch { $renamed = $false }
+            Assert-True (-not $renamed -and [IO.Directory]::Exists($dst)) 'a pasta fixada nao pode ser renomeada'
+            $r = [AgentTempManager.AtmMover]::MoveTree($t, $s.Files, $s.Dirs, $s.Bytes, $s.NewestWriteTimeUtc.Ticks, $pm, 'restaurado', $null)
+            Assert-True ($r.Moved -and $r.Verified -and [IO.File]::Exists((Join-Path $dst 'restaurado\sub\b.txt'))) "PinForMove: movido e conferido ($($r.AbortReason))"
+        } finally { $pm.Dispose() }
+        foreach ($bad in @('relativo\x', ($dst + '\..\dest'), 'C:\')) {
+            $x = [AgentTempManager.AtmSafeCreate]::PinForMove($bad)
+            try { Assert-True (-not $x.IsPinned -and $x.Error) "recusado: $bad ($($x.Error))" } finally { $x.Dispose() }
+        }
     }
 
     # ------------------------------------------------------------------ trusted accounts per engine (FIX-TRUSTED-SIDS)

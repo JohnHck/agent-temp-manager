@@ -975,6 +975,43 @@ namespace AgentTempManager
             catch (Exception ex) { s.Error = "PIN_" + ex.GetType().Name; return s; }
         }
 
+        // ISO-P3b: pins an EXISTING folder as the destination of the mover in a restore (its only caller). The same checks
+        // as Pin (fixed drive, not substituted, canonical, ancestors pinned without delete sharing, no reparse point, final
+        // path verified); the folder itself is shared for reading AND writing, like a folder made by CreateNewDirectory,
+        // because a rename into a folder held without write sharing fails. Never shared for deletion: no other process can
+        // rename or remove it while it is pinned. The rename keeps ReplaceIfExists = FALSE.
+        public static AtmSafeCreateSession PinForMove(string parentDir)
+        {
+            AtmSafeCreateSession s = new AtmSafeCreateSession();
+            string why;
+            try
+            {
+                if (parentDir == null || parentDir.Length < 4 || !char.IsLetter(parentDir[0]) || parentDir[0] > 'z' || parentDir[1] != ':' || parentDir[2] != '\\') { s.Error = "PARENT_INVALID"; return s; }
+                string full = Path.GetFullPath(parentDir).TrimEnd('\\');
+                if (!string.Equals(full, parentDir.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)) { s.Error = "PARENT_NOT_CANONICAL"; return s; }
+                if (full.Length >= 240) { s.Error = "PARENT_TOO_LONG"; return s; }
+                if (GetDriveTypeW(full.Substring(0, 3)) != 3) { s.Error = "UNSUPPORTED_DRIVE"; return s; }
+                if (AtmPathCheck.IsSubstitutedDrive(full)) { s.Error = "SUBSTITUTED_DRIVE"; return s; }
+                s.ParentPath = full;
+                string[] parts = full.Substring(3).Split('\\');
+                string cur = full.Substring(0, 3);
+                for (int i = 0; i < parts.Length - 1; i++)
+                {
+                    cur = Path.Combine(cur, parts[i]);
+                    SafeFileHandle h = AtmDeleter.OpenChecked(cur, true, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE, out why);
+                    if (h == null) { s.Error = "ANCESTOR_" + Code(why); return s; }
+                    s.Pins.Add(h);
+                }
+                AtmDeleter.BY_HANDLE_FILE_INFORMATION info;
+                SafeFileHandle p = AtmDeleter.OpenChecked(full, true, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE, out why, out info);
+                if (p == null) { s.Error = "PARENT_" + Code(why); return s; }
+                s.Parent = p;
+                s.VolumeSerial = info.VolumeSerialNumber;
+                return s;
+            }
+            catch (Exception ex) { s.Error = "PIN_" + ex.GetType().Name; return s; }
+        }
+
         // Creates fileName in the pinned folder and writes content. Returns null on success, otherwise a code.
         public static string CreateNew(AtmSafeCreateSession s, string fileName, byte[] content)
         {
