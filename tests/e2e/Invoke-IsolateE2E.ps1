@@ -63,6 +63,9 @@ if (-not $DisposableMachine -and -not ($env:GITHUB_ACTIONS -eq 'true' -and $env:
     throw 'Recusado: este teste move e expurga de verdade raizes que ele mesmo planta; so roda em maquina descartavel (runner do GitHub) ou com -DisposableMachine.'
 }
 
+# ISO-P5b: the 200,000-file case must end well inside the job's limit (the steps after this harness still need to run).
+$harnessClock = [Diagnostics.Stopwatch]::StartNew()
+$heavyDeadline = [TimeSpan]::FromMinutes(35)
 $me = [Security.Principal.WindowsIdentity]::GetCurrent()
 $mySid = $me.User.Value
 $isAdmin = (New-Object Security.Principal.WindowsPrincipal($me)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -818,6 +821,7 @@ Case 'ISO-open-file-before-plan' {
     Assert-Entry $root.Path
     $f = Join-Path $root.Path 'scratchpad\SYNTHETIC.txt'
     $h = Start-HoldProcess $f 'None' 'openA'
+    $c = $null
     try {
         Assert $h.Ready 'processo auxiliar nao abriu o arquivo'
         $probe = Get-Codes @((Get-AtmLockProbeReasons $root.Path).Reasons)
@@ -904,17 +908,17 @@ Case 'ISO-concurrency-isolate-holds-clean-busy' {
     # (its own deletion gate opened in its memory) and must be refused at once. Then a wrong phrase: nothing is moved.
     $isoConc = @{ Child = $null }
     $concInner = (New-Operator).Reader
-    $op = @{ Calls = (New-Object System.Collections.Generic.List[string]) }
-    $op.Reader = {
+    $concOp = @{ Calls = (New-Object System.Collections.Generic.List[string]) }
+    $concOp.Reader = {
         param($phrase, $kind, $rootPath, $choices, $info)
-        $op.Calls.Add([string]$kind)
+        $concOp.Calls.Add([string]$kind)
         if ($kind -ceq 'confirm') {
             if ($null -eq $isoConc.Child) { $isoConc.Child = Wait-IsoChild (Start-IsoChild 'CleanTry' $xc.Path 'ISO-X1-clean.jsonl') }
             return 'ISOLAR 1 CAMINHOS ZZZZZZZZ'
         }
         & $concInner $phrase $kind $rootPath $choices $info
     }
-    $c = Invoke-E2EIsolate -Paths @($conc.Path) -LogName 'ISO-X1-isolate.jsonl' -Operator $op
+    $c = Invoke-E2EIsolate -Paths @($conc.Path) -LogName 'ISO-X1-isolate.jsonl' -Operator $concOp
     Assert ($null -ne $isoConc.Child) 'a limpeza concorrente nao foi iniciada'
     $k = $isoConc.Child
     Assert ($k.Exit -eq 0 -and $k.Out -ceq 'NOT_EXITED|CLEAN_LOCK_BUSY||0|False' -and -not (Test-Path -LiteralPath $k.Log)) "limpeza concorrente: exit $($k.Exit), $($k.Out) [$($k.Tail)]"
@@ -1047,44 +1051,61 @@ Case 'ISO-200k-files' {
     $scope = Join-Path $ctx.Base $slug; $rp = Join-Path $scope $id
     $ctx.Skip.Add($scope)
     $ctx.Touched.Add($scope.Substring($runRoot.Length).TrimStart('\'))
-    $budget = [TimeSpan]::FromMinutes(15)
+    # Time budget (the round: "if it fits the job's limit, else NAO_TESTADO with the partial measurement"): everything
+    # below must end before $heavyDeadline after this harness started; each engine call starts only if its projection
+    # (from the measured inventory of this root) fits. One attempt only: churn here is NAO_TESTADO with the timings.
+    $left = { $heavyDeadline - $harnessClock.Elapsed }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $one = [byte[]]@(120)
     $made = 0
-    for ($d = 0; $d -lt 200 -and $sw.Elapsed -lt $budget; $d++) {
+    for ($d = 0; $d -lt 200 -and (& $left) -gt [TimeSpan]::FromMinutes(12); $d++) {
         $dir = Join-Path $rp ('d{0:D3}' -f $d)
         [void][IO.Directory]::CreateDirectory($dir)
         for ($f = 0; $f -lt 1000; $f++) { [IO.File]::WriteAllBytes((Join-Path $dir ('f{0:D4}.bin' -f $f)), $one); $made++ }
     }
     [IO.File]::WriteAllText((Join-Path $rp 'ATM-E2E-NONCE.txt'), $nonce)
-    $plantSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
-    $summary.heavy = [ordered]@{ planned = 200000; files = $made; plantSeconds = $plantSeconds; isolateSeconds = $null; restoreSeconds = $null }
-    if ($made -lt 200000) { return (NotTested "partial measurement: $made files planted in $plantSeconds s, over the 15 min budget of the plant; the isolation was not started") }
+    $summary.heavy = [ordered]@{ planned = 200000; files = $made; plantSeconds = $null; inventorySeconds = $null; isolateSeconds = $null; restoreSeconds = $null }
+    if ($made -lt 200000) { $summary.heavy.plantSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); return (NotTested "partial measurement: $made files planted in $($summary.heavy.plantSeconds) s before the time budget of the job ran short; the isolation was not started") }
     $pj = Join-Path $ctx.Cfg "projects\$slug"; [void][IO.Directory]::CreateDirectory($pj)
     $ctx.Touched.Add($pj.Substring($runRoot.Length).TrimStart('\'))
     $tr = Join-Path $pj "$id.jsonl"
     [IO.File]::WriteAllText($tr, ('{"type":"ai-title","aiTitle":"SYNTHETIC","sessionId":"' + $id + '"}' + "`n"))
     Start-Sleep -Seconds 2
     $old = [datetime]::UtcNow.AddHours(-$shiftHours)
-    foreach ($fi in (New-Object IO.DirectoryInfo $rp).EnumerateFiles('*', [IO.SearchOption]::AllDirectories)) { [IO.File]::SetLastWriteTimeUtc($fi.FullName, $old) }
+    $timed = 0
+    foreach ($fi in (New-Object IO.DirectoryInfo $rp).EnumerateFiles('*', [IO.SearchOption]::AllDirectories)) {
+        if (($timed % 10000) -eq 0 -and (& $left) -lt [TimeSpan]::FromMinutes(10)) { break }
+        [IO.File]::SetLastWriteTimeUtc($fi.FullName, $old); $timed++
+    }
+    $summary.heavy.plantSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+    if ($timed -lt 200001) { return (NotTested "partial measurement: 200,001 files planted, $timed write times set back in $($summary.heavy.plantSeconds) s before the time budget of the job ran short; the isolation was not started") }
     foreach ($di in (New-Object IO.DirectoryInfo $rp).EnumerateDirectories('*', [IO.SearchOption]::TopDirectoryOnly)) { [IO.Directory]::SetLastWriteTimeUtc($di.FullName, $old) }
     [IO.Directory]::SetLastWriteTimeUtc($rp, $old); [IO.File]::SetLastWriteTimeUtc($tr, $old)
     $ctx.Roots['heavy'] = [pscustomobject]@{ Label = 'heavy'; Id = $id; Slug = $slug; Scope = $scope; Path = $rp; Transcript = $tr; Tree = $null }
     $one1 = @{} + $ia; $one1['OnlyRootPath'] = $rp
+    $sw.Restart()
     $p0 = @((Invoke-AtmInventory @one1).Partitions | Where-Object { [string]::Equals($_.Path, $rp, [StringComparison]::OrdinalIgnoreCase) -and $_.Kind -ne 'BaseLooseFiles' })
-    Assert ($p0.Count -eq 1 -and [long]$p0[0].Files -eq 200001) "raiz pesada inventariada: $(@($p0 | ForEach-Object { $_.Files }) -join ',')"
+    $inv = $sw.Elapsed
+    $summary.heavy.inventorySeconds = [math]::Round($inv.TotalSeconds, 1)
+    Assert ($p0.Count -eq 1 -and [long]$p0[0].Files -eq 200001) "raiz pesada inventariada: $(@($p0 | ForEach-Object { [string]$_.Kind + '/' + [string]$_.Files }) -join ',')"
     $ctx.Roots['heavy'].Path = $p0[0].Path
     $st0 = '{0}/{1}/{2}/{3}' -f $p0[0].Files, $p0[0].Dirs, $p0[0].Bytes, ([datetime]$p0[0].NewestWriteTimeUtc).ToUniversalTime().Ticks
+    $timings = { "plant $($summary.heavy.plantSeconds) s, one inventory of the root $($summary.heavy.inventorySeconds) s, isolate $($summary.heavy.isolateSeconds) s, restore $($summary.heavy.restoreSeconds) s" }
+    # Isolate: about 3 inventories and 3 in-use probes of the base, the move and its two measurements.
+    if ((& $left) -lt [TimeSpan]::FromTicks($inv.Ticks * 8)) { return (NotTested "partial measurement: $(& $timings); the isolation projected past the time budget of the job, not started") }
+    Assert-Entry $rp
     $sw.Restart()
-    $c = Invoke-E2EIsolateChurn -Label 'heavy' -LogBase 'ISO-heavy'
+    $c = Invoke-E2EIsolate -Paths @($rp) -LogName 'ISO-heavy.jsonl'
     $summary.heavy.isolateSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
-    if ($c.Exhausted) { return (Resolve-Exhausted $c) }
-    # The quarantine snapshot does not enter the 200,000 files if they stay in the entry (a restore that failed).
+    # The quarantine snapshot does not enter the 200,000 files if they stay in the entry (no restore, or a failed one).
     if ($c.Res.EntryId) { $ctx.QSkip.Add((Join-Path (Join-Path $qRoot $c.Res.EntryId) 'payload')) }
-    $null = Assert-Isolated $c 'heavy'
+    if (@('PLAN_CHANGED_BEFORE_EXECUTION', 'REVALIDATION_REFUSED') -ccontains [string]$c.Res.Aborted) { return (NotTested "refused before the mover by process churn of the runner ($($c.Res.Aborted)), one attempt only for this case; $(& $timings)") }
+    $null = Assert-Isolated ([pscustomobject]@{ Res = $c.Res; Log = $c.Log; Calls = $c.Calls; Attempts = 1; Churn = @(); Exhausted = $false }) 'heavy'
     $mi = @(Read-E2ELog $c.Log | Where-Object { $_.type -ceq 'move-result' })[0]
     Assert ([long]$mi.filesAfter -eq 200001) "move-result: $($mi.filesAfter) arquivos"
     $hid = $ctx.Iso['heavy']
+    # Restore: about 2 inventories of the base, the verification of the payload, the move and its two measurements.
+    if ((& $left) -lt [TimeSpan]::FromTicks($inv.Ticks * 6)) { return (NotTested "partial measurement: isolated (COMPLETE, 200,001 files verified); $(& $timings); the restore projected past the time budget of the job, not started (the entry stays ISOLATED in the VM's quarantine)") }
     $op = New-Operator
     $sw.Restart()
     $res = Invoke-AtmRestore -Id $hid -PlanPresenter $rstPresenter -ConfirmationReader $op.Reader -InventoryArgs $ia -LogFile (New-E2ELogPath 'ISO-heavy-restore.jsonl') -Interaction $interaction
@@ -1093,7 +1114,7 @@ Case 'ISO-200k-files' {
     $p1 = @((Invoke-AtmInventory @one1).Partitions | Where-Object { [string]::Equals($_.Path, $rp, [StringComparison]::OrdinalIgnoreCase) -and $_.Kind -ne 'BaseLooseFiles' })
     $st1 = $(if ($p1.Count -eq 1) { '{0}/{1}/{2}/{3}' -f $p1[0].Files, $p1[0].Dirs, $p1[0].Bytes, ([datetime]$p1[0].NewestWriteTimeUtc).ToUniversalTime().Ticks } else { 'MISSING' })
     Assert ($st1 -ceq $st0) "estatisticas antes $st0, depois $st1"
-    "200,001 files (200 folders): planted in $plantSeconds s; isolated by the real mover in $($summary.heavy.isolateSeconds) s (plan, plan check, revalidation, move; move-result 200,001 files verified); restored in $($summary.heavy.restoreSeconds) s (COMPLETE); files, folders, bytes and newest write time identical before and after; $(Get-AttemptText $c)"
+    "200,001 files (200 folders): planted and set back in $($summary.heavy.plantSeconds) s; one inventory of the root $($summary.heavy.inventorySeconds) s; isolated by the real mover in $($summary.heavy.isolateSeconds) s (plan, plan check, revalidation, move; move-result 200,001 files verified); restored in $($summary.heavy.restoreSeconds) s (COMPLETE); files, folders, bytes and newest write time identical before and after"
 }
 
 # ---------------------------------------------------------------------------------------------- snapshots after the runs

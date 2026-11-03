@@ -400,8 +400,10 @@ the V2 one; what differs:
     `move-intent`) and that nothing is moved. No second fixed volume, or one this account cannot write to: `NAO_TESTADO`;
   * 200,000 files (one root of 200 folders of 1,000 one-byte files), in **one x64 job only** (windows-2025, installer
     pwsh, `ATM_E2E_HEAVY`): the plant, the isolation and the restore timed (`heavy` in the summary), the statistics
-    identical before and after. A plant over its 15-minute budget is `NAO_TESTADO` with the partial measurement; the
-    other jobs report it `NAO_TESTADO` by design.
+    identical before and after. The case must end within 35 minutes of the harness start, so the job keeps room for its
+    later steps: the plant stops early, and the isolation and the restore start only when their projection (from a
+    measured inventory of the root) fits; otherwise `NAO_TESTADO` with the partial timings. One attempt only (process
+    churn there is `NAO_TESTADO`). The other jobs report it `NAO_TESTADO` by design.
 * **Not tested here.** The CLI and the TUI past the gates (opening them there would mean changing the installed copy);
   isolation without the B1 exception in leg A (a standard user's coverage is incomplete); UAC prompts and filtered
   tokens (the runners have UAC disabled).
