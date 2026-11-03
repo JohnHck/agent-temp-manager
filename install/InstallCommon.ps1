@@ -728,6 +728,44 @@ function Invoke-AtmRestoreUnlocked {
     return (Get-Content -LiteralPath (Join-Path $InstallDir 'install-state.json') -Raw | ConvertFrom-Json).version
 }
 
+# The scheduled task of the automatic purge (P6b) belongs to the user who created it: the uninstall only reads the
+# product's folder and warns, and never removes a task, the current user's or another user's. Without the installation a
+# task fails closed (its action, the installed entry point, no longer exists). The folder and the name rule are the
+# engine's (Engine.Isolate.ps1: AtmAutoPurgeTaskFolder, Get-AtmAutoPurgeTaskName), repeated here because the installer
+# does not load the engine; the suite checks that both are the same.
+$script:AtmInstallAutoPurgeTaskFolder = '\AgentTempManager'
+
+function Get-AtmInstallAutoPurgeTaskName {
+    param([string]$Sid)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $h = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Sid)) } finally { $sha.Dispose() }
+    return 'AutoPurge-' + (-join ($h[0..7] | ForEach-Object { $_.ToString('x2') }))
+}
+
+function Get-AtmUninstallAutoPurgeTaskNotice {
+    # Read only: the warnings of the uninstall about these tasks. The current user's task (by its name) and how many tasks
+    # of other users the folder holds (counted, never named). No folder: nothing to say.
+    $out = New-Object System.Collections.Generic.List[string]
+    try {
+        $svc = New-Object -ComObject 'Schedule.Service'
+        $svc.Connect()
+        $folder = $null
+        try { $folder = $svc.GetFolder($script:AtmInstallAutoPurgeTaskFolder) } catch {
+            $e = $_.Exception
+            for ($i = 0; $i -lt 4 -and $e -is [Management.Automation.MethodInvocationException] -and $null -ne $e.InnerException; $i++) { $e = $e.InnerException }
+            if (@(-2147024894, -2147024893) -contains [int]$e.HResult) { return $out.ToArray() }
+            throw
+        }
+        $own = Get-AtmInstallAutoPurgeTaskName -Sid ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+        $names = New-Object System.Collections.Generic.List[string]
+        foreach ($t in $folder.GetTasks(1)) { $names.Add([string]$t.Name) }
+        if ($names.Contains($own)) { $out.Add((Get-AtmText 'inst.apTaskWarn' ($script:AtmInstallAutoPurgeTaskFolder + '\' + $own))) }
+        $others = @($names | Where-Object { $_ -cmatch '^AutoPurge-[0-9a-f]{16}$' -and $_ -cne $own }).Count
+        if ($others -gt 0) { $out.Add((Get-AtmText 'inst.apTaskOthers' $others)) }
+    } catch { $out.Add((Get-AtmText 'inst.apTaskUnreadable' $_.Exception.GetType().Name)) }
+    return $out.ToArray()
+}
+
 function Uninstall-AtmProduct {
     # Runs under the operation lock of InstallDir (R-B6).
     param([string]$InstallDir, [string]$TestPathKey)
@@ -742,6 +780,8 @@ function Invoke-AtmUninstallUnlocked {
     # may be the only intact installation (R-B6).
     Assert-AtmNoRecoveryPending -InstallDir $InstallDir
     if (-not (Test-Path -LiteralPath (Join-Path $InstallDir 'install-state.json'))) { throw (Get-AtmText 'inst.notInstalled' $InstallDir) }
+    # Scheduled tasks of the automatic purge (P6b): read and warned about, never removed.
+    foreach ($wl in @(Get-AtmUninstallAutoPurgeTaskNotice)) { Write-Warning $wl }
     # Only remove the PATH entry if this product added it (never an entry that pre-existed).
     $added = $false
     # Unreadable install state: never remove a PATH entry we cannot prove we added.

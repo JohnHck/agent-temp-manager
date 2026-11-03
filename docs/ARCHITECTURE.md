@@ -96,7 +96,16 @@ Collection -> normalization -> evidence -> correlation -> presentation:
     engine functions. Retention only marks `EXPIRED`, and the quota only refuses new isolations.
   * The report and the TUI show `EXPIRED`, `PURGED` and the policy. They never call the purge or the deleter.
 
-**Later phases:** automatic purge (P6; `autoPurge` is read and shown, nothing more).
+* P6a: the automatic purge. `bin\agent-temp-autopurge.ps1` is the only caller of `Invoke-AtmAutoPurge`, which acts only
+  with `autoPurge = true` in the policy and reuses the plan, gates and deleter path of `quarantine purge`
+  (`Invoke-AtmPurgeDeletion`), behind the same purge gate. The reports and the TUI show the notice while it is on.
+
+* P6b: the user's optional scheduled task (J-ISO-7). The Task Scheduler is reached only through
+  `Connect-AtmTaskScheduler` in `Engine.Isolate.ps1`. It is changed only by `Register-AtmAutoPurgeTask` and
+  `Unregister-AtmAutoPurgeTask`, called by `Invoke-AtmAutoPurgeSchedule`/`Invoke-AtmAutoPurgeUnschedule` and only from the
+  CLI's `quarantine schedule-autopurge` and `unschedule-autopurge`. `version`, `quarantine list` and the TUI only read its
+  state (`Get-AtmAutoPurgeTaskState`); the TUI never schedules or unschedules (T-ISO-6). The uninstall
+  (`InstallCommon.ps1`) only reads the folder and warns.
 
 ### Planned layering (ADR-0013)
 

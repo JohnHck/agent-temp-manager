@@ -311,6 +311,7 @@ function Get-AtmTuiTextLines {
             & $add ('  ' + (Get-AtmText 'q.cliOnly' $e.Id)) 'Cyan'
             & $add ('  ' + (Get-AtmText 'q.cliPurge' $e.Id)) 'Cyan'
             if ($State.Quarantine) { foreach ($pl in (Get-AtmQuarantinePolicyLines -Policy $State.Quarantine.Policy -List $State.Quarantine)) { & $add $pl.Text $pl.Color } }
+            foreach ($tl in (Get-AtmAutoPurgeTaskLines -Task $State.AutoPurgeTask)) { & $add $tl.Text $tl.Color }
             & $add (Get-AtmText 'tui.q.readOnly') 'Green'
         }
     }
@@ -336,10 +337,21 @@ function Get-AtmTuiChrome {
     return New-AtmSeg $head 'White' 'DarkBlue'
 }
 
+function Get-AtmTuiAutoPurgeNotice {
+    # Display only (P6b): the notice of the automatic purge, read when the TUI starts (Get-AtmAutoPurgeNoticeLines), on
+    # every screen under the header while the policy of this copy has autoPurge = true. Wrapped, never clipped.
+    param($State)
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($nl in @($State.AutoPurgeNotice)) { if ($nl) { foreach ($pc in (Split-AtmWrap $nl ($State.Width - 3))) { $out.Add(@(New-AtmSeg (' ' + $pc) 'Magenta')) } } }
+    # The list itself (one line = an array of segments), never unrolled.
+    return , $out
+}
+
 function Get-AtmTuiBusyFrame {
     param($State, [string]$Text, [int]$Percent = -1, [switch]$Diag)
     $lines = New-Object System.Collections.Generic.List[object]
     $lines.Add(@(Get-AtmTuiChrome -State $State -Title (Get-AtmText 'tui.working') -Diag:$Diag))
+    foreach ($nl in (Get-AtmTuiAutoPurgeNotice -State $State)) { $lines.Add($nl) }
     $lines.Add(@(New-AtmSeg ''))
     foreach ($bt in (Split-AtmWrap $Text ($State.Width - 4))) { $lines.Add(@(New-AtmSeg ('  ' + $bt) 'Cyan')) }
     if ($Percent -ge 0) {
@@ -429,7 +441,9 @@ function Get-AtmTuiFrame {
     $scr = $State.Stack[$State.Stack.Count - 1]
     $lines = New-Object System.Collections.Generic.List[object]
     $lines.Add(@(Get-AtmTuiChrome -State $State -Title $scr.Title -Diag:($script:AtmTuiDiagScreens -contains $scr.Name)))
-    $bodyH = $h - 3
+    $notice = Get-AtmTuiAutoPurgeNotice -State $State
+    foreach ($nl in $notice) { $lines.Add($nl) }
+    $bodyH = $h - 3 - $notice.Count
     $footer = Get-AtmText 'foot.default'
     switch ($scr.Name) {
         'menu' {
@@ -453,8 +467,11 @@ function Get-AtmTuiFrame {
             $data = Get-AtmTuiScreenRows -State $State -Screen $scr
             $scr.Count = $data.Rows.Count
             $tbl = Format-AtmTuiTable -Columns $data.Columns -Rows $data.Rows -Width $w -G $G
+            # The quarantine area: the state of the user's scheduled task of the automatic purge above the table (display only).
+            $qPre = 0
+            if ($scr.Name -eq 'quarantine') { foreach ($tl in (Get-AtmAutoPurgeTaskLines -Task $State.AutoPurgeTask)) { foreach ($pc in (Split-AtmWrap $tl.Text ($w - 3))) { $lines.Add(@(New-AtmSeg (' ' + $pc) $tl.Color)); $qPre++ } } }
             $lines.Add(@(New-AtmSeg (' ' + $tbl.Header) 'White' 'DarkGray'))
-            $vis = [math]::Max(1, $bodyH - 2)
+            $vis = [math]::Max(1, $bodyH - 2 - $qPre)
             if ($scr.Sel -ge $data.Rows.Count) { $scr.Sel = [math]::Max(0, $data.Rows.Count - 1) }
             if ($scr.Sel -lt $scr.Top) { $scr.Top = $scr.Sel }
             if ($scr.Sel -ge $scr.Top + $vis) { $scr.Top = $scr.Sel - $vis + 1 }
@@ -958,9 +975,11 @@ function Start-AtmTui {
       -Width/-Height : fixed size (tests); default = console window
       -DiagnoseArgs  : splatted into Invoke-AtmDiagnose (default: the inventory arguments above)
       -DiagnoseRunner: scriptblock(args) -> diagnose result (tests; default Invoke-AtmDiagnose)
+      -AutoPurgeTaskReader: scriptblock() -> the state of the user's scheduled task of the automatic purge (tests; default
+                       Get-AtmAutoPurgeTaskState, read only). The TUI only shows it: it never schedules or unschedules.
     #>
     param([hashtable]$InventoryArgs = @{}, [scriptblock]$KeySource, [scriptblock]$Renderer, [scriptblock]$LineReader, [switch]$Ascii, [int]$Width = 0, [int]$Height = 0, $Inventory,
-        [hashtable]$DiagnoseArgs = $null, [scriptblock]$DiagnoseRunner = $null, [scriptblock]$KeyFlush = $null)
+        [hashtable]$DiagnoseArgs = $null, [scriptblock]$DiagnoseRunner = $null, [scriptblock]$KeyFlush = $null, [scriptblock]$AutoPurgeTaskReader = $null)
     $headless = [bool]$Renderer
     $useAscii = $Ascii -or -not (Test-AtmTuiUnicodeDefault)
     # Callbacks below rely on dynamic scoping with tui-prefixed names (no GetNewClosure: such closures
@@ -971,6 +990,11 @@ function Start-AtmTui {
         Diag = $null; DiagRuns = 0
         DiagnoseArgs = $(if ($null -ne $DiagnoseArgs) { $DiagnoseArgs } else { @{ InventoryArgs = (@{} + $InventoryArgs) } })
         DiagnoseRunner = $(if ($null -ne $DiagnoseRunner) { $DiagnoseRunner } else { { param($a) Invoke-AtmDiagnose @a } })
+        # Display only (P6b): the notice of the automatic purge of this copy's policy, and the task state read when the
+        # quarantine area is opened.
+        AutoPurgeNotice = @(Get-AtmAutoPurgeNoticeLines -ConfigDir $(if ($InventoryArgs['ConfigDir']) { [string]$InventoryArgs['ConfigDir'] } else { Join-AtmPath (Split-Path $PSScriptRoot -Parent) 'config' }))
+        AutoPurgeTask = $null
+        AutoPurgeTaskReader = $(if ($null -ne $AutoPurgeTaskReader) { $AutoPurgeTaskReader } else { { Get-AtmAutoPurgeTaskState } })
     }
     $tuiHeadless = $headless
     $sizeOf = {
@@ -1102,6 +1126,7 @@ function Start-AtmTui {
                         # Read on entering the area (read only; a missing quarantine is not created), with the policy of the
                         # installation (the retention marks EXPIRED; shown, never acted on).
                         $state.Quarantine = Get-AtmQuarantineList -OwnSid (Get-AtmTuiOwnSid $state) -Policy (Get-AtmQuarantinePolicy -ConfigDir ([string]$state.InventoryArgs['ConfigDir']))
+                        $state.AutoPurgeTask = & $state.AutoPurgeTaskReader
                         if ($state.Quarantine.RootProblem) { $state.Message = (Get-AtmText 'q.rootProblem' $state.Quarantine.RootProblem) }
                         elseif (@($state.Quarantine.Entries).Count -eq 0) { $state.Message = (Get-AtmText 'tui.q.empty') }
                         else { $state.Message = (Format-AtmQuarantinePolicy $state.Quarantine.Policy) }

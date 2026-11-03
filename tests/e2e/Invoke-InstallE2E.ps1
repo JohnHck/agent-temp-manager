@@ -395,7 +395,7 @@ Step 'shipped-purge-gate' {
 Step 'installed-autopurge-entry-point' {
     # 0.3.x isolation, phase P6a: the entry point of the automatic purge is installed and listed in the manifest. Run by
     # hand from a new process with no policy installed it does nothing (exit 0, one status line, no log folder); any
-    # argument is refused (exit 2). No scheduled task exists.
+    # argument is refused (exit 2). The installer creates no scheduled task (P6b: only the user does, below).
     $ep = Join-Path $installDir 'bin\agent-temp-autopurge.ps1'
     $m = [IO.File]::ReadAllText((Join-Path $installDir 'manifest.json')) | ConvertFrom-Json
     Assert ([IO.File]::Exists($ep) -and @($m.files | Where-Object { [string]$_.path -ceq 'bin\agent-temp-autopurge.ps1' }).Count -eq 1) 'ponto de entrada ausente ou fora do manifesto'
@@ -417,6 +417,27 @@ Step 'installed-autopurge-entry-point' {
     $t = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -like '*AgentTemp*' -or $_.TaskPath -like '*AgentTemp*' })
     Assert ($t.Count -eq 0) 'existe uma tarefa agendada do produto'
     'installed entry point listed in the manifest; no policy: exit 0, one status line, nothing created; an argument: exit 2; no scheduled task'
+}
+# 0.3.x isolation, phase P6b: the user's own task of the automatic purge. The installer created none; in this elevated
+# shell schedule-autopurge is refused before anything is asked or created (J-ISO-7: the task is always on the user's
+# standard token); unschedule-autopurge without a console is refused; version and quarantine list show the state.
+function Test-E2EApFolder {
+    $svc = New-Object -ComObject 'Schedule.Service'
+    $svc.Connect()
+    try { $null = $svc.GetFolder('\AgentTempManager'); return $true } catch { return $false }
+}
+Step 'autopurge-task-elevated-refused' {
+    Assert (-not (Test-E2EApFolder)) 'a instalacao criou a pasta do produto no agendador'
+    $r = Invoke-Agent 'quarantine schedule-autopurge -Lang en-US' 'schedule-autopurge-elevated'
+    Assert ($r.Code -eq 3 -and $r.Text.Contains('AUTOPURGE_TASK_REQUIRES_STANDARD_TOKEN') -and -not $r.Text.Contains('AGENDAR EXPURGO AUTOMATICO')) "agendar elevado: exit $($r.Code)"
+    Assert (-not (Test-E2EApFolder)) 'agendar elevado criou a pasta do produto no agendador'
+    $r = Invoke-Agent 'quarantine unschedule-autopurge -Lang en-US' 'unschedule-autopurge-noconsole'
+    Assert ($r.Code -eq 6 -and $r.Text.Contains('CONSOLE_NOT_OBSERVED')) "desagendar sem console: exit $($r.Code)"
+    $r = Invoke-Agent 'version -Lang en-US' 'version-autopurge-task'
+    Assert ($r.Code -eq 0 -and $r.Text.Contains('Scheduled task of the automatic purge: none for this user')) 'version sem o estado da tarefa'
+    $r = Invoke-Agent 'quarantine list -Lang en-US' 'quarantine-list-autopurge-task'
+    Assert ($r.Code -eq 0 -and $r.Text.Contains('Scheduled task of the automatic purge: none for this user')) 'quarantine list sem o estado da tarefa'
+    'elevated schedule-autopurge: exit 3, AUTOPURGE_TASK_REQUIRES_STANDARD_TOKEN, nothing asked or created; unschedule without a console: exit 6; version and quarantine list: no task'
 }
 Step 'shipped-worktree-diagnostics-gate' {
     # P3-B0: reading repositories and running Git in them stay closed in every shipped copy.
@@ -621,6 +642,63 @@ Step 'standard-user-cannot-write-install-dir' {
     Assert (-not (Test-Path -LiteralPath $target)) 'usuario comum conseguiu gravar no diretorio de instalacao'
     "denied (exit $($p.ExitCode))"
 }
+# 0.3.x isolation, phase P6b (J-ISO-7 on a real standard token): the installed engine, run as the standard user of this
+# VM, registers that user's task (a name marked as a test) in the product's folder, which it creates itself; read back,
+# it is that user's, interactive, limited, with no password and the exact action; a second registration is refused; the
+# engine removes it. The helper writes booleans and codes only (no SID, no account name).
+Step 'autopurge-task-standard-user' {
+    if (-not $cred) { throw 'usuario de teste indisponivel' }
+    $helper = @'
+param([string]$Inst, [string]$Out, [string]$Name)
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 2.0
+$r = [ordered]@{}
+try {
+    foreach ($l in @('Engine.Audit', 'Engine.Clean', 'Engine.Isolate', 'Engine.Diagnose')) { . (Join-Path $Inst "lib\$l.ps1") }
+    $script:AtmAutoPurgeTaskNameOverride = $Name
+    $r.standard = [bool](Test-AtmAutoPurgeStandardToken)
+    $me = Get-AtmCurrentIdentity
+    $ep = Get-AtmAutoPurgeEntryPoint
+    $r.entryPointInstalled = [IO.File]::Exists($ep) -and $ep.StartsWith($Inst + '\', [StringComparison]::OrdinalIgnoreCase)
+    $r.register = [string](Register-AtmAutoPurgeTask -Sid $me.Sid -EntryPoint $ep)
+    $st = Get-AtmAutoPurgeTaskState
+    $r.state = $st.State
+    $r.reasons = (@($st.Reasons) -join ',')
+    $t = (Connect-AtmTaskScheduler).GetFolder('\AgentTempManager').GetTask($Name)
+    $r.userIsSelf = ((Resolve-AtmTaskUserSid ([string]$t.Definition.Principal.UserId)) -ceq $me.Sid)
+    $r.logonType = [int]$t.Definition.Principal.LogonType
+    $r.runLevel = [int]$t.Definition.Principal.RunLevel
+    $r.noPassword = -not ([string]$t.Xml).Contains('<Password>')
+    $r.actionExact = (@(Test-AtmAutoPurgeTaskMatch -Task $t -Sid $me.Sid -Name $Name -EntryPoint $ep).Count -eq 0)
+    $r.nextRunFuture = ([datetime]$t.NextRunTime -gt [datetime]::Now)
+    $r.duplicate = [string](Register-AtmAutoPurgeTask -Sid $me.Sid -EntryPoint $ep)
+    $r.unregister = [string](Unregister-AtmAutoPurgeTask -Sid $me.Sid -EntryPoint $ep)
+    $r.after = (Get-AtmAutoPurgeTaskState).State
+} catch { $r.error = $_.Exception.GetType().Name + ': ' + ([regex]::Replace([string]$_.Exception.Message, 'S-1-5-21-[0-9-]+', '<sid>')) }
+[IO.File]::WriteAllText($Out, ($r | ConvertTo-Json -Compress))
+'@
+    $hp = Join-Path $userDir 'ap-task-helper.ps1'
+    $out = Join-Path $userDir 'ap-task-result.json'
+    [IO.File]::WriteAllText($hp, $helper)
+    $name = 'AutoPurgeTest-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    try {
+        try {
+            $p = Start-Process -FilePath $installerExe -ArgumentList "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$hp`" -Inst `"$installDir`" -Out `"$out`" -Name $name" `
+                -Credential $cred -LoadUserProfile -WorkingDirectory $userDir -WindowStyle Hidden -PassThru -Wait
+        } catch { $script:notTested = $true; return "processo como usuario comum nao iniciou neste runner: $($_.Exception.Message)" }
+        Assert (Test-Path -LiteralPath $out) "helper sem resultado (exit $($p.ExitCode))"
+        $text = [IO.File]::ReadAllText($out)
+        [IO.File]::WriteAllText((Join-Path $OutDir 'autopurge-task-standard-user.json'), $text)
+        $j = $text | ConvertFrom-Json
+        Assert (-not $j.PSObject.Properties['error']) "helper: $($j.error)"
+        Assert ($j.standard -and $j.entryPointInstalled -and $j.register -ceq '' -and $j.state -ceq 'PRESENT' -and $j.userIsSelf -and $j.logonType -eq 3 -and $j.runLevel -eq 0 -and $j.noPassword -and $j.actionExact -and $j.nextRunFuture) "tarefa do usuario comum: $text"
+        Assert ($j.duplicate -ceq 'AUTOPURGE_TASK_EXISTS' -and $j.unregister -ceq '' -and $j.after -ceq 'ABSENT') "duplicada e remocao: $text"
+    } finally {
+        # A task the helper left behind (a failure) is removed here, by its test name only.
+        try { $svc = New-Object -ComObject 'Schedule.Service'; $svc.Connect(); $svc.GetFolder('\AgentTempManager').DeleteTask($name, 0) } catch { $null = $_ }
+    }
+    'standard token: the engine created the product folder and the user''s task (test name): that user, interactive, limited, no password, the exact action, first run in the future; duplicate AUTOPURGE_TASK_EXISTS; removed by the engine'
+}
 
 # V0.3 V2: the REAL clean of roots planted by tests\e2e\Invoke-CleanE2E.ps1 itself, against this installation, in the
 # installer's shell. The harness opens the deletion gate only in its own process memory; the installed copy stays
@@ -802,12 +880,67 @@ if ($l.Acquired) {
     'standard user holds -> elevated account BUSY; elevated account holds -> standard user BUSY (never DENIED); free after both (CI evidence, not the V4 row)'
 }
 
+# 0.3.x isolation, phase P6b: the uninstall and the task of the automatic purge. This account's task (the product's name)
+# is registered by the installed engine in a child process (schedule-autopurge itself refuses this elevated shell);
+# version shows it. The uninstall warns and keeps it; then the task's own action, run as registered, fails closed (the
+# entry point is gone) and the harness removes the task.
+$script:apTaskPath = $null
+Step 'autopurge-task-before-uninstall' {
+    $helper = @'
+param([string]$Inst, [string]$Out)
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 2.0
+$r = [ordered]@{}
+try {
+    foreach ($l in @('Engine.Audit', 'Engine.Clean', 'Engine.Isolate', 'Engine.Diagnose')) { . (Join-Path $Inst "lib\$l.ps1") }
+    $r.register = [string](Register-AtmAutoPurgeTask -Sid (Get-AtmCurrentIdentity).Sid -EntryPoint (Get-AtmAutoPurgeEntryPoint))
+    $st = Get-AtmAutoPurgeTaskState
+    $r.state = $st.State
+    $r.path = $st.TaskPath
+} catch { $r.error = $_.Exception.GetType().Name }
+[IO.File]::WriteAllText($Out, ($r | ConvertTo-Json -Compress))
+'@
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('atm-e2e-ap-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    [void][IO.Directory]::CreateDirectory($d)
+    $hp = Join-Path $d 'ap-own-task.ps1'; $out = Join-Path $d 'ap-own-task.json'
+    [IO.File]::WriteAllText($hp, $helper)
+    $null = & $installerExe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $hp -Inst $installDir -Out $out 2>&1
+    $j = [IO.File]::ReadAllText($out) | ConvertFrom-Json
+    Assert (-not $j.PSObject.Properties['error'] -and $j.register -ceq '' -and $j.state -ceq 'PRESENT' -and $j.path -cmatch '^\\AgentTempManager\\AutoPurge-[0-9a-f]{16}$') "tarefa desta conta: $([IO.File]::ReadAllText($out))"
+    $script:apTaskPath = [string]$j.path
+    $r = Invoke-Agent 'version -Lang en-US' 'version-autopurge-task-present'
+    Assert ($r.Code -eq 0 -and $r.Text.Contains('Scheduled task of the automatic purge: ' + $script:apTaskPath + ' (enabled)')) 'version nao mostra a tarefa presente'
+    "this account's task registered by the installed engine ($($script:apTaskPath)); version shows it PRESENT"
+}
+
 Step 'uninstall' {
     & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pkg 'install\Uninstall-AgentTempManager.ps1') *> (Join-Path $OutDir 'uninstall.txt')
     Assert ($LASTEXITCODE -eq 0) "uninstall exit $LASTEXITCODE"
     Assert (-not (Test-Path $installDir)) 'diretorio ainda existe'
     Assert (-not (([Environment]::GetEnvironmentVariable('Path', 'Machine')) -match 'AgentTempManager')) 'PATH ainda contem o produto'
     'removed'
+}
+Step 'autopurge-task-after-uninstall' {
+    if (-not $script:apTaskPath) { throw 'tarefa desta conta nao foi criada antes da desinstalacao' }
+    # Whitespace ignored: a redirected warning is wrapped at the console width.
+    $u = [IO.File]::ReadAllText((Join-Path $OutDir 'uninstall.txt')) -replace '\s+', ''
+    Assert ($u.Contains($script:apTaskPath) -and $u.Contains('unschedule-autopurge')) 'a desinstalacao nao avisou da tarefa desta conta'
+    $leaf = Split-Path -Leaf $script:apTaskPath
+    $svc = New-Object -ComObject 'Schedule.Service'
+    $svc.Connect()
+    $folder = $svc.GetFolder('\AgentTempManager')
+    $code = $null
+    try {
+        $t = $folder.GetTask($leaf)
+        $a = $t.Definition.Actions.Item(1)
+        $home0 = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'AgentTempManager'
+        $seen0 = [IO.Directory]::Exists((Join-Path $home0 'AutoPurgeLog'))
+        $p = Start-Process -FilePath ([string]$a.Path) -ArgumentList ([string]$a.Arguments) -WindowStyle Hidden -PassThru -Wait
+        $code = $p.ExitCode
+        Assert ([IO.Directory]::Exists((Join-Path $home0 'AutoPurgeLog')) -eq $seen0) 'a acao sem a instalacao criou a pasta de log'
+    } finally { try { $folder.DeleteTask($leaf, 0) } catch { $null = $_ } }
+    Assert ($null -ne $code -and $code -ne 0) "a acao da tarefa sem a instalacao: exit $code"
+    "the uninstall warned and kept the task; its action without the installation: exit $code (fails closed); the task removed by the harness"
 }
 # FINAL-C: from the published 0.1.0 to this package and back. The 0.1.0 package is the asset of the GitHub Release
 # v0.1.0, accepted only with the SHA-256 published with it (pinned here). Runs after the uninstall above, on the same

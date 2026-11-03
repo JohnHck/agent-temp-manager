@@ -622,8 +622,9 @@ profile in V0.4.
   confirmed by default.
 * **Opt-in automatic purge** (ISO-D4): off by default and enabled only by an administrator. It is visible in `version`
   and the reports, and covers only expired entries with an intact manifest. It never touches the active environment,
-  logs each purge and fails closed. Since phase P6a it has an entry point run by hand (see "Automatic purge: the entry
-  point" below); no scheduled task exists.
+  logs each purge and fails closed. Since phase P6a it has an entry point, and since P6b each user may schedule it with
+  a task of their own, on their standard token (see "Automatic purge: the entry point" and "Automatic purge: the
+  scheduled task" below).
 
 Unchanged by the proposal: the clean gates, B1, RECENT, and the rule that the tool never changes an existing ACL or
 owner, never enables privileges and never terminates processes.
@@ -728,8 +729,8 @@ owner, never enables privileges and never terminates processes.
 
 The automatic purge (contract section 11, ISO-D4, J-ISO-7 (ii)) has one entry point, `bin\agent-temp-autopurge.ps1`, and
 one engine pass, `Invoke-AtmAutoPurge`; a static suite test checks that the entry point is its only caller and that
-the CLI and the TUI never call it. **No scheduled task, service or credential exists in this phase**: the pass runs only
-when someone runs the entry point by hand, as the user who runs it.
+the CLI and the TUI never call it. No service or credential exists: the pass runs when the user's optional scheduled
+task (phase P6b, below) or a person runs the entry point, as the user who runs it.
 
 * **What authorizes it.** Only the administrator's policy file in the installation (`autoPurge: true`, valid schema).
   There is no question, phrase or declaration, so no parameter of the interactive commands accepts a confirmation
@@ -750,16 +751,67 @@ when someone runs the entry point by hand, as the user who runs it.
 * **Mitigations (contract section 11.3).** A minimum retention fixed in code: with `retentionDays` below 7 nothing expires
   automatically. An entry whose id or any manifest record is dated after the clock is skipped (`FUTURE_DATE`), so a clock
   set back or forward cannot make a recent entry look expired.
-* **Visibility.** While the policy has `autoPurge: true`, `version`, `quarantine list`, the TUI's quarantine screen and
-  every report show `AUTOMATIC PURGE ON` and say that only a manual run of the entry point acts.
+* **Visibility.** While the policy has `autoPurge: true`, `version`, `quarantine list`, every screen of the TUI (since
+  P6b) and every report show `AUTOMATIC PURGE ON`.
 * **Declared risks.**
   * Once enabled (past the purge gate, in a later release), what it purges cannot be restored. The administrator's
     policy authorizes every pass: nobody confirms each entry.
   * The pass trusts the system clock for `EXPIRED`. The minimum retention and `FUTURE_DATE` limit a wrong clock; they
     do not detect a clock moved forward after an entry was isolated.
-  * JSON exports and the TUI screens other than the quarantine's do not show the notice; the policy line of `version`
-    and of `quarantine list` does.
-  * The scheduled task and the elevation it may need are phase P6b, not in this version.
+  * JSON exports do not show the notice; the policy line of `version` and of `quarantine list` does.
+
+### Automatic purge: the scheduled task (0.3.x phase P6b)
+
+Decision J-ISO-7 (complement of 2026-11-03): creating the task needs **no elevation**. The user creates it with an
+explicit command and a typed confirmation; it runs on the user's non-elevated token, only with the session open, with no
+credential. What a run may do is still decided only by `autoPurge = true` in the administrator's policy.
+
+* **Only two commands change the Task Scheduler.** `quarantine schedule-autopurge` (`Register-AtmAutoPurgeTask`) and
+  `quarantine unschedule-autopurge` (`Unregister-AtmAutoPurgeTask`), each the only place of its call, are reached only
+  from the CLI; the scheduler is reached only through one helper (`Connect-AtmTaskScheduler`). `version`,
+  `quarantine list` and the TUI only read the task's state; the TUI never schedules or unschedules (T-ISO-6), and the
+  installer never creates a task. Static suite tests check all of this.
+* **The task.** One per user, `\AgentTempManager\AutoPurge-<first 16 hex digits of SHA-256(SID)>`: the name does not show
+  the SID or the account. Principal: the user's SID, logon type Interactive (`InteractiveToken`: it runs only while that
+  user's session is open, and no password is stored), run level Limited (never elevated). One action: Windows
+  PowerShell 5.1 by its absolute path, `-NoProfile -NonInteractive`, running the installed entry point with no
+  arguments. Daily at 12:00 local time with a random delay of up to one hour; a missed run starts at the next
+  opportunity; one instance at a time; stopped after two hours. The first run is the next 12:00, so registering never
+  starts a run.
+* **`schedule-autopurge`** refuses an elevated process or a token it cannot read
+  (`AUTOPURGE_TASK_REQUIRES_STANDARD_TOKEN`), a copy that is not installed, and a console it does not observe itself.
+  A task of that name that already exists, in any form, is refused and never replaced (`AUTOPURGE_TASK_EXISTS`; the
+  registration itself uses `TASK_CREATE`, which fails rather than overwrite). It shows the plan, asks a phrase of its own
+  for the warning that nothing happens while the policy is off, then `AGENDAR EXPURGO AUTOMATICO`, registers the task
+  and reads it back.
+* **`unschedule-autopurge`** removes only the task with the product's exact folder and name, for the current user's SID
+  (a name is resolved to its SID; an unresolvable one does not match), interactive, limited, with exactly one action
+  equal to the installed entry point's. Any divergence refuses with nothing touched (`AUTOPURGE_TASK_DIVERGENT`). The
+  task is read and compared again just before it is removed.
+* **Uninstall.** It never removes a task, the current user's or another user's. It warns when the current user's task
+  exists and counts other users' tasks, without naming them.
+* **Mitigations.** The action is only the installed entry point, which checks the manifest before it loads any code and
+  refuses arguments; it then acts only with `autoPurge = true` and within the limits above. After an uninstall the
+  action points to a file that no longer exists, so the task fails closed. That relies on PRIV-7: the parent of the
+  install directory is administrator-only, so nobody can place a script at the old path.
+* **Declared risks.**
+  * **Shared folder; SIDs are not secret.** Any local user can create tasks in `\AgentTempManager` (the scheduler's
+    default ACL lets authenticated users add folders and tasks; each task is owned by its creator). Another user can
+    therefore register a task named after **your** hash, running as themselves, before you do, or deny you access to
+    the folder. The effect is a denial of service: `schedule-autopurge` refuses (`AUTOPURGE_TASK_EXISTS`),
+    `unschedule-autopurge` refuses (`AUTOPURGE_TASK_DIVERGENT`), and `version` shows `DIVERGENT`. It is never an
+    escalation: such a task runs as its creator, and the strict match refuses to touch it.
+  * **Your own environment.** The task runs `powershell.exe` with your environment. `-NoProfile` keeps your profile
+    out, but your `PSModulePath` is not pinned as `bin\agent-temp.cmd` pins it. Anything that changes it runs as you
+    already, so this is not an escalation; the entry point itself loads only manifest-verified files.
+  * **A run stopped at the time limit** (two hours) can stop in the middle of an entry, which leaves the same state as a
+    crash: the manifest records the intent, and the entry is not retried with weaker checks.
+  * **Another administrator's elevation.** Uninstalling with another administrator's credentials checks that
+    administrator's task, not the standard user's; that user's task is only counted.
+  * **A window may flash.** An interactive task starts `powershell.exe` with `-WindowStyle Hidden`, which can still show
+    a console window for a moment.
+  * **No run without a session.** By design the task does nothing while the user is signed out; a missed run starts at
+    the next opportunity once the session is open.
 
 ### Native primitives (0.3.x phase P1)
 

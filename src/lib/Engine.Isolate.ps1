@@ -51,6 +51,27 @@ $script:AtmPurgeLogSchema = 'atm.purgelog/1'
 $script:AtmAutoPurgeLogSchema = 'atm.autopurgelog/1'
 $script:AtmAutoPurgeLogFolder = 'AutoPurgeLog'
 $script:AtmAutoPurgeMinRetentionDays = 7
+# The scheduled task of the automatic purge (J-ISO-7 and its complement of 2026-11-03, phase P6b): optional, created only
+# by the user with quarantine schedule-autopurge (never by the installer or the TUI). One task per user, in a folder of
+# its own, named after a hash of the user's SID (the name never shows the SID). It runs on the user's own token, not
+# elevated (RunLevel Limited), and only while that user's session is open (LogonType Interactive): no password or other
+# credential is asked for, stored or passed. Its only action is the entry point of the installation, with no arguments.
+# The trigger is daily at a local hour fixed in code with a bounded random delay; a missed run starts at the next
+# opportunity. What a run may do is still decided by the policy (autoPurge = true, changed only by the administrator).
+$script:AtmAutoPurgeTaskFolder = '\AgentTempManager'
+$script:AtmAutoPurgeTaskPrefix = 'AutoPurge-'
+$script:AtmAutoPurgeTaskHour = 12
+$script:AtmAutoPurgeTaskRandomDelay = 'PT1H'
+$script:AtmAutoPurgeTaskTimeLimit = 'PT2H'
+$script:AtmAutoPurgeSchedulePhrase = 'AGENDAR EXPURGO AUTOMATICO'
+$script:AtmAutoPurgeScheduleOffPhrase = 'AGENDAR COM EXPURGO DESLIGADO'
+$script:AtmAutoPurgeUnschedulePhrase = 'DESAGENDAR EXPURGO AUTOMATICO'
+# Test seams, single assignment each; the CLI and the TUI never set them. The task name: the suite replaces it inside its
+# own process with a name marked as a test (AutoPurgeTest-<8 hex digits>), and nothing else is accepted in its place.
+# The token read by the elevation refusal (a scriptblock returning the shape of Get-AtmIdentityState): the suite runs
+# elevated and replaces it to reach the rest of schedule-autopurge.
+$script:AtmAutoPurgeTaskNameOverride = $null
+$script:AtmAutoPurgeElevationSource = $null
 # Test seam, single assignment: the clock of the retention (a scriptblock that returns a UTC time). $null is the system
 # clock. The suite replaces it inside its own process; the CLI and the TUI never set it.
 $script:AtmQuarantineClock = $null
@@ -642,8 +663,9 @@ function Get-AtmQuarantinePolicy {
       whole number of days, 1 to 3650), quotaBytes (a whole number of bytes, at least 1) and autoPurge (true or false);
       nothing else. A missing file is the default (30 days, no quota, autoPurge false). A file that cannot be read or
       breaks the schema counts as OFF, the same values, with the warning QUARANTINE_POLICY_INVALID. autoPurge = true
-      turns the automatic purge on (phase P6a): only the entry point bin\agent-temp-autopurge.ps1 acts on it (no scheduled
-      task exists), within the limits of section 11.1, and it gives the warning AUTOPURGE_ON wherever the policy is shown.
+      turns the automatic purge on (phase P6a): only the entry point bin\agent-temp-autopurge.ps1 acts on it (run by the
+      user's optional scheduled task, P6b, or by hand), within the limits of section 11.1, and it gives the warning
+      AUTOPURGE_ON wherever the policy is shown.
       Returns RetentionDays, QuotaBytes ($null: no quota), AutoPurge, Source (DEFAULT, FILE, INVALID) and Warnings.
     #>
     param([string]$ConfigDir)
@@ -1437,7 +1459,8 @@ function Invoke-AtmPurgeDeletion {
 
 # ---------------------------------------------------------------------------------------------
 # Automatic purge (contract section 11, J-ISO-7 (ii), phase P6a): the pass behind bin\agent-temp-autopurge.ps1, its only
-# caller. No scheduled task exists in this phase: the pass runs only when that entry point is run. It asks nothing (the
+# caller. The pass runs only when that entry point is run: by the user's optional scheduled task (phase P6b, below) or by
+# hand. It asks nothing (the
 # administrator's policy is the authorization, ISO-D4) and is not a parameter of the interactive CLI.
 # ---------------------------------------------------------------------------------------------
 
@@ -1637,4 +1660,291 @@ function Invoke-AtmAutoPurgeCore {
     } finally {
         if ($null -ne $log) { try { $log.Dispose() } catch { $null = $_ } }
     }
+}
+
+# ------------------------------------------------------------------ the scheduled task of the automatic purge (P6b)
+# The Task Scheduler is reached only through Connect-AtmTaskScheduler. It is changed only by Register-AtmAutoPurgeTask
+# (quarantine schedule-autopurge) and Unregister-AtmAutoPurgeTask (quarantine unschedule-autopurge); everything else
+# (version, quarantine list, the TUI) only reads the task's state.
+
+function Get-AtmAutoPurgeTaskName {
+    # The task name of a user: the prefix and the first 16 hex digits of the SHA-256 of the SID (UTF-8), never the SID.
+    # The suite's name replaces it only in the test form.
+    param([string]$Sid)
+    if ($null -ne $script:AtmAutoPurgeTaskNameOverride) {
+        if ([string]$script:AtmAutoPurgeTaskNameOverride -cnotmatch '^AutoPurgeTest-[0-9a-f]{8}$') { throw 'AUTOPURGE_TASK_TEST_NAME_INVALID' }
+        return [string]$script:AtmAutoPurgeTaskNameOverride
+    }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $h = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Sid)) } finally { $sha.Dispose() }
+    return $script:AtmAutoPurgeTaskPrefix + (-join ($h[0..7] | ForEach-Object { $_.ToString('x2') }))
+}
+
+function Get-AtmAutoPurgeEntryPoint {
+    # The entry point of this copy (bin next to lib): the only action a task of the product may have.
+    return (Join-AtmPath (Split-Path $PSScriptRoot -Parent) 'bin\agent-temp-autopurge.ps1')
+}
+
+function Get-AtmAutoPurgeTaskAction {
+    # The exact action (program and arguments), built only here for the definition and for every comparison: Windows
+    # PowerShell 5.1 by its absolute path, as bin\agent-temp.cmd, with no profile, no input and a hidden window, and the
+    # entry point with no arguments of its own.
+    param([string]$EntryPoint)
+    return [pscustomobject]@{
+        Path      = (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe')
+        Arguments = ('-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $EntryPoint)
+    }
+}
+
+function Get-AtmAutoPurgeTaskStart {
+    # The first run: the next occurrence of the fixed hour at least one minute ahead, in local time without an offset (the
+    # scheduler keeps the local hour across daylight-saving changes). Registering the task never starts a run.
+    param([datetime]$Now = [datetime]::Now)
+    $t = $Now.Date.AddHours($script:AtmAutoPurgeTaskHour)
+    if ($t -le $Now.AddMinutes(1)) { $t = $t.AddDays(1) }
+    return $t.ToString('yyyy-MM-ddTHH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Connect-AtmTaskScheduler {
+    # The Task Scheduler of this machine, as the process user (its COM service object).
+    $svc = New-Object -ComObject 'Schedule.Service'
+    $svc.Connect()
+    return $svc
+}
+
+function Get-AtmTaskSchedulerCode {
+    # A scheduler error as a code (its HRESULT), never a message: TASK_SCHEDULER_0x<8 hex digits>.
+    param($Exception)
+    return ('TASK_SCHEDULER_0x{0:X8}' -f [int](Get-AtmInnerException $Exception).HResult)
+}
+
+function Test-AtmTaskNotFound {
+    # The folder or the task does not exist (ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND); any other error is not absence.
+    param($Exception)
+    return (@(-2147024894, -2147024893) -contains [int](Get-AtmInnerException $Exception).HResult)
+}
+
+function Resolve-AtmTaskUserSid {
+    # The SID of a task's user, given as a SID or as an account name; $null when it cannot be resolved (never a match).
+    param([string]$UserId)
+    if (-not $UserId) { return $null }
+    try {
+        if ($UserId -cmatch '^S-1-') { return (New-Object Security.Principal.SecurityIdentifier($UserId)).Value }
+        return (New-Object Security.Principal.NTAccount($UserId)).Translate([Security.Principal.SecurityIdentifier]).Value
+    } catch { return $null }
+}
+
+function Get-AtmAutoPurgeTaskObject {
+    # The task of this name in the product's folder, read only (the folder is never created here): Folder and Task
+    # ($null when absent), or Code when the scheduler cannot be read.
+    param($Service, [string]$Name)
+    $folder = $null
+    try { $folder = $Service.GetFolder($script:AtmAutoPurgeTaskFolder) } catch {
+        if (Test-AtmTaskNotFound $_.Exception) { return [pscustomobject]@{ Folder = $null; Task = $null; Code = $null } }
+        return [pscustomobject]@{ Folder = $null; Task = $null; Code = (Get-AtmTaskSchedulerCode $_.Exception) }
+    }
+    $task = $null
+    try { $task = $folder.GetTask($Name) } catch {
+        if (Test-AtmTaskNotFound $_.Exception) { return [pscustomobject]@{ Folder = $folder; Task = $null; Code = $null } }
+        return [pscustomobject]@{ Folder = $folder; Task = $null; Code = (Get-AtmTaskSchedulerCode $_.Exception) }
+    }
+    return [pscustomobject]@{ Folder = $folder; Task = $task; Code = $null }
+}
+
+function Test-AtmAutoPurgeTaskMatch {
+    # Read only: the reasons a registered task is not exactly the product's task of this user (none: it is). Its path in
+    # the product's folder; its user (the SID, or a name that resolves to it); interactive logon; limited run level; one
+    # action, a program, exactly the action of Get-AtmAutoPurgeTaskAction, with no working directory.
+    param($Task, [string]$Sid, [string]$Name, [string]$EntryPoint)
+    $r = New-Object System.Collections.Generic.List[string]
+    if (-not [string]::Equals([string]$Task.Path, ($script:AtmAutoPurgeTaskFolder + '\' + $Name), [StringComparison]::OrdinalIgnoreCase)) { $r.Add('TASK_PATH') }
+    $td = $Task.Definition
+    if ((Resolve-AtmTaskUserSid ([string]$td.Principal.UserId)) -cne $Sid) { $r.Add('TASK_USER') }
+    if ([int]$td.Principal.LogonType -ne 3) { $r.Add('TASK_LOGON_TYPE') }
+    if ([int]$td.Principal.RunLevel -ne 0) { $r.Add('TASK_RUN_LEVEL') }
+    if ([int]$td.Actions.Count -ne 1) { $r.Add('TASK_ACTION_COUNT') }
+    else {
+        $a = $td.Actions.Item(1)
+        if ([int]$a.Type -ne 0) { $r.Add('TASK_ACTION_TYPE') }
+        else {
+            $want = Get-AtmAutoPurgeTaskAction -EntryPoint $EntryPoint
+            if (-not [string]::Equals([string]$a.Path, $want.Path, [StringComparison]::OrdinalIgnoreCase)) { $r.Add('TASK_ACTION_PATH') }
+            if ([string]$a.Arguments -cne $want.Arguments) { $r.Add('TASK_ACTION_ARGUMENTS') }
+            if ([string]$a.WorkingDirectory) { $r.Add('TASK_ACTION_DIRECTORY') }
+        }
+    }
+    return $r.ToArray()
+}
+
+function Get-AtmAutoPurgeTaskState {
+    # Read only: the product's task of the process user. State ABSENT, PRESENT (exactly the product's task, with the entry
+    # point of this copy), DIVERGENT (Reasons) or UNREADABLE (Reasons: the code). TaskPath, Enabled, NextRunTime and
+    # LastRunTime/LastResult (local times; $null when none). Never the SID or the account name.
+    $me = Get-AtmCurrentIdentity
+    $name = Get-AtmAutoPurgeTaskName -Sid $me.Sid
+    $st = [ordered]@{ State = 'UNREADABLE'; TaskPath = ($script:AtmAutoPurgeTaskFolder + '\' + $name); Enabled = $null; NextRunTime = $null; LastRunTime = $null; LastResult = $null; Reasons = @() }
+    try {
+        $found = Get-AtmAutoPurgeTaskObject -Service (Connect-AtmTaskScheduler) -Name $name
+        if ($found.Code) { $st.Reasons = @($found.Code) }
+        elseif ($null -eq $found.Task) { $st.State = 'ABSENT' }
+        else {
+            $t = $found.Task
+            $st.Reasons = @(Test-AtmAutoPurgeTaskMatch -Task $t -Sid $me.Sid -Name $name -EntryPoint (Get-AtmAutoPurgeEntryPoint))
+            $st.State = $(if ($st.Reasons.Count -gt 0) { 'DIVERGENT' } else { 'PRESENT' })
+            $st.Enabled = [bool]$t.Enabled
+            # The scheduler reports "none" as a date in 1899.
+            $nr = [datetime]$t.NextRunTime; if ($nr.Year -gt 1900) { $st.NextRunTime = $nr }
+            $lr = [datetime]$t.LastRunTime; if ($lr.Year -gt 1900) { $st.LastRunTime = $lr; $st.LastResult = ('0x{0:X8}' -f [int]$t.LastTaskResult) }
+        }
+    } catch { $st.State = 'UNREADABLE'; $st.Reasons = @(Get-AtmTaskSchedulerCode $_.Exception) }
+    return [pscustomobject]$st
+}
+
+function New-AtmAutoPurgeTaskDefinition {
+    # The definition of the task, not registered: the user's own token, interactive (no password), limited; daily at the
+    # fixed hour with the random delay, a missed run at the next opportunity, also on battery (the defaults would never
+    # start it on a laptop on battery), one instance at a time, stopped at the time limit; the single action.
+    param($Service, [string]$Sid, [string]$EntryPoint, [datetime]$Now = [datetime]::Now)
+    $td = $Service.NewTask(0)
+    $td.RegistrationInfo.Author = 'Agent Temp Manager'
+    $td.RegistrationInfo.Description = 'Agent Temp Manager: automatic purge of EXPIRED quarantine entries. It acts only with autoPurge = true in the policy of the installation.'
+    $td.Principal.UserId = $Sid
+    $td.Principal.LogonType = 3
+    $td.Principal.RunLevel = 0
+    $tr = $td.Triggers.Create(2)
+    $tr.DaysInterval = 1
+    $tr.StartBoundary = Get-AtmAutoPurgeTaskStart -Now $Now
+    $tr.RandomDelay = $script:AtmAutoPurgeTaskRandomDelay
+    $tr.Enabled = $true
+    $s = $td.Settings
+    $s.Enabled = $true
+    $s.StartWhenAvailable = $true
+    $s.DisallowStartIfOnBatteries = $false
+    $s.StopIfGoingOnBatteries = $false
+    $s.ExecutionTimeLimit = $script:AtmAutoPurgeTaskTimeLimit
+    $s.MultipleInstances = 2
+    $act = Get-AtmAutoPurgeTaskAction -EntryPoint $EntryPoint
+    $a = $td.Actions.Create(0)
+    $a.Path = $act.Path
+    $a.Arguments = $act.Arguments
+    return $td
+}
+
+function Register-AtmAutoPurgeTask {
+    # The only registration (schedule-autopurge): the product's folder, created when missing, and the task of this user
+    # with TASK_CREATE, so an existing task of the same name is never replaced (AUTOPURGE_TASK_EXISTS). The user is the
+    # SID, the logon type interactive and the password none. Returns $null, or the code.
+    param([string]$Sid, [string]$EntryPoint)
+    try {
+        $name = Get-AtmAutoPurgeTaskName -Sid $Sid
+        $svc = Connect-AtmTaskScheduler
+        $found = Get-AtmAutoPurgeTaskObject -Service $svc -Name $name
+        if ($found.Code) { return $found.Code }
+        if ($null -ne $found.Task) { return 'AUTOPURGE_TASK_EXISTS' }
+        $folder = $found.Folder
+        if ($null -eq $folder) {
+            # Created by another process meanwhile (ERROR_ALREADY_EXISTS): that folder is used.
+            try { $folder = $svc.GetFolder('\').CreateFolder($script:AtmAutoPurgeTaskFolder.TrimStart('\'), $null) } catch {
+                if ([int](Get-AtmInnerException $_.Exception).HResult -ne -2147024713) { throw }
+                $folder = $svc.GetFolder($script:AtmAutoPurgeTaskFolder)
+            }
+        }
+        $td = New-AtmAutoPurgeTaskDefinition -Service $svc -Sid $Sid -EntryPoint $EntryPoint
+        $null = $folder.RegisterTaskDefinition($name, $td, 2, $Sid, $null, 3, $null)
+        return $null
+    } catch {
+        if ([int](Get-AtmInnerException $_.Exception).HResult -eq -2147024713) { return 'AUTOPURGE_TASK_EXISTS' }
+        return (Get-AtmTaskSchedulerCode $_.Exception)
+    }
+}
+
+function Unregister-AtmAutoPurgeTask {
+    # The only removal (unschedule-autopurge): the task is read again just before and removed only when it is exactly the
+    # product's task of this user (Test-AtmAutoPurgeTaskMatch); any divergence refuses with nothing touched
+    # (AUTOPURGE_TASK_DIVERGENT). The folder stays. Returns $null, or the code.
+    param([string]$Sid, [string]$EntryPoint)
+    try {
+        $name = Get-AtmAutoPurgeTaskName -Sid $Sid
+        $found = Get-AtmAutoPurgeTaskObject -Service (Connect-AtmTaskScheduler) -Name $name
+        if ($found.Code) { return $found.Code }
+        if ($null -eq $found.Task) { return 'AUTOPURGE_TASK_ABSENT' }
+        if (@(Test-AtmAutoPurgeTaskMatch -Task $found.Task -Sid $Sid -Name $name -EntryPoint $EntryPoint).Count -gt 0) { return 'AUTOPURGE_TASK_DIVERGENT' }
+        $found.Folder.DeleteTask($name, 0)
+        return $null
+    } catch { return (Get-AtmTaskSchedulerCode $_.Exception) }
+}
+
+function Test-AtmAutoPurgeStandardToken {
+    # schedule-autopurge runs only on a standard token: not an elevated administrator, not a full token, medium
+    # integrity. Anything else, an unreadable token included, is refused: the task is always the user's own, never
+    # elevated.
+    $tok = $(if ($null -ne $script:AtmAutoPurgeElevationSource) { & $script:AtmAutoPurgeElevationSource } else { Get-AtmIdentityState })
+    return ($tok.IsElevatedAdministrator -eq $false -and @('DEFAULT', 'LIMITED') -ccontains [string]$tok.ElevationType -and @('MEDIUM', 'MEDIUM_PLUS') -ccontains [string]$tok.IntegrityLevel)
+}
+
+function Invoke-AtmAutoPurgeSchedule {
+    <#
+      quarantine schedule-autopurge (J-ISO-7, complement of 2026-11-03). In order: a token that is not a standard one is
+      refused (AUTOPURGE_TASK_REQUIRES_STANDARD_TOKEN), and so is a copy that is not installed
+      (AUTOPURGE_TASK_NOT_INSTALLED); then the console, observed by the engine itself; a task that already exists, in any
+      state, is refused and never replaced (AUTOPURGE_TASK_EXISTS). The plan is shown; with the policy not on, the
+      warning that nothing happens until the administrator turns it on needs its own phrase; then the phrase AGENDAR
+      EXPURGO AUTOMATICO. Only then the task is registered, and read back. Nothing is asked before the plan.
+      Returns Operation, Aborted, Plan, Registered, Done and Task (the state read last).
+    #>
+    param([string]$ConfigDir, [switch]$Installed, [scriptblock]$PlanPresenter, [scriptblock]$ConfirmationReader)
+    $st = [ordered]@{ Operation = 'schedule'; Aborted = $null; Plan = $null; Registered = $false; Done = $false; Task = $null }
+    $end = { return [pscustomobject]$st }
+    if (-not (Test-AtmAutoPurgeStandardToken)) { $st.Aborted = 'AUTOPURGE_TASK_REQUIRES_STANDARD_TOKEN'; return (& $end) }
+    $ep = Get-AtmAutoPurgeEntryPoint
+    if (-not $Installed -or -not [IO.File]::Exists($ep)) { $st.Aborted = 'AUTOPURGE_TASK_NOT_INSTALLED'; return (& $end) }
+    if (-not $PlanPresenter -or -not $ConfirmationReader) { $st.Aborted = 'SEM_APRESENTACAO_OU_CONFIRMACAO'; return (& $end) }
+    if (-not (Get-AtmEngineConsoleObservation).Observed) { $st.Aborted = 'CONSOLE_NOT_OBSERVED'; return (& $end) }
+    $st.Task = Get-AtmAutoPurgeTaskState
+    if ($st.Task.State -ceq 'UNREADABLE') { $st.Aborted = 'AUTOPURGE_TASK_UNREADABLE'; return (& $end) }
+    if ($st.Task.State -cne 'ABSENT') { $st.Aborted = 'AUTOPURGE_TASK_EXISTS'; return (& $end) }
+    $p = Get-AtmQuarantinePolicy -ConfigDir $ConfigDir
+    $on = ($p.Source -ceq 'FILE' -and [bool]$p.AutoPurge)
+    $act = Get-AtmAutoPurgeTaskAction -EntryPoint $ep
+    $st.Plan = [pscustomobject]@{ TaskPath = $st.Task.TaskPath; Hour = $script:AtmAutoPurgeTaskHour; RandomDelay = $script:AtmAutoPurgeTaskRandomDelay; FirstRun = (Get-AtmAutoPurgeTaskStart)
+        TimeLimit = $script:AtmAutoPurgeTaskTimeLimit; ActionPath = $act.Path; ActionArguments = $act.Arguments; PolicyOn = $on; Phrase = $script:AtmAutoPurgeSchedulePhrase
+        OffPhrase = $(if ($on) { $null } else { $script:AtmAutoPurgeScheduleOffPhrase }) }
+    & $PlanPresenter $st.Plan
+    if (-not $on -and [string](& $ConfirmationReader $script:AtmAutoPurgeScheduleOffPhrase 'autopurge-off') -cne $script:AtmAutoPurgeScheduleOffPhrase) { $st.Aborted = 'AUTOPURGE_TASK_NOT_CONFIRMED'; return (& $end) }
+    if ([string](& $ConfirmationReader $script:AtmAutoPurgeSchedulePhrase 'autopurge-schedule') -cne $script:AtmAutoPurgeSchedulePhrase) { $st.Aborted = 'AUTOPURGE_TASK_NOT_CONFIRMED'; return (& $end) }
+    $code = Register-AtmAutoPurgeTask -Sid (Get-AtmCurrentIdentity).Sid -EntryPoint $ep
+    if ($code) { $st.Aborted = $code; return (& $end) }
+    $st.Registered = $true
+    $st.Task = Get-AtmAutoPurgeTaskState
+    if ($st.Task.State -cne 'PRESENT') { $st.Aborted = 'AUTOPURGE_TASK_NOT_VERIFIED' } else { $st.Done = $true }
+    return (& $end)
+}
+
+function Invoke-AtmAutoPurgeUnschedule {
+    <#
+      quarantine unschedule-autopurge. The console, observed by the engine; then the task: absent
+      (AUTOPURGE_TASK_ABSENT), unreadable, or divergent from the product's task of this user in any way
+      (AUTOPURGE_TASK_DIVERGENT, with the reasons) is refused with nothing touched. The plan is shown, then the phrase
+      DESAGENDAR EXPURGO AUTOMATICO; the task is checked again just before it is removed, and read back. The folder stays.
+      Returns the shape of Invoke-AtmAutoPurgeSchedule.
+    #>
+    param([scriptblock]$PlanPresenter, [scriptblock]$ConfirmationReader)
+    $st = [ordered]@{ Operation = 'unschedule'; Aborted = $null; Plan = $null; Registered = $false; Done = $false; Task = $null }
+    $end = { return [pscustomobject]$st }
+    if (-not $PlanPresenter -or -not $ConfirmationReader) { $st.Aborted = 'SEM_APRESENTACAO_OU_CONFIRMACAO'; return (& $end) }
+    if (-not (Get-AtmEngineConsoleObservation).Observed) { $st.Aborted = 'CONSOLE_NOT_OBSERVED'; return (& $end) }
+    $st.Task = Get-AtmAutoPurgeTaskState
+    if ($st.Task.State -ceq 'ABSENT') { $st.Aborted = 'AUTOPURGE_TASK_ABSENT'; return (& $end) }
+    if ($st.Task.State -ceq 'UNREADABLE') { $st.Aborted = 'AUTOPURGE_TASK_UNREADABLE'; return (& $end) }
+    if ($st.Task.State -cne 'PRESENT') { $st.Aborted = 'AUTOPURGE_TASK_DIVERGENT'; return (& $end) }
+    $ep = Get-AtmAutoPurgeEntryPoint
+    $act = Get-AtmAutoPurgeTaskAction -EntryPoint $ep
+    $st.Plan = [pscustomobject]@{ TaskPath = $st.Task.TaskPath; ActionPath = $act.Path; ActionArguments = $act.Arguments; Phrase = $script:AtmAutoPurgeUnschedulePhrase }
+    & $PlanPresenter $st.Plan
+    if ([string](& $ConfirmationReader $script:AtmAutoPurgeUnschedulePhrase 'autopurge-unschedule') -cne $script:AtmAutoPurgeUnschedulePhrase) { $st.Aborted = 'AUTOPURGE_TASK_NOT_CONFIRMED'; return (& $end) }
+    $code = Unregister-AtmAutoPurgeTask -Sid (Get-AtmCurrentIdentity).Sid -EntryPoint $ep
+    $st.Task = Get-AtmAutoPurgeTaskState
+    if ($code) { $st.Aborted = $code; return (& $end) }
+    if ($st.Task.State -cne 'ABSENT') { $st.Aborted = 'AUTOPURGE_TASK_NOT_VERIFIED' } else { $st.Done = $true }
+    return (& $end)
 }

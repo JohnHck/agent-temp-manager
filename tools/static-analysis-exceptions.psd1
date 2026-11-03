@@ -19,6 +19,11 @@
             Justification = 'Interactive console presentation (coloured output) by design. The engines, providers, catalog and installer library stay under this rule.'
         }
         @{
+            Rule          = 'PSAvoidUsingWriteHost'
+            Files         = @('src/bin/agent-temp-autopurge.ps1')
+            Justification = 'Console entry point of the automatic purge (run by the user''s scheduled task or by hand): its bilingual refusals before any library is loaded and its one status line go to the console by design.'
+        }
+        @{
             Rule          = 'PSAvoidUsingPositionalParameters'
             Files         = @('src/lib/Tui.ps1')
             Match         = "^Cmdlet '(Limit-AtmText|New-AtmSeg|Format-AtmTuiBar)' "

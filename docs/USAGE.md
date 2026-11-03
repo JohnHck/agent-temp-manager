@@ -615,16 +615,16 @@ The optional file `config\quarantine.policy.json` of the installation sets the p
   `isolate` refuses the root (`QUARANTINE_QUOTA_REACHED`; `QUARANTINE_QUOTA_UNMEASURED` when the quarantine's usage
   cannot be measured). `isolate` also refuses when the quarantine's volume has less
   free space than a minimum fixed in code (`LOW_DISK_SPACE`). Neither rule ever purges anything.
-* `autoPurge: true` turns the automatic purge on (below). It acts only when `bin\agent-temp-autopurge.ps1` is run.
-  While it is on, `version`, `quarantine list`, the TUI's quarantine screen and every report show
-  `AUTOMATIC PURGE ON` and say that only running that entry point by hand acts.
+* `autoPurge: true` turns the automatic purge on (below). It acts only when `bin\agent-temp-autopurge.ps1` is run, by
+  the user's optional scheduled task or by hand. While it is on, `version`, `quarantine list`, every screen of the TUI
+  and every report show `AUTOMATIC PURGE ON`.
 * An update keeps the installed policy file as it is, like `projects.local.json`. A policy file edited after an update
   makes `verify` report the copy as modified, as an edited `projects.local.json` does.
 
-### Automatic purge (0.3.x phase P6a)
+### Automatic purge (0.3.x phases P6a and P6b)
 
-`bin\agent-temp-autopurge.ps1` in the installation is the entry point of the automatic purge. **No scheduled task
-exists in this version**: nothing runs it but a person running it by hand. It is not a command or a parameter of
+`bin\agent-temp-autopurge.ps1` in the installation is the entry point of the automatic purge. It runs when the user's
+optional scheduled task runs it (below) or when a person runs it by hand. It is not a command or a parameter of
 `agent-temp` and of the TUI, and it asks nothing: the administrator's policy is the authorization.
 
 ```powershell
@@ -658,16 +658,53 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Program Files\AgentTempM
 * **Exit codes:** `0` off, report only, quarantine absent, or done; `2` an argument; `3` the minimum retention, the lock
   not available, or a pass that ended or stopped on an error; `5` integrity; `10` unexpected (its type only).
 
+#### The scheduled task (phase P6b)
+
+Each user may create **one** task of their own that runs the entry point daily (decision J-ISO-7). It is optional: the
+installer never creates one, and the TUI only shows its state. Creating it needs no elevation and no credential.
+
+```powershell
+agent-temp quarantine schedule-autopurge
+agent-temp quarantine unschedule-autopurge
+```
+
+* **`schedule-autopurge`** runs in a terminal that is **not** elevated. An elevated process, or one whose token cannot
+  be read, is refused (`AUTOPURGE_TASK_REQUIRES_STANDARD_TOKEN`, exit 3); so is a copy that is not installed
+  (`AUTOPURGE_TASK_NOT_INSTALLED`). It needs an interactive console (exit 6 without one). It then shows the plan:
+  * the task: `\AgentTempManager\AutoPurge-<16 hex digits>` in the Task Scheduler. The name comes from a hash of your
+    SID and does not show your account;
+  * the trigger: daily at 12:00 local time with a random delay of up to 60 minutes. A missed run starts at the next
+    opportunity; the first run is the next 12:00, so creating the task never runs it. A run is stopped after 120 minutes;
+  * the action: Windows PowerShell 5.1 by its absolute path running the installed entry point, with no arguments;
+  * it runs as you, on your own token, **not elevated** (run level Limited), and **only while your session is open**
+    (logon type Interactive). No password or other credential is asked for, stored or passed.
+
+  If the task already exists, in any form, it is refused and never replaced (`AUTOPURGE_TASK_EXISTS`). With the policy
+  not on (`autoPurge` is not `true`), the plan warns that nothing will happen until the administrator turns it on, and
+  that warning needs its own phrase, `AGENDAR COM EXPURGO DESLIGADO`. The task is created only after the phrase
+  `AGENDAR EXPURGO AUTOMATICO`, then read back. Exit 0 when created, 3 when refused or not confirmed.
+* **`unschedule-autopurge`** needs an interactive console and the phrase `DESAGENDAR EXPURGO AUTOMATICO`. It removes
+  **only** the task with the product's exact folder and name for you, set to run as you, interactive, limited, with the
+  installed entry point as its only action. Anything else (`AUTOPURGE_TASK_DIVERGENT`, with the reasons in `version`),
+  or no task (`AUTOPURGE_TASK_ABSENT`), is refused with nothing touched (exit 3). The folder `\AgentTempManager` stays.
+* **State.** `version`, `quarantine list` and the TUI's quarantine screens show whether your task exists, whether it is
+  enabled and its next and last run: `ABSENT`, `PRESENT`, `DIVERGENT` (not exactly the product's task; check it in Task
+  Scheduler) or unreadable. The policy line next to it says whether a run would do anything.
+* **Uninstall** never removes a task, yours or another user's. If yours exists, it warns and says how to remove it; other
+  users' tasks are only counted. Without the installation a task fails closed: its action, the entry point, no longer
+  exists, so it does nothing. Run `unschedule-autopurge` before uninstalling, or remove the task in Task Scheduler.
+
 ## Exit codes
 
 `0` ok (for `diagnose`, partial coverage included) · `1` unknown command · `2` invalid clean invocation, or a refused
 `-PseudonymKeyFile`, or `authorize` without `-Path`/`-RecordFile`, or `isolate` without a path or with
 `-IncludeOtherUsers` · `3` clean aborted (nothing deleted), `isolate`, `quarantine restore` or `quarantine purge` stopped
-after the plan (nothing moved or purged), or, only with
+after the plan (nothing moved or purged), `quarantine schedule-autopurge` or `unschedule-autopurge` refused or not
+confirmed (nothing scheduled or removed), or, only with
 deletion enabled (not in any published copy), stopped before completing (Clean log, above); `authorize`: nothing recorded ·
 `4` no manifest (source checkout, `verify` only) · `5` integrity mismatch (a listed file missing, altered or
 unreadable, a missing or unreadable `providers` directory, an unlisted library or provider, an unreadable or
-invalid manifest, or an installed copy without one; nothing is loaded) · `6` TUI, `authorize`, or `clean` with real deletion enabled (not in any published copy) needs an interactive console · `10` unexpected error,
+invalid manifest, or an installed copy without one; nothing is loaded) · `6` TUI, `authorize`, `quarantine schedule-autopurge` or `unschedule-autopurge`, or `clean` with real deletion enabled (not in any published copy) needs an interactive console · `10` unexpected error,
 or a `diagnose` export refused or not written (nothing deleted because of it).
 
 ## Project names

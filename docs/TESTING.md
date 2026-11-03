@@ -360,7 +360,47 @@ The quarantine is a folder of the sandbox (the `AtmIsolationQuarantineRoot` seam
     code; every report function shows the notice; the texts in both languages; the installer and the build require
     the entry point.
 * Install e2e step `installed-autopurge-entry-point`: the installed entry point is in the manifest; with no policy it
-  exits 0 with one status line and creates nothing; an argument exits 2; no scheduled task of the product exists.
+  exits 0 with one status line and creates nothing; an argument exits 2; the installer created no scheduled task.
+* The user's scheduled task of the automatic purge (0.3.x P6b, area `Isolamento P6b`). **A real task is created only
+  in CI**, on the disposable runner, always with a name marked as a test (`AutoPurgeTest-<8 hex>`, the only name the
+  engine accepts in place of the product's) and removed by the case; anywhere else that case is `NAO_TESTADO`. The
+  suite's elevated process reaches the rest of `schedule-autopurge` only through a test seam for the token:
+  * static: the Task Scheduler is reached only through `Connect-AtmTaskScheduler`; `RegisterTaskDefinition`,
+    `DeleteTask`, `CreateFolder` and `NewTask` appear once each, in their functions; registering is called only by
+    `schedule-autopurge` and removing only by `unschedule-autopurge`, both only from the CLI's two subcommands; the TUI,
+    the reports, the entry point and the uninstall never change the scheduler; the definition (interactive, limited,
+    `TASK_CREATE`, no password), the order of the refusals, the single-assignment seams, the same folder and name rule
+    in the engine and the uninstall, the texts in both languages and the `Write-Host` exception of the entry point;
+  * the definition, built and never registered (its XML): the SID as the user, `InteractiveToken`, `LeastPrivilege`,
+    no password, daily at 12:00 local time with up to 1 hour of random delay, the first run in the future with no time
+    zone, `StartWhenAvailable`, on battery too, one instance, a 2-hour limit, one exact action; the name rule; the
+    token rule (elevated, full, high or unknown refused; standard and filtered accepted); the exact match, with each
+    divergence and its reason;
+  * refusals before anything is asked or registered: the real elevated token of CI and the seam's variants, a copy
+    that is not installed, no presenter, no console, a wrong phrase (policy off and on), unschedule with no task; the
+    CLI in child processes (schedule: exit 3 with nothing asked; unschedule without a console: exit 6; `version` and
+    `help`);
+  * the real task (CI only): created with the policy on (only the main phrase) and read back as the process user,
+    interactive, limited, no password, the exact action, the first run in the future and never run; a second
+    `schedule-autopurge` refused with nothing asked or changed, and `TASK_CREATE` refusing to overwrite; a wrong
+    unschedule phrase removes nothing; unschedule removes it and the folder stays; with the policy off, the warning's
+    phrase and then the main one; a task whose action the test changed is `DIVERGENT` and is refused by unschedule with
+    nothing asked or touched;
+  * the TUI headless in both languages: with `autoPurge: true` the notice is under the header of every frame (menu,
+    dashboard, help, quarantine, busy); the quarantine area shows the task's state, read once when the area opens
+    (through a test reader); without the policy, no notice.
+* Install e2e, P6b steps:
+  * `autopurge-task-elevated-refused`: the installer created no scheduler folder; `schedule-autopurge` in the elevated
+    shell exits 3 (`AUTOPURGE_TASK_REQUIRES_STANDARD_TOKEN`) with nothing asked or created; `unschedule-autopurge`
+    without a console exits 6; `version` and `quarantine list` show no task;
+  * `autopurge-task-standard-user`: as the real standard user of the VM, the installed engine registers that user's
+    task (a test name) and creates the product's folder; read back, it is that user's, interactive, limited, with no
+    password, the exact action and the first run in the future; a second registration is refused; the engine removes
+    it. The helper writes only booleans and codes;
+  * `autopurge-task-before-uninstall` and `autopurge-task-after-uninstall`: this account's task (the product's name)
+    is registered by the installed engine and `version` shows it; the uninstall warns about it and keeps it; its own
+    action, run as registered once the installation is gone, exits non-zero with nothing created (fail closed); the
+    harness then removes it.
 
 ## Real isolation on disposable VMs (0.3.x ISO-P5a and P5b)
 

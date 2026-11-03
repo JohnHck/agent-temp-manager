@@ -4728,11 +4728,15 @@ exit 0
         Assert-Eq (Get-RstSnapshot $e.Path) $snap 'autoPurge nao fez nada: payload e manifesto identicos'
         $iso = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Isolate.ps1'))
         $pol = $iso.Substring($iso.IndexOf('function Get-AtmQuarantinePolicy'), $iso.IndexOf('function Get-AtmQuarantineUsage') - $iso.IndexOf('function Get-AtmQuarantinePolicy'))
-        # P6a: the policy's autoPurge is read in the policy function and, outside it, only by the automatic pass.
+        # P6a: the policy's autoPurge is read in the policy function and, outside it, only by the automatic pass; P6b: and
+        # once by schedule-autopurge, only to warn that nothing happens while it is off.
         $apw = $iso.Substring($iso.IndexOf('function Invoke-AtmAutoPurge {'), $iso.IndexOf('function Invoke-AtmAutoPurgeCore') - $iso.IndexOf('function Invoke-AtmAutoPurge {'))
-        Assert-Eq ([regex]::Matches($iso, '\.AutoPurge\b').Count) ([regex]::Matches($pol, '\.AutoPurge\b').Count + [regex]::Matches($apw, '\.AutoPurge\b').Count) 'autoPurge so lido na politica e na passada automatica (motor)'
+        $aps = $iso.Substring($iso.IndexOf('function Invoke-AtmAutoPurgeSchedule {'), $iso.IndexOf('function Invoke-AtmAutoPurgeUnschedule {') - $iso.IndexOf('function Invoke-AtmAutoPurgeSchedule {'))
+        Assert-Eq ([regex]::Matches($iso, '\.AutoPurge\b').Count) ([regex]::Matches($pol, '\.AutoPurge\b').Count + [regex]::Matches($apw, '\.AutoPurge\b').Count + [regex]::Matches($aps, '\.AutoPurge\b').Count) 'autoPurge so lido na politica, na passada automatica e no aviso do agendamento (motor)'
         Assert-Eq ([regex]::Matches($apw, '\.AutoPurge\b').Count) 1 'a passada automatica le autoPurge uma vez'
-        foreach ($n in @('agent-temp.ps1', 'lib\Tui.ps1', 'lib\Engine.Clean.ps1', 'lib\Engine.Audit.ps1', 'lib\Engine.Diagnose.ps1')) { Assert-True (-not ([IO.File]::ReadAllText((Join-Path $srcDir $n))).Contains('.AutoPurge')) "$n nao usa autoPurge" }
+        Assert-Eq ([regex]::Matches($aps, '\.AutoPurge\b').Count) 1 'o agendamento le autoPurge uma vez (so para avisar)'
+        # The policy field, not the TUI's own state keys (AutoPurgeNotice, AutoPurgeTask: display only, P6b).
+        foreach ($n in @('agent-temp.ps1', 'lib\Tui.ps1', 'lib\Engine.Clean.ps1', 'lib\Engine.Audit.ps1', 'lib\Engine.Diagnose.ps1')) { Assert-True (-not [regex]::IsMatch([IO.File]::ReadAllText((Join-Path $srcDir $n)), '\.AutoPurge\b')) "$n nao usa autoPurge" }
         Assert-Eq ([regex]::Matches([IO.File]::ReadAllText((Join-Path $srcDir 'lib\Report.ps1')), '\.AutoPurge').Count) 2 'relatorio so mostra autoPurge (linha da politica e aviso de ligado)'
         # Capacity: refusals only (QUARANTINE_QUOTA_REACHED, LOW_DISK_SPACE with the minimum fixed in code); nothing purged.
         $q = $script:AtmIsolationQuarantineRoot
@@ -5043,9 +5047,13 @@ exit 0
     }
     Test-Case 'Isolamento P6a' 'Estatico: so bin\agent-temp-autopurge.ps1 chama a passada (a CLI interativa e a TUI nunca, e nenhuma tem parametro de expurgo automatico); o ponto de entrada nao tem bloco de parametros, recusa argumentos antes de tudo, confere o manifesto antes de carregar, so em ASCII, nunca chama o deleter, nem pergunta, nem abre a trava; a passada nao tem leitor, apresentador nem frase; uma referencia ao deleter no motor; minimo de 7 dias fixo; todo relatorio mostra o aviso; textos nos dois idiomas; instalador e build exigem o ponto de entrada' {
         $calls = @()
-        foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1', '.cmd') -and $_.Name -ne 'Engine.Isolate.ps1' })) { if ([IO.File]::ReadAllText($fi.FullName).Contains('Invoke-AtmAutoPurge')) { $calls += $fi.Name } }
+        foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1', '.cmd') -and $_.Name -ne 'Engine.Isolate.ps1' })) { if ([regex]::IsMatch([IO.File]::ReadAllText($fi.FullName), 'Invoke-AtmAutoPurge\b')) { $calls += $fi.Name } }
         Assert-Eq ($calls -join ',') 'agent-temp-autopurge.ps1' 'so o ponto de entrada chama a passada'
-        foreach ($n in @('agent-temp.ps1', 'lib\Tui.ps1')) { Assert-True (-not [regex]::IsMatch([IO.File]::ReadAllText((Join-Path $srcDir $n)), 'autopurge', 'IgnoreCase')) "$n sem expurgo automatico" }
+        # P6b: the CLI reaches only the task's two commands and its state; the TUI only the notice and the task's state.
+        $apCmds = { param($n) $t = [Management.Automation.Language.Parser]::ParseFile((Join-Path $srcDir $n), [ref]$null, [ref]$null)
+            @($t.FindAll({ param($a) $a -is [Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() } | Where-Object { $_ -match 'autopurge' } | Sort-Object -Unique) }
+        Assert-Eq ((& $apCmds 'agent-temp.ps1') -join ',') 'Get-AtmAutoPurgeTaskLines,Get-AtmAutoPurgeTaskState,Invoke-AtmAutoPurgeSchedule,Invoke-AtmAutoPurgeUnschedule,Show-AtmAutoPurgeTaskPlan,Show-AtmAutoPurgeTaskResult' 'a CLI so chama os comandos da tarefa e o seu estado'
+        Assert-Eq ((& $apCmds 'lib\Tui.ps1') -join ',') 'Get-AtmAutoPurgeNoticeLines,Get-AtmAutoPurgeTaskLines,Get-AtmAutoPurgeTaskState,Get-AtmTuiAutoPurgeNotice' 'a TUI so mostra o aviso e o estado da tarefa'
         $epPath = Join-Path $srcDir 'bin\agent-temp-autopurge.ps1'
         $ep = [IO.File]::ReadAllText($epPath)
         $tk = $null; $er = $null
@@ -5073,7 +5081,9 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
         foreach ($pat in @('AtmDeleter', 'DeleteTree', 'ConfirmationReader', 'Read-Host', 'AtmQuarantinePurgeEnabled', 'PurgeTreeImpl', 'BeforePurgeHook', 'Invoke-AtmPurge ')) { Assert-True (-not $ep.Contains($pat)) "ponto de entrada sem '$pat'" }
         Assert-Eq @([IO.File]::ReadAllBytes($epPath) | Where-Object { $_ -gt 127 }).Count 0 'ponto de entrada so em ASCII'
         $iso = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Isolate.ps1'))
-        $ap = $iso.Substring($iso.IndexOf('function Invoke-AtmAutoPurge {'))
+        # The pass, up to the scheduled task's section (P6b), which has its own presenter and phrases.
+        $apEnd = $iso.IndexOf('# ------------------------------------------------------------------ the scheduled task of the automatic purge (P6b)')
+        $ap = $iso.Substring($iso.IndexOf('function Invoke-AtmAutoPurge {'), $apEnd - $iso.IndexOf('function Invoke-AtmAutoPurge {'))
         foreach ($pat in @('ConfirmationReader', 'PlanPresenter', 'Test-AtmTypedPhrase', 'Get-AtmEngineConsoleObservation', 'Read-Host')) { Assert-True (-not $ap.Contains($pat)) "passada sem '$pat'" }
         Assert-Eq ([regex]::Matches($iso, 'AtmDeleter').Count) 1 'uma referencia ao deleter no motor (o caminho comum dos dois expurgos)'
         Assert-True ($iso.IndexOf('AtmDeleter') -gt $iso.IndexOf('function Invoke-AtmPurgeDeletion') -and $iso.IndexOf('function Invoke-AtmPurgeDeletion') -gt $iso.IndexOf('function Invoke-AtmPurgeCore')) 'o deleter so no caminho comum, depois do expurgo manual'
@@ -5156,6 +5166,293 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
         Assert-Eq $r.Exit 0 "copia restaurada volta a passar ($($r.Text.Trim()))"
     }
 
+    # ------------------------------------------------------------------ the scheduled task of the automatic purge (ISO-P6b)
+    # J-ISO-7, complement of 2026-11-03. A real task is created only on the CI's disposable runner, always with a name marked
+    # as a test (AutoPurgeTest-<8 hex>), and removed by the case; anywhere else those cases are NAO_TESTADO.
+    function Get-ApFnBody {
+        # The text of one function of a file (AST), for the static checks.
+        param([string]$File, [string]$Name)
+        $t = [Management.Automation.Language.Parser]::ParseFile($File, [ref]$null, [ref]$null)
+        $d = @($t.FindAll({ param($a) $a -is [Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -ceq $Name }, $true))
+        if ($d.Count -ne 1) { return '' }
+        return $d[0].Extent.Text
+    }
+    function Get-ApCallers {
+        # Where a command is called in src, as <file>:<function> (script: the top level).
+        param([string]$Command)
+        $out = New-Object System.Collections.Generic.List[string]
+        foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File -Filter '*.ps1' | Sort-Object FullName)) {
+            $t = [Management.Automation.Language.Parser]::ParseFile($fi.FullName, [ref]$null, [ref]$null)
+            foreach ($c in @($t.FindAll({ param($a) $a -is [Management.Automation.Language.CommandAst] -and $a.GetCommandName() -ceq $Command }, $true))) {
+                $p = $c.Parent
+                while ($null -ne $p -and -not ($p -is [Management.Automation.Language.FunctionDefinitionAst])) { $p = $p.Parent }
+                $out.Add($fi.Name + ':' + $(if ($null -ne $p) { $p.Name } else { 'script' }))
+            }
+        }
+        return $out.ToArray()
+    }
+    function New-ApTestName { return ('AutoPurgeTest-' + [guid]::NewGuid().ToString('N').Substring(0, 8)) }
+    function Clear-ApTestTask {
+        # Test code only: a task of the suite (test name) left by a case is removed here; never any other task.
+        param([string]$Name)
+        if ($Name -cnotmatch '^AutoPurgeTest-[0-9a-f]{8}$') { throw "nao e um nome de tarefa de teste: $Name" }
+        try { (Connect-AtmTaskScheduler).GetFolder('\AgentTempManager').DeleteTask($Name, 0) } catch { $null = $_ }
+    }
+    function Reset-ApSeams { $script:AtmAutoPurgeTaskNameOverride = $null; $script:AtmAutoPurgeElevationSource = $null; $script:AtmCleanConsoleSource = $null }
+    $apStd = { [pscustomobject]@{ IsElevatedAdministrator = $false; ElevationType = 'DEFAULT'; IntegrityLevel = 'MEDIUM' } }
+
+    Test-Case 'Isolamento P6b' 'Estatico: o agendador so por Connect-AtmTaskScheduler; RegisterTaskDefinition, DeleteTask, CreateFolder e NewTask uma vez cada, so nas suas funcoes; registrar so pelo agendar e remover so pelo desagendar, os dois so pela CLI nos dois subcomandos; TUI, relatorio, ponto de entrada e desinstalador nunca mudam o agendador; principal interativo e limitado, TASK_CREATE, sem senha; ordem das recusas; costuras de atribuicao unica; mesmo nome e pasta no motor e no desinstalador; textos nos dois idiomas; excecao de Write-Host do ponto de entrada' {
+        $root = Split-Path -Parent $testsDir
+        $isoFile = Join-Path $srcDir 'lib\Engine.Isolate.ps1'
+        $iso = [IO.File]::ReadAllText($isoFile)
+        $all = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1', '.cmd', '.cs') })
+        $count = { param([string]$Pat) $n = 0; $where = @(); foreach ($fi in $all) { $m = [regex]::Matches([IO.File]::ReadAllText($fi.FullName), $Pat).Count; if ($m -gt 0) { $n += $m; $where += $fi.Name } }; [pscustomobject]@{ N = $n; Where = ($where -join ',') } }
+        foreach ($c in @(@('Schedule\.Service', 'Connect-AtmTaskScheduler'), @('\.RegisterTaskDefinition\(', 'Register-AtmAutoPurgeTask'), @('\.DeleteTask\(', 'Unregister-AtmAutoPurgeTask'), @('\.CreateFolder\(', 'Register-AtmAutoPurgeTask'), @('\.NewTask\(', 'New-AtmAutoPurgeTaskDefinition'))) {
+            $r = & $count $c[0]
+            Assert-True ($r.N -eq 1 -and $r.Where -ceq 'Engine.Isolate.ps1' -and [regex]::IsMatch((Get-ApFnBody $isoFile $c[1]), $c[0])) "$($c[0]): uma vez, so em $($c[1]) ($($r.N) em $($r.Where))"
+        }
+        foreach ($pat in @('DeleteFolder', 'Register-ScheduledTask', 'Unregister-ScheduledTask', 'Set-ScheduledTask', 'New-ScheduledTask', 'schtasks', 'Get-Credential', 'SecureString', 'savecred')) { Assert-Eq (& $count ([regex]::Escape($pat))).N 0 "nenhum '$pat' em src" }
+        Assert-Eq ((Get-ApCallers 'Connect-AtmTaskScheduler') -join ',') 'Engine.Isolate.ps1:Get-AtmAutoPurgeTaskState,Engine.Isolate.ps1:Register-AtmAutoPurgeTask,Engine.Isolate.ps1:Unregister-AtmAutoPurgeTask' 'o agendador so e alcancado pelo estado (leitura) e pelas duas funcoes que o mudam'
+        Assert-Eq ((Get-ApCallers 'Register-AtmAutoPurgeTask') -join ',') 'Engine.Isolate.ps1:Invoke-AtmAutoPurgeSchedule' 'registrar so pelo agendar'
+        Assert-Eq ((Get-ApCallers 'Unregister-AtmAutoPurgeTask') -join ',') 'Engine.Isolate.ps1:Invoke-AtmAutoPurgeUnschedule' 'remover so pelo desagendar'
+        Assert-Eq ((Get-ApCallers 'Invoke-AtmAutoPurgeSchedule') -join ',') 'agent-temp.ps1:script' 'agendar so pela CLI'
+        Assert-Eq ((Get-ApCallers 'Invoke-AtmAutoPurgeUnschedule') -join ',') 'agent-temp.ps1:script' 'desagendar so pela CLI'
+        $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        $iCase = $cli.IndexOf("{ `$_ -in @('schedule-autopurge', 'unschedule-autopurge') } {"); $iDef = $cli.IndexOf("default { Write-Host (Get-AtmText 'cli.quarantineUsage')")
+        foreach ($fn in @('Invoke-AtmAutoPurgeSchedule -', 'Invoke-AtmAutoPurgeUnschedule -')) { $i = $cli.IndexOf($fn); Assert-True ($iCase -gt 0 -and $i -gt $iCase -and $i -lt $iDef) "$fn so no caso dos dois subcomandos de quarantine" }
+        foreach ($n in @('lib\Tui.ps1', 'lib\Report.ps1', 'bin\agent-temp-autopurge.ps1', 'agent-temp.ps1')) {
+            $t = [IO.File]::ReadAllText((Join-Path $srcDir $n))
+            foreach ($pat in @('Register-AtmAutoPurgeTask', 'Connect-AtmTaskScheduler', 'RegisterTaskDefinition', 'DeleteTask', 'CreateFolder', 'Schedule.Service', 'AtmAutoPurgeTaskNameOverride', 'AtmAutoPurgeElevationSource')) { Assert-True (-not $t.Contains($pat)) "$n sem '$pat'" }
+        }
+        foreach ($n in @('lib\Tui.ps1', 'lib\Report.ps1', 'bin\agent-temp-autopurge.ps1')) { foreach ($pat in @('Invoke-AtmAutoPurgeSchedule', 'Invoke-AtmAutoPurgeUnschedule')) { Assert-True (-not ([IO.File]::ReadAllText((Join-Path $srcDir $n))).Contains($pat)) "$n sem '$pat' (a TUI so mostra, T-ISO-6)" } }
+        $ic = [IO.File]::ReadAllText((Join-Path $root 'install\InstallCommon.ps1'))
+        foreach ($pat in @('RegisterTaskDefinition', 'DeleteTask', 'CreateFolder', 'DeleteFolder', 'Register-ScheduledTask', 'Unregister-ScheduledTask', 'schtasks')) { Assert-True (-not $ic.Contains($pat)) "desinstalador sem '$pat'" }
+        Assert-True ($ic.Contains("`$script:AtmInstallAutoPurgeTaskFolder = '\AgentTempManager'") -and $iso.Contains("`$script:AtmAutoPurgeTaskFolder = '\AgentTempManager'") -and $iso.Contains("`$script:AtmAutoPurgeTaskPrefix = 'AutoPurge-'")) 'mesma pasta e prefixo no motor e no desinstalador'
+        $i = 0
+        foreach ($s in @('S-1-5-80-1000-2000-3000-4000-5000', 'S-1-5-18', 'S-1-5-32-545', 'S-1-12-1-1-2-3-4')) { $i++; Assert-Eq (Get-AtmInstallAutoPurgeTaskName -Sid $s) (Get-AtmAutoPurgeTaskName -Sid $s) "mesmo nome no motor e no desinstalador (SID sintetico $i)" }
+        $def = Get-ApFnBody $isoFile 'New-AtmAutoPurgeTaskDefinition'
+        foreach ($s in @('$td.Principal.UserId = $Sid', '$td.Principal.LogonType = 3', '$td.Principal.RunLevel = 0', '$td.Triggers.Create(2)', '$tr.DaysInterval = 1', '$tr.RandomDelay = $script:AtmAutoPurgeTaskRandomDelay', '$s.StartWhenAvailable = $true', '$s.DisallowStartIfOnBatteries = $false', '$s.StopIfGoingOnBatteries = $false', '$s.MultipleInstances = 2', '$td.Actions.Create(0)')) { Assert-True $def.Contains($s) "definicao: $s" }
+        Assert-Eq ([regex]::Matches($def, '\.Actions\.Create\(').Count) 1 'uma acao'
+        Assert-True ((Get-ApFnBody $isoFile 'Register-AtmAutoPurgeTask').Contains('.RegisterTaskDefinition($name, $td, 2, $Sid, $null, 3, $null)')) 'registro com TASK_CREATE (2), o SID, senha nula e logon interativo (3)'
+        foreach ($rx in @('(?m)^\$script:AtmAutoPurgeTaskHour = 12\r?$', "(?m)^\`$script:AtmAutoPurgeTaskRandomDelay = 'PT1H'\r?$", "(?m)^\`$script:AtmAutoPurgeTaskTimeLimit = 'PT2H'\r?$", "(?m)^\`$script:AtmAutoPurgeSchedulePhrase = 'AGENDAR EXPURGO AUTOMATICO'\r?$", "(?m)^\`$script:AtmAutoPurgeUnschedulePhrase = 'DESAGENDAR EXPURGO AUTOMATICO'\r?$")) { Assert-True ($iso -match $rx) "fixo no codigo: $rx" }
+        foreach ($seam in @('AtmAutoPurgeTaskNameOverride', 'AtmAutoPurgeElevationSource')) {
+            Assert-True ([regex]::Matches($iso, '\$script:' + $seam + '\s*=').Count -eq 1 -and $iso -match ('(?m)^\$script:' + $seam + ' = \$null\r?$')) "costura $seam`: atribuicao unica `$null no motor"
+            foreach ($fi in $all) { if ($fi.Name -ne 'Engine.Isolate.ps1') { Assert-True (-not ([IO.File]::ReadAllText($fi.FullName)).Contains($seam)) "$($fi.Name) usa a costura $seam" } }
+        }
+        Assert-True ((Get-ApFnBody $isoFile 'Get-AtmAutoPurgeTaskName').Contains("-cnotmatch '^AutoPurgeTest-[0-9a-f]{8}$'")) 'o nome de teste so na forma de teste'
+        $sch = Get-ApFnBody $isoFile 'Invoke-AtmAutoPurgeSchedule'
+        $ix = @(@("'AUTOPURGE_TASK_REQUIRES_STANDARD_TOKEN'", "'AUTOPURGE_TASK_NOT_INSTALLED'", "'CONSOLE_NOT_OBSERVED'", "'AUTOPURGE_TASK_EXISTS'", '& $PlanPresenter', "'autopurge-off'", "'autopurge-schedule'", 'Register-AtmAutoPurgeTask -') | ForEach-Object { $sch.IndexOf($_) })
+        Assert-True (@($ix | Where-Object { $_ -lt 0 }).Count -eq 0 -and ((@($ix | Sort-Object) -join ',') -ceq ($ix -join ','))) "agendar: token, instalacao, console, existente, plano, frases e registro nessa ordem ($($ix -join ','))"
+        $uns = Get-ApFnBody $isoFile 'Invoke-AtmAutoPurgeUnschedule'
+        $ix = @(@("'CONSOLE_NOT_OBSERVED'", 'Get-AtmAutoPurgeTaskState', "'AUTOPURGE_TASK_DIVERGENT'", '& $PlanPresenter', "'autopurge-unschedule'", 'Unregister-AtmAutoPurgeTask -') | ForEach-Object { $uns.IndexOf($_) })
+        Assert-True (@($ix | Where-Object { $_ -lt 0 }).Count -eq 0 -and ((@($ix | Sort-Object) -join ',') -ceq ($ix -join ','))) "desagendar: console, estado, divergente, plano, frase e remocao nessa ordem ($($ix -join ','))"
+        $un = Get-ApFnBody $isoFile 'Unregister-AtmAutoPurgeTask'
+        Assert-True ($un.IndexOf('Test-AtmAutoPurgeTaskMatch') -gt 0 -and $un.IndexOf('Test-AtmAutoPurgeTaskMatch') -lt $un.IndexOf('.DeleteTask(')) 'remocao so depois de conferir a tarefa exata, na mesma leitura'
+        Assert-True ((Get-ApFnBody $isoFile 'Get-AtmAutoPurgeTaskObject') -notmatch 'CreateFolder|RegisterTaskDefinition|DeleteTask') 'a leitura do estado nunca cria a pasta'
+        foreach ($l in @('en-US', 'pt-BR')) {
+            foreach ($k in @('help.quarantine3', 'ap.task.absent', 'ap.task.present', 'ap.task.enabled', 'ap.task.disabled', 'ap.task.never', 'ap.task.lastResult', 'ap.task.divergent', 'ap.task.unreadable', 'ap.plan.header', 'ap.plan.task', 'ap.plan.trigger', 'ap.plan.action', 'ap.plan.principal', 'ap.plan.policyOn', 'ap.plan.policyOff',
+                    'ap.plan.unschedule', 'ap.plan.unscheduleTask', 'ap.task.created', 'ap.task.removed', 'ap.task.notScheduled', 'ap.task.notRemoved', 'ap.task.notVerified', 'inst.apTaskWarn', 'inst.apTaskOthers', 'inst.apTaskUnreadable',
+                    'ap.task.why.AUTOPURGE_TASK_REQUIRES_STANDARD_TOKEN', 'ap.task.why.AUTOPURGE_TASK_NOT_INSTALLED', 'ap.task.why.AUTOPURGE_TASK_EXISTS', 'ap.task.why.AUTOPURGE_TASK_DIVERGENT', 'ap.task.why.AUTOPURGE_TASK_ABSENT', 'ap.task.why.AUTOPURGE_TASK_NOT_CONFIRMED', 'ap.task.why.CONSOLE_NOT_OBSERVED')) { Assert-True $script:AtmMessages[$l].ContainsKey($k) "$k ($l)" }
+            Assert-True (-not $script:AtmMessages[$l]['q.policyWarn.AUTOPURGE_ON'].Contains('No scheduled task') -and -not $script:AtmMessages[$l]['q.policyWarn.AUTOPURGE_ON'].Contains('existe tarefa agendada'))"aviso de ligado sem 'nenhuma tarefa' ($l)"
+        }
+        Assert-True ($cli.Contains("'help.quarantine2', 'help.quarantine3'")) 'a ajuda lista os dois subcomandos'
+        $sa = Import-PowerShellDataFile -LiteralPath (Join-Path $root 'tools\static-analysis-exceptions.psd1')
+        $wh = @($sa.Exceptions | Where-Object { $_['Rule'] -eq 'PSAvoidUsingWriteHost' -and @($_['Files']) -contains 'src/bin/agent-temp-autopurge.ps1' })
+        Assert-True ($wh.Count -eq 1 -and ([string]$wh[0]['Justification']).Contains('Console entry point')) 'excecao de Write-Host do ponto de entrada de console, justificada'
+    }
+
+    Test-Case 'Isolamento P6b' 'Definicao montada e nunca registrada (XML): o SID como usuario, logon interativo, nivel limitado, sem senha; diario as 12:00 locais com atraso de ate 1 h, primeira execucao no futuro sem fuso, perdida roda na proxima oportunidade, tambem na bateria, uma instancia, limite de 2 h, uma acao exata; nome por hash do SID (nunca o SID; o de teste so na forma de teste); regra do token; conferencia exata (usuario por nome resolvido; cada divergencia com o seu motivo)' {
+        $me = Get-AtmCurrentIdentity
+        $ep = Join-Path $sandbox 'ap6b dir\bin\agent-temp-autopurge.ps1'
+        $svc = Connect-AtmTaskScheduler
+        $td = New-AtmAutoPurgeTaskDefinition -Service $svc -Sid $me.Sid -EntryPoint $ep -Now ([datetime]'2026-11-03T09:00:00')
+        $x = [xml]$td.XmlText
+        $ns = New-Object Xml.XmlNamespaceManager($x.NameTable); $ns.AddNamespace('t', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
+        $v = { param($p) $n = $x.SelectSingleNode($p, $ns); if ($null -ne $n) { $n.InnerText } else { '<none>' } }
+        Assert-True ((& $v '//t:Principal/t:UserId') -ceq $me.Sid -and (& $v '//t:Principal/t:LogonType') -ceq 'InteractiveToken' -and (& $v '//t:Principal/t:RunLevel') -ceq 'LeastPrivilege') 'principal: o SID do processo, InteractiveToken, LeastPrivilege'
+        Assert-True ($null -eq $x.SelectSingleNode('//t:Password', $ns) -and -not $td.XmlText.Contains('Password')) 'nenhuma senha na definicao'
+        Assert-Eq (& $v '//t:CalendarTrigger/t:StartBoundary') '2026-11-03T12:00:00' 'primeira execucao: as 12:00 locais, sem fuso'
+        Assert-True ((& $v '//t:CalendarTrigger/t:RandomDelay') -ceq 'PT1H' -and (& $v '//t:CalendarTrigger/t:ScheduleByDay/t:DaysInterval') -ceq '1' -and @($x.SelectNodes('//t:Triggers/*', $ns)).Count -eq 1) 'um gatilho diario com atraso de ate 1 h'
+        foreach ($k in @(@('StartWhenAvailable', 'true'), @('DisallowStartIfOnBatteries', 'false'), @('StopIfGoingOnBatteries', 'false'), @('MultipleInstancesPolicy', 'IgnoreNew'), @('ExecutionTimeLimit', 'PT2H'))) { Assert-Eq (& $v ('//t:Settings/t:' + $k[0])) $k[1] "configuracao $($k[0])" }
+        $want = Get-AtmAutoPurgeTaskAction -EntryPoint $ep
+        Assert-True (@($x.SelectNodes('//t:Actions/*', $ns)).Count -eq 1 -and (& $v '//t:Exec/t:Command') -ceq (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -and (& $v '//t:Exec/t:Arguments') -ceq ('-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ep + '"') -and $want.Arguments -ceq (& $v '//t:Exec/t:Arguments')) 'uma acao exata: o PowerShell 5.1 absoluto e o ponto de entrada, sem argumentos proprios'
+        Assert-Eq (& $v '//t:RegistrationInfo/t:Author') 'Agent Temp Manager' 'autor: o produto (nunca a conta)'
+        Assert-True ((Get-AtmAutoPurgeTaskStart -Now ([datetime]'2026-11-03T11:59:30')) -ceq '2026-11-04T12:00:00' -and (Get-AtmAutoPurgeTaskStart -Now ([datetime]'2026-11-03T13:00:00')) -ceq '2026-11-04T12:00:00' -and (Get-AtmAutoPurgeTaskStart -Now ([datetime]'2026-12-31T12:30:00')) -ceq '2027-01-01T12:00:00') 'registrar nunca dispara: a primeira execucao e sempre a proxima, ao menos 1 min adiante'
+        $nm = Get-AtmAutoPurgeTaskName -Sid $me.Sid
+        Assert-True ($nm -cmatch '^AutoPurge-[0-9a-f]{16}$' -and -not $nm.Contains($me.Sid) -and (Get-AtmAutoPurgeTaskName -Sid $me.Sid) -ceq $nm -and (Get-AtmAutoPurgeTaskName -Sid 'S-1-5-18') -cne $nm) 'nome: prefixo e 16 hex do SHA-256 do SID, estavel, nunca o SID'
+        try {
+            foreach ($bad in @('AutoPurge-0123456789abcdef', 'AutoPurgeTest-ABCDEF12', 'AutoPurgeTest-1234567', 'x')) {
+                $script:AtmAutoPurgeTaskNameOverride = $bad
+                $thrown = ''; try { $null = Get-AtmAutoPurgeTaskName -Sid $me.Sid } catch { $thrown = $_.Exception.Message }
+                Assert-Eq $thrown 'AUTOPURGE_TASK_TEST_NAME_INVALID' "nome de teste fora da forma recusado: $bad"
+            }
+            $script:AtmAutoPurgeTaskNameOverride = 'AutoPurgeTest-0a1b2c3d'
+            Assert-Eq (Get-AtmAutoPurgeTaskName -Sid $me.Sid) 'AutoPurgeTest-0a1b2c3d' 'nome de teste na forma de teste'
+            $script:AtmAutoPurgeTaskNameOverride = $null
+            foreach ($c in @(@($true, 'FULL', 'HIGH', $false), @($false, 'FULL', 'MEDIUM', $false), @($false, 'DEFAULT', 'HIGH', $false), @($false, 'DEFAULT', 'SYSTEM', $false), @($null, 'UNKNOWN', 'UNKNOWN', $false),
+                    @($false, 'DEFAULT', 'LOW', $false), @($false, 'DEFAULT', 'UNTRUSTED', $false), @($false, 'DEFAULT', 'MEDIUM', $true), @($false, 'LIMITED', 'MEDIUM', $true), @($false, 'DEFAULT', 'MEDIUM_PLUS', $true))) {
+                $script:apTok = [pscustomobject]@{ IsElevatedAdministrator = $c[0]; ElevationType = $c[1]; IntegrityLevel = $c[2] }
+                $script:AtmAutoPurgeElevationSource = { $script:apTok }
+                Assert-Eq (Test-AtmAutoPurgeStandardToken) $c[3] "token admin=$($c[0]) $($c[1]) $($c[2])"
+            }
+        } finally { Reset-ApSeams }
+        # The exact match, on tasks built in memory (no scheduler).
+        $mkTask = { param($Path, $User, $Logon, $Run, $Acts)
+            $col = [pscustomobject]@{ Count = @($Acts).Count; Items = @($Acts) }
+            $col | Add-Member -MemberType ScriptMethod -Name Item -Value { param($i) $this.Items[$i - 1] }
+            [pscustomobject]@{ Path = $Path; Definition = [pscustomobject]@{ Principal = [pscustomobject]@{ UserId = $User; LogonType = $Logon; RunLevel = $Run }; Actions = $col } } }
+        $mkAct = { param($Type, $P, $A, $D) [pscustomobject]@{ Type = $Type; Path = $P; Arguments = $A; WorkingDirectory = $D } }
+        $tp = '\AgentTempManager\' + $nm
+        $ok = & $mkAct 0 $want.Path $want.Arguments ''
+        $cases = @(
+            @('exata', (& $mkTask $tp $me.Sid 3 0 @($ok)), ''),
+            @('usuario por nome', (& $mkTask $tp $me.Name 3 0 @($ok)), ''),
+            @('caminho em maiusculas', (& $mkTask $tp.ToUpperInvariant() $me.Sid 3 0 @(& $mkAct 0 $want.Path.ToUpperInvariant() $want.Arguments '')), ''),
+            @('outra pasta', (& $mkTask ('\Other\' + $nm) $me.Sid 3 0 @($ok)), 'TASK_PATH'),
+            @('outro usuario', (& $mkTask $tp 'S-1-5-18' 3 0 @($ok)), 'TASK_USER'),
+            @('usuario que nao resolve', (& $mkTask $tp 'NOSUCHDOMAIN\no-such-account' 3 0 @($ok)), 'TASK_USER'),
+            @('logon com senha', (& $mkTask $tp $me.Sid 1 0 @($ok)), 'TASK_LOGON_TYPE'),
+            @('nivel elevado', (& $mkTask $tp $me.Sid 3 1 @($ok)), 'TASK_RUN_LEVEL'),
+            @('duas acoes', (& $mkTask $tp $me.Sid 3 0 @($ok, $ok)), 'TASK_ACTION_COUNT'),
+            @('acao que nao e programa', (& $mkTask $tp $me.Sid 3 0 @(& $mkAct 5 $want.Path $want.Arguments '')), 'TASK_ACTION_TYPE'),
+            @('outro programa', (& $mkTask $tp $me.Sid 3 0 @(& $mkAct 0 'C:\Windows\System32\cmd.exe' $want.Arguments '')), 'TASK_ACTION_PATH'),
+            @('argumentos a mais', (& $mkTask $tp $me.Sid 3 0 @(& $mkAct 0 $want.Path ($want.Arguments + ' x') '')), 'TASK_ACTION_ARGUMENTS'),
+            @('pasta de trabalho', (& $mkTask $tp $me.Sid 3 0 @(& $mkAct 0 $want.Path $want.Arguments 'C:\')), 'TASK_ACTION_DIRECTORY'))
+        foreach ($c in $cases) { Assert-Eq (@(Test-AtmAutoPurgeTaskMatch -Task $c[1] -Sid $me.Sid -Name $nm -EntryPoint $ep) -join ',') $c[2] "conferencia: $($c[0])" }
+    }
+
+    Test-Case 'Isolamento P6b' 'Recusas antes de qualquer pergunta ou registro (nome de teste): processo elevado (o token real da CI e as variantes pela costura) AUTOPURGE_TASK_REQUIRES_STANDARD_TOKEN; copia nao instalada; sem apresentador; console nao observado; frase do aviso ou principal errada nao cria nada; desagendar sem tarefa (AUTOPURGE_TASK_ABSENT) ou sem console; o resultado diz o codigo e o porque nos dois idiomas; a CLI em processo filho (agendar: exit 3 sem perguntar; desagendar sem console: exit 6; version e quarantine list mostram o estado)' {
+        $name = New-ApTestName
+        $asked = New-Object System.Collections.Generic.List[string]
+        $pres = { param($p) $asked.Add('plan') }
+        $rd = { param($ph, $k) $asked.Add($k); 'nao' }
+        $cfgOff = New-PurConfig 'ap6b-off' $null
+        $cfgOn = New-PurConfig 'ap6b-on' '{"schema":"atm.quarantine-policy/1","autoPurge":true}'
+        $old = Get-AtmLanguage
+        try {
+            $script:AtmAutoPurgeTaskNameOverride = $name
+            if ([bool](Get-AtmIdentityState).IsElevatedAdministrator) {
+                $r = Invoke-AtmAutoPurgeSchedule -ConfigDir $cfgOn -Installed -PlanPresenter $pres -ConfirmationReader $rd
+                Assert-True ($r.Aborted -ceq 'AUTOPURGE_TASK_REQUIRES_STANDARD_TOKEN' -and -not $r.Registered -and $null -eq $r.Plan -and $asked.Count -eq 0) "processo elevado (token real) recusado sem perguntar ($($r.Aborted))"
+            } else { $script:caseNote = 'o processo nao e elevado aqui: a recusa com o token real e verificada na CI (elevada); as variantes pela costura rodam aqui' }
+            foreach ($tok in @(@($true, 'FULL', 'HIGH'), @($false, 'DEFAULT', 'HIGH'), @($null, 'UNKNOWN', 'UNKNOWN'))) {
+                $script:apTok = [pscustomobject]@{ IsElevatedAdministrator = $tok[0]; ElevationType = $tok[1]; IntegrityLevel = $tok[2] }
+                $script:AtmAutoPurgeElevationSource = { $script:apTok }
+                $r = Invoke-AtmAutoPurgeSchedule -ConfigDir $cfgOn -Installed -PlanPresenter $pres -ConfirmationReader $rd
+                Assert-True ($r.Aborted -ceq 'AUTOPURGE_TASK_REQUIRES_STANDARD_TOKEN' -and $asked.Count -eq 0) "token $($tok -join ' ') recusado ($($r.Aborted))"
+            }
+            $script:AtmAutoPurgeElevationSource = $apStd
+            $r = Invoke-AtmAutoPurgeSchedule -ConfigDir $cfgOn -PlanPresenter $pres -ConfirmationReader $rd
+            Assert-True ($r.Aborted -ceq 'AUTOPURGE_TASK_NOT_INSTALLED' -and $asked.Count -eq 0) "copia nao instalada ($($r.Aborted))"
+            $r = Invoke-AtmAutoPurgeSchedule -ConfigDir $cfgOn -Installed -ConfirmationReader $rd
+            Assert-True ($r.Aborted -ceq 'SEM_APRESENTACAO_OU_CONFIRMACAO' -and $asked.Count -eq 0) "sem apresentador ($($r.Aborted))"
+            $script:AtmCleanConsoleSource = { $false }
+            $r = Invoke-AtmAutoPurgeSchedule -ConfigDir $cfgOn -Installed -PlanPresenter $pres -ConfirmationReader $rd
+            Assert-True ($r.Aborted -ceq 'CONSOLE_NOT_OBSERVED' -and $asked.Count -eq 0) "agendar sem console ($($r.Aborted))"
+            $r = Invoke-AtmAutoPurgeUnschedule -PlanPresenter $pres -ConfirmationReader $rd
+            Assert-True ($r.Aborted -ceq 'CONSOLE_NOT_OBSERVED' -and $asked.Count -eq 0) "desagendar sem console ($($r.Aborted))"
+            $script:AtmCleanConsoleSource = { $true }
+            $r = Invoke-AtmAutoPurgeSchedule -ConfigDir $cfgOff -Installed -PlanPresenter $pres -ConfirmationReader $rd
+            Assert-True ($r.Aborted -ceq 'AUTOPURGE_TASK_NOT_CONFIRMED' -and ($asked -join ',') -ceq 'plan,autopurge-off' -and -not $r.Plan.PolicyOn -and $r.Plan.OffPhrase -ceq 'AGENDAR COM EXPURGO DESLIGADO' -and -not $r.Registered) "politica desligada, frase do aviso errada: nada criado ($($r.Aborted) $($asked -join ','))"
+            $asked.Clear()
+            $r = Invoke-AtmAutoPurgeSchedule -ConfigDir $cfgOn -Installed -PlanPresenter $pres -ConfirmationReader $rd
+            Assert-True ($r.Aborted -ceq 'AUTOPURGE_TASK_NOT_CONFIRMED' -and ($asked -join ',') -ceq 'plan,autopurge-schedule' -and $r.Plan.PolicyOn -and $null -eq $r.Plan.OffPhrase -and $r.Plan.TaskPath -ceq ('\AgentTempManager\' + $name)) "politica ligada, frase errada: nada criado ($($r.Aborted) $($asked -join ','))"
+            Assert-Eq (Get-AtmAutoPurgeTaskState).State 'ABSENT' 'nenhuma tarefa criada'
+            $asked.Clear()
+            $r = Invoke-AtmAutoPurgeUnschedule -PlanPresenter $pres -ConfirmationReader $rd
+            Assert-True ($r.Aborted -ceq 'AUTOPURGE_TASK_ABSENT' -and $asked.Count -eq 0) "desagendar sem tarefa ($($r.Aborted))"
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                foreach ($c in @(@('schedule', 'AUTOPURGE_TASK_REQUIRES_STANDARD_TOKEN'), @('schedule', 'AUTOPURGE_TASK_EXISTS'), @('unschedule', 'AUTOPURGE_TASK_DIVERGENT'), @('unschedule', 'AUTOPURGE_TASK_ABSENT'), @('schedule', 'TASK_SCHEDULER_0x80070005'))) {
+                    $t = Get-RstHost { Show-AtmAutoPurgeTaskResult -Result ([pscustomobject]@{ Operation = $c[0]; Aborted = $c[1]; Plan = $null; Registered = $false; Done = $false; Task = $null }) }
+                    $why = 'ap.task.why.' + $c[1]
+                    Assert-True ($t.Contains($c[1]) -and $t.Contains((Get-AtmText $(if ($c[0] -ceq 'schedule') { 'ap.task.notScheduled' } else { 'ap.task.notRemoved' }) $c[1])) -and (-not $script:AtmMessages['en-US'].ContainsKey($why) -or $t.Contains((Get-AtmText $why)))) "$lang`: resultado $($c[1])"
+                }
+                $plan = [pscustomobject]@{ TaskPath = '\AgentTempManager\' + $name; Hour = 12; RandomDelay = 'PT1H'; FirstRun = '2026-11-04T12:00:00'; TimeLimit = 'PT2H'; ActionPath = 'P.exe'; ActionArguments = '-File "x"'; PolicyOn = $false; Phrase = 'A'; OffPhrase = 'B' }
+                $t = Get-RstHost { Show-AtmAutoPurgeTaskPlan -Plan $plan -Operation 'schedule' }
+                Assert-True ($t.Contains($plan.TaskPath) -and $t.Contains((Get-AtmText 'ap.plan.trigger' 12 60 '2026-11-04 12:00:00' 120)) -and $t.Contains((Get-AtmText 'ap.plan.principal')) -and $t.Contains((Get-AtmText 'ap.plan.policyOff'))) "$lang`: plano (tarefa, gatilho, quem roda, aviso de desligada)"
+            }
+        } finally { Reset-ApSeams; Set-AtmLanguage -Requested $old; Clear-ApTestTask $name }
+        # The CLI of the source in child processes: no question is asked and no task is created.
+        $shell = (Get-Process -Id $PID).Path
+        $cliRun = { param([string]$ArgLine) Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $srcDir 'agent-temp.ps1')`" $ArgLine") -TimeoutSec 300 }
+        $r = & $cliRun 'quarantine schedule-autopurge -Lang en-US'
+        Assert-True ($r.Exit -eq 3 -and ($r.Text.Contains('AUTOPURGE_TASK_REQUIRES_STANDARD_TOKEN') -or $r.Text.Contains('AUTOPURGE_TASK_NOT_INSTALLED')) -and -not $r.Text.Contains('AGENDAR EXPURGO AUTOMATICO')) "agendar pela CLI (elevado ou origem): exit 3 sem perguntar (exit $($r.Exit))"
+        $r = & $cliRun 'quarantine unschedule-autopurge -Lang en-US'
+        Assert-True ($r.Exit -eq 6 -and $r.Text.Contains('CONSOLE_NOT_OBSERVED')) "desagendar sem console: exit 6 (exit $($r.Exit))"
+        $r = & $cliRun 'version -Lang en-US'
+        Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('Scheduled task of the automatic purge:')) "version mostra o estado da tarefa (exit $($r.Exit))"
+        $r = & $cliRun 'help -Lang en-US'
+        Assert-True ($r.Text.Contains('schedule-autopurge | unschedule-autopurge')) 'a ajuda mostra os dois subcomandos'
+    }
+
+    Test-Case 'Isolamento P6b' 'Tarefa real (so na CI, runner descartavel, nomes de teste): agendar com a politica ligada pede so a frase principal, cria e rele PRESENT (usuario = o SID do processo, logon interativo, nivel limitado, sem senha, uma acao exata, primeira execucao no futuro, nunca executada); agendar de novo recusa sem perguntar nem mudar nada (AUTOPURGE_TASK_EXISTS) e TASK_CREATE recusa sobrescrever; desagendar com frase errada nao remove; desagendar remove so ela (a pasta fica); com a politica desligada pede a frase do aviso e a principal; acao divergente: estado DIVERGENT e desagendar recusa sem perguntar nem tocar' {
+        if ($env:GITHUB_ACTIONS -ne 'true') { $script:caseSkipped = $true; $script:caseNote = 'cria tarefas agendadas reais: so na CI (runner descartavel), nunca local'; return }
+        $n1 = New-ApTestName; $n2 = New-ApTestName
+        $me = Get-AtmCurrentIdentity
+        $ep = Get-AtmAutoPurgeEntryPoint
+        $want = Get-AtmAutoPurgeTaskAction -EntryPoint $ep
+        $asked = New-Object System.Collections.Generic.List[string]
+        $pres = { param($p) $script:apPlan = $p; $asked.Add('plan') }
+        $rd = { param($ph, $k) $asked.Add($k); $ph }
+        $cfgOff = New-PurConfig 'ap6b-real-off' '{"schema":"atm.quarantine-policy/1","autoPurge":false}'
+        $cfgOn = New-PurConfig 'ap6b-real-on' '{"schema":"atm.quarantine-policy/1","retentionDays":30,"autoPurge":true}'
+        $getTask = { param($n) (Connect-AtmTaskScheduler).GetFolder('\AgentTempManager').GetTask($n) }
+        try {
+            $script:AtmAutoPurgeElevationSource = $apStd
+            $script:AtmCleanConsoleSource = { $true }
+            $script:AtmAutoPurgeTaskNameOverride = $n1
+            $r = Invoke-AtmAutoPurgeSchedule -ConfigDir $cfgOn -Installed -PlanPresenter $pres -ConfirmationReader $rd
+            Assert-True ($r.Done -and $r.Registered -and -not $r.Aborted -and $r.Task.State -ceq 'PRESENT' -and ($asked -join ',') -ceq 'plan,autopurge-schedule') "agendar com a politica ligada ($($r.Aborted) $($asked -join ','))"
+            Assert-True ($script:apPlan.PolicyOn -and $null -eq $script:apPlan.OffPhrase -and $script:apPlan.TaskPath -ceq ('\AgentTempManager\' + $n1) -and $script:apPlan.ActionArguments -ceq $want.Arguments) 'o plano mostrado: tarefa, acao, politica ligada'
+            $t = & $getTask $n1
+            $td = $t.Definition
+            Assert-True ((Resolve-AtmTaskUserSid ([string]$td.Principal.UserId)) -ceq $me.Sid) 'usuario da tarefa: o SID deste processo'
+            Assert-True ([int]$td.Principal.LogonType -eq 3 -and [int]$td.Principal.RunLevel -eq 0) 'logon interativo (InteractiveToken) e nivel limitado (LUA)'
+            $x = [xml]$t.Xml
+            $ns = New-Object Xml.XmlNamespaceManager($x.NameTable); $ns.AddNamespace('t', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
+            Assert-True ($null -eq $x.SelectSingleNode('//t:Password', $ns) -and $x.SelectSingleNode('//t:Principal/t:LogonType', $ns).InnerText -ceq 'InteractiveToken' -and $x.SelectSingleNode('//t:Principal/t:RunLevel', $ns).InnerText -ceq 'LeastPrivilege') 'tarefa registrada: sem senha, InteractiveToken, LeastPrivilege'
+            Assert-True ([int]$td.Actions.Count -eq 1 -and [int]$td.Actions.Item(1).Type -eq 0 -and [string]$td.Actions.Item(1).Path -ceq $want.Path -and [string]$td.Actions.Item(1).Arguments -ceq $want.Arguments) 'uma acao exata: o ponto de entrada'
+            Assert-True ([datetime]$t.NextRunTime -gt [datetime]::Now -and ([datetime]$t.LastRunTime).Year -lt 1900) 'primeira execucao no futuro; nunca executada'
+            Assert-True ([bool]$td.Settings.StartWhenAvailable -and -not [bool]$td.Settings.DisallowStartIfOnBatteries -and [string]$td.Triggers.Item(1).RandomDelay -ceq 'PT1H') 'perdida roda na proxima oportunidade, tambem na bateria, com atraso'
+            $xml0 = [string]$t.Xml
+            $asked.Clear()
+            $r = Invoke-AtmAutoPurgeSchedule -ConfigDir $cfgOn -Installed -PlanPresenter $pres -ConfirmationReader $rd
+            Assert-True ($r.Aborted -ceq 'AUTOPURGE_TASK_EXISTS' -and $asked.Count -eq 0 -and -not $r.Registered) "duplicada recusada sem perguntar ($($r.Aborted))"
+            Assert-Eq (Register-AtmAutoPurgeTask -Sid $me.Sid -EntryPoint $ep) 'AUTOPURGE_TASK_EXISTS' 'registro direto: AUTOPURGE_TASK_EXISTS'
+            $hr = 0
+            try { $svc = Connect-AtmTaskScheduler; $null = $svc.GetFolder('\AgentTempManager').RegisterTaskDefinition($n1, (New-AtmAutoPurgeTaskDefinition -Service $svc -Sid $me.Sid -EntryPoint $ep -Now ([datetime]::Now.AddDays(3))), 2, $me.Sid, $null, 3, $null) } catch { $hr = [int](Get-AtmInnerException $_.Exception).HResult }
+            Assert-Eq $hr -2147024713 'TASK_CREATE (a flag do produto) recusa sobrescrever: ERROR_ALREADY_EXISTS'
+            Assert-Eq ([string](& $getTask $n1).Xml) $xml0 'a tarefa ficou intacta'
+            $asked.Clear()
+            $r = Invoke-AtmAutoPurgeUnschedule -PlanPresenter $pres -ConfirmationReader { param($ph, $k) $asked.Add($k); 'nao' }
+            Assert-True ($r.Aborted -ceq 'AUTOPURGE_TASK_NOT_CONFIRMED' -and ($asked -join ',') -ceq 'plan,autopurge-unschedule' -and (Get-AtmAutoPurgeTaskState).State -ceq 'PRESENT') "desagendar com frase errada nao remove ($($r.Aborted))"
+            $asked.Clear()
+            $r = Invoke-AtmAutoPurgeUnschedule -PlanPresenter $pres -ConfirmationReader $rd
+            Assert-True ($r.Done -and -not $r.Aborted -and $r.Task.State -ceq 'ABSENT' -and ($asked -join ',') -ceq 'plan,autopurge-unschedule' -and $script:apPlan.TaskPath -ceq ('\AgentTempManager\' + $n1)) "desagendar remove ($($r.Aborted))"
+            $folderStays = $true; try { $null = (Connect-AtmTaskScheduler).GetFolder('\AgentTempManager') } catch { $folderStays = $false }
+            Assert-True $folderStays 'a pasta do produto fica'
+            $script:AtmAutoPurgeTaskNameOverride = $n2
+            $asked.Clear()
+            $r = Invoke-AtmAutoPurgeSchedule -ConfigDir $cfgOff -Installed -PlanPresenter $pres -ConfirmationReader $rd
+            Assert-True ($r.Done -and ($asked -join ',') -ceq 'plan,autopurge-off,autopurge-schedule' -and -not $script:apPlan.PolicyOn) "politica desligada: frase do aviso e a principal ($($r.Aborted) $($asked -join ','))"
+            # A divergent task: the test changes the arguments (TASK_UPDATE); the product refuses to touch it.
+            $svc = Connect-AtmTaskScheduler; $f = $svc.GetFolder('\AgentTempManager'); $d2 = $f.GetTask($n2).Definition
+            $d2.Actions.Item(1).Arguments = $want.Arguments + ' -Extra'
+            $null = $f.RegisterTaskDefinition($n2, $d2, 4, $me.Sid, $null, 3, $null)
+            $st = Get-AtmAutoPurgeTaskState
+            Assert-True ($st.State -ceq 'DIVERGENT' -and (@($st.Reasons) -join ',') -ceq 'TASK_ACTION_ARGUMENTS') "estado DIVERGENT com o motivo ($($st.State) $(@($st.Reasons) -join ','))"
+            $xml2 = [string](& $getTask $n2).Xml
+            $asked.Clear()
+            $r = Invoke-AtmAutoPurgeUnschedule -PlanPresenter $pres -ConfirmationReader $rd
+            Assert-True ($r.Aborted -ceq 'AUTOPURGE_TASK_DIVERGENT' -and $asked.Count -eq 0 -and -not $r.Done) "desagendar recusa a divergente sem perguntar ($($r.Aborted))"
+            Assert-Eq (Unregister-AtmAutoPurgeTask -Sid $me.Sid -EntryPoint $ep) 'AUTOPURGE_TASK_DIVERGENT' 'remocao direta recusa a divergente'
+            Assert-Eq ([string](& $getTask $n2).Xml) $xml2 'a divergente ficou intacta'
+            $t = Get-RstHost { Show-AtmAutoPurgeTaskResult -Result $r }
+            Assert-True ($t.Contains('AUTOPURGE_TASK_DIVERGENT') -and $t.Contains('TASK_ACTION_ARGUMENTS')) 'o resultado mostra o codigo e o motivo'
+        } finally { Reset-ApSeams; Clear-ApTestTask $n1; Clear-ApTestTask $n2 }
+    }
+
     # ------------------------------------------------------------------ trusted accounts per engine (FIX-TRUSTED-SIDS)
     Test-Case 'Contas confiaveis' 'Cada motor com a sua lista: com Clean, Isolate e Diagnose carregados na ordem do lancador, o gate 4 usa a lista declarada no Engine.Clean (com OWNER RIGHTS) e a regra de local do Git a sua propria (sem OWNER RIGHTS); nenhum arquivo atribui a lista de outro motor' {
         $declared = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464', 'S-1-3-0', 'S-1-3-4')
@@ -5212,7 +5509,7 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
     # ------------------------------------------------------------------ TUI (headless) and layering
     function New-Key { param([string]$Key, [char]$Char = [char]0) return New-Object ConsoleKeyInfo($Char, [ConsoleKey]$Key, $false, $false, $false) }
     function Invoke-HeadlessTui {
-        param([object[]]$Keys, [hashtable]$InvArgs, [string[]]$Lines = @(), [switch]$Ascii, [int]$W = 120, [int]$H = 30, [scriptblock]$DiagRunner = $null)
+        param([object[]]$Keys, [hashtable]$InvArgs, [string[]]$Lines = @(), [switch]$Ascii, [int]$W = 120, [int]$H = 30, [scriptblock]$DiagRunner = $null, [scriptblock]$ApTaskReader = $null)
         $script:tuiKeys = New-Object System.Collections.Generic.Queue[object]; foreach ($k in $Keys) { $script:tuiKeys.Enqueue($k) }
         $script:tuiLines = New-Object System.Collections.Generic.Queue[string]; foreach ($l in $Lines) { $script:tuiLines.Enqueue($l) }
         $script:tuiFrames = New-Object System.Collections.Generic.List[string]
@@ -5223,6 +5520,7 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
         $rd = { param($frame) $script:tuiFrames.Add((($frame | ForEach-Object { ($_ | ForEach-Object { $_.Text }) -join '' }) -join "`n")) }
         $tuiArgs = @{ InventoryArgs = $InvArgs; KeySource = $ks; Renderer = $rd; LineReader = $lr; Ascii = $Ascii; Width = $W; Height = $H }
         if ($null -ne $DiagRunner) { $tuiArgs['DiagnoseRunner'] = $DiagRunner; $tuiArgs['DiagnoseArgs'] = @{} }
+        if ($null -ne $ApTaskReader) { $tuiArgs['AutoPurgeTaskReader'] = $ApTaskReader }
         $st = Start-AtmTui @tuiArgs
         return [pscustomobject]@{ State = $st; Frames = $script:tuiFrames.ToArray(); Prompts = $script:tuiPrompts.ToArray() }
     }
@@ -5294,6 +5592,35 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
             }
         } finally { $script:AtmQuarantineClock = $null; $script:AtmIsolationQuarantineRoot = $saved; Set-AtmLanguage -Requested $old }
         Assert-Eq (Get-RstSnapshot (Join-Path $sandbox 'tuip4-home\AgentTempManager\Q')) $snap 'quarentena e manifestos identicos: a TUI so leu'
+    }
+    Test-Case 'Isolamento P6b' 'TUI headless (en-US e pt-BR; so exibicao, T-ISO-6): com autoPurge = true o aviso de expurgo automatico ligado fica sob o cabecalho de toda tela (menu, painel, ajuda, quarentena, ocupada); a area Quarentena mostra o estado da tarefa do usuario (lido ao abrir a area, nunca agendado nem desagendado); sem a politica, nenhum aviso; linhas dentro da largura' {
+        $saved = $script:AtmIsolationQuarantineRoot
+        $script:AtmIsolationQuarantineRoot = Join-Path $sandbox 'tuip6b-home\AgentTempManager\Q'
+        $old = Get-AtmLanguage
+        try {
+            $p = New-TestProfile 'tuip6b'; $null = New-TestRoot -ProfileInfo $p
+            $script:apReads = 0
+            $reader = { $script:apReads++; [pscustomobject]@{ State = 'PRESENT'; TaskPath = '\AgentTempManager\AutoPurge-0123456789abcdef'; Enabled = $true; NextRunTime = [datetime]'2026-11-04T12:31:00'; LastRunTime = $null; LastResult = $null; Reasons = @() } }
+            $keys = @((New-Key 'D1' '1'), (New-Key 'Escape'), (New-Key 'H' 'h'), (New-Key 'Escape'), (New-Key 'Z' 'z'), (New-Key 'Escape'), (New-Key 'Q' 'q'))
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                $ia = Get-InvArgs -Profiles @($p)
+                $ia['ConfigDir'] = New-PurConfig 'tuip6b-on' '{"schema":"atm.quarantine-policy/1","autoPurge":true}'
+                $script:apReads = 0
+                $o = Invoke-HeadlessTui -Keys $keys -InvArgs $ia -H 40 -ApTaskReader $reader
+                # Headless frames are transliterated when the console has no Unicode output (ASCII fallback): both forms count.
+                $head = (Get-AtmText 'q.policyWarn.AUTOPURGE_ON').Substring(0, 30)
+                $bad = @($o.Frames | Where-Object { $r1 = ($_ -split "`n")[1]; $r1.IndexOf($head) -lt 0 -and $r1.IndexOf((ConvertTo-AtmAscii $head)) -lt 0 })
+                Assert-True ($o.Frames.Count -ge 5 -and $bad.Count -eq 0) "$lang`: aviso sob o cabecalho em todos os $($o.Frames.Count) quadros (sem ele: $($bad.Count))"
+                $q = @($o.Frames | Where-Object { $_.Contains('\AgentTempManager\AutoPurge-0123456789abcdef') })
+                Assert-True ($q.Count -ge 1 -and $script:apReads -eq 1 -and $o.State.AutoPurgeTask.State -ceq 'PRESENT') "$lang`: area Quarentena mostra a tarefa (leituras: $($script:apReads))"
+                foreach ($fr in $o.Frames) { foreach ($ln in ($fr -split "`n")) { Assert-True ($ln.Length -le 120) "$lang`: linha excede a largura: $($ln.Length)" } }
+                $ia['ConfigDir'] = $cfgDir
+                $o = Invoke-HeadlessTui -Keys $keys -InvArgs $ia -H 40 -ApTaskReader $reader
+                $allOff = $o.Frames -join "`n"
+                Assert-True (-not $allOff.Contains($head) -and -not $allOff.Contains((ConvertTo-AtmAscii $head))) "$lang`: sem a politica, nenhum aviso"
+            }
+        } finally { $script:AtmIsolationQuarantineRoot = $saved; Set-AtmLanguage -Requested $old }
     }
     Test-Case 'TUI' 'Navegacao headless: dashboard, usuarios, roots, detalhe, classes, erros, preview, ajuda' {
         $p = New-TestProfile 'tui'

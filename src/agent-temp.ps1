@@ -184,7 +184,7 @@ $cliInvArgs['NoProgress'] = [bool]$NoProgress
 $cliInvArgs['ProgressCallback'] = { param($pct, $msg) $act = Get-AtmText 'cli.progressActivity'; if ($pct -ge 100) { Write-Progress -Activity $act -Completed } else { Write-Progress -Activity $act -Status $msg -PercentComplete $pct } }
 
 function Show-Help {
-    foreach ($k in @('help.title', 'help.blank', 'help.tui', 'help.audit', 'help.preview', 'help.diagnose', 'help.clean', 'help.clean2', 'help.isolate', 'help.isolate2', 'help.quarantine', 'help.quarantine2', 'help.authorize', 'help.verify', 'help.version', 'help.help', 'help.blank',
+    foreach ($k in @('help.title', 'help.blank', 'help.tui', 'help.audit', 'help.preview', 'help.diagnose', 'help.clean', 'help.clean2', 'help.isolate', 'help.isolate2', 'help.quarantine', 'help.quarantine2', 'help.quarantine3', 'help.authorize', 'help.verify', 'help.version', 'help.help', 'help.blank',
             'help.drill', 'help.export', 'help.diagOpts', 'help.cleanOpts', 'help.cleanOpts2', 'help.cleanOpts3', 'help.cleanOpts4', 'help.tuiOpts', 'help.lang', 'help.blank', 'help.examples')) { Write-Host (Get-AtmText $k) }
     Write-Host '  agent-temp'
     Write-Host '  agent-temp audit'
@@ -334,7 +334,7 @@ try {
             if ($Entry -and $Entry -cnotmatch $script:AtmQuarantineEntryIdPattern) { Write-Host (Get-AtmText 'cli.quarantineEntryInvalid') -ForegroundColor Red; exit 2 }
             $qPolicy = Get-AtmQuarantinePolicy -ConfigDir $invArgs.ConfigDir
             switch ($qSub) {
-                'list' { Show-AtmQuarantineList -List (Get-AtmQuarantineList -Policy $qPolicy); exit 0 }
+                'list' { Show-AtmQuarantineList -List (Get-AtmQuarantineList -Policy $qPolicy) -AutoPurgeTask (Get-AtmAutoPurgeTaskState); exit 0 }
                 'inspect' {
                     if (-not $Entry) { Write-Host (Get-AtmText 'cli.quarantineUsage') -ForegroundColor Red; exit 2 }
                     $qEntry = Get-AtmQuarantineEntry -Id $Entry -Policy $qPolicy
@@ -380,6 +380,18 @@ try {
                     Show-AtmPurgeResult -Result $purRes
                     exit $(if ($purRes.Aborted -or $purRes.StoppedBy) { 3 } else { 0 })
                 }
+                { $_ -in @('schedule-autopurge', 'unschedule-autopurge') } {
+                    # The user's own optional task of the automatic purge (J-ISO-7, complement of 2026-11-03): the only two
+                    # commands that change the Task Scheduler. schedule refuses an elevated process, a copy that is not
+                    # installed and an existing task; both need the console the engine observes, show the plan and ask
+                    # their own phrase. No credential is asked for; the policy (autoPurge = true) stays the authorization.
+                    $apPresenter = { param($plan) Show-AtmAutoPurgeTaskPlan -Plan $plan -Operation $(if ($qSub -ceq 'schedule-autopurge') { 'schedule' } else { 'unschedule' }) }
+                    $apReader = { param($phrase, $kind) Read-AtmCleanAnswer -Phrase $phrase -Kind $kind -LineReader { param($pr) Read-Host $pr } }
+                    if ($qSub -ceq 'schedule-autopurge') { $apRes = Invoke-AtmAutoPurgeSchedule -ConfigDir $invArgs.ConfigDir -Installed:([bool]$integrity.Installed) -PlanPresenter $apPresenter -ConfirmationReader $apReader }
+                    else { $apRes = Invoke-AtmAutoPurgeUnschedule -PlanPresenter $apPresenter -ConfirmationReader $apReader }
+                    Show-AtmAutoPurgeTaskResult -Result $apRes
+                    exit $(if ($apRes.Done) { 0 } elseif ($apRes.Aborted -ceq 'CONSOLE_NOT_OBSERVED') { 6 } else { 3 })
+                }
                 default { Write-Host (Get-AtmText 'cli.quarantineUsage') -ForegroundColor Red; exit 2 }
             }
         }
@@ -416,6 +428,8 @@ try {
             Write-Host (Get-AtmText 'cli.purge' $(if ($script:AtmQuarantinePurgeEnabled) { Get-AtmText 'cli.enabled' } else { Get-AtmText 'cli.purgeDisabled' }))
             # The effective quarantine policy (contract section 11.2), with its warnings (an invalid file counts as off).
             foreach ($pl in (Get-AtmQuarantinePolicyLines -Policy (Get-AtmQuarantinePolicy -ConfigDir $invArgs.ConfigDir))) { Write-Host $pl.Text -ForegroundColor $pl.Color }
+            # The user's scheduled task of the automatic purge, read only (P6b).
+            foreach ($tl in (Get-AtmAutoPurgeTaskLines -Task (Get-AtmAutoPurgeTaskState))) { Write-Host $tl.Text -ForegroundColor $tl.Color }
             Write-Host (Get-AtmText 'cli.language' (Get-AtmLanguage))
             $idState = Get-AtmIdentityState
             Write-Host (Get-AtmText 'cli.identity' $idState.Name (Get-AtmYesNo ([bool]$idState.IsElevatedAdministrator)) $idState.ElevationType $idState.IntegrityLevel $idState.SessionId)

@@ -417,6 +417,58 @@ function Show-AtmAutoPurgeNotice {
     foreach ($l in @(Get-AtmAutoPurgeNoticeLines)) { Write-Host ('  ' + $l) -ForegroundColor Magenta }
 }
 
+function Get-AtmAutoPurgeTaskLines {
+    # The state of the user's scheduled task of the automatic purge (Get-AtmAutoPurgeTaskState), as lines for version,
+    # quarantine list and the TUI (each item: Text and Color). Display only.
+    param($Task)
+    if ($null -eq $Task) { return @() }
+    $t = $(switch ([string]$Task.State) {
+            'ABSENT' { [pscustomobject]@{ Text = (Get-AtmText 'ap.task.absent'); Color = 'Gray' } }
+            'PRESENT' {
+                $last = $(if ($null -ne $Task.LastRunTime) { Get-AtmText 'ap.task.lastResult' ($Task.LastRunTime.ToString('yyyy-MM-dd HH:mm')) $Task.LastResult } else { Get-AtmText 'ap.task.never' })
+                [pscustomobject]@{ Text = (Get-AtmText 'ap.task.present' $Task.TaskPath $(if ($Task.Enabled) { Get-AtmText 'ap.task.enabled' } else { Get-AtmText 'ap.task.disabled' }) $(if ($null -ne $Task.NextRunTime) { $Task.NextRunTime.ToString('yyyy-MM-dd HH:mm') } else { '-' }) $last); Color = 'Cyan' }
+            }
+            'DIVERGENT' { [pscustomobject]@{ Text = (Get-AtmText 'ap.task.divergent' $Task.TaskPath (@($Task.Reasons) -join ', ')); Color = 'Yellow' } }
+            default { [pscustomobject]@{ Text = (Get-AtmText 'ap.task.unreadable' (@($Task.Reasons) -join ', ')); Color = 'Yellow' } }
+        })
+    return @($t)
+}
+
+function Show-AtmAutoPurgeTaskPlan {
+    # quarantine schedule-autopurge and unschedule-autopurge: the plan of the engine, before any phrase.
+    param($Plan, [string]$Operation)
+    if ($Operation -ceq 'unschedule') {
+        Write-AtmHeader (Get-AtmText 'ap.plan.unschedule')
+        Write-Host ('  ' + (Get-AtmText 'ap.plan.unscheduleTask' $Plan.TaskPath))
+        Write-Host ('  ' + (Get-AtmText 'ap.plan.action' $Plan.ActionPath $Plan.ActionArguments))
+        return
+    }
+    $min = { param([string]$D) [int][Xml.XmlConvert]::ToTimeSpan($D).TotalMinutes }
+    Write-AtmHeader (Get-AtmText 'ap.plan.header')
+    Write-Host ('  ' + (Get-AtmText 'ap.plan.task' $Plan.TaskPath))
+    Write-Host ('  ' + (Get-AtmText 'ap.plan.trigger' $Plan.Hour (& $min $Plan.RandomDelay) ($Plan.FirstRun -replace 'T', ' ') (& $min $Plan.TimeLimit)))
+    Write-Host ('  ' + (Get-AtmText 'ap.plan.action' $Plan.ActionPath $Plan.ActionArguments))
+    Write-Host ('  ' + (Get-AtmText 'ap.plan.principal')) -ForegroundColor Green
+    if ($Plan.PolicyOn) { Write-Host ('  ' + (Get-AtmText 'ap.plan.policyOn')) -ForegroundColor Magenta }
+    else { Write-Host ('  ' + (Get-AtmText 'ap.plan.policyOff')) -ForegroundColor Yellow }
+}
+
+function Show-AtmAutoPurgeTaskResult {
+    # The result of schedule-autopurge or unschedule-autopurge: what was done, or the refusal (its code and why).
+    param($Result)
+    $sched = ($Result.Operation -ceq 'schedule')
+    if ($Result.Done) {
+        if ($sched) { Write-Host (Get-AtmText 'ap.task.created' $Result.Task.TaskPath) -ForegroundColor Green }
+        else { Write-Host (Get-AtmText 'ap.task.removed' $Result.Plan.TaskPath $script:AtmAutoPurgeTaskFolder) -ForegroundColor Green }
+    } else {
+        Write-Host (Get-AtmText $(if ($sched) { 'ap.task.notScheduled' } else { 'ap.task.notRemoved' }) $Result.Aborted) -ForegroundColor Yellow
+        $why = 'ap.task.why.' + [string]$Result.Aborted
+        if ($script:AtmMessages['en-US'].ContainsKey($why)) { Write-Host ('  ' + (Get-AtmText $why)) }
+        if ($Result.Aborted -ceq 'AUTOPURGE_TASK_NOT_VERIFIED') { Write-Host ('  ' + (Get-AtmText 'ap.task.notVerified')) -ForegroundColor Yellow }
+    }
+    foreach ($tl in (Get-AtmAutoPurgeTaskLines -Task $Result.Task)) { Write-Host ('  ' + $tl.Text) -ForegroundColor $tl.Color }
+}
+
 function Show-AtmAutoPurgeResult {
     # bin\agent-temp-autopurge.ps1: the result of one automatic pass. Off or below the minimum retention: one status
     # line. Otherwise one row per entry (its decision and reasons: codes, never a path).
@@ -442,8 +494,9 @@ function Show-AtmAutoPurgeResult {
 
 function Show-AtmQuarantineList {
     # quarantine list (read only): one row per entry with its derived state and, for an isolated entry, when its retention
-    # ends; the original path is shown only here, on this machine (contract section 8.1). Then the policy.
-    param($List)
+    # ends; the original path is shown only here, on this machine (contract section 8.1). Then the policy and, when given,
+    # the state of the user's scheduled task of the automatic purge.
+    param($List, $AutoPurgeTask = $null)
     Write-AtmHeader (Get-AtmText 'q.listHeader' $List.Root)
     if ($List.RootProblem) { Write-Host ('  ' + (Get-AtmText 'q.rootProblem' $List.RootProblem)) -ForegroundColor Red; return }
     if (-not $List.Exists) { Write-Host ('  ' + (Get-AtmText 'q.noQuarantine')) }
@@ -451,6 +504,7 @@ function Show-AtmQuarantineList {
                     'col.mb' = $(if ($null -ne $_.Bytes) { Format-AtmMB $_.Bytes } else { '-' }); 'col.created' = (Format-AtmTime $_.CreatedUtc); 'col.expires' = (Format-AtmTime $_.ExpiresUtc); 'col.original' = $_.OriginalPath }) })
     Write-Host ('  ' + (Get-AtmText 'q.count' @($List.Entries).Count))
     foreach ($pl in (Get-AtmQuarantinePolicyLines -Policy $List.Policy -List $List)) { Write-Host ('  ' + $pl.Text) -ForegroundColor $pl.Color }
+    foreach ($tl in (Get-AtmAutoPurgeTaskLines -Task $AutoPurgeTask)) { Write-Host ('  ' + $tl.Text) -ForegroundColor $tl.Color }
     Write-Host ('  ' + (Get-AtmText 'q.readOnly')) -ForegroundColor Green
 }
 
