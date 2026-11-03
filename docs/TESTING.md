@@ -328,7 +328,7 @@ The quarantine is a folder of the sandbox (the `AtmIsolationQuarantineRoot` seam
     * `autoPurge` is only read and shown;
     * the clock seam is a single `$null` assignment.
 
-## Real isolation on disposable VMs (0.3.x ISO-P5a)
+## Real isolation on disposable VMs (0.3.x ISO-P5a and P5b)
 
 The same `install e2e` jobs (every OS and installer shell of the matrix) also run the **real** isolation, restore and
 purge, end to end, through `tests/e2e/Invoke-IsolateE2E.ps1`, after the V2 legs and before the uninstall. The pattern is
@@ -337,8 +337,10 @@ the V2 one; what differs:
 * **CI-only.** `tools/Build-Release.ps1` leaves the harness out of the release archive and refuses an archive that
   contains it; the e2e step `package-excludes-ci-harness` checks the extracted package.
 * **Gates.** It loads the *installed* engine into its own process and opens the isolation gate and the purge gate there
-  only, in memory. The deletion gate of clean stays closed (the purge reads only its own gate). The six installed gates
-  and the SHA-256 of every installed file are checked before and after, with `agent-temp verify`.
+  only, in memory. The deletion gate of clean stays closed in it (the purge reads only its own gate); only the child
+  that contends for the lock as clean (P5b) opens that gate, in its own memory, and always answers a wrong final phrase,
+  so it never deletes. The six installed gates and the SHA-256 of every installed file are checked before and after,
+  with `agent-temp verify`.
 * **Real parts.** The real mover, the real deleter of the purge, the T1 logs (`atm.isolatelog/1`, `atm.purgelog/1`) in
   real files, the manifests, the real B8 lock name, the real revalidation, and the **real quarantine of each account**
   (`%LOCALAPPDATA%\AgentTempManager\Q`, never the suite's seam). The only seam is the console observation
@@ -360,8 +362,8 @@ the V2 one; what differs:
   * restore on a conflict (the original path recreated after the isolation): the engine's alternative
     `<name>.restored-<id8>` with its own phrase; the recreated path unchanged (nothing overwritten or merged, T-ISO-8);
   * purge of one entry after the purge's own declarations: the payload gone, the entry and manifest kept, `PURGED`;
-  * snapshots: the run root (only the purged root, the conflict scope and the run's logs may differ) and the
-    quarantine's area (only the run's entries may appear); the temp folder reported as in V2.
+  * snapshots: the run root (only the purged root, the scopes a case changed and checked itself, and the run's logs may
+    differ) and the quarantine's area (only the run's entries may appear); the temp folder reported as in V2.
 * **Leg B** isolates only when the process coverage measured in that run is complete; otherwise the isolate, restore
   and purge cases are `NAO_TESTADO`, never forced. The refusals run in both legs.
 * **Process churn.** A refusal before the mover caused by new processes of the runner (`PLAN_CHANGED_BEFORE_EXECUTION`
@@ -370,10 +372,36 @@ the V2 one; what differs:
 * **Evidence.** Only the harness summary is uploaded (codes, counts and labels; no path, account name or SID), through
   the artifact sanitizer. The raw logs stay in the run root and the manifests in the quarantine.
 * **Section 6.1 (rename with an open handle inside the tree)** is measured on every image (Windows Server 2022 and
-  2025, Windows 11 ARM64) by the existing step `iso-p1-rename-with-open-handles`; its line is in each job's summary.
-* **Not in P5a (phase P5b):** an interruption after `move-intent` reconciled by a later restore; clean and isolate
-  contending in both orders (`BUSY`); a file opened by a harness process; a junction swapped in the window; another
-  fixed volume; 200,000 files with the time measured.
+  2025, Windows 11 ARM64), in both legs, by the harness itself (`measure-6.1-rename-open-handle`, recorded as
+  `section61` in its summary): the installed mover on trees of the run root outside the base, with nothing open, a
+  file open exclusively, a file open with full sharing, and a process (ending by itself) whose working directory is
+  inside. The step `iso-p1-rename-with-open-handles` keeps measuring the same in the installer's shell.
+* **Adversarial cases and scale (P5b), leg A** (leg B: `NAO_TESTADO` while its coverage is incomplete, never forced).
+  The windows inside the flow use the engine's existing mover seam with a wrapper that calls the **real** mover with
+  exactly the engine's arguments, plus the attack (no new seam in the product):
+  * a file held (no sharing) by another process of the harness before the plan: the in-use probe sees it and removes
+    the B1 exception, so the root is refused (`NENHUM_CAMINHO_ISOLAVEL`); no question, no log. Leg B is `NAO_TESTADO`
+    by design: B1 refuses before the probe there;
+  * a file held open (full sharing) by another process of the harness between the revalidation and the mover: the real
+    mover refuses, `STOPPED_AFTER_REFUSED`, the entry `FAILED` with no payload, the root identical;
+  * an interruption: the harness started again as a child isolates a root and ends by itself right after the real mover
+    (`Environment.Exit`, never a forced termination): the log ends at `move-intent`, the entry is `INCOMPLETE` with the
+    payload present and the original absent; the restore reconciles it first (`reconcile`, T-ISO-5) and brings the tree
+    back identical (`RESTORED`). Up to 3 children when one is refused before the mover by process churn;
+  * concurrency, both orders, with the real lock name: isolate holding the lock at its final phrase while a child runs a
+    complete clean (`CLEAN_LOCK_BUSY` at once, no log); a child clean holding the lock at its final phrase while isolate
+    runs (`CLEAN_LOCK_BUSY` at once, no inventory, no log, no entry). Each holder is then given a wrong phrase: nothing is
+    moved or deleted;
+  * a junction swapped in for the root (to a sentinel outside the base) between the revalidation and the mover: the real
+    mover refuses, nothing is moved through the junction; the sentinel, the junction and the root (renamed aside) are
+    unchanged;
+  * another fixed volume: a base planted on the runner's second fixed volume (the user environment pointed at it for
+    that case only). Measured: where it is refused (at the plan, or by the mover with `OTHER_VOLUME` after
+    `move-intent`) and that nothing is moved. No second fixed volume, or one this account cannot write to: `NAO_TESTADO`;
+  * 200,000 files (one root of 200 folders of 1,000 one-byte files), in **one x64 job only** (windows-2025, installer
+    pwsh, `ATM_E2E_HEAVY`): the plant, the isolation and the restore timed (`heavy` in the summary), the statistics
+    identical before and after. A plant over its 15-minute budget is `NAO_TESTADO` with the partial measurement; the
+    other jobs report it `NAO_TESTADO` by design.
 * **Not tested here.** The CLI and the TUI past the gates (opening them there would mean changing the installed copy);
   isolation without the B1 exception in leg A (a standard user's coverage is incomplete); UAC prompts and filtered
   tokens (the runners have UAC disabled).

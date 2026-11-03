@@ -25,6 +25,15 @@
   Writes ONLY a summary (codes, counts, labels; no path, account name or SID) to -SummaryFile; the raw T1 logs stay in
   the run root and the manifests in the quarantine, never uploaded. Exit code = number of failed cases (NOT_TESTED is
   neither a pass nor a failure).
+  ISO-P5b (adversarial cases and scale): the section 6.1 measurement (the installed mover on trees of the run root, outside
+  the base); a file held open by a helper process of this harness, before the plan and between the revalidation and the
+  mover; a process that ends by itself after move-intent (this script started again as a CHILD, Environment.Exit, never a
+  forced termination) and the restore that reconciles the entry; clean and isolate contending for the lock in both orders
+  (BUSY); a junction swapped in for the root between the revalidation and the mover; a root on a second fixed volume;
+  200,000 files with the time measured (-Heavy, one x64 job). The windows inside the flow use the engine's existing mover
+  seam (-MoveTreeImpl) with a wrapper that calls the REAL mover with exactly the engine's arguments, plus the attack (no
+  new seam in the product). The clean that contends for the lock runs in a child that opens the deletion gate in its own
+  memory only and answers a wrong final phrase by design: it never deletes.
 #>
 [CmdletBinding()]
 param(
@@ -32,7 +41,19 @@ param(
     [Parameter(Mandatory)][string]$InstallDir,
     [Parameter(Mandatory)][string]$SummaryFile,
     [Parameter(Mandatory)][string]$WorkDir,
-    [switch]$DisposableMachine
+    [switch]$DisposableMachine,
+    # ISO-P5b: 200,000 files in one root (one x64 job of the matrix only); without it that case is NOT_TESTED.
+    [switch]$Heavy,
+    # ISO-P5b child modes (this script started again by itself; no case runs): K isolates -ChildRoot and ends by itself
+    # right after the real mover, before move-result; CleanTry runs one clean of -ChildRoot (the lock is expected busy);
+    # CleanHold runs one clean of -ChildRoot that holds the lock at its final phrase until -ChildRelease, then answers a
+    # wrong phrase (never deletes). One line is written to -ChildOut.
+    [ValidateSet('', 'K', 'CleanTry', 'CleanHold')][string]$ChildMode = '',
+    [string]$ChildRoot,
+    [string]$ChildLog,
+    [string]$ChildOut,
+    [string]$ChildReady,
+    [string]$ChildRelease
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
@@ -50,14 +71,19 @@ $nonce = [guid]::NewGuid().ToString('N')
 $runRoot = Join-Path $env:SystemDrive ('ATM-E2E-ISO-' + $Leg + '-' + $nonce.Substring(0, 12))
 $shiftHours = 120
 # One scope (slug) per case: the restore refuses when a sibling of its destination is RECENT or ACTIVE_EVIDENCE.
-$labels = @('free', 'conflict', 'purge')
-$ctx = @{ Roots = @{}; Logs = (New-Object System.Collections.Generic.List[string]); EnvSet = @{}; Eligible = $false; EntryIds = (New-Object System.Collections.Generic.List[string]); Iso = @{}; Purged = $false; ConflictTouched = $false }
+$labels = @('free', 'conflict', 'purge', 'openA', 'openB', 'interrupt', 'conc', 'xclean', 'jswap')
+# Touched: scopes (relative to the run root) that a case changes on purpose and checks itself; Skip: folders the run-root
+# snapshot does not enter (the 200,000 files); ExtraBases: a base planted outside the run root (the second volume).
+$ctx = @{ Roots = @{}; Logs = (New-Object System.Collections.Generic.List[string]); EnvSet = @{}; Eligible = $false; EntryIds = (New-Object System.Collections.Generic.List[string]); Iso = @{}
+    Touched = (New-Object System.Collections.Generic.List[string]); Skip = (New-Object System.Collections.Generic.List[string]); QSkip = (New-Object System.Collections.Generic.List[string])
+    ExtraBases = (New-Object System.Collections.Generic.List[object]) }
 $summary = [ordered]@{
-    schema = 'atm.e2e-isolate/1'; phase = 'ISO-P5a'; leg = $Leg; startedUtc = [datetime]::UtcNow.ToString('o')
+    schema = 'atm.e2e-isolate/1'; phase = 'ISO-P5a+P5b'; leg = $Leg; startedUtc = [datetime]::UtcNow.ToString('o')
     shell = "$($PSVersionTable.PSEdition) $($PSVersionTable.PSVersion)"; arch = $env:PROCESSOR_ARCHITECTURE
     elevated = [bool]$isAdmin; confirmation = 'AUTOMATED_BY_HARNESS (console: TEST_SEAM); not a human acceptance'
     recencySimulated = $true; recencyShiftHours = $shiftHours; recentHoursInProduct = $null
     processCoverage = [ordered]@{ complete = $null; uninspectable = $null }; quarantine = [ordered]@{ existedBefore = $null; entriesCreated = 0 }
+    section61 = $null; secondVolume = $null; heavy = $null
     cases = [ordered]@{}
 }
 [void][IO.Directory]::CreateDirectory($WorkDir)
@@ -73,6 +99,7 @@ function Protect-Text([string]$Text) {
 }
 $script:notTested = $false
 function Case([string]$Id, [scriptblock]$Body) {
+    if ($ChildMode) { return }
     $script:notTested = $false
     try {
         $d = & $Body
@@ -92,9 +119,10 @@ function Get-FileSha([string]$Path) {
     $s = [IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
     try { $h = [Security.Cryptography.SHA256]::Create(); try { return ([BitConverter]::ToString($h.ComputeHash($s))).Replace('-', '') } finally { $h.Dispose() } } finally { $s.Dispose() }
 }
-function Get-Snapshot([string]$Root, [long]$HashMax, [int]$MaxEntries = 200000) {
+function Get-Snapshot([string]$Root, [long]$HashMax, [int]$MaxEntries = 200000, [string[]]$Skip = @()) {
     # Relative path -> D (directory), R (reparse point, never traversed), F|length|write ticks|SHA-256 ('-' above
-    # HashMax, 'UNREADABLE' when it cannot be opened), X (directory not enumerable). A missing root is an empty map.
+    # HashMax, 'UNREADABLE' when it cannot be opened), X (directory not enumerable). A missing root is an empty map. A
+    # folder in -Skip is recorded as D and not entered.
     $map = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
     if (-not [IO.Directory]::Exists($Root)) { return $map }
     $stack = New-Object System.Collections.Generic.Stack[string]
@@ -108,7 +136,11 @@ function Get-Snapshot([string]$Root, [long]$HashMax, [int]$MaxEntries = 200000) 
             if ($map.Count -ge $MaxEntries) { throw 'SNAPSHOT_TOO_LARGE' }
             $rel = $i.FullName.Substring($Root.Length).TrimStart('\')
             if (($i.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $map[$rel] = 'R'; continue }
-            if (($i.Attributes -band [IO.FileAttributes]::Directory) -ne 0) { $map[$rel] = 'D'; $stack.Push($i.FullName); continue }
+            if (($i.Attributes -band [IO.FileAttributes]::Directory) -ne 0) {
+                $map[$rel] = 'D'
+                if (@($Skip | Where-Object { [string]::Equals($_, $i.FullName, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 0) { $stack.Push($i.FullName) }
+                continue
+            }
             $sha = '-'
             if ($i.Length -le $HashMax) { try { $sha = Get-FileSha $i.FullName } catch { $sha = 'UNREADABLE' } }
             $map[$rel] = 'F|{0}|{1}|{2}' -f $i.Length, $i.LastWriteTimeUtc.Ticks, $sha
@@ -151,7 +183,7 @@ Case 'installed-before' {
     $ctx.InstallBefore = Get-Snapshot $InstallDir ([long]::MaxValue)
     "verify 0; six installed gates `$false (single assignment each); $($ctx.InstallBefore.Count) installed entries hashed"
 }
-if ($summary.cases['identity'].status -ne 'PASS' -or $summary.cases['installed-before'].status -ne 'PASS') {
+if (-not $ChildMode -and ($summary.cases['identity'].status -ne 'PASS' -or $summary.cases['installed-before'].status -ne 'PASS')) {
     [IO.File]::WriteAllText($SummaryFile, ($summary | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
     exit 1
 }
@@ -177,16 +209,18 @@ $qRoot = Get-AtmQuarantineRootPath
 $qArea = $(if ($qRoot) { [IO.Path]::GetDirectoryName($qRoot) } else { $null })
 
 function Assert-Entry([string]$Path) {
-    # Containment: canonical, under this run's base, the nonce of this run, no reparse point in the chain.
+    # Containment: canonical, under a base of this run (the run root's, or one planted in this run on another volume),
+    # the nonce of this run, no reparse point in the chain.
     Assert ([string]::Equals([IO.Path]::GetFullPath($Path), $Path, [StringComparison]::Ordinal)) 'entrada nao canonica'
-    Assert ($Path.StartsWith($ctx.Base + '\', [StringComparison]::OrdinalIgnoreCase)) 'entrada fora da base desta execucao'
+    $b = @(@(@{ Base = $ctx['Base']; Top = $runRoot }) + @($ctx.ExtraBases) | Where-Object { $_.Base -and $Path.StartsWith($_.Base + '\', [StringComparison]::OrdinalIgnoreCase) })
+    Assert ($b.Count -eq 1) 'entrada fora da base desta execucao'
     $nf = Join-Path $Path 'ATM-E2E-NONCE.txt'
     Assert ((Test-Path -LiteralPath $nf -PathType Leaf) -and [IO.File]::ReadAllText($nf) -ceq $nonce) 'entrada sem o nonce desta execucao'
-    Assert-NoReparseChain $Path
+    Assert-NoReparseChain $Path $b[0].Top
 }
-function Assert-NoReparseChain([string]$Path) {
+function Assert-NoReparseChain([string]$Path, [string]$Top = $runRoot) {
     $p = $Path
-    while ($p.Length -gt $runRoot.Length) {
+    while ($p.Length -gt $Top.Length) {
         Assert (([IO.File]::GetAttributes($p) -band [IO.FileAttributes]::ReparsePoint) -eq 0) 'reparse point na cadeia da entrada'
         $p = [IO.Path]::GetDirectoryName($p)
     }
@@ -227,16 +261,23 @@ function Assert-Sequence($Records, [string]$Id, [string]$What) {
 function New-E2ELogPath([string]$Name) { $ctx.Logs.Add($Name); return (Join-Path $ctx.LogDir $Name) }
 $interaction = @{ Caller = 'E2E'; ConsoleRequired = $true }
 
-function Invoke-E2EIsolate([string[]]$Paths, [string]$LogName, [switch]$NoRisk, [scriptblock]$Hook) {
+function Add-EntryId([string]$Id) {
+    # Any entry this run created is attributed to it (the quarantine snapshot allows only those), even if its run stopped.
+    if ($Id -and -not $ctx.EntryIds.Contains($Id)) { $ctx.EntryIds.Add($Id); $summary.quarantine.entriesCreated = $ctx.EntryIds.Count }
+}
+function Invoke-E2EIsolate([string[]]$Paths, [string]$LogName, [switch]$NoRisk, [scriptblock]$Hook, $Operator, [scriptblock]$MoveImpl) {
     $entries = @(foreach ($p in $Paths) { [pscustomobject]@{ Source = 'e2e-iso'; Path = $p; Fingerprint = $null } })
-    $op = New-Operator
+    $op = $(if ($Operator) { $Operator } else { New-Operator })
     $a = @{ Entries = $entries; PlanPresenter = $isoPresenter; ConfirmationReader = $op.Reader; InventoryArgs = $ia; LogFile = (New-E2ELogPath $LogName); Interaction = $interaction }
     if ($Leg -eq 'A' -and -not $NoRisk) { $a['AcceptB1ResidualRisk'] = $true }
     if ($Hook) { $a['BeforeMoveHook'] = $Hook }
+    # The engine's existing mover seam: a wrapper that calls the REAL mover with the engine's own arguments (ISO-P5b).
+    if ($MoveImpl) { $a['MoveTreeImpl'] = $MoveImpl }
     $res = Invoke-AtmIsolate @a
+    Add-EntryId ([string]$res.EntryId)
     return [pscustomobject]@{ Res = $res; Log = $a.LogFile; Calls = $op.Calls }
 }
-function Invoke-E2EIsolateChurn([string]$Label, [string]$LogBase, [scriptblock]$Hook) {
+function Invoke-E2EIsolateChurn([string]$Label, [string]$LogBase, [scriptblock]$Hook, [scriptblock]$MoveImpl) {
     # Up to 3 complete, fresh runs. PLAN_CHANGED_BEFORE_EXECUTION and REVALIDATION_REFUSED are the engine's fail-closed
     # refusals when the set changed after the plan (with the B1 exception: a process identity not inspectable that was
     # not in the plan); nothing is moved then. Each refusal is explained by comparing the identities recorded in the
@@ -245,7 +286,7 @@ function Invoke-E2EIsolateChurn([string]$Label, [string]$LogBase, [scriptblock]$
     Assert-Entry $path
     $churn = New-Object System.Collections.Generic.List[object]
     for ($n = 1; $n -le 3; $n++) {
-        $c = Invoke-E2EIsolate -Paths @($path) -LogName "$LogBase-$n.jsonl" -Hook $Hook
+        $c = Invoke-E2EIsolate -Paths @($path) -LogName "$LogBase-$n.jsonl" -Hook $Hook -MoveImpl $MoveImpl
         if ($c.Res.Aborted -cne 'PLAN_CHANGED_BEFORE_EXECUTION' -and $c.Res.Aborted -cne 'REVALIDATION_REFUSED') {
             return [pscustomobject]@{ Res = $c.Res; Log = $c.Log; Calls = $c.Calls; Attempts = $n; Churn = $churn.ToArray(); Exhausted = $false }
         }
@@ -273,8 +314,6 @@ function Assert-Isolated($C, [string]$Label) {
     # from their files, the derived state; the original path gone and the payload carrying this run's nonce.
     $r = $C.Res
     $root = $ctx.Roots[$Label]
-    # Any entry this run created is attributed to it first (the quarantine snapshot allows only those), even if it stopped.
-    if ($r.EntryId) { $ctx.EntryIds.Add([string]$r.EntryId); $summary.quarantine.entriesCreated = $ctx.EntryIds.Count }
     Assert (-not $r.Aborted -and -not $r.StoppedBy) "Aborted=$($r.Aborted) StoppedBy=$($r.StoppedBy) rejected=$(@($r.Rejected | ForEach-Object { Get-Codes $_.Reasons }) -join ';')"
     Assert (@($r.Results).Count -eq 1 -and $r.Results[0].Outcome -ceq 'COMPLETE' -and $r.Results[0].Moved -eq $true -and $r.Results[0].Verified -eq $true) "resultado: $(@($r.Results | ForEach-Object { $_.Outcome }) -join ',')"
     Assert ([string]$r.EntryId -cmatch '^\d{8}T\d{6}Z-[0-9a-f]{8}$') 'id da entrada fora do formato'
@@ -306,14 +345,15 @@ function Assert-Isolated($C, [string]$Label) {
 }
 
 $lockHelper = Join-Path $WorkDir 'lock-helper.ps1'
-[IO.File]::WriteAllText($lockHelper, @'
+# A child (ISO-P5b) never rewrites the helpers the parent may be running.
+if (-not $ChildMode) { [IO.File]::WriteAllText($lockHelper, @'
 param([string]$Dll, [string]$Out)
 # B8 evidence from ANOTHER process: try the product lock once (never waits) and release it at once.
 Add-Type -Path $Dll
 $l = [AgentTempManager.AtmCleanLock]::TryAcquire('Global\AgentTempManager.Clean')
 [IO.File]::WriteAllText($Out, [string]$l.Status)
 if ($l.Acquired) { $rc = $l.Release(); if ($null -ne $rc) { [IO.File]::AppendAllText($Out, '|RELEASE_' + $rc) } }
-'@)
+'@) }
 function Invoke-LockProbe([string]$Tag) {
     $out = Join-Path $WorkDir "lock-$Tag.txt"
     $null = & $shellExe -NoProfile -ExecutionPolicy Bypass -File $lockHelper -Dll (Join-Path $lib 'AgentTempManager.Native.dll') -Out $out 2>&1
@@ -327,6 +367,105 @@ function Set-SimulatedOld([string[]]$Files, [string[]]$Dirs) {
 function Set-AccountOwner([string]$Path) {
     # Leg B: items created elevated are owned by Administrators; the profile's own roots are owned by the account.
     foreach ($it in @(@(Get-Item -LiteralPath $Path -Force) + @(Get-ChildItem -LiteralPath $Path -Recurse -Force))) { $a = Get-Acl -LiteralPath $it.FullName; $a.SetOwner($me.User); Set-Acl -LiteralPath $it.FullName -AclObject $a }
+}
+
+# ---------------------------------------------------------------------------------------------- ISO-P5b helpers
+# A file held open by ANOTHER process of this harness: the path is handed over in a request file (never on the command
+# line, so the runtime evidence does not see it as a reference); it ends by itself on a release file or a deadline.
+$holdHelper = Join-Path $WorkDir 'hold-helper.ps1'
+if (-not $ChildMode) { [IO.File]::WriteAllText($holdHelper, @'
+param([string]$Request, [string]$Share, [string]$Ready, [string]$Release)
+$path = [IO.File]::ReadAllText($Request)
+$sh = $(if ($Share -eq 'None') { [IO.FileShare]::None } else { [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete })
+$h = [IO.File]::Open($path, 'Open', 'Read', $sh)
+try { [IO.File]::WriteAllText($Ready, '1'); $n = 0; while (-not (Test-Path -LiteralPath $Release) -and $n -lt 1800) { Start-Sleep -Milliseconds 100; $n++ } } finally { $h.Dispose() }
+'@) }
+function Start-HoldProcess([string]$File, [string]$Share, [string]$Tag) {
+    $req = Join-Path $WorkDir "hold-$Tag.request"; $ready = Join-Path $WorkDir "hold-$Tag.ready"; $release = Join-Path $WorkDir "hold-$Tag.release"
+    [IO.File]::WriteAllText($req, $File)
+    $psi = New-Object Diagnostics.ProcessStartInfo($shellExe, ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Request "{1}" -Share {2} -Ready "{3}" -Release "{4}"' -f $holdHelper, $req, $Share, $ready, $release))
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.WorkingDirectory = $WorkDir
+    $p = [Diagnostics.Process]::Start($psi)
+    $n = 0; while (-not (Test-Path -LiteralPath $ready) -and -not $p.HasExited -and $n -lt 600) { Start-Sleep -Milliseconds 100; $n++ }
+    return [pscustomobject]@{ Process = $p; Ready = (Test-Path -LiteralPath $ready); Release = $release }
+}
+function Stop-HoldProcess($H) {
+    # The helper releases the file and ends by itself (never terminated).
+    [IO.File]::WriteAllText($H.Release, '1')
+    if (-not $H.Process.WaitForExit(120000)) { throw 'processo auxiliar nao terminou (nunca encerrado a forca)' }
+}
+function New-RefusedMoveStub([string]$Reason) {
+    # What the wrapper hands back when its attack could not be set up: the real mover is NOT called then.
+    return [pscustomobject]@{ Moved = $false; Verified = $false; RenameStatus = $null; AbortReason = $Reason; FilesAfter = $null; DirsAfter = $null; BytesAfter = $null; DigestPlanned = $null; DigestAfter = $null }
+}
+function Start-IsoChild([string]$Mode, [string]$Root, [string]$LogName) {
+    # This script again, as a child of the same account (real lock name); it ends by itself and is never terminated.
+    $tag = [IO.Path]::GetFileNameWithoutExtension($LogName)
+    $k = [pscustomobject]@{ Out = (Join-Path $WorkDir "child-$tag.txt"); Ready = (Join-Path $WorkDir "child-$tag.ready"); Release = (Join-Path $WorkDir "child-$tag.release"); Log = (New-E2ELogPath $LogName); Process = $null; So = $null; Se = $null }
+    $argLine = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Leg {1} -InstallDir "{2}" -SummaryFile "{3}" -WorkDir "{4}" -DisposableMachine -ChildMode {5} -ChildRoot "{6}" -ChildLog "{7}" -ChildOut "{8}" -ChildReady "{9}" -ChildRelease "{10}"' -f $PSCommandPath, $Leg, $InstallDir, (Join-Path $WorkDir "child-summary-$tag.json"), $WorkDir, $Mode, $Root, $k.Log, $k.Out, $k.Ready, $k.Release
+    $psi = New-Object Diagnostics.ProcessStartInfo($shellExe, $argLine)
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.WorkingDirectory = $WorkDir
+    $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    $k.Process = [Diagnostics.Process]::Start($psi)
+    $k.So = $k.Process.StandardOutput.ReadToEndAsync(); $k.Se = $k.Process.StandardError.ReadToEndAsync()
+    return $k
+}
+function Wait-IsoChild($K) {
+    if (-not $K.Process.WaitForExit(900000)) { throw 'processo filho nao terminou em 15 min (nunca encerrado a forca)' }
+    $K.Process.WaitForExit()
+    $text = ([string]$K.So.Result + ' ' + [string]$K.Se.Result) -replace '\s+', ' '
+    return [pscustomobject]@{ Exit = $K.Process.ExitCode; Out = $(if (Test-Path -LiteralPath $K.Out) { [IO.File]::ReadAllText($K.Out) } else { $null }); Log = $K.Log
+        Tail = $(if ($text.Length -gt 400) { $text.Substring($text.Length - 400) } else { $text.Trim() }) }
+}
+function Invoke-IsoChild {
+    # Child mode: one run of its own on -ChildRoot (the parent checked the entry before starting it), then one line.
+    $calls = @{ Presenter = 0 }
+    $op = New-Operator
+    $entries = @([pscustomobject]@{ Source = 'e2e-iso-child'; Path = $ChildRoot; Fingerprint = $null })
+    if ($ChildMode -ceq 'K') {
+        # The REAL mover with the engine's own arguments, then this process ends by itself before move-result
+        # (Environment.Exit: never a forced termination); the lock and the log are left as an interrupted run leaves them.
+        $kMove = {
+            param($c, $entrySession, $name)
+            $m = [AgentTempManager.AtmMover]::MoveTree($c.Path, $c.Files, $c.Dirs, $c.Bytes, $c.NewestWriteTimeUtc.Ticks, $entrySession, $name, $null)
+            [IO.File]::WriteAllText($ChildOut, ('EXITED|{0}|{1}|{2}' -f [IO.Path]::GetFileName([string]$entrySession.ParentPath), [bool]$m.Moved, [bool]$m.Verified))
+            [Environment]::Exit(7)
+        }
+        $pres = { param($verified, $rejected, $inventory, $planId) $calls.Presenter++ }.GetNewClosure()
+        $a = @{ Entries = $entries; PlanPresenter = $pres; ConfirmationReader = $op.Reader; InventoryArgs = $ia; LogFile = $ChildLog; Interaction = $interaction; MoveTreeImpl = $kMove }
+        if ($Leg -eq 'A') { $a['AcceptB1ResidualRisk'] = $true }
+        $res = Invoke-AtmIsolate @a
+    } else {
+        # The deletion gate of clean, opened in THIS child's memory only, so that clean reaches the lock; the final phrase
+        # is always wrong (CleanHold) or never asked (CleanTry: the lock is expected busy): nothing is deleted.
+        $script:AtmRealDeletionEnabled = $true
+        $holdInner = $op.Reader
+        $reader = $op.Reader
+        if ($ChildMode -ceq 'CleanHold') {
+            $reader = {
+                param($phrase, $kind, $rootPath, $choices, $info)
+                if ($kind -ceq 'confirm') {
+                    [IO.File]::WriteAllText($ChildReady, '1')
+                    $n = 0; while (-not (Test-Path -LiteralPath $ChildRelease) -and $n -lt 3000) { Start-Sleep -Milliseconds 100; $n++ }
+                    return 'APAGAR 1 CAMINHOS ZZZZZZZZ'
+                }
+                & $holdInner $phrase $kind $rootPath $choices $info
+            }
+        }
+        $pres = { param($verified, $rejected, $inventory) $calls.Presenter++ }.GetNewClosure()
+        $a = @{ Entries = $entries; PlanPresenter = $pres; ConfirmationReader = $reader; InventoryArgs = $ia; LogFile = $ChildLog; Interaction = $interaction }
+        if ($Leg -eq 'A') { $a['AcceptB1ResidualRisk'] = $true }
+        $res = Invoke-AtmClean @a
+    }
+    [IO.File]::WriteAllText($ChildOut, ('NOT_EXITED|{0}|{1}|{2}|{3}' -f $res.Aborted, $res.StoppedBy, $calls.Presenter, [bool]$res.LogCreated))
+}
+if ($ChildMode) {
+    if (-not $ChildRoot -or -not $ChildLog -or -not $ChildOut) { throw 'modo filho sem raiz, log ou saida' }
+    # Clean and isolate take the lock before any inventory: the installed library is loaded here first, by the engine's
+    # own loader (only if its SHA-256 matches the manifest).
+    Initialize-AtmNative -LibDir $lib
+    Invoke-IsoChild
+    exit 0
 }
 
 # ---------------------------------------------------------------------------------------------- plant
@@ -379,6 +518,10 @@ Case 'plant' {
         $ctx.Roots[$label] = [pscustomobject]@{ Label = $label; Id = $id; Slug = $slug; Scope = (Join-Path $ctx.Base $slug); Path = $root; Transcript = $tr }
     }
     if ($isAdmin) { Set-AccountOwner $ctx.Tmp }
+    # ISO-P5b: the target of the junction swapped in for a root (outside the base, never a planted root).
+    $ctx.Sentinel = Join-Path $runRoot 'sentinel-jswap'
+    [void][IO.Directory]::CreateDirectory($ctx.Sentinel)
+    [IO.File]::WriteAllText((Join-Path $ctx.Sentinel 'keep.txt'), "sentinel: never moved`n")
     # A pause so that the directory times are settled, then the SIMULATION.
     Start-Sleep -Seconds 2
     foreach ($label in $labels) {
@@ -396,7 +539,7 @@ Case 'plant' {
             [Environment]::SetEnvironmentVariable($pair[0], $pair[1], 'Process')
         }
     } finally { $k.Close() }
-    "$($labels.Count) roots, one scope each (set back ${shiftHours}h = SIMULATION), 3 files each, transcripts; user environment set"
+    "$($labels.Count) roots, one scope each (set back ${shiftHours}h = SIMULATION), 3 files each, transcripts; a sentinel outside the base; user environment set"
 }
 Case 'discovery' {
     Assert ($ctx.Roots.Count -eq $labels.Count) 'plantio indisponivel'
@@ -428,6 +571,61 @@ Case 'discovery' {
 }
 $needEligible = { if (-not $ctx.Eligible) { NotTested $(if ($Leg -eq 'B') { 'leg B: the measured process coverage is not complete (discovery); isolation only with complete coverage, never forced' } else { 'no planted root reached the expected category (discovery)' }) } }
 
+Case 'measure-6.1-rename-open-handle' {
+    # Contract section 6.1, in this harness's summary (both legs; no gate involved): the installed mover on trees of this
+    # run root (outside the base, never an entry), into a destination pinned by AtmSafeCreate: nothing open, a file open
+    # exclusively, a file open with full sharing, and a process (ending by itself) whose working directory is inside.
+    Assert ($null -ne $ctx['LogDir']) 'raiz de execucao indisponivel'
+    $m = Join-Path $runRoot 'm61'
+    [void][IO.Directory]::CreateDirectory((Join-Path $m 'q'))
+    $q = [AgentTempManager.AtmSafeCreate]::Pin((Join-Path $m 'q'))
+    $out = New-Object System.Collections.Generic.List[string]
+    try {
+        if (-not $q.IsPinned) { return (NotTested "destination not pinned on this image: $($q.Error)") }
+        $e = [AgentTempManager.AtmSafeCreate]::CreateNewDirectory($q, 'e', $mySid)
+        try {
+            if (-not $e.IsPinned) { return (NotTested "destination not created on this image: $($e.Error)") }
+            $n = 0
+            foreach ($case in @('none', 'file-exclusive', 'file-shared', 'cwd')) {
+                $n++
+                $r = Join-Path $m "t$n\root"
+                [void][IO.Directory]::CreateDirectory((Join-Path $r 'd')); [IO.File]::WriteAllText((Join-Path $r 'd\f.txt'), 'x'); [IO.File]::WriteAllText((Join-Path $r 'g.txt'), 'yy')
+                # NTFS updates directory times lazily after recent creations: scan until two scans agree (10 s at most).
+                $s = $null; $prev = $null
+                for ($i = 0; $i -lt 20 -and $null -eq $s; $i++) {
+                    Start-Sleep -Milliseconds 500
+                    $cur = [AgentTempManager.AtmScanner]::ScanTree($r, 3, 4096)
+                    if ($null -ne $prev -and $cur.Files -eq $prev.Files -and $cur.Dirs -eq $prev.Dirs -and $cur.Bytes -eq $prev.Bytes -and $cur.NewestWriteTimeUtc -eq $prev.NewestWriteTimeUtc) { $s = $cur }
+                    $prev = $cur
+                }
+                if ($null -eq $s) { $s = $prev }
+                $h = $null; $p = $null
+                if ($case -eq 'file-exclusive') { $h = [IO.File]::Open((Join-Path $r 'd\f.txt'), 'Open', 'ReadWrite', 'None') }
+                if ($case -eq 'file-shared') { $h = [IO.File]::Open((Join-Path $r 'd\f.txt'), 'Open', 'Read', ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)) }
+                if ($case -eq 'cwd') {
+                    $psi = New-Object Diagnostics.ProcessStartInfo($shellExe, '-NoProfile -NonInteractive -Command Start-Sleep -Seconds 8')
+                    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.WorkingDirectory = (Join-Path $r 'd')
+                    $p = [Diagnostics.Process]::Start($psi); Start-Sleep -Milliseconds 2000
+                }
+                try { $mv = [AgentTempManager.AtmMover]::MoveTree($r, $s.Files, $s.Dirs, $s.Bytes, $s.NewestWriteTimeUtc.Ticks, $e, "p$n", $null) }
+                finally {
+                    if ($null -ne $h) { $h.Dispose() }
+                    # The helper ends by itself (never terminated).
+                    if ($null -ne $p -and -not $p.WaitForExit(60000)) { throw 'processo com diretorio de trabalho na arvore nao terminou' }
+                }
+                $state = $(if ($mv.Moved -and $mv.Verified) { 'MOVED_VERIFIED' } elseif ([string]$mv.AbortReason -like 'PLAN_DIFFERS*') { 'NOT_TESTED_PLAN_DIFFERS' } elseif ($mv.Moved) { 'MOVED_' + ([regex]::Match([string]$mv.AbortReason, '^[A-Z0-9_]+')).Value } elseif ([IO.File]::Exists((Join-Path $r 'd\f.txt'))) { ([regex]::Match([string]$mv.AbortReason, '^[A-Z0-9_]+')).Value + '_SOURCE_INTACT' } else { ([regex]::Match([string]$mv.AbortReason, '^[A-Z0-9_]+')).Value + '_SOURCE_MISSING' })
+                $out.Add("$case=$state")
+            }
+        } finally { $e.Dispose() }
+    } finally { $q.Dispose() }
+    $line = $out -join '|'
+    $summary.section61 = $line
+    Assert ($out[0] -match '^none=(MOVED_VERIFIED|NOT_TESTED_PLAN_DIFFERS)$') "mover: $line"
+    foreach ($x in $out[1..3]) { Assert ($x -match '=(MOVED_VERIFIED|[A-Z_]+_SOURCE_INTACT|NOT_TESTED_PLAN_DIFFERS)$') "resultado: $x" }
+    if ($line -match 'NOT_TESTED_PLAN_DIFFERS') { return (NotTested "a tree kept changing under the scan: $line") }
+    "$((Get-CimInstance -ClassName Win32_OperatingSystem -Property Caption).Caption) $env:PROCESSOR_ARCHITECTURE`: $line"
+}
+
 # ---------------------------------------------------------------------------------------------- snapshots before the runs
 if ($null -ne $ctx['LogDir'] -and $ctx.Roots.Count -eq $labels.Count) {
     $ctx.RunBefore = Get-Snapshot $runRoot ([long]::MaxValue)
@@ -436,7 +634,7 @@ if ($null -ne $ctx['LogDir'] -and $ctx.Roots.Count -eq $labels.Count) {
 }
 function Assert-QuarantineUnchanged([string]$What) {
     Assert ($null -ne $ctx['QBefore']) 'sem fotografia da quarentena'
-    $d = Compare-Snapshot $ctx.QBefore (Get-Snapshot $qArea ([long]::MaxValue))
+    $d = Compare-Snapshot $ctx.QBefore (Get-Snapshot $qArea ([long]::MaxValue) -Skip @($ctx.QSkip))
     $bad = @(@(@($d.Removed) + @($d.Changed) + @($d.Added)) | Where-Object { $k = $_; @($ctx.EntryIds | Where-Object { Test-Under $k ('Q\' + $_) }).Count -eq 0 -and $k -ine 'Q' })
     Assert ($bad.Count -eq 0) "$What`: $($bad.Count) mudanca(s) na area da quarentena fora das entradas desta execucao"
 }
@@ -532,7 +730,7 @@ Case 'ISO-restore-conflict-alternative' {
     $null = Assert-Isolated $c 'conflict'
     $id = $ctx.Iso['conflict']; $root = $ctx.Roots['conflict']
     # The original path taken again (as an agent would recreate it): this run's nonce, other content, set back too.
-    $ctx.ConflictTouched = $true
+    $ctx.Touched.Add($root.Scope.Substring($runRoot.Length).TrimStart('\'))
     [void][IO.Directory]::CreateDirectory((Join-Path $root.Path 'scratchpad'))
     [IO.File]::WriteAllText((Join-Path $root.Path 'scratchpad\RECREATED.txt'), "recreated after the isolation`n")
     [IO.File]::WriteAllText((Join-Path $root.Path 'ATM-E2E-NONCE.txt'), $nonce)
@@ -591,15 +789,322 @@ Case 'ISO-purge-one-entry' {
     "EXPURGAR <id8> 3 ARQUIVOS after the purge's own declarations (task,results,purge): the real deleter COMPLETE, verified gone; the entry and its manifest kept as the trail; log: $types; manifest: $mt; state PURGED; $(Get-AttemptText $c)"
 }
 
+# ---------------------------------------------------------------------------------------------- ISO-P5b
+function Assert-StoppedRefused($C, [string]$Label, [string]$What) {
+    # A run stopped by the real mover's refusal: one result REFUSED, nothing moved, the log and the manifest read back,
+    # the entry FAILED with no payload, the root identical by SHA-256, size and write time. Returns the mover's code.
+    $r = $C.Res
+    Assert ($r.StoppedBy -ceq 'STOPPED_AFTER_REFUSED' -and @($r.Results).Count -eq 1 -and $r.Results[0].Outcome -ceq 'REFUSED' -and $r.Results[0].Moved -eq $false) "$What`: Aborted=$($r.Aborted) StoppedBy=$($r.StoppedBy) resultado=$(@($r.Results | ForEach-Object { $_.Outcome }) -join ',')"
+    $code = ([regex]::Match([string]$r.Results[0].AbortReason, '^[A-Z0-9_]+')).Value
+    $recs = Read-E2ELog $C.Log
+    $types = Get-Types $recs
+    Assert ($types -ceq 'run-start,plan,confirmation,plan-check,move-intent,move-result,run-end' -and $recs[5].outcome -ceq 'REFUSED' -and $recs[6].stoppedBy -ceq 'STOPPED_AFTER_REFUSED') "$What`: log $types"
+    $man = Read-E2ELog (Join-Path $r.EntryPath 'manifest.jsonl')
+    $mt = Get-Types $man
+    Assert ($mt -ceq 'entry,move-intent,move-result' -and $man[2].outcome -ceq 'REFUSED') "$What`: manifesto $mt"
+    $e = Get-AtmQuarantineEntry -Id $r.EntryId
+    Assert ($null -ne $e -and $e.State -ceq 'FAILED' -and -not $e.PayloadPresent) "$What`: estado $(if ($e) { $e.State })"
+    return [pscustomobject]@{ Code = $code; Types = $types; Manifest = $mt }
+}
+function Assert-TreeSame([string]$Path, $Tree, [string]$What) {
+    $d = Compare-Snapshot $Tree (Get-Snapshot $Path ([long]::MaxValue))
+    Assert ((Get-DiffCount $d) -eq 0) "$What`: arvore alterada ($($d.Removed.Count) ausentes, $($d.Added.Count) novas, $($d.Changed.Count) alteradas)"
+}
+
+Case 'ISO-open-file-before-plan' {
+    if ($Leg -eq 'B') { return (NotTested 'leg B: B1 (coverage measured incomplete) refuses before the in-use probe, so the probe is not observable in this leg; never forced') }
+    $nt = & $needEligible; if ($nt) { return $nt }
+    $root = $ctx.Roots['openA']
+    Assert-Entry $root.Path
+    $f = Join-Path $root.Path 'scratchpad\SYNTHETIC.txt'
+    $h = Start-HoldProcess $f 'None' 'openA'
+    try {
+        Assert $h.Ready 'processo auxiliar nao abriu o arquivo'
+        $probe = Get-Codes @((Get-AtmLockProbeReasons $root.Path).Reasons)
+        Assert ($probe -match 'EM_USO') "sondagem direta sem EM_USO: $probe"
+        $c = Invoke-E2EIsolate -Paths @($root.Path) -LogName 'ISO-openA.jsonl'
+    } finally { Stop-HoldProcess $h }
+    Assert ($c.Res.Aborted -ceq 'NENHUM_CAMINHO_ISOLAVEL' -and $c.Calls.Count -eq 0 -and -not (Test-Path -LiteralPath $c.Log)) "Aborted=$($c.Res.Aborted)"
+    $codes = Get-Codes $c.Res.Rejected[0].Reasons
+    Assert ($codes -match 'COBERTURA_DE_PROCESSOS_INCOMPLETA') "razoes: $codes"
+    Assert-TreeSame $root.Path $root.Tree 'raiz'
+    Assert-QuarantineUnchanged 'arquivo aberto antes do plano'
+    "a file held (no sharing) by another process of the harness before the plan: the in-use probe sees it (EM_USO) and removes the B1 exception (F6), so the root is refused ($codes), NENHUM_CAMINHO_ISOLAVEL; no question, no log, root and quarantine unchanged"
+}
+Case 'ISO-open-file-in-move-window' {
+    $nt = & $needEligible; if ($nt) { return $nt }
+    $root = $ctx.Roots['openB']
+    # Between the revalidation and the mover: another process of the harness opens a file of the root with full sharing,
+    # then the REAL mover runs with the engine's own arguments (section 6.1: the rename is refused, the source intact).
+    $isoHold = @{ H = $null; File = (Join-Path $root.Path 'scratchpad\SYNTHETIC.txt'); Ready = $false }
+    $mvImpl = {
+        param($c, $entrySession, $name)
+        $isoHold.H = Start-HoldProcess $isoHold.File 'Full' 'openB'
+        $isoHold.Ready = [bool]$isoHold.H.Ready
+        if (-not $isoHold.Ready) { New-RefusedMoveStub 'E2E_ATTACK_NOT_APPLIED' }
+        else { [AgentTempManager.AtmMover]::MoveTree($c.Path, $c.Files, $c.Dirs, $c.Bytes, $c.NewestWriteTimeUtc.Ticks, $entrySession, $name, $null) }
+    }
+    try { $c = Invoke-E2EIsolateChurn -Label 'openB' -LogBase 'ISO-openB' -MoveImpl $mvImpl } finally { if ($null -ne $isoHold.H) { Stop-HoldProcess $isoHold.H } }
+    if ($c.Exhausted) { return (Resolve-Exhausted $c) }
+    Assert $isoHold.Ready 'ataque nao aplicado: o processo auxiliar nao abriu o arquivo'
+    $s = Assert-StoppedRefused $c 'openB' 'mover'
+    Assert-TreeSame $root.Path $root.Tree 'raiz'
+    "a file held open (full sharing) by another process of the harness between the revalidation and the real mover: the mover refused ($($s.Code)), nothing moved, STOPPED_AFTER_REFUSED; log $($s.Types); manifest $($s.Manifest); entry FAILED with no payload; root identical; $(Get-AttemptText $c)"
+}
+Case 'ISO-interrupt-after-move-intent' {
+    $nt = & $needEligible; if ($nt) { return $nt }
+    $root = $ctx.Roots['interrupt']
+    Assert-Entry $root.Path
+    # A child of the same account isolates the root and ends by itself right after the real mover, before move-result.
+    $ctx.Touched.Add($root.Scope.Substring($runRoot.Length).TrimStart('\'))
+    $tries = New-Object System.Collections.Generic.List[string]
+    $k = $null
+    for ($n = 1; $n -le 3 -and $null -eq $k; $n++) {
+        $w = Wait-IsoChild (Start-IsoChild 'K' $root.Path "ISO-interrupt-$n.jsonl")
+        if ($w.Exit -eq 7) { $k = $w; break }
+        Assert ($w.Exit -eq 0 -and $w.Out -and ($w.Out -cmatch '^NOT_EXITED\|(PLAN_CHANGED_BEFORE_EXECUTION|REVALIDATION_REFUSED)\|')) "filho saiu com $($w.Exit): $($w.Out) [$($w.Tail)]"
+        $tries.Add(($w.Out -split '\|')[1])
+    }
+    if ($null -eq $k) { return (NotTested "the child was refused before the mover in all 3 attempts (process churn): $($tries -join ', ')") }
+    $p = @($k.Out -split '\|')
+    Assert ($p.Count -eq 4 -and $p[0] -ceq 'EXITED' -and $p[2] -ceq 'True' -and $p[3] -ceq 'True') "saida do filho: $($k.Out)"
+    $id = $p[1]
+    Assert ($id -cmatch '^\d{8}T\d{6}Z-[0-9a-f]{8}$') 'id da entrada do filho fora do formato'
+    Add-EntryId $id
+    $lt = Get-Types (Read-E2ELog $k.Log)
+    Assert ($lt -ceq 'run-start,plan,confirmation,plan-check,move-intent') "o log do filho deve terminar no move-intent: $lt"
+    $e = Get-AtmQuarantineEntry -Id $id
+    Assert ($null -ne $e -and $e.State -ceq 'INCOMPLETE' -and $e.Pending -ceq 'move' -and $e.PayloadPresent -and -not (Test-Path -LiteralPath $root.Path)) "entrada: $(if ($e) { $e.State + '/' + $e.Pending })"
+    $mt0 = Get-Types (Read-E2ELog (Join-Path $e.Path 'manifest.jsonl'))
+    Assert ($mt0 -ceq 'entry,move-intent') "manifesto antes da reconciliacao: $mt0"
+    # The restore reconciles the entry first (T-ISO-5). A lock left abandoned by the child is reported once by the engine.
+    $abandoned = $false
+    $op = New-Operator
+    $res = Invoke-AtmRestore -Id $id -PlanPresenter $rstPresenter -ConfirmationReader $op.Reader -InventoryArgs $ia -LogFile (New-E2ELogPath 'ISO-interrupt-restore.jsonl') -Interaction $interaction
+    if ($res.Aborted -ceq 'CLEAN_LOCK_ABANDONED') {
+        $abandoned = $true
+        $op = New-Operator
+        $res = Invoke-AtmRestore -Id $id -PlanPresenter $rstPresenter -ConfirmationReader $op.Reader -InventoryArgs $ia -LogFile (New-E2ELogPath 'ISO-interrupt-restore-2.jsonl') -Interaction $interaction
+    }
+    Assert (-not $res.Aborted -and -not $res.StoppedBy) "Aborted=$($res.Aborted) StoppedBy=$($res.StoppedBy) razoes=$(Get-PlanCodes $res)"
+    Assert ($res.Plan.Reconcile -eq $true -and $res.Plan.Conflict -eq $false -and @($res.Results).Count -eq 1 -and $res.Results[0].Outcome -ceq 'COMPLETE' -and $res.Results[0].Verified -eq $true) 'restauracao sem reconciliacao ou incompleta'
+    $types = Get-Types (Read-E2ELog $res.LogFile)
+    Assert ($types -ceq 'run-start,confirmation,plan-check,reconcile,restore-intent,restore-result,run-end') "log da restauracao: $types"
+    $e2 = Get-AtmQuarantineEntry -Id $id
+    $mt = Get-Types (Read-E2ELog (Join-Path $e2.Path 'manifest.jsonl'))
+    Assert ($mt -ceq 'entry,move-intent,reconcile,restore-intent,restore-result' -and $e2.State -ceq 'RESTORED' -and -not $e2.PayloadPresent) "manifesto: $mt; estado $($e2.State)"
+    Assert-TreeSame $root.Path $root.Tree 'raiz restaurada'
+    "a child ended by itself right after the real mover (exit 7, never terminated): log ends at move-intent, manifest $mt0, entry INCOMPLETE (move) with the payload present and the original absent; the restore reconciled it first (T-ISO-5$(if ($abandoned) { '; the lock left abandoned by the child reported once as CLEAN_LOCK_ABANDONED' })): log $types, manifest $mt, RESTORED, tree identical$(if ($tries.Count) { '; earlier attempts: ' + ($tries -join ', ') })"
+}
+Case 'ISO-concurrency-isolate-holds-clean-busy' {
+    $nt = & $needEligible; if ($nt) { return $nt }
+    $conc = $ctx.Roots['conc']; $xc = $ctx.Roots['xclean']
+    Assert-Entry $conc.Path; Assert-Entry $xc.Path
+    # This process isolates and holds the lock through its questions; at the final phrase a child runs a complete clean
+    # (its own deletion gate opened in its memory) and must be refused at once. Then a wrong phrase: nothing is moved.
+    $isoConc = @{ Child = $null }
+    $concInner = (New-Operator).Reader
+    $op = @{ Calls = (New-Object System.Collections.Generic.List[string]) }
+    $op.Reader = {
+        param($phrase, $kind, $rootPath, $choices, $info)
+        $op.Calls.Add([string]$kind)
+        if ($kind -ceq 'confirm') {
+            if ($null -eq $isoConc.Child) { $isoConc.Child = Wait-IsoChild (Start-IsoChild 'CleanTry' $xc.Path 'ISO-X1-clean.jsonl') }
+            return 'ISOLAR 1 CAMINHOS ZZZZZZZZ'
+        }
+        & $concInner $phrase $kind $rootPath $choices $info
+    }
+    $c = Invoke-E2EIsolate -Paths @($conc.Path) -LogName 'ISO-X1-isolate.jsonl' -Operator $op
+    Assert ($null -ne $isoConc.Child) 'a limpeza concorrente nao foi iniciada'
+    $k = $isoConc.Child
+    Assert ($k.Exit -eq 0 -and $k.Out -ceq 'NOT_EXITED|CLEAN_LOCK_BUSY||0|False' -and -not (Test-Path -LiteralPath $k.Log)) "limpeza concorrente: exit $($k.Exit), $($k.Out) [$($k.Tail)]"
+    Assert ($c.Res.Aborted -ceq 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE' -and @($c.Res.Results).Count -eq 0 -and $null -eq $c.Res.EntryId) "isolamento: $($c.Res.Aborted)"
+    $types = Get-Types (Read-E2ELog $c.Log)
+    Assert ($types -ceq 'run-start,plan,confirmation,run-end') "log do isolamento: $types"
+    Assert-TreeSame $conc.Path $conc.Tree 'raiz do isolamento'
+    Assert-TreeSame $xc.Path $xc.Tree 'raiz da limpeza'
+    "isolate holding the lock at its final phrase; a complete clean of another root in a child (deletion gate open in its memory only): CLEAN_LOCK_BUSY at once (presenter never called, no log, nothing deleted); the isolation then given a wrong phrase stopped (log $types); both roots identical"
+}
+Case 'ISO-concurrency-clean-holds-isolate-busy' {
+    $nt = & $needEligible; if ($nt) { return $nt }
+    $conc = $ctx.Roots['conc']; $xc = $ctx.Roots['xclean']
+    Assert-Entry $conc.Path; Assert-Entry $xc.Path
+    # A child runs a clean (its own deletion gate opened in its memory) that holds the lock at its final phrase until
+    # released, then answers a wrong phrase: it never deletes. Meanwhile this process tries to isolate another root.
+    $k = Start-IsoChild 'CleanHold' $xc.Path 'ISO-X2-clean.jsonl'
+    $c = $null
+    try {
+        $n = 0; while (-not (Test-Path -LiteralPath $k.Ready) -and -not $k.Process.HasExited -and $n -lt 6000) { Start-Sleep -Milliseconds 100; $n++ }
+        if (Test-Path -LiteralPath $k.Ready) { $c = Invoke-E2EIsolate -Paths @($conc.Path) -LogName 'ISO-X2-isolate.jsonl' }
+    } finally { [IO.File]::WriteAllText($k.Release, '1') }
+    $w = Wait-IsoChild $k
+    Assert ($null -ne $c) "a limpeza do filho nao chegou a frase final: exit $($w.Exit), $($w.Out) [$($w.Tail)]"
+    Assert ($c.Res.Aborted -ceq 'CLEAN_LOCK_BUSY' -and -not $c.Res.LogCreated -and -not (Test-Path -LiteralPath $c.Log) -and $c.Calls.Count -eq 0) "isolamento: Aborted=$($c.Res.Aborted) log=$($c.Res.LogCreated)"
+    Assert ($w.Exit -eq 0 -and $w.Out -cmatch '^NOT_EXITED\|CONFIRMACAO_AUSENTE_OU_DIVERGENTE\|') "limpeza do filho: exit $($w.Exit), $($w.Out) [$($w.Tail)]"
+    $recs = Read-E2ELog $w.Log
+    $types = Get-Types $recs
+    Assert (@($recs | Where-Object { $_.type -ceq 'intent' }).Count -eq 0 -and @($recs | Where-Object { $_.type -ceq 'confirmation' -and $_.accepted -eq $false }).Count -eq 1 -and $recs[-1].type -ceq 'run-end') "log da limpeza: $types"
+    Assert-TreeSame $conc.Path $conc.Tree 'raiz do isolamento'
+    Assert-TreeSame $xc.Path $xc.Tree 'raiz da limpeza'
+    Assert-QuarantineUnchanged 'concorrencia'
+    "a clean in a child holding the lock at its final phrase: isolate refused CLEAN_LOCK_BUSY at once (no inventory, no question, no log, no entry); the clean then given a wrong phrase stopped without deleting (log $types, 0 intents); both roots identical"
+}
+Case 'ISO-second-volume' {
+    $nt = & $needEligible; if ($nt) { return $nt }
+    $sys = [IO.Path]::GetPathRoot($runRoot)
+    $vols = @([IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq [IO.DriveType]::Fixed -and $_.IsReady -and -not [string]::Equals($_.Name, $sys, [StringComparison]::OrdinalIgnoreCase) })
+    if ($vols.Count -eq 0) { $summary.secondVolume = 'NONE'; return (NotTested 'no second fixed volume on this runner') }
+    $vr = Join-Path $vols[0].Name ('ATM-E2E-ISO2-' + $Leg + '-' + $nonce.Substring(0, 12))
+    Assert (-not (Test-Path -LiteralPath $vr)) 'RUN_ROOT_EXISTS (segundo volume)'
+    $ds = New-Object Security.AccessControl.DirectorySecurity
+    $ds.SetSecurityDescriptorSddlForm("O:$($mySid)D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;$mySid)")
+    try { if ($PSVersionTable.PSEdition -eq 'Core') { $ext = 'System.IO.FileSystemAclExtensions' -as [type]; $null = $ext::CreateDirectory($ds, $vr) } else { $null = [IO.Directory]::CreateDirectory($vr, $ds) } }
+    catch { $summary.secondVolume = 'NOT_WRITABLE'; return (NotTested "measured: this account cannot create a folder at the root of the second fixed volume ($($_.Exception.GetType().Name))") }
+    $summary.secondVolume = 'PRESENT'
+    $tmp2 = Join-Path $vr 'tmpdir'; $base2 = Join-Path $tmp2 'claude'
+    $slug = 'C--atm-e2e-iso-vol'; $id = [guid]::NewGuid().ToString()
+    $rp = Join-Path $base2 "$slug\$id"
+    [void][IO.Directory]::CreateDirectory((Join-Path $rp 'scratchpad'))
+    [IO.File]::WriteAllText((Join-Path $rp 'scratchpad\SYNTHETIC.txt'), "synthetic ISO-P5b fixture (second volume)`n")
+    [IO.File]::WriteAllText((Join-Path $rp 'ATM-E2E-NONCE.txt'), $nonce)
+    $pj = Join-Path $ctx.Cfg "projects\$slug"; [void][IO.Directory]::CreateDirectory($pj)
+    $ctx.Touched.Add($pj.Substring($runRoot.Length).TrimStart('\'))
+    $tr = Join-Path $pj "$id.jsonl"
+    [IO.File]::WriteAllText($tr, ('{"type":"ai-title","aiTitle":"SYNTHETIC","sessionId":"' + $id + '"}' + "`n"))
+    if ($isAdmin) { Set-AccountOwner $tmp2 }
+    Start-Sleep -Seconds 2
+    Set-SimulatedOld -Files @((Join-Path $rp 'scratchpad\SYNTHETIC.txt'), (Join-Path $rp 'ATM-E2E-NONCE.txt'), $tr) -Dirs @((Join-Path $rp 'scratchpad'), $rp)
+    $ctx.ExtraBases.Add(@{ Base = $base2; Top = $vr })
+    $ctx.Roots['vol'] = [pscustomobject]@{ Label = 'vol'; Id = $id; Slug = $slug; Scope = (Join-Path $base2 $slug); Path = $rp; Transcript = $tr; Tree = (Get-Snapshot $rp ([long]::MaxValue)) }
+    $volBefore = Get-Snapshot $vr ([long]::MaxValue)
+    # The base of this run moved to the second volume for this case only (user environment and process), then back.
+    $k = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+    try { $k.SetValue('CLAUDE_CODE_TMPDIR', $tmp2, [Microsoft.Win32.RegistryValueKind]::String) } finally { $k.Close() }
+    [Environment]::SetEnvironmentVariable('CLAUDE_CODE_TMPDIR', $tmp2, 'Process')
+    try {
+        $inv = Invoke-AtmInventory @ia
+        $m = @($inv.Partitions | Where-Object { $_.Kind -ne 'BaseLooseFiles' -and [string]::Equals($_.Path, $rp, [StringComparison]::OrdinalIgnoreCase) })
+        if ($m.Count -ne 1) { return (NotTested "the root on the second volume was not inventoried through the user environment ($($m.Count))") }
+        $ctx.Roots['vol'].Path = $m[0].Path
+        $c = Invoke-E2EIsolateChurn -Label 'vol' -LogBase 'ISO-vol'
+    } finally {
+        $k = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+        try { $k.SetValue('CLAUDE_CODE_TMPDIR', $ctx.Tmp, [Microsoft.Win32.RegistryValueKind]::String) } finally { $k.Close() }
+        [Environment]::SetEnvironmentVariable('CLAUDE_CODE_TMPDIR', $ctx.Tmp, 'Process')
+    }
+    if ($c.Exhausted) { return (Resolve-Exhausted $c) }
+    $r = $c.Res
+    Assert (Test-Path -LiteralPath $rp) 'raiz do segundo volume ausente'
+    Assert-TreeSame $rp $ctx.Roots['vol'].Tree 'raiz do segundo volume'
+    $dv = Compare-Snapshot $volBefore (Get-Snapshot $vr ([long]::MaxValue))
+    Assert ((Get-DiffCount $dv) -eq 0) "segundo volume alterado: $(Get-DiffCount $dv)"
+    if ($r.Aborted -ceq 'NENHUM_CAMINHO_ISOLAVEL') {
+        $codes = Get-Codes $r.Rejected[0].Reasons
+        $summary.secondVolume = 'REFUSED_AT_PLAN'
+        if ($codes -match 'VOLUME') { return "a root on another fixed volume than the quarantine: refused at the plan ($codes); nothing created or moved" }
+        return (NotTested "the root on the second volume did not reach the volume rule; refused at the plan for other reasons: $codes")
+    }
+    $s = Assert-StoppedRefused $c 'vol' 'segundo volume'
+    Assert ($s.Code -match 'OTHER_VOLUME') "recusa do mover: $($s.Code)"
+    $summary.secondVolume = 'REFUSED_BY_MOVER'
+    "a root on another fixed volume than the quarantine: the plan does not refuse it (the target rule and the gates accept it); the real mover refused it ($($s.Code)) after move-intent, nothing moved; entry FAILED with no payload, log $($s.Types); the root and the second volume identical. Finding: contract section 4 lists a base on another volume as not isolable; the refusal happens at the mover, not at the plan; $(Get-AttemptText $c)"
+}
+Case 'ISO-junction-swapped-in-window' {
+    $nt = & $needEligible; if ($nt) { return $nt }
+    $root = $ctx.Roots['jswap']
+    $sentBefore = Get-Snapshot $ctx.Sentinel ([long]::MaxValue)
+    $ctx.Touched.Add($root.Scope.Substring($runRoot.Length).TrimStart('\'))
+    # Between the revalidation and the mover: the root is renamed aside and a junction to a sentinel outside the base takes
+    # its name; then the REAL mover runs with the engine's own arguments.
+    $isoSwap = @{ Status = $null; Aside = ($root.Path + '-aside'); Sentinel = $ctx.Sentinel }
+    $mvImpl = {
+        param($c, $entrySession, $name)
+        try {
+            [IO.Directory]::Move($c.Path, $isoSwap.Aside)
+            $null = & (Join-Path $env:SystemRoot 'System32\cmd.exe') /c mklink /J "$($c.Path)" "$($isoSwap.Sentinel)" 2>&1
+            $isoSwap.Status = $(if ((Test-Path -LiteralPath $c.Path) -and ([IO.File]::GetAttributes($c.Path) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { 'SWAPPED' } else { 'JUNCTION_NOT_CREATED' })
+        } catch { $isoSwap.Status = 'SWAP_' + $_.Exception.GetType().Name }
+        if ($isoSwap.Status -cne 'SWAPPED') { New-RefusedMoveStub 'E2E_ATTACK_NOT_APPLIED' }
+        else { [AgentTempManager.AtmMover]::MoveTree($c.Path, $c.Files, $c.Dirs, $c.Bytes, $c.NewestWriteTimeUtc.Ticks, $entrySession, $name, $null) }
+    }
+    $c = Invoke-E2EIsolateChurn -Label 'jswap' -LogBase 'ISO-jswap' -MoveImpl $mvImpl
+    if ($c.Exhausted) { return (Resolve-Exhausted $c) }
+    Assert ($isoSwap.Status -ceq 'SWAPPED') "ataque nao aplicado: $($isoSwap.Status)"
+    $s = Assert-StoppedRefused $c 'jswap' 'juncao'
+    Assert ((([IO.File]::GetAttributes($root.Path)) -band [IO.FileAttributes]::ReparsePoint) -ne 0) 'a juncao saiu do lugar'
+    Assert-TreeSame $isoSwap.Aside $root.Tree 'raiz renomeada'
+    $ds = Compare-Snapshot $sentBefore (Get-Snapshot $ctx.Sentinel ([long]::MaxValue))
+    Assert ((Get-DiffCount $ds) -eq 0) 'sentinela alterada'
+    "the root swapped for a junction to a sentinel outside the base between the revalidation and the real mover: the mover refused ($($s.Code)), nothing moved through the junction; STOPPED_AFTER_REFUSED, log $($s.Types); entry FAILED with no payload; the sentinel, the junction and the root (renamed aside) unchanged; $(Get-AttemptText $c)"
+}
+Case 'ISO-200k-files' {
+    if (-not $Heavy) { return (NotTested 'scale runs in one x64 job of the matrix only (windows-2025, installer pwsh, leg A); not this one') }
+    if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { return (NotTested 'scale runs on x64 only') }
+    $nt = & $needEligible; if ($nt) { return $nt }
+    # Planted after the run-root snapshot, last of all the cases (every later inventory would scan it), in a scope the
+    # snapshot does not enter. 200 folders of 1,000 one-byte files, then the nonce; times set back (SIMULATION).
+    $slug = 'C--atm-e2e-iso-heavy'; $id = [guid]::NewGuid().ToString()
+    $scope = Join-Path $ctx.Base $slug; $rp = Join-Path $scope $id
+    $ctx.Skip.Add($scope)
+    $ctx.Touched.Add($scope.Substring($runRoot.Length).TrimStart('\'))
+    $budget = [TimeSpan]::FromMinutes(15)
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $one = [byte[]]@(120)
+    $made = 0
+    for ($d = 0; $d -lt 200 -and $sw.Elapsed -lt $budget; $d++) {
+        $dir = Join-Path $rp ('d{0:D3}' -f $d)
+        [void][IO.Directory]::CreateDirectory($dir)
+        for ($f = 0; $f -lt 1000; $f++) { [IO.File]::WriteAllBytes((Join-Path $dir ('f{0:D4}.bin' -f $f)), $one); $made++ }
+    }
+    [IO.File]::WriteAllText((Join-Path $rp 'ATM-E2E-NONCE.txt'), $nonce)
+    $plantSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+    $summary.heavy = [ordered]@{ planned = 200000; files = $made; plantSeconds = $plantSeconds; isolateSeconds = $null; restoreSeconds = $null }
+    if ($made -lt 200000) { return (NotTested "partial measurement: $made files planted in $plantSeconds s, over the 15 min budget of the plant; the isolation was not started") }
+    $pj = Join-Path $ctx.Cfg "projects\$slug"; [void][IO.Directory]::CreateDirectory($pj)
+    $ctx.Touched.Add($pj.Substring($runRoot.Length).TrimStart('\'))
+    $tr = Join-Path $pj "$id.jsonl"
+    [IO.File]::WriteAllText($tr, ('{"type":"ai-title","aiTitle":"SYNTHETIC","sessionId":"' + $id + '"}' + "`n"))
+    Start-Sleep -Seconds 2
+    $old = [datetime]::UtcNow.AddHours(-$shiftHours)
+    foreach ($fi in (New-Object IO.DirectoryInfo $rp).EnumerateFiles('*', [IO.SearchOption]::AllDirectories)) { [IO.File]::SetLastWriteTimeUtc($fi.FullName, $old) }
+    foreach ($di in (New-Object IO.DirectoryInfo $rp).EnumerateDirectories('*', [IO.SearchOption]::TopDirectoryOnly)) { [IO.Directory]::SetLastWriteTimeUtc($di.FullName, $old) }
+    [IO.Directory]::SetLastWriteTimeUtc($rp, $old); [IO.File]::SetLastWriteTimeUtc($tr, $old)
+    $ctx.Roots['heavy'] = [pscustomobject]@{ Label = 'heavy'; Id = $id; Slug = $slug; Scope = $scope; Path = $rp; Transcript = $tr; Tree = $null }
+    $one1 = @{} + $ia; $one1['OnlyRootPath'] = $rp
+    $p0 = @((Invoke-AtmInventory @one1).Partitions | Where-Object { [string]::Equals($_.Path, $rp, [StringComparison]::OrdinalIgnoreCase) -and $_.Kind -ne 'BaseLooseFiles' })
+    Assert ($p0.Count -eq 1 -and [long]$p0[0].Files -eq 200001) "raiz pesada inventariada: $(@($p0 | ForEach-Object { $_.Files }) -join ',')"
+    $ctx.Roots['heavy'].Path = $p0[0].Path
+    $st0 = '{0}/{1}/{2}/{3}' -f $p0[0].Files, $p0[0].Dirs, $p0[0].Bytes, ([datetime]$p0[0].NewestWriteTimeUtc).ToUniversalTime().Ticks
+    $sw.Restart()
+    $c = Invoke-E2EIsolateChurn -Label 'heavy' -LogBase 'ISO-heavy'
+    $summary.heavy.isolateSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+    if ($c.Exhausted) { return (Resolve-Exhausted $c) }
+    # The quarantine snapshot does not enter the 200,000 files if they stay in the entry (a restore that failed).
+    if ($c.Res.EntryId) { $ctx.QSkip.Add((Join-Path (Join-Path $qRoot $c.Res.EntryId) 'payload')) }
+    $null = Assert-Isolated $c 'heavy'
+    $mi = @(Read-E2ELog $c.Log | Where-Object { $_.type -ceq 'move-result' })[0]
+    Assert ([long]$mi.filesAfter -eq 200001) "move-result: $($mi.filesAfter) arquivos"
+    $hid = $ctx.Iso['heavy']
+    $op = New-Operator
+    $sw.Restart()
+    $res = Invoke-AtmRestore -Id $hid -PlanPresenter $rstPresenter -ConfirmationReader $op.Reader -InventoryArgs $ia -LogFile (New-E2ELogPath 'ISO-heavy-restore.jsonl') -Interaction $interaction
+    $summary.heavy.restoreSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+    Assert (-not $res.Aborted -and -not $res.StoppedBy -and @($res.Results).Count -eq 1 -and $res.Results[0].Outcome -ceq 'COMPLETE') "restauracao: $($res.Aborted) $($res.StoppedBy) razoes=$(Get-PlanCodes $res)"
+    $p1 = @((Invoke-AtmInventory @one1).Partitions | Where-Object { [string]::Equals($_.Path, $rp, [StringComparison]::OrdinalIgnoreCase) -and $_.Kind -ne 'BaseLooseFiles' })
+    $st1 = $(if ($p1.Count -eq 1) { '{0}/{1}/{2}/{3}' -f $p1[0].Files, $p1[0].Dirs, $p1[0].Bytes, ([datetime]$p1[0].NewestWriteTimeUtc).ToUniversalTime().Ticks } else { 'MISSING' })
+    Assert ($st1 -ceq $st0) "estatisticas antes $st0, depois $st1"
+    "200,001 files (200 folders): planted in $plantSeconds s; isolated by the real mover in $($summary.heavy.isolateSeconds) s (plan, plan check, revalidation, move; move-result 200,001 files verified); restored in $($summary.heavy.restoreSeconds) s (COMPLETE); files, folders, bytes and newest write time identical before and after; $(Get-AttemptText $c)"
+}
+
 # ---------------------------------------------------------------------------------------------- snapshots after the runs
 Case 'snapshot-run-root' {
     if ($null -eq $ctx['RunBefore']) { return (NotTested 'no snapshot before the runs') }
-    $d = Compare-Snapshot $ctx.RunBefore (Get-Snapshot $runRoot ([long]::MaxValue))
+    $d = Compare-Snapshot $ctx.RunBefore (Get-Snapshot $runRoot ([long]::MaxValue) -Skip @($ctx.Skip))
     $purgeRel = $ctx.Roots['purge'].Path.Substring($runRoot.Length).TrimStart('\')
-    $conflictScopeRel = $ctx.Roots['conflict'].Scope.Substring($runRoot.Length).TrimStart('\')
     $allowed = {
         param([string]$k, [string]$kind)
-        if ($ctx.ConflictTouched -and (Test-Under $k $conflictScopeRel)) { return $true }
+        # Scopes a case changed on purpose and checked itself (conflict, interruption, junction, scale, their transcripts).
+        if (@($ctx.Touched | Where-Object { Test-Under $k $_ }).Count -gt 0) { return $true }
         # The purge root left the run root when it was isolated (purged or not afterwards).
         if ($kind -ceq 'Removed' -and $ctx.Iso.ContainsKey('purge') -and (Test-Under $k $purgeRel)) { return $true }
         if ($kind -ceq 'Added' -and $ctx.Logs.Contains($(if ($k.StartsWith('log\', [StringComparison]::OrdinalIgnoreCase)) { $k.Substring(4) } else { '' }))) { return $true }
@@ -607,11 +1112,11 @@ Case 'snapshot-run-root' {
     }
     $bad = @(@($d.Removed | Where-Object { -not (& $allowed $_ 'Removed') }) + @($d.Added | Where-Object { -not (& $allowed $_ 'Added') }) + @($d.Changed | Where-Object { -not (& $allowed $_ 'Changed') }))
     Assert ($bad.Count -eq 0) "raiz de execucao: $($bad.Count) diferenca(s) fora do alvo [$((@($bad | Select-Object -First 3)) -join '; ')]"
-    "run root: only the purged root ($(@($d.Removed).Count) removed), the conflict scope (recreated path and alternative) and this run's logs ($(@($d.Added).Count) added) differ; the restored root, the transcripts and the rest identical"
+    "run root: only the purged root ($(@($d.Removed).Count) removed), the scopes the cases changed and checked themselves ($($ctx.Touched.Count)) and this run's logs ($(@($d.Added).Count) added) differ; the restored roots, the held and contended roots, the sentinel, the transcripts and the rest identical"
 }
 Case 'snapshot-quarantine' {
     Assert-QuarantineUnchanged 'fim'
-    $d = Compare-Snapshot $ctx.QBefore (Get-Snapshot $qArea ([long]::MaxValue))
+    $d = Compare-Snapshot $ctx.QBefore (Get-Snapshot $qArea ([long]::MaxValue) -Skip @($ctx.QSkip))
     foreach ($id in $ctx.EntryIds) { Assert (Test-Path -LiteralPath (Join-Path (Join-Path $qRoot $id) 'manifest.jsonl')) 'entrada desta execucao sem manifesto' }
     "quarantine area: only this run's $($ctx.EntryIds.Count) entries added ($(@($d.Added).Count) items), 0 removed or changed outside them; every entry keeps its manifest"
 }

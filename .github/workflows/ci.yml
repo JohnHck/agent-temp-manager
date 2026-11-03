@@ -196,7 +196,8 @@ jobs:
   # is uploaded (codes and counts; the raw clean logs are not). Every matrix entry is a failing job on a FAIL.
   # 0.3.x ISO-P5a: also the REAL isolation, restore and purge of roots planted by tests/e2e/Invoke-IsolateE2E.ps1 itself,
   # in the same two legs, with the quarantine in each account's own LocalAppData; the isolation and purge gates opened only
-  # in its own process memory; never shipped; only its summary uploaded.
+  # in its own process memory; never shipped; only its summary uploaded. ISO-P5b adds the adversarial cases there, and
+  # the 200,000-file case in the windows-2025 / pwsh job only.
   install-e2e:
     name: install e2e (${{ matrix.os }}, installer ${{ matrix.installer }})
     needs: build-package
@@ -219,6 +220,8 @@ jobs:
         shell: powershell
         env:
           INSTALLER_SHELL: ${{ matrix.installer }}
+          # ISO-P5b: the 200,000-file isolation runs in one x64 job only (time measured in its summary).
+          ATM_E2E_HEAVY: ${{ (matrix.os == 'windows-2025' && matrix.installer == 'pwsh') && '1' || '0' }}
         run: |
           ./tests/e2e/Invoke-InstallE2E.ps1 -OutDir "$env:RUNNER_TEMP\atm-e2e" -InstallerShell $env:INSTALLER_SHELL -ReleaseDir "$env:RUNNER_TEMP\release-package"
           exit $LASTEXITCODE

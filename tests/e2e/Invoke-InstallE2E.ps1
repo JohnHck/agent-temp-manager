@@ -693,7 +693,12 @@ function Read-IsoSummary([string]$File, [int]$Exit, [string]$Console) {
     $bad = @($s.cases.PSObject.Properties | Where-Object { $_.Value.status -eq 'FAIL' } | ForEach-Object { "$($_.Name): $($_.Value.detail)" })
     $nt = @($s.cases.PSObject.Properties | Where-Object { $_.Value.status -eq 'NOT_TESTED' } | ForEach-Object { $_.Name })
     Assert ($bad.Count -eq 0 -and $Exit -eq 0) ("ISO FAIL (exit $Exit): " + ($bad -join ' | '))
-    "$($s.passed) PASS / 0 FAIL / $($s.notTested) NOT_TESTED [$($nt -join ', ')]; $($s.shell); coverage complete=$($s.processCoverage.complete); quarantine entries created $($s.quarantine.entriesCreated)"
+    # ISO-P5b: the section 6.1 measurement, the second volume and the scale case, from the same summary.
+    $p5b = ''
+    if ($s.PSObject.Properties['section61'] -and $s.section61) { $p5b += "; 6.1 $($s.section61)" }
+    if ($s.PSObject.Properties['secondVolume'] -and $s.secondVolume) { $p5b += "; second volume $($s.secondVolume)" }
+    if ($s.PSObject.Properties['heavy'] -and $s.heavy) { $p5b += "; 200k: $($s.heavy.files) files, plant $($s.heavy.plantSeconds) s, isolate $($s.heavy.isolateSeconds) s, restore $($s.heavy.restoreSeconds) s" }
+    "$($s.passed) PASS / 0 FAIL / $($s.notTested) NOT_TESTED [$($nt -join ', ')]; $($s.shell); coverage complete=$($s.processCoverage.complete); quarantine entries created $($s.quarantine.entriesCreated)$p5b"
 }
 Step 'iso-p5-isolate-leg-A-standard-user' {
     # Leg A: the standard user of this VM (not elevated): B1 restricted exception, its own quarantine. The harness is
@@ -703,7 +708,9 @@ Step 'iso-p5-isolate-leg-A-standard-user' {
     [IO.File]::Copy((Join-Path $PSScriptRoot 'Invoke-IsolateE2E.ps1'), $copy, $true)
     $sum = Join-Path $userDir 'iso-p5-A-summary.json'
     $con = Join-Path $userDir 'iso-p5-A-console.txt'
-    $cmdLine = "/c `"`"$installerExe`" -NoProfile -ExecutionPolicy Bypass -File `"$copy`" -Leg A -InstallDir `"$installDir`" -SummaryFile `"$sum`" -WorkDir `"$(Join-Path $userDir 'iso-A')`" -DisposableMachine > `"$con`" 2>&1`""
+    # ISO-P5b: 200,000 files only in the one x64 job the workflow marks (ATM_E2E_HEAVY=1).
+    $heavy = $(if ($env:ATM_E2E_HEAVY -eq '1') { ' -Heavy' } else { '' })
+    $cmdLine = "/c `"`"$installerExe`" -NoProfile -ExecutionPolicy Bypass -File `"$copy`" -Leg A -InstallDir `"$installDir`" -SummaryFile `"$sum`" -WorkDir `"$(Join-Path $userDir 'iso-A')`" -DisposableMachine$heavy > `"$con`" 2>&1`""
     try {
         $p = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') -ArgumentList $cmdLine -Credential $cred -LoadUserProfile -WorkingDirectory $userDir -WindowStyle Hidden -PassThru -Wait
     } catch { $script:notTested = $true; return "processo como usuario comum nao iniciou neste runner: $($_.Exception.Message)" }
