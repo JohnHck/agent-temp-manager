@@ -690,7 +690,7 @@ try {
         $text = [IO.File]::ReadAllText($out)
         [IO.File]::WriteAllText((Join-Path $OutDir 'autopurge-task-standard-user.json'), $text)
         $j = $text | ConvertFrom-Json
-        Assert (-not $j.PSObject.Properties['error']) "helper: $($j.error)"
+        Assert (-not $j.PSObject.Properties['error']) "helper: $text"
         Assert ($j.standard -and $j.entryPointInstalled -and $j.register -ceq '' -and $j.state -ceq 'PRESENT' -and $j.userIsSelf -and $j.logonType -eq 3 -and $j.runLevel -eq 0 -and $j.noPassword -and $j.actionExact -and $j.nextRunFuture) "tarefa do usuario comum: $text"
         Assert ($j.duplicate -ceq 'AUTOPURGE_TASK_EXISTS' -and $j.unregister -ceq '' -and $j.after -ceq 'ABSENT') "duplicada e remocao: $text"
     } finally {

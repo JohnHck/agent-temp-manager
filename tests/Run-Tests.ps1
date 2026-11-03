@@ -5198,7 +5198,9 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
         if ($Name -cnotmatch '^AutoPurgeTest-[0-9a-f]{8}$') { throw "nao e um nome de tarefa de teste: $Name" }
         try { (Connect-AtmTaskScheduler).GetFolder('\AgentTempManager').DeleteTask($Name, 0) } catch { $null = $_ }
     }
-    function Reset-ApSeams { $script:AtmAutoPurgeTaskNameOverride = $null; $script:AtmAutoPurgeElevationSource = $null; $script:AtmCleanConsoleSource = $null }
+    # The engine's own seams of P6b back to $null; the console seam is the suite's (set for the whole run), so each case
+    # that changes it gives back the value it found.
+    function Reset-ApSeams { param($Console) $script:AtmAutoPurgeTaskNameOverride = $null; $script:AtmAutoPurgeElevationSource = $null; $script:AtmCleanConsoleSource = $Console }
     $apStd = { [pscustomobject]@{ IsElevatedAdministrator = $false; ElevationType = 'DEFAULT'; IntegrityLevel = 'MEDIUM' } }
 
     Test-Case 'Isolamento P6b' 'Estatico: o agendador so por Connect-AtmTaskScheduler; RegisterTaskDefinition, DeleteTask, CreateFolder e NewTask uma vez cada, so nas suas funcoes; registrar so pelo agendar e remover so pelo desagendar, os dois so pela CLI nos dois subcomandos; TUI, relatorio, ponto de entrada e desinstalador nunca mudam o agendador; principal interativo e limitado, TASK_CREATE, sem senha; ordem das recusas; costuras de atribuicao unica; mesmo nome e pasta no motor e no desinstalador; textos nos dois idiomas; excecao de Write-Host do ponto de entrada' {
@@ -5295,7 +5297,7 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
                 $script:AtmAutoPurgeElevationSource = { $script:apTok }
                 Assert-Eq (Test-AtmAutoPurgeStandardToken) $c[3] "token admin=$($c[0]) $($c[1]) $($c[2])"
             }
-        } finally { Reset-ApSeams }
+        } finally { Reset-ApSeams $script:AtmCleanConsoleSource }
         # The exact match, on tasks built in memory (no scheduler).
         $mkTask = { param($Path, $User, $Logon, $Run, $Acts)
             $col = [pscustomobject]@{ Count = @($Acts).Count; Items = @($Acts) }
@@ -5329,6 +5331,7 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
         $cfgOff = New-PurConfig 'ap6b-off' $null
         $cfgOn = New-PurConfig 'ap6b-on' '{"schema":"atm.quarantine-policy/1","autoPurge":true}'
         $old = Get-AtmLanguage
+        $prevConsole = $script:AtmCleanConsoleSource
         try {
             $script:AtmAutoPurgeTaskNameOverride = $name
             if ([bool](Get-AtmIdentityState).IsElevatedAdministrator) {
@@ -5372,7 +5375,7 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
                 $t = Get-RstHost { Show-AtmAutoPurgeTaskPlan -Plan $plan -Operation 'schedule' }
                 Assert-True ($t.Contains($plan.TaskPath) -and $t.Contains((Get-AtmText 'ap.plan.trigger' 12 60 '2026-11-04 12:00:00' 120)) -and $t.Contains((Get-AtmText 'ap.plan.principal')) -and $t.Contains((Get-AtmText 'ap.plan.policyOff'))) "$lang`: plano (tarefa, gatilho, quem roda, aviso de desligada)"
             }
-        } finally { Reset-ApSeams; Set-AtmLanguage -Requested $old; Clear-ApTestTask $name }
+        } finally { Reset-ApSeams $prevConsole; Set-AtmLanguage -Requested $old; Clear-ApTestTask $name }
         # The CLI of the source in child processes: no question is asked and no task is created.
         $shell = (Get-Process -Id $PID).Path
         $cliRun = { param([string]$ArgLine) Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $srcDir 'agent-temp.ps1')`" $ArgLine") -TimeoutSec 300 }
@@ -5398,6 +5401,7 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
         $cfgOff = New-PurConfig 'ap6b-real-off' '{"schema":"atm.quarantine-policy/1","autoPurge":false}'
         $cfgOn = New-PurConfig 'ap6b-real-on' '{"schema":"atm.quarantine-policy/1","retentionDays":30,"autoPurge":true}'
         $getTask = { param($n) (Connect-AtmTaskScheduler).GetFolder('\AgentTempManager').GetTask($n) }
+        $prevConsole = $script:AtmCleanConsoleSource
         try {
             $script:AtmAutoPurgeElevationSource = $apStd
             $script:AtmCleanConsoleSource = { $true }
@@ -5411,7 +5415,10 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
             Assert-True ([int]$td.Principal.LogonType -eq 3 -and [int]$td.Principal.RunLevel -eq 0) 'logon interativo (InteractiveToken) e nivel limitado (LUA)'
             $x = [xml]$t.Xml
             $ns = New-Object Xml.XmlNamespaceManager($x.NameTable); $ns.AddNamespace('t', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
-            Assert-True ($null -eq $x.SelectSingleNode('//t:Password', $ns) -and $x.SelectSingleNode('//t:Principal/t:LogonType', $ns).InnerText -ceq 'InteractiveToken' -and $x.SelectSingleNode('//t:Principal/t:RunLevel', $ns).InnerText -ceq 'LeastPrivilege') 'tarefa registrada: sem senha, InteractiveToken, LeastPrivilege'
+            # The scheduler stores a registered task without the elements that hold their default value (RunLevel
+            # LeastPrivilege, for one): absent or that value, with the definition's own properties checked above.
+            $xn = { param($p, $default) $n = $x.SelectSingleNode($p, $ns); ($null -eq $n) -or ($n.InnerText -ceq $default) }
+            Assert-True ($null -eq $x.SelectSingleNode('//t:Password', $ns) -and -not ([string]$t.Xml).Contains('<Password') -and (& $xn '//t:Principal/t:LogonType' 'InteractiveToken') -and (& $xn '//t:Principal/t:RunLevel' 'LeastPrivilege')) 'tarefa registrada: sem senha, InteractiveToken, LeastPrivilege'
             Assert-True ([int]$td.Actions.Count -eq 1 -and [int]$td.Actions.Item(1).Type -eq 0 -and [string]$td.Actions.Item(1).Path -ceq $want.Path -and [string]$td.Actions.Item(1).Arguments -ceq $want.Arguments) 'uma acao exata: o ponto de entrada'
             Assert-True ([datetime]$t.NextRunTime -gt [datetime]::Now -and [int]$t.LastTaskResult -eq 267011 -and $null -eq $r.Task.LastRunTime) 'primeira execucao no futuro; nunca executada (SCHED_S_TASK_HAS_NOT_RUN; o estado nao mostra ultima execucao)'
             Assert-True ([bool]$td.Settings.StartWhenAvailable -and -not [bool]$td.Settings.DisallowStartIfOnBatteries -and [string]$td.Triggers.Item(1).RandomDelay -ceq 'PT1H') 'perdida roda na proxima oportunidade, tambem na bateria, com atraso'
@@ -5422,7 +5429,7 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
             Assert-Eq (Register-AtmAutoPurgeTask -Sid $me.Sid -EntryPoint $ep) 'AUTOPURGE_TASK_EXISTS' 'registro direto: AUTOPURGE_TASK_EXISTS'
             $hr = 0
             try { $svc = Connect-AtmTaskScheduler; $null = $svc.GetFolder('\AgentTempManager').RegisterTaskDefinition($n1, (New-AtmAutoPurgeTaskDefinition -Service $svc -Sid $me.Sid -EntryPoint $ep -Now ([datetime]::Now.AddDays(3))), 2, $me.Sid, $null, 3, $null) } catch { $hr = [int](Get-AtmInnerException $_.Exception).HResult }
-            Assert-Eq $hr -2147024713 'TASK_CREATE (a flag do produto) recusa sobrescrever: ERROR_ALREADY_EXISTS'
+            Assert-True (@(-2147024713, -2147024816) -contains $hr) "TASK_CREATE (a flag do produto) recusa sobrescrever: ERROR_ALREADY_EXISTS ou ERROR_FILE_EXISTS (0x$('{0:X8}' -f $hr))"
             Assert-Eq ([string](& $getTask $n1).Xml) $xml0 'a tarefa ficou intacta'
             $asked.Clear()
             $r = Invoke-AtmAutoPurgeUnschedule -PlanPresenter $pres -ConfirmationReader { param($ph, $k) $asked.Add($k); 'nao' }
@@ -5450,7 +5457,7 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
             Assert-Eq ([string](& $getTask $n2).Xml) $xml2 'a divergente ficou intacta'
             $t = Get-RstHost { Show-AtmAutoPurgeTaskResult -Result $r }
             Assert-True ($t.Contains('AUTOPURGE_TASK_DIVERGENT') -and $t.Contains('TASK_ACTION_ARGUMENTS')) 'o resultado mostra o codigo e o motivo'
-        } finally { Reset-ApSeams; Clear-ApTestTask $n1; Clear-ApTestTask $n2 }
+        } finally { Reset-ApSeams $prevConsole; Clear-ApTestTask $n1; Clear-ApTestTask $n2 }
     }
 
     # ------------------------------------------------------------------ trusted accounts per engine (FIX-TRUSTED-SIDS)

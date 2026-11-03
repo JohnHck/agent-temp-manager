@@ -46,6 +46,14 @@ function Test-AtmTuiInteractive {
 # ------------------------------------------------------------------ frame primitives
 
 function Get-AtmTuiOpt { param($Table, [string]$Key) if ($Table -and $Table.ContainsKey($Key)) { return $Table[$Key] } return $null }
+# A value of the TUI state that a state built elsewhere (the suite's frames) may not have: $null then, never an error.
+function Get-AtmTuiStateValue {
+    param($State, [string]$Key)
+    if ($State -is [Collections.IDictionary]) { return $State[$Key] }
+    $p = $State.PSObject.Properties[$Key]
+    if ($null -ne $p) { return $p.Value }
+    return $null
+}
 
 function Limit-AtmTuiLine {
     # Clips a line (array of segments) to the given width; the frame never exceeds the terminal.
@@ -311,7 +319,7 @@ function Get-AtmTuiTextLines {
             & $add ('  ' + (Get-AtmText 'q.cliOnly' $e.Id)) 'Cyan'
             & $add ('  ' + (Get-AtmText 'q.cliPurge' $e.Id)) 'Cyan'
             if ($State.Quarantine) { foreach ($pl in (Get-AtmQuarantinePolicyLines -Policy $State.Quarantine.Policy -List $State.Quarantine)) { & $add $pl.Text $pl.Color } }
-            foreach ($tl in (Get-AtmAutoPurgeTaskLines -Task $State.AutoPurgeTask)) { & $add $tl.Text $tl.Color }
+            foreach ($tl in (Get-AtmAutoPurgeTaskLines -Task (Get-AtmTuiStateValue $State 'AutoPurgeTask'))) { & $add $tl.Text $tl.Color }
             & $add (Get-AtmText 'tui.q.readOnly') 'Green'
         }
     }
@@ -342,7 +350,7 @@ function Get-AtmTuiAutoPurgeNotice {
     # every screen under the header while the policy of this copy has autoPurge = true. Wrapped, never clipped.
     param($State)
     $out = New-Object System.Collections.Generic.List[object]
-    foreach ($nl in @($State.AutoPurgeNotice)) { if ($nl) { foreach ($pc in (Split-AtmWrap $nl ($State.Width - 3))) { $out.Add(@(New-AtmSeg (' ' + $pc) 'Magenta')) } } }
+    foreach ($nl in @(Get-AtmTuiStateValue $State 'AutoPurgeNotice')) { if ($nl) { foreach ($pc in (Split-AtmWrap $nl ($State.Width - 3))) { $out.Add(@(New-AtmSeg (' ' + $pc) 'Magenta')) } } }
     # The list itself (one line = an array of segments), never unrolled.
     return , $out
 }
@@ -469,7 +477,7 @@ function Get-AtmTuiFrame {
             $tbl = Format-AtmTuiTable -Columns $data.Columns -Rows $data.Rows -Width $w -G $G
             # The quarantine area: the state of the user's scheduled task of the automatic purge above the table (display only).
             $qPre = 0
-            if ($scr.Name -eq 'quarantine') { foreach ($tl in (Get-AtmAutoPurgeTaskLines -Task $State.AutoPurgeTask)) { foreach ($pc in (Split-AtmWrap $tl.Text ($w - 3))) { $lines.Add(@(New-AtmSeg (' ' + $pc) $tl.Color)); $qPre++ } } }
+            if ($scr.Name -eq 'quarantine') { foreach ($tl in (Get-AtmAutoPurgeTaskLines -Task (Get-AtmTuiStateValue $State 'AutoPurgeTask'))) { foreach ($pc in (Split-AtmWrap $tl.Text ($w - 3))) { $lines.Add(@(New-AtmSeg (' ' + $pc) $tl.Color)); $qPre++ } } }
             $lines.Add(@(New-AtmSeg (' ' + $tbl.Header) 'White' 'DarkGray'))
             $vis = [math]::Max(1, $bodyH - 2 - $qPre)
             if ($scr.Sel -ge $data.Rows.Count) { $scr.Sel = [math]::Max(0, $data.Rows.Count - 1) }

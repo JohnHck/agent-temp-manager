@@ -1853,7 +1853,8 @@ function Register-AtmAutoPurgeTask {
         $null = $folder.RegisterTaskDefinition($name, $td, 2, $Sid, $null, 3, $null)
         return $null
     } catch {
-        if ([int](Get-AtmInnerException $_.Exception).HResult -eq -2147024713) { return 'AUTOPURGE_TASK_EXISTS' }
+        # Registered by another process meanwhile: TASK_CREATE refuses (ERROR_ALREADY_EXISTS or ERROR_FILE_EXISTS).
+        if (@(-2147024713, -2147024816) -contains [int](Get-AtmInnerException $_.Exception).HResult) { return 'AUTOPURGE_TASK_EXISTS' }
         return (Get-AtmTaskSchedulerCode $_.Exception)
     }
 }
