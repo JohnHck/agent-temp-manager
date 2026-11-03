@@ -4,7 +4,32 @@
 
 Work for 0.3.x, which comes after 0.3.0 is published (ADR-0013, ROADMAP "0.3.x"). It is not part of the 0.3.0 candidate.
 **A fifth release gate, `AtmIsolationEnabled`, is closed in every copy**: in every copy `isolate` only plans.
+**A sixth, `AtmQuarantinePurgeEnabled`, is closed in every copy too**: in every copy `quarantine purge` only plans, and
+no space is freed.
 
+* Isolation, phase P4: `agent-temp quarantine purge -Entry <id> -LogFile <new file>`, retention, quota and policy.
+  * The purge has a gate of its own (J-ISO-1 (C)). It is independent of the isolation gate and of the deletion gate, and
+    is checked by the build, the install e2e (six gates) and `version`.
+  * With the gate closed, `purge` checks the entry and shows the plan, then stops (`EXPURGO_REAL_DESABILITADO`).
+    Nothing is asked, locked, logged or purged.
+  * Refusals are `PURGE_REFUSED_<reason>`: an `INCOMPLETE`, `FAILED`, `ABANDONED`, `UNRECOGNIZED`, `RESTORED` or
+    `PURGED` entry, one that `DIFFERS`, or one whose payload is missing. The gates of the path, ACL and in-use probe on
+    the quarantine also refuse, and so does a command line that names the quarantine (B2-1 extended).
+  * Past the gate:
+    * the run needs the clean lock, a console, a new log (`atm.purgelog/1`), the declarations of the purge itself and
+      `EXPURGAR <id8> <files> ARQUIVOS`;
+    * then a revalidation, and `purge-intent` in the manifest and the log;
+    * then one call to the same deleter as clean, with the manifest's measurement, and `purge-result`
+      (`automatic: false`);
+    * the entry stays as the trail (`PURGED`).
+  * Retention: 30 days by default. It only marks an `ISOLATED` entry `EXPIRED`, shown with its date in `list` and
+    `inspect`, and never purges.
+  * Quota (off by default): once reached, `list` warns and new isolations are refused (`QUARANTINE_QUOTA_REACHED`).
+    Isolations are also refused below a free-space minimum fixed in code (`LOW_DISK_SPACE`). Neither rule ever purges.
+  * Policy: optional `config\quarantine.policy.json` (`atm.quarantine-policy/1`: `retentionDays`, `quotaBytes`,
+    `autoPurge`), with a strict schema. An invalid file counts as off, with a warning. `autoPurge: true` is shown and
+    does nothing. `version` and `list` show the effective policy, and an update keeps the file.
+  * TUI: shows `EXPIRED`, `PURGED`, the policy and the purge CLI command. It never purges.
 * Isolation, phase P3b: `agent-temp quarantine list | inspect | verify | restore`.
   * list, inspect and verify only read, in every copy. restore shows the plan only while the isolation gate is closed.
   * Past the gate: lock, console, new log, `RESTAURAR <id8>`, revalidation, the same mover back; on a conflict an

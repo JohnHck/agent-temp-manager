@@ -6,7 +6,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)][string]$Command = 'tui',
-    # quarantine only: list | inspect | verify | restore.
+    # quarantine only: list | inspect | verify | restore | purge.
     [Parameter(Position = 1)][string]$SubCommand,
     [string]$User,
     [string]$Project,
@@ -328,22 +328,24 @@ try {
             # 0.3.x quarantine (contract section 8). list, inspect and verify only read (bytes and times unchanged, manifests
             # included), with the isolation gate open or closed. restore: with the gate closed (every distributed copy) only
             # the plan; past it, an interactive console, a new -LogFile and the phrases bound to the entry. -Entry takes only
-            # an entry id, never a path; the destination is never given by the user (T-ISO-8).
+            # an entry id, never a path; the destination is never given by the user (T-ISO-8). The retention of the policy
+            # (config\quarantine.policy.json) only marks EXPIRED in list and inspect.
             $qSub = $(if ($SubCommand) { $SubCommand.ToLowerInvariant() } else { '' })
             if ($Entry -and $Entry -cnotmatch $script:AtmQuarantineEntryIdPattern) { Write-Host (Get-AtmText 'cli.quarantineEntryInvalid') -ForegroundColor Red; exit 2 }
+            $qPolicy = Get-AtmQuarantinePolicy -ConfigDir $invArgs.ConfigDir
             switch ($qSub) {
-                'list' { Show-AtmQuarantineList -List (Get-AtmQuarantineList); exit 0 }
+                'list' { Show-AtmQuarantineList -List (Get-AtmQuarantineList -Policy $qPolicy); exit 0 }
                 'inspect' {
                     if (-not $Entry) { Write-Host (Get-AtmText 'cli.quarantineUsage') -ForegroundColor Red; exit 2 }
-                    $qEntry = Get-AtmQuarantineEntry -Id $Entry
+                    $qEntry = Get-AtmQuarantineEntry -Id $Entry -Policy $qPolicy
                     if ($null -eq $qEntry) { Write-Host (Get-AtmText 'cli.quarantineEntryNotFound' $Entry) -ForegroundColor Yellow; exit 3 }
                     Show-AtmQuarantineEntry -Entry $qEntry
                     exit 0
                 }
                 'verify' {
                     if (-not $Entry -and -not $All) { Write-Host (Get-AtmText 'cli.quarantineUsage') -ForegroundColor Red; exit 2 }
-                    $qIds = $(if ($Entry) { @($Entry) } else { @((Get-AtmQuarantineList).Entries | Where-Object { $_.Id -cmatch $script:AtmQuarantineEntryIdPattern } | ForEach-Object { $_.Id }) })
-                    Show-AtmQuarantineVerify -Results @($qIds | ForEach-Object { Test-AtmQuarantineEntry -Id $_ })
+                    $qIds = $(if ($Entry) { @($Entry) } else { @((Get-AtmQuarantineList -Policy $qPolicy).Entries | Where-Object { $_.Id -cmatch $script:AtmQuarantineEntryIdPattern } | ForEach-Object { $_.Id }) })
+                    Show-AtmQuarantineVerify -Results @($qIds | ForEach-Object { Test-AtmQuarantineEntry -Id $_ -Policy $qPolicy })
                     exit 0
                 }
                 'restore' {
@@ -359,6 +361,24 @@ try {
                         -Interaction @{ Caller = 'CLI'; ConsoleRequired = [bool]$script:AtmIsolationEnabled }
                     Show-AtmRestoreResult -Result $rstRes
                     exit $(if ($rstRes.Aborted -or $rstRes.StoppedBy) { 3 } else { 0 })
+                }
+                'purge' {
+                    # One entry per run, from here only (J-ISO-1 (C)). With the purge gate closed (every distributed copy)
+                    # only the plan: nothing is asked, locked, logged or purged, and no space is freed. Past it (only that
+                    # gate: neither the isolation nor the deletion gate is read), an interactive console, a new -LogFile,
+                    # the AUT-2 declarations of this purge and the phrase bound to the entry.
+                    if (-not $Entry) { Write-Host (Get-AtmText 'cli.quarantineUsage') -ForegroundColor Red; exit 2 }
+                    if ($script:AtmQuarantinePurgeEnabled -and $LogFile) {
+                        $purProbe = Invoke-AtmInventory @cliInvArgs
+                        if (-not (Test-AtmOutputPathOutsideBases -Path $LogFile -Inventory $purProbe)) { Write-Host (Get-AtmText 'cli.logRefused') -ForegroundColor Red; exit 2 }
+                    }
+                    if ($script:AtmQuarantinePurgeEnabled -and -not (Test-AtmTuiInteractive)) { Write-Host (Get-AtmText 'cli.purgeNeedsConsole') -ForegroundColor Yellow; exit 6 }
+                    $purPresenter = { param($plan, $i, $planId, $phrase) Show-AtmPurgePlan -Plan $plan -PlanId $planId -Phrase $phrase }
+                    $purReader = { param($phrase, $kind, $rootPath, $choices) Read-AtmCleanAnswer -Phrase $phrase -Kind $kind -RootPath $rootPath -Choices $choices -LineReader { param($pr) Read-Host $pr } }
+                    $purRes = Invoke-AtmPurge -Id $Entry -PlanPresenter $purPresenter -ConfirmationReader $purReader -InventoryArgs $cliInvArgs -LogFile $LogFile `
+                        -Interaction @{ Caller = 'CLI'; ConsoleRequired = [bool]$script:AtmQuarantinePurgeEnabled }
+                    Show-AtmPurgeResult -Result $purRes
+                    exit $(if ($purRes.Aborted -or $purRes.StoppedBy) { 3 } else { 0 })
                 }
                 default { Write-Host (Get-AtmText 'cli.quarantineUsage') -ForegroundColor Red; exit 2 }
             }
@@ -393,6 +413,9 @@ try {
             Write-Host (Get-AtmText 'cli.native' (Get-AtmText "native.$script:AtmNativeMode"))
             Write-Host (Get-AtmText 'cli.realDeletion' $(if ($script:AtmRealDeletionEnabled) { Get-AtmText 'cli.enabled' } else { Get-AtmText 'cli.disabledV01' }))
             Write-Host (Get-AtmText 'cli.isolation' $(if ($script:AtmIsolationEnabled) { Get-AtmText 'cli.enabled' } else { Get-AtmText 'cli.isolationDisabled' }))
+            Write-Host (Get-AtmText 'cli.purge' $(if ($script:AtmQuarantinePurgeEnabled) { Get-AtmText 'cli.enabled' } else { Get-AtmText 'cli.purgeDisabled' }))
+            # The effective quarantine policy (contract section 11.2), with its warnings (an invalid file counts as off).
+            foreach ($pl in (Get-AtmQuarantinePolicyLines -Policy (Get-AtmQuarantinePolicy -ConfigDir $invArgs.ConfigDir))) { Write-Host $pl.Text -ForegroundColor $pl.Color }
             Write-Host (Get-AtmText 'cli.language' (Get-AtmLanguage))
             $idState = Get-AtmIdentityState
             Write-Host (Get-AtmText 'cli.identity' $idState.Name (Get-AtmYesNo ([bool]$idState.IsElevatedAdministrator)) $idState.ElevationType $idState.IntegrityLevel $idState.SessionId)

@@ -372,6 +372,22 @@ Step 'shipped-isolation-gate' {
     Assert (-not (Test-Path -LiteralPath $probe)) 'isolate criou o caminho pedido'
     'installed isolation gate = $false; version shows it disabled; isolate plan-only, exit 3'
 }
+Step 'shipped-purge-gate' {
+    # 0.3.x isolation, phase P4: the purge gate of its own is a single assignment to $false in the installed copy, version
+    # shows it disabled and the default quarantine policy (no policy file is installed), and quarantine purge from a new
+    # process (machine PATH) only plans: an entry that does not exist is refused, exit 3, and no quarantine is created.
+    $iso = [IO.File]::ReadAllText((Join-Path $installDir 'lib\Engine.Isolate.ps1'))
+    Assert ([regex]::Matches($iso, '\$script:AtmQuarantinePurgeEnabled\s*=').Count -eq 1 -and $iso -match '(?m)^\$script:AtmQuarantinePurgeEnabled = \$false\r?$') 'trava de expurgo instalada nao e uma unica atribuicao a $false'
+    Assert (-not (Test-Path -LiteralPath (Join-Path $installDir 'config\quarantine.policy.json'))) 'politica da quarentena instalada sem ser pedida'
+    $r = Invoke-Agent 'version -Lang en-US' 'version-purge'
+    Assert ($r.Code -eq 0 -and $r.Text -match 'quarantine purge: DISABLED' -and $r.Text -match 'retention 30 day\(s\)' -and $r.Text.Contains('default: no policy file')) "version: exit $($r.Code)"
+    $q = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'AgentTempManager\Q'
+    $qBefore = Test-Path -LiteralPath $q
+    $r = Invoke-Agent 'quarantine purge -Entry 20260101T000000Z-0badc0de -Lang en-US -NoProgress' 'purge-plan-only'
+    Assert ($r.Code -eq 3 -and $r.Text.Contains('PURGE_REFUSED_ENTRY_NOT_FOUND') -and $r.Text.Contains('EXPURGO_RECUSADO')) "purge: exit $($r.Code)"
+    Assert ((Test-Path -LiteralPath $q) -eq $qBefore) 'purge criou a quarentena'
+    'installed purge gate = $false; version shows it disabled and the default policy; purge plan-only, exit 3'
+}
 Step 'shipped-worktree-diagnostics-gate' {
     # P3-B0: reading repositories and running Git in them stay closed in every shipped copy.
     $diag = [IO.File]::ReadAllText((Join-Path $installDir 'lib\Engine.Diagnose.ps1'))
@@ -783,12 +799,12 @@ $v011Url = 'https://github.com/JohnHck/agent-temp-manager/releases/download/v0.1
 $v011Dir = Join-Path $env:ProgramFiles 'AgentTempManager-v011'
 $script:v011Pkg = $null
 $installedGates = {
-    $files = @{ AtmRealDeletionEnabled = 'lib\Engine.Clean.ps1'; AtmWorktreeDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmHandleDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmDiagnoseExportEnabled = 'lib\Report.ps1'; AtmIsolationEnabled = 'lib\Engine.Isolate.ps1' }
+    $files = @{ AtmRealDeletionEnabled = 'lib\Engine.Clean.ps1'; AtmWorktreeDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmHandleDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmDiagnoseExportEnabled = 'lib\Report.ps1'; AtmIsolationEnabled = 'lib\Engine.Isolate.ps1'; AtmQuarantinePurgeEnabled = 'lib\Engine.Isolate.ps1' }
     foreach ($g in $files.Keys) {
         $t = [IO.File]::ReadAllText((Join-Path $installDir $files[$g]))
         Assert ([regex]::Matches($t, ('\$script:' + $g + '\s*=')).Count -eq 1 -and $t -match ('\$script:' + $g + ' = \$false')) "trava instalada $g nao e uma unica atribuicao a `$false"
     }
-    'five installed gates $false'
+    'six installed gates $false'
 }
 Step 'xversion-0.1.1-package' {
     [void][IO.Directory]::CreateDirectory($v011Dir)

@@ -3460,14 +3460,15 @@ exit 0
         Assert-True ($oe.Contains('FILE_APPEND_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE, ref oa') -and $oe.Contains('FILE_SHARE_READ, FILE_OPEN,') -and -not $oe.Contains('FILE_CREATE') -and -not $oe.Contains('FILE_WRITE_DATA')) 'abre so existente, so acrescimo, compartilhado so para leitura'
         # -Include is ignored with -LiteralPath on Windows PowerShell 5.1: filtered by extension.
         # P3a: the isolation engine is the only product caller. P3b: two calls to the mover (isolate, and restore: the move back
-        # is the same mover, on the same volume); OpenExisting only to reopen an entry's manifest (isolate and restore).
+        # is the same mover, on the same volume); OpenExisting only to reopen an entry's manifest (isolate, restore and, since
+        # P4, purge).
         foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1', '.cmd') -and $_.Name -ne 'Engine.Isolate.ps1' })) {
             $t = [IO.File]::ReadAllText($fi.FullName)
             foreach ($api in @('AtmMover', 'CreateNewDirectory', 'OpenExisting')) { Assert-True (-not $t.Contains($api)) "$($fi.Name) nao chama $api (so o motor de isolamento)" }
         }
         $isoSrc = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Isolate.ps1'))
         Assert-Eq ([regex]::Matches($isoSrc, '\[AgentTempManager\.AtmMover\]::MoveTree\(').Count) 2 'duas chamadas de produto ao mover: isolar e restaurar (P3b)'
-        Assert-Eq ([regex]::Matches($isoSrc, 'OpenExisting\(').Count) 2 'OpenExisting so para reabrir o manifesto de uma entrada (isolar e restaurar)'
+        Assert-Eq ([regex]::Matches($isoSrc, 'OpenExisting\(').Count) 3 'OpenExisting so para reabrir o manifesto de uma entrada (isolar, restaurar e expurgar)'
         Assert-True ($isoSrc.Contains("`$man.OpenExisting('manifest.jsonl')") -and $isoSrc.IndexOf('$man.Close(); $man.Dispose(); $man = $null') -lt $isoSrc.IndexOf('[AgentTempManager.AtmMover]::MoveTree(') -and $isoSrc.IndexOf("`$man.OpenExisting('manifest.jsonl')") -gt $isoSrc.IndexOf('[AgentTempManager.AtmMover]::MoveTree(')) 'manifesto fechado antes do mover e reaberto depois (o pino da pasta impediria a renomeacao para dentro dela)'
     }
 
@@ -3532,7 +3533,10 @@ exit 0
         $iStop = $core.IndexOf("if (-not `$script:AtmIsolationEnabled) { `$state.Aborted = 'ISOLAMENTO_REAL_DESABILITADO'; return (& `$finish) }")
         Assert-True ($iStop -gt 0) 'parada da trava no nucleo'
         foreach ($act in @('& $ConfirmationReader', 'Open-AtmCleanLog', 'Open-AtmQuarantine -Path', '::CreateNewDirectory(', '[AgentTempManager.AtmMover]::MoveTree(', '& $MoveTreeImpl', 'Get-AtmEngineConsoleObservation')) { Assert-True ($core.IndexOf($act) -gt $iStop) "'$act' so depois da parada da trava" }
-        foreach ($pat in @('AtmDeleter', 'DeleteTree', 'Remove-Item', 'Move-Item', '::Delete(', 'Write-Host', 'Read-Host')) { Assert-True (-not $iso.Contains($pat)) "motor de isolamento nao contem '$pat'" }
+        foreach ($pat in @('Remove-Item', 'Move-Item', '::Delete(', 'Write-Host', 'Read-Host')) { Assert-True (-not $iso.Contains($pat)) "motor de isolamento nao contem '$pat'" }
+        # P4: the deleter only in the purge (one product call, in Invoke-AtmPurgeCore); never in isolate or restore.
+        Assert-Eq ([regex]::Matches($iso, 'AtmDeleter').Count) 1 'o motor de isolamento so referencia o deleter na chamada do expurgo'
+        Assert-True ($core.Substring(0, $core.IndexOf('function Invoke-AtmPurgeCore')).IndexOf('AtmDeleter') -lt 0) 'isolar e restaurar nunca chamam o deleter'
     }
     Test-Case 'Isolamento P2' 'Regra de alvo da 0.3.x: escopo e base inteira recusados com codigo proprio (J-ISO-9 a); outro perfil, alvo que nao e raiz de sessao, caixa divergente, duplicado, sintaxe e caminho fora do inventario recusados; RECENT bloqueia (J-ISO-3 a); fingerprint divergente recusado' {
         $p = New-TestProfile 'isotarget'
@@ -3823,7 +3827,7 @@ exit 0
         Assert-True ($iso.Contains("Join-Path `$la 'AgentTempManager\Q'")) 'quarentena padrao em %LOCALAPPDATA%\AgentTempManager\Q'
         foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Name -ne 'Engine.Isolate.ps1' })) {
             $t = [IO.File]::ReadAllText($fi.FullName)
-            foreach ($seam in @('MoveTreeImpl', 'AtmIsolationQuarantineRoot', 'BeforeMoveHook')) { Assert-True (-not $t.Contains($seam)) "$($fi.Name) usa a costura $seam" }
+            foreach ($seam in @('MoveTreeImpl', 'AtmIsolationQuarantineRoot', 'BeforeMoveHook', 'PurgeTreeImpl', 'BeforePurgeHook', 'AtmQuarantineClock')) { Assert-True (-not $t.Contains($seam)) "$($fi.Name) usa a costura $seam" }
         }
         $iIntent = $iso.IndexOf("-Type 'move-intent'"); $iMove = $iso.IndexOf('[AgentTempManager.AtmMover]::MoveTree('); $iGate = $iso.IndexOf("'ISOLAMENTO_REAL_DESABILITADO'"); $iLog = $iso.IndexOf("'LOG_REQUIRED'")
         Assert-True ($iGate -gt 0 -and $iLog -gt $iGate -and $iIntent -gt $iLog -and $iMove -gt $iIntent -and $iso.IndexOf("-Type 'move-intent'", $iIntent + 1) -lt $iMove) "ordem: trava $iGate < LOG_REQUIRED $iLog < intencao (log e manifesto) $iIntent < mover $iMove"
@@ -4206,7 +4210,7 @@ exit 0
         $ro = $iso.Substring($iso.IndexOf('function Read-AtmQuarantineManifest'), $iso.IndexOf('function Get-AtmRestorePlanId') - $iso.IndexOf('function Read-AtmQuarantineManifest'))
         foreach ($pat in @('AtmCleanLog', 'OpenExisting', 'AtmSafeCreate', 'AtmMover', 'MoveTree(', 'WriteAll', 'AppendAll', 'File]::Create(', 'CreateDirectory', 'FileAccess]::Write', 'FileAccess]::ReadWrite', '::Move(', 'SetAttributes', 'Set-Content', 'Out-File', 'Write-AtmIsolationRecord')) { Assert-True (-not $ro.Contains($pat)) "list/inspect/verify sem escrita ('$pat')" }
         $tui = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Tui.ps1'))
-        foreach ($pat in @('Invoke-AtmRestore', 'PinForMove', 'restore -Entry', 'Read-AtmQuarantineManifest', 'Get-AtmRestorePlan')) { Assert-True (-not $tui.Contains($pat)) "TUI nao restaura ('$pat')" }
+        foreach ($pat in @('Invoke-AtmRestore', 'PinForMove', 'restore -Entry', 'Read-AtmQuarantineManifest', 'Get-AtmRestorePlan', 'Invoke-AtmPurge', 'Get-AtmPurgePlan', 'purge -Entry', 'AtmQuarantinePurgeEnabled')) { Assert-True (-not $tui.Contains($pat)) "TUI nao restaura nem expurga ('$pat')" }
         Assert-True ($tui.Contains('Get-AtmQuarantineList -OwnSid') -and $tui.Contains('Test-AtmQuarantineEntry -Id') -and [regex]::Matches($tui, 'Invoke-AtmIsolate ').Count -eq 1) 'TUI: leitura pela engine; um unico ponto de isolamento'
         $rep = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Report.ps1'))
         Assert-True (-not $rep.Contains('Invoke-AtmRestore') -and -not $rep.Contains('Invoke-AtmIsolate')) 'relatorio so apresenta'
@@ -4253,6 +4257,481 @@ exit 0
             $x = [AgentTempManager.AtmSafeCreate]::PinForMove($bad)
             try { Assert-True (-not $x.IsPinned -and $x.Error) "recusado: $bad ($($x.Error))" } finally { $x.Dispose() }
         }
+    }
+
+    # ------------------------------------------------------------------ 0.3.x isolation, phase P4: purge, retention, quota and policy (ISO-P4)
+    # Entries come from real isolations in the sandbox (New-RstEntry). The purge gate opens only around each call
+    # (Invoke-PurOpen) and is restored: the real deleter runs only here, on payloads in the sandbox's quarantine. A policy
+    # is written only in a config folder of the sandbox (New-PurConfig), never in the source's.
+    function Invoke-PurOpen {
+        param([hashtable]$Arguments)
+        Assert-True ([string]$script:AtmIsolationQuarantineRoot -and ([string]$script:AtmIsolationQuarantineRoot).StartsWith($sandbox + '\', [StringComparison]::OrdinalIgnoreCase)) "quarentena dentro do sandbox ($($script:AtmIsolationQuarantineRoot))"
+        $script:AtmQuarantinePurgeEnabled = $true
+        try { return (Invoke-AtmPurge @Arguments) } finally { $script:AtmQuarantinePurgeEnabled = $false }
+    }
+    function New-PurPlanRecorder {
+        $st = @{ Calls = (New-Object System.Collections.Generic.List[object]) }
+        $st.Presenter = { param($plan, $inv, $planId, $phrase) $st.Calls.Add([pscustomobject]@{ Plan = $plan; PlanId = $planId; Phrase = $phrase }) }.GetNewClosure()
+        return $st
+    }
+    function Get-PurArgs {
+        param($E, $Operator, [string]$Log, [hashtable]$Extra = @{})
+        $a = @{ Id = $E.Id; PlanPresenter = (New-PurPlanRecorder).Presenter; ConfirmationReader = $Operator.Reader; InventoryArgs = $E.Run.IA; LogFile = $Log }
+        foreach ($k in $Extra.Keys) { $a[$k] = $Extra[$k] }
+        return $a
+    }
+    function New-PurConfig {
+        # A config folder of the sandbox: the source's files and, when given, a quarantine.policy.json.
+        param([string]$Name, [string]$Policy)
+        $d = Join-Path $sandbox ('cfg-' + $Name)
+        [void][IO.Directory]::CreateDirectory($d)
+        foreach ($f in @(Get-ChildItem -LiteralPath $cfgDir -File)) { [IO.File]::Copy($f.FullName, (Join-Path $d $f.Name), $true) }
+        if ($Policy) { [IO.File]::WriteAllText((Join-Path $d 'quarantine.policy.json'), $Policy, (New-Object Text.UTF8Encoding($false))) }
+        return $d
+    }
+
+    Test-Case 'Isolamento P4' 'Seis travas: cada uma com uma unica atribuicao a $false no seu arquivo; a do expurgo (sexta) so no motor, conferida pelo build, pelo e2e da instalacao e mostrada em version; leitura independente: o expurgo so le a sua, isolar, restaurar, a gestao e os outros motores nunca a leem' {
+        foreach ($g in @(@('lib\Engine.Clean.ps1', 'AtmRealDeletionEnabled'), @('lib\Engine.Diagnose.ps1', 'AtmWorktreeDiagnosticsEnabled'), @('lib\Engine.Diagnose.ps1', 'AtmHandleDiagnosticsEnabled'), @('lib\Report.ps1', 'AtmDiagnoseExportEnabled'), @('lib\Engine.Isolate.ps1', 'AtmIsolationEnabled'), @('lib\Engine.Isolate.ps1', 'AtmQuarantinePurgeEnabled'))) {
+            $t = [IO.File]::ReadAllText((Join-Path $srcDir $g[0]))
+            Assert-True ([regex]::Matches($t, '\$script:' + $g[1] + '\s*=').Count -eq 1 -and $t -match ('(?m)^\$script:' + $g[1] + ' = \$false\r?$')) "$($g[1]): uma unica atribuicao, a `$false ($($g[0]))"
+        }
+        Assert-Eq $script:AtmQuarantinePurgeEnabled $false 'trava do expurgo fechada neste processo'
+        foreach ($f in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Name -ne 'Engine.Isolate.ps1' })) {
+            Assert-True (-not ([regex]::IsMatch([IO.File]::ReadAllText($f.FullName), 'AtmQuarantinePurgeEnabled\s*='))) "$($f.Name) nao pode alterar a trava do expurgo"
+        }
+        $root = Split-Path -Parent $testsDir
+        $br = [IO.File]::ReadAllText((Join-Path $root 'tools\Build-Release.ps1'))
+        Assert-True ($br.Contains("@(`$isoTxt, 'AtmQuarantinePurgeEnabled')") -and $br.Contains("@(`$isoTxt, 'AtmIsolationEnabled')") -and $br.Contains("@(`$repTxt, 'AtmDiagnoseExportEnabled')")) 'build recusa o pacote sem as travas fechadas, a do expurgo inclusive'
+        $e2e = [IO.File]::ReadAllText((Join-Path $testsDir 'e2e\Invoke-InstallE2E.ps1'))
+        Assert-True ($e2e.Contains("AtmQuarantinePurgeEnabled = 'lib\Engine.Isolate.ps1'") -and $e2e.Contains("Step 'shipped-purge-gate'") -and $e2e.Contains('six installed gates')) 'e2e confere as seis travas instaladas'
+        $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        Assert-True ($cli.Contains("Get-AtmText 'cli.purge' `$(if (`$script:AtmQuarantinePurgeEnabled)") -and $cli.Contains('Get-AtmQuarantinePolicyLines -Policy (Get-AtmQuarantinePolicy')) 'version mostra a trava do expurgo e a politica efetiva'
+        $iso = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Isolate.ps1'))
+        $iP = $iso.IndexOf('function Invoke-AtmPurge {')
+        $pur = $iso.Substring($iP)
+        Assert-True ($iP -gt 0 -and -not $pur.Contains('AtmIsolationEnabled') -and -not $pur.Contains('AtmRealDeletionEnabled')) 'o expurgo so le a propria trava'
+        Assert-Eq ([regex]::Matches($iso.Substring(0, $iP), '\$script:AtmQuarantinePurgeEnabled').Count) 1 'isolar, restaurar e a gestao nunca leem a trava do expurgo (so a atribuicao)'
+        foreach ($n in @('lib\Engine.Clean.ps1', 'lib\Engine.Audit.ps1', 'lib\Engine.Diagnose.ps1', 'lib\Tui.ps1')) { Assert-True (-not [IO.File]::ReadAllText((Join-Path $srcDir $n)).Contains('AtmQuarantinePurgeEnabled')) "$n nunca le a trava do expurgo" }
+    }
+    Test-Case 'Isolamento P4' 'Travas independentes nos dois sentidos: com a do isolamento aberta (e a de exclusao do clean, aberta pela suite) o expurgo para em EXPURGO_REAL_DESABILITADO sem perguntar; com a do expurgo aberta, isolar e restaurar param nas suas e o clean com a sua fechada para na dele; o expurgo alem da sua trava funciona com as outras fechadas' {
+        $e = New-RstEntry 'purindep'
+        if (-not $e) { return }
+        $dir = New-TestCleanLogDir 'pur-indep'
+        if (-not $dir) { return }
+        $snap = Get-RstSnapshot $e.Path
+        $op = New-TestCleanOperator
+        $a1 = Get-PurArgs $e $op (Join-Path $dir 'iso-aberta.jsonl')
+        $script:AtmIsolationEnabled = $true
+        try { $r1 = Invoke-AtmPurge @a1 } finally { $script:AtmIsolationEnabled = $false }
+        Assert-True ($r1.Aborted -ceq 'EXPURGO_REAL_DESABILITADO' -and $op.Calls.Count -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $dir 'iso-aberta.jsonl')) -and $script:AtmRealDeletionEnabled) "isolamento e exclusao abertos nao abrem o expurgo ($($r1.Aborted))"
+        $x = New-IsoRun 'purindepx'
+        if (-not $x) { return }
+        $before = Get-IsoRelativeListing $x.Root
+        $ai = Get-IsoArgs $x (New-TestCleanOperator)
+        $ar = Get-RstArgs $e (New-TestCleanOperator) (Join-Path $dir 'rst.jsonl')
+        $script:AtmQuarantinePurgeEnabled = $true
+        try {
+            $ri = Invoke-AtmIsolate @ai
+            $rr = Invoke-AtmRestore @ar
+            $script:AtmRealDeletionEnabled = $false
+            try { $rc = Invoke-AtmClean -Entries @([pscustomobject]@{ Source = 't'; Path = $x.Root; Fingerprint = $null }) -PlanPresenter { param($v, $r, $i) } -ConfirmationReader { param($p) $p } -InventoryArgs $x.IA -LogWriter (New-TestCleanLogWriter) }
+            finally { $script:AtmRealDeletionEnabled = $true }
+        } finally { $script:AtmQuarantinePurgeEnabled = $false }
+        Assert-True ($ri.Aborted -ceq 'ISOLAMENTO_REAL_DESABILITADO' -and $rr.Aborted -ceq 'RESTAURACAO_REAL_DESABILITADA' -and $rc.Aborted -ceq 'EXCLUSAO_REAL_DESABILITADA_V0_1') "expurgo aberto: isolar $($ri.Aborted), restaurar $($rr.Aborted), clean $($rc.Aborted)"
+        Assert-Eq (Get-IsoRelativeListing $x.Root) $before 'nada isolado nem apagado'
+        Assert-Eq (Get-RstSnapshot $e.Path) $snap 'entrada identica: nada restaurado nem expurgado'
+        $script:AtmRealDeletionEnabled = $false
+        try { $rp = Invoke-PurOpen (Get-PurArgs $e (New-TestCleanOperator) (Join-Path $dir 'purge.jsonl')) } finally { $script:AtmRealDeletionEnabled = $true }
+        Assert-True (@($rp.Results).Count -eq 1 -and $rp.Results[0].Outcome -ceq 'COMPLETE' -and $script:AtmIsolationEnabled -eq $false) "so a trava do expurgo aberta: expurgado ($($rp.Aborted)$($rp.StoppedBy))"
+    }
+    Test-Case 'Isolamento P4' 'Expurgo com a trava fechada: so o plano (plan id com prefixo proprio, frase EXPURGAR <id8> <arquivos> ARQUIVOS) e EXPURGO_REAL_DESABILITADO; nada perguntado, nenhum lock, nenhum log, nada expurgado; o relatorio diz que nenhum espaco foi liberado; quarentena e manifesto identicos (bytes e horarios)' {
+        $e = New-RstEntry 'purclosed'
+        if (-not $e) { return }
+        $snap = Get-RstSnapshot $script:AtmIsolationQuarantineRoot
+        $rec = New-PurPlanRecorder
+        $log = Join-Path $sandbox 'pur-closed.jsonl'
+        $script:purReaderCalls = 0
+        $h = Start-TestLockHolder -Name $script:AtmCleanLockName -Mode release
+        try {
+            Assert-Eq $h.Status 'ACQUIRED' 'lock ocupado por outro processo'
+            $res = Invoke-AtmPurge -Id $e.Id -PlanPresenter $rec.Presenter -ConfirmationReader { param($x) $script:purReaderCalls++; $x } -InventoryArgs $e.Run.IA -LogFile $log -PurgeTreeImpl { param($p) throw 'nunca' }
+        } finally { $null = Stop-TestLockHolderByGo $h }
+        Assert-Eq $res.Aborted 'EXPURGO_REAL_DESABILITADO' 'parado pela trava, sem tentar o lock'
+        $phrase = 'EXPURGAR {0} 2 ARQUIVOS' -f $e.Id8.ToUpperInvariant()
+        $pl = $rec.Calls[0].Plan
+        Assert-True ($rec.Calls.Count -eq 1 -and $rec.Calls[0].PlanId -match '^[0-9a-f]{64}$' -and $rec.Calls[0].PlanId -ceq $res.PlanId -and $rec.Calls[0].Phrase -ceq $phrase -and $res.Phrase -ceq $phrase) 'plano apresentado uma vez, com o plan id e a frase'
+        Assert-True (@($pl.Reasons).Count -eq 0 -and $pl.Files -eq 2 -and $pl.Dirs -eq 1 -and $pl.Bytes -eq 2148 -and $pl.Uninspectable -eq 0 -and $pl.PayloadPath -eq (Join-Path $e.Path 'payload')) "plano sem recusas, com a medicao do manifesto ($(@($pl.Reasons) -join ';'))"
+        Assert-True ($script:purReaderCalls -eq 0 -and -not (Test-Path -LiteralPath $log) -and @($res.Results).Count -eq 0 -and [IO.File]::Exists((Join-Path $e.Path 'payload\a.txt'))) 'nada perguntado; nenhum log; nada expurgado'
+        $old = Get-AtmLanguage
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                $t = Get-RstHost { Show-AtmPurgePlan -Plan $pl -PlanId $res.PlanId -Phrase $res.Phrase; Show-AtmPurgeResult -Result $res }
+                Assert-True ($t.Contains((Get-AtmText 'pur.planOnly')) -and $t.Contains((Get-AtmText 'pur.gateMsg')) -and $t.Contains($phrase) -and $t.Contains($e.Id) -and -not $t.Contains('a.txt') -and -not $t.Contains('b.bin')) "$lang`: so o plano, nenhum espaco liberado, sem nomes de arquivo"
+            }
+        } finally { Set-AtmLanguage -Requested $old }
+        Assert-Eq (Get-RstSnapshot $script:AtmIsolationQuarantineRoot) $snap 'quarentena e manifesto identicos'
+        Assert-True ([IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Isolate.ps1')).Contains("'atm-purge-plan/1;'")) 'prefixo proprio do plan id do expurgo'
+    }
+    Test-Case 'Isolamento P4' 'Expurgar alem da trava (no processo da suite, quarentena do sandbox): declaracoes AUT-2 do proprio expurgo e a frase EXPURGAR <id8> <arquivos> ARQUIVOS; intencao no manifesto e no log; uma chamada ao deleter real com a medicao do manifesto; payload ausente, entrada e manifesto ficam como trilha (PURGED); log completo sem nomes de arquivo; restaurar ou expurgar de novo e recusado' {
+        $e = New-RstEntry 'purfull'
+        if (-not $e) { return }
+        $dir = New-TestCleanLogDir 'pur-full'
+        if (-not $dir) { return }
+        $log = Join-Path $dir 'purge.jsonl'
+        $op = New-TestCleanOperator
+        $res = Invoke-PurOpen (Get-PurArgs $e $op $log @{ Interaction = @{ Caller = 'CLI'; ConsoleRequired = $true } })
+        Assert-True (-not $res.Aborted -and -not $res.StoppedBy -and @($res.Results).Count -eq 1 -and $res.Results[0].Outcome -ceq 'COMPLETE' -and $res.Results[0].Verified -and $res.Results[0].FilesDeleted -eq 2) "expurgado ($($res.Aborted)$($res.StoppedBy) $(@($res.Results | ForEach-Object { $_.AbortReason; $_.ExceptionType }) -join ';'))"
+        Assert-Eq ($op.Calls -join ',') ('task|{0},results|{0},purge|{1}' -f $e.Run.Root, $e.Id) 'declaracoes do proprio expurgo (as do isolamento nao contam), depois a frase ligada a entrada'
+        Assert-Eq $op.Phrases[2] ('EXPURGAR {0} 2 ARQUIVOS' -f $e.Id8.ToUpperInvariant()) 'frase EXPURGAR <id8> <arquivos> ARQUIVOS'
+        Assert-True ($res.Declaration.TaskCompleted -and $res.Declaration.ContentDecision) 'declaracao registrada no resultado'
+        Assert-True (-not [IO.Directory]::Exists((Join-Path $e.Path 'payload')) -and [IO.File]::Exists($e.Manifest) -and -not [IO.Directory]::Exists($e.Run.Root)) 'payload expurgado; entrada e manifesto ficam; nada restaurado'
+        $mf = Read-TestCleanLogFile $e.Manifest
+        Assert-Eq (@($mf.Records | ForEach-Object { $_.type }) -join ',') 'entry,move-intent,move-result,purge-intent,purge-result' 'registros do manifesto'
+        $pi = $mf.Records[3]; $pr = $mf.Records[4]
+        Assert-True ($pi.automatic -eq $false -and $pi.declaredBy -ceq 'OPERATOR' -and $pi.files -eq 2 -and $pr.outcome -ceq 'COMPLETE' -and $pr.automatic -eq $false -and $pr.verifiedGone -eq $true -and $pi.opId -ceq $pr.opId) 'purge-intent e purge-result (automatic false), a mesma operacao'
+        Assert-True (@($mf.Records | Where-Object { $_.schema -cne 'atm.quarantine/1' -or $_.id -cne $e.Id }).Count -eq 0 -and -not $mf.Bom -and $mf.EndsLf) 'manifesto atm.quarantine/1 da entrada'
+        $lg = Read-TestCleanLogFile $log
+        Assert-Eq (@($lg.Records | ForEach-Object { $_.type }) -join ',') 'run-start,declaration,confirmation,plan-check,purge-intent,purge-result,run-end' 'registros do log'
+        Assert-True ($lg.Records[0].operation -ceq 'purge' -and $lg.Records[0].entryId -ceq $e.Id -and $lg.Records[1].declaredBy -ceq 'OPERATOR' -and $lg.Records[2].accepted -and $lg.Records[2].interaction.caller -ceq 'CLI' -and $lg.Records[3].matched) 'run-start, declaracao, confirmacao e plan-check'
+        Assert-True ($lg.Records[5].outcome -ceq 'COMPLETE' -and $lg.Records[5].automatic -eq $false -and @($lg.Records | Where-Object { $_.schema -cne 'atm.purgelog/1' }).Count -eq 0 -and -not $lg.Bom -and $lg.EndsLf) 'log atm.purgelog/1 do expurgo'
+        foreach ($t in @([IO.File]::ReadAllText($e.Manifest), [IO.File]::ReadAllText($log))) { foreach ($leaf in @('a.txt', 'b.bin')) { Assert-True (-not $t.Contains($leaf)) "sem nome de arquivo ($leaf)" } }
+        $s = Get-AtmQuarantineEntry -Id $e.Id -OwnSid $testIdentity.Sid
+        Assert-True ($s.State -ceq 'PURGED' -and -not $s.PayloadPresent -and (Test-AtmQuarantineEntry -Id $e.Id -OwnSid $testIdentity.Sid).Result -ceq 'NOT_VERIFIABLE') "entrada PURGED ($(Format-AtmQuarantineState $s))"
+        $old = Get-AtmLanguage
+        try { foreach ($lang in @('en-US', 'pt-BR')) { Set-AtmLanguage -Requested $lang; $t = Get-RstHost { Show-AtmPurgeResult -Result $res }; Assert-True ($t.Contains('COMPLETE') -and $t.Contains($e.Id) -and -not $t.Contains('a.txt')) "$lang`: resultado do expurgo" } } finally { Set-AtmLanguage -Requested $old }
+        $rr = Invoke-RstOpen (Get-RstArgs $e (New-TestCleanOperator) (Join-Path $dir 'rst.jsonl'))
+        Assert-True ($rr.Aborted -ceq 'RESTAURACAO_RECUSADA' -and (@($rr.Plan.Reasons) -join ';') -ceq 'ENTRY_PURGED') "restaurar entrada expurgada: recusado ($(@($rr.Plan.Reasons) -join ';'))"
+        $op2 = New-TestCleanOperator
+        $again = Invoke-PurOpen (Get-PurArgs $e $op2 (Join-Path $dir 'again.jsonl'))
+        Assert-True ($again.Aborted -ceq 'EXPURGO_RECUSADO' -and (@($again.Plan.Reasons) -join ';') -ceq 'PURGE_REFUSED_PURGED' -and $op2.Calls.Count -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $dir 'again.jsonl'))) "expurgar de novo: recusado ($(@($again.Plan.Reasons) -join ';'))"
+    }
+    Test-Case 'Isolamento P4' 'Recusas por estado (gate aberto, antes de qualquer pergunta ou log; manifesto intacto; nunca uma nova tentativa com verificacao mais fraca): ABANDONED, DIFFERS, PAYLOAD_MISSING, PURGED, INCOMPLETE, FAILED, RESTORED, UNRECOGNIZED, ENTRY_MANIFEST_INVALID e entrada inexistente' {
+        $dir = New-TestCleanLogDir 'pur-states'
+        if (-not $dir) { return }
+        $script:purN = 0
+        $refuse = {
+            param($E, [string]$Want, [string]$Label, [hashtable]$Extra = @{})
+            $op = New-TestCleanOperator; $script:purN++; $lg = Join-Path $dir ('s' + $script:purN + '.jsonl')
+            $h0 = $(if ($E.Manifest -and [IO.File]::Exists($E.Manifest)) { [IO.File]::ReadAllText($E.Manifest) } else { $null })
+            $res = Invoke-PurOpen (Get-PurArgs $E $op $lg $Extra)
+            $why = @($res.Plan.Reasons) -join ';'
+            Assert-True ($res.Aborted -ceq 'EXPURGO_RECUSADO' -and $why -like $Want -and @($res.Results).Count -eq 0 -and $op.Calls.Count -eq 0 -and -not (Test-Path -LiteralPath $lg)) "${Label}: $($res.Aborted) $why (esperado $Want)"
+            if ($null -ne $h0) { Assert-Eq ([IO.File]::ReadAllText($E.Manifest)) $h0 "${Label}: manifesto intacto" }
+        }
+        $a = New-RstEntry 'purstate'
+        if (-not $a) { return }
+        $otherIa = Get-InvArgs -Profiles @($a.Run.Profile) -Identity ([pscustomobject]@{ Sid = 'S-1-5-21-1-2-3-4444'; Name = 'outro'; IsAdmin = $false })
+        & $refuse $a 'PURGE_REFUSED_ABANDONED' 'outra identidade' @{ InventoryArgs = $otherIa }
+        [IO.File]::WriteAllText((Join-Path $a.Path 'payload\depois.txt'), 'x')
+        & $refuse $a 'PURGE_REFUSED_DIFFERS (*FILES 3/2*' 'payload divergente'
+        [IO.Directory]::Move((Join-Path $a.Path 'payload'), (Join-Path $a.Path 'payload-fora'))
+        & $refuse $a 'PURGE_REFUSED_PAYLOAD_MISSING*' 'payload ausente'
+        $u = [datetime]::UtcNow.ToString('o')
+        Set-RstManifestLines -Path $a.Manifest -Keep 3 -Append @([ordered]@{ schema = 'atm.quarantine/1'; type = 'purge-intent'; id = $a.Id; recSeq = 4; utc = $u; opId = 'x:1'; files = 2; dirs = 1; bytes = 2148; automatic = $false }, [ordered]@{ schema = 'atm.quarantine/1'; type = 'purge-result'; id = $a.Id; recSeq = 5; utc = $u; opId = 'x:1'; outcome = 'COMPLETE'; automatic = $false })
+        Assert-Eq (Get-AtmQuarantineEntry -Id $a.Id -OwnSid $testIdentity.Sid).State 'PURGED' 'purge-result COMPLETE sem payload: PURGED'
+        & $refuse $a 'PURGE_REFUSED_PURGED' 'ja expurgada'
+        Set-RstManifestLines -Path $a.Manifest -Keep 2
+        & $refuse $a 'PURGE_REFUSED_INCOMPLETE (move)' 'intencao sem resultado'
+        $b = New-RstEntry 'purstatef' @{ MoveTreeImpl = $isoRefused }
+        & $refuse $b 'PURGE_REFUSED_FAILED' 'isolamento recusado (FAILED)'
+        $c = New-RstEntry 'purstater'
+        $rr = Invoke-RstOpen (Get-RstArgs $c (New-TestCleanOperator) (Join-Path $dir 'rst.jsonl'))
+        Assert-True (@($rr.Results).Count -eq 1 -and $rr.Results[0].Outcome -ceq 'COMPLETE') "restaurada ($($rr.Aborted)$($rr.StoppedBy))"
+        & $refuse $c 'PURGE_REFUSED_RESTORED' 'restaurada (RESTORED)'
+        Assert-True ([IO.Directory]::Exists($c.Run.Root)) 'a raiz restaurada nunca e tocada pelo expurgo'
+        & $refuse ([pscustomobject]@{ Id = '20260101T000000Z-0badf00d'; Run = $c.Run; Manifest = $null }) 'PURGE_REFUSED_ENTRY_NOT_FOUND' 'entrada inexistente'
+        # Hand-made folders in a quarantine of their own.
+        $qc = Join-Path $sandbox 'pur-states\Q'
+        $i1 = '20260101T000000Z-0000a001'; [void][IO.Directory]::CreateDirectory((Join-Path $qc ($i1 + '\payload')))
+        $tgt = Join-Path $sandbox 'pur-states-alvo'; [void][IO.Directory]::CreateDirectory((Join-Path $tgt 'payload')); [IO.File]::WriteAllText((Join-Path $tgt 'payload\x.txt'), 'x')
+        $i2 = '20260101T000000Z-0000a002'; New-Junction (Join-Path $qc $i2) $tgt
+        $saved = $script:AtmIsolationQuarantineRoot
+        $script:AtmIsolationQuarantineRoot = $qc
+        try {
+            & $refuse ([pscustomobject]@{ Id = $i1; Run = $c.Run; Manifest = $null }) 'PURGE_REFUSED_ENTRY_MANIFEST_INVALID (MANIFEST_MISSING)' 'manifesto ausente'
+            & $refuse ([pscustomobject]@{ Id = $i2; Run = $c.Run; Manifest = $null }) 'PURGE_REFUSED_UNRECOGNIZED' 'juncao no lugar de uma entrada'
+        } finally { $script:AtmIsolationQuarantineRoot = $saved }
+        Assert-True ([IO.File]::Exists((Join-Path $tgt 'payload\x.txt')) -and [IO.Directory]::Exists((Join-Path $qc ($i1 + '\payload')))) 'nada expurgado no alvo da juncao nem na pasta sem manifesto'
+    }
+    Test-Case 'Isolamento P4' 'Recusas antes do deleter (gate aberto; manifesto e payload intactos): id invalido, sem apresentacao, sem leitor, frase errada, declaracao da tarefa ou do conteudo recusada, sem log, log dentro da quarentena, sem console, lock ocupado (o mesmo do clean); linha de comando que cita a quarentena (B2-1 estendido) recusa no plano; mudanca no payload depois das perguntas: revalidacao recusada' {
+        $e = New-RstEntry 'purrefuse'
+        if (-not $e) { return }
+        $dir = New-TestCleanLogDir 'pur-refuse'
+        if (-not $dir) { return }
+        $h0 = [IO.File]::ReadAllText($e.Manifest)
+        $intact = { [IO.File]::Exists((Join-Path $e.Path 'payload\a.txt')) -and [IO.File]::Exists((Join-Path $e.Path 'payload\sub\b.bin')) -and [IO.File]::ReadAllText($e.Manifest) -ceq $h0 }
+        $check = { param($Res, [string]$Code, [string]$Label) Assert-True ($Res.Aborted -ceq $Code -and @($Res.Results).Count -eq 0) "${Label}: $($Res.Aborted) (esperado $Code)"; Assert-True (& $intact) "${Label}: manifesto e payload intactos" }
+        $script:purN = 0
+        $next = { $script:purN++; Join-Path $dir ('r' + $script:purN + '.jsonl') }
+        & $check (Invoke-PurOpen (Get-PurArgs $e (New-TestCleanOperator) (& $next) @{ Id = '..\x' })) 'ENTRY_ID_INVALID' 'id invalido'
+        $a = Get-PurArgs $e (New-TestCleanOperator) (& $next); $a.Remove('PlanPresenter')
+        & $check (Invoke-PurOpen $a) 'SEM_APRESENTACAO' 'sem apresentacao'
+        $a = Get-PurArgs $e (New-TestCleanOperator) (& $next); $a.Remove('ConfirmationReader')
+        & $check (Invoke-PurOpen $a) 'SEM_APRESENTACAO_OU_CONFIRMACAO' 'sem leitor'
+        $op = New-TestCleanOperator -Answers @{ 'purge#1' = 'EXPURGAR ERRADO' }; $lg = & $next
+        $res = Invoke-PurOpen (Get-PurArgs $e $op $lg)
+        & $check $res 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE' 'frase errada'
+        Assert-True ($res.RefusedAt.Step -ceq 'purge' -and (Get-RstTypes $lg) -ceq 'run-start,confirmation,run-end' -and -not (Read-TestCleanLogFile $lg).Records[1].accepted) 'frase errada: recusa registrada no log, sem declaracao'
+        $op = New-TestCleanOperator -Answers @{ 'task#1' = 'NAO TERMINEI' }
+        $res = Invoke-PurOpen (Get-PurArgs $e $op (& $next))
+        Assert-True ($res.Aborted -like 'DECLARATION_*' -and $res.RefusedAt.Step -ceq 'task' -and $op.Calls.Count -eq 1 -and (& $intact)) "declaracao da tarefa recusada ($($res.Aborted))"
+        $op = New-TestCleanOperator -Answers @{ 'results#1' = 'TALVEZ' }
+        $res = Invoke-PurOpen (Get-PurArgs $e $op (& $next))
+        Assert-True ($res.Aborted -like 'DECLARATION_*' -and $res.RefusedAt.Step -ceq 'results' -and $op.Calls.Count -eq 2 -and (& $intact)) "declaracao do conteudo recusada ($($res.Aborted))"
+        $a = Get-PurArgs $e (New-TestCleanOperator) $null; $a.Remove('LogFile')
+        & $check (Invoke-PurOpen $a) 'LOG_REQUIRED' 'sem log'
+        & $check (Invoke-PurOpen (Get-PurArgs $e (New-TestCleanOperator) (Join-Path $script:AtmIsolationQuarantineRoot 'x.jsonl'))) 'LOG_DESTINATION_NOT_ALLOWED' 'log dentro da quarentena'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $script:AtmIsolationQuarantineRoot 'x.jsonl'))) 'nada criado na quarentena'
+        $script:AtmCleanConsoleSource = { $false }
+        try { $res = Invoke-PurOpen (Get-PurArgs $e (New-TestCleanOperator) (& $next)) } finally { $script:AtmCleanConsoleSource = { $true } }
+        & $check $res 'CONSOLE_NOT_OBSERVED' 'sem console'
+        $h = Start-TestLockHolder -Name $script:AtmCleanLockName -Mode release
+        try { $op = New-TestCleanOperator; $lg = & $next; $res = Invoke-PurOpen (Get-PurArgs $e $op $lg) } finally { $null = Stop-TestLockHolderByGo $h }
+        & $check $res 'CLEAN_LOCK_BUSY' 'lock ocupado'
+        Assert-True ($op.Calls.Count -eq 0 -and -not (Test-Path -LiteralPath $lg)) 'lock ocupado: nada perguntado, nenhum log'
+        # B2-1 extended to the quarantine: a command line that names it (any slash form) refuses; one that only starts like it does not.
+        $q = $script:AtmIsolationQuarantineRoot
+        $proc = { param([string]$Cmd) [pscustomobject]@{ ProcessId = 4321; Name = 'tool.exe'; ParentProcessId = 0; CommandLine = $Cmd; CreationDate = (Get-Date).AddHours(-1) } }
+        $iaRef = Get-InvArgs -Profiles @($e.Run.Profile) -Procs (New-Procs -Extra @((& $proc ('tool.exe --dir "' + $q.Replace('\', '/') + '/' + $e.Id + '"'))))
+        $op = New-TestCleanOperator; $lg = & $next
+        $res = Invoke-PurOpen (Get-PurArgs $e $op $lg @{ InventoryArgs = $iaRef })
+        & $check $res 'EXPURGO_RECUSADO' 'linha de comando cita a quarentena'
+        Assert-True ((@($res.Plan.Reasons) -join ';') -ceq 'RUNTIME_QUARANTINE_REFERENCED (1)' -and $op.Calls.Count -eq 0 -and -not (Test-Path -LiteralPath $lg)) "B2-1 estendido a quarentena, so a contagem ($(@($res.Plan.Reasons) -join ';'))"
+        $iaNear = Get-InvArgs -Profiles @($e.Run.Profile) -Procs (New-Procs -Extra @((& $proc ('tool.exe ' + $q + 'X'))))
+        $res = Invoke-AtmPurge -Id $e.Id -PlanPresenter (New-PurPlanRecorder).Presenter -InventoryArgs $iaNear
+        Assert-True ($res.Aborted -ceq 'EXPURGO_REAL_DESABILITADO' -and @($res.Plan.Reasons).Count -eq 0) "nome que so comeca como a quarentena nao conta ($(@($res.Plan.Reasons) -join ';'))"
+        # Last: a change in the payload after the questions.
+        $hook = { param($plan) [IO.File]::WriteAllText((Join-Path $plan.PayloadPath 'depois.txt'), 'novo') }
+        $lg = & $next
+        $res = Invoke-PurOpen (Get-PurArgs $e (New-TestCleanOperator) $lg @{ BeforePurgeHook = $hook; PurgeTreeImpl = { param($p) throw 'nunca' } })
+        Assert-True ($res.Aborted -ceq 'REVALIDATION_REFUSED' -and @($res.Results).Count -eq 0 -and [IO.File]::ReadAllText($e.Manifest) -ceq $h0 -and [IO.File]::Exists((Join-Path $e.Path 'payload\a.txt')) -and [IO.File]::Exists((Join-Path $e.Path 'payload\depois.txt'))) "revalidacao recusada, nada expurgado ($($res.Aborted))"
+        Assert-True ((Get-RstTypes $lg) -ceq 'run-start,declaration,confirmation,plan-check,run-end' -and -not (Read-TestCleanLogFile $lg).Records[3].matched) 'plan-check nao confere, registrado'
+    }
+    Test-Case 'Isolamento P4' 'Desfechos do deleter no expurgo (deleter real e costura -PurgeTreeImpl): intencao no manifesto e no log ANTES da chamada; medicao divergente: o deleter recusa antes da primeira exclusao (so o codigo do motivo) e a entrada fica ISOLATED, depois expurgavel; excecao: FAILED; arquivo em uso: recusado no plano pela sonda (gate 8) e, aberto depois da revalidacao, nunca apagado; nada repetido' {
+        $dir = New-TestCleanLogDir 'pur-out'
+        if (-not $dir) { return }
+        $e = New-RstEntry 'purout-differs'
+        if (-not $e) { return }
+        $before = Get-IsoRelativeListing (Join-Path $e.Path 'payload')
+        $script:purLog = Join-Path $dir 'differs.jsonl'; $script:purSeen = $null
+        $impl = { param($plan) $script:purSeen = @((Get-IsoLiveLastType $script:purLog), (Get-IsoLiveLastType (Join-Path $plan.Entry.Path 'manifest.jsonl'))); [AgentTempManager.AtmDeleter]::DeleteTree($plan.PayloadPath, $plan.Files + 1, $plan.Dirs, $plan.Bytes, $plan.NewestTicks, $null) }
+        $res = Invoke-PurOpen (Get-PurArgs $e (New-TestCleanOperator) $script:purLog @{ PurgeTreeImpl = $impl })
+        Assert-True (@($res.Results).Count -eq 1 -and $res.Results[0].Outcome -ceq 'REFUSED' -and $res.StoppedBy -ceq 'STOPPED_AFTER_REFUSED' -and $res.Results[0].AbortReason -ceq 'PLAN_DIFFERS_FROM_VALIDATED_MEASUREMENT' -and $res.Results[0].FilesDeleted -eq 0 -and $res.Results[0].Attempted -eq $false) "medicao divergente: recusado antes da primeira exclusao ($($res.StoppedBy) $(@($res.Results | ForEach-Object { $_.AbortReason }) -join ';'))"
+        Assert-Eq ($script:purSeen -join ',') 'purge-intent,purge-intent' 'na chamada ao deleter: intencao no log e no manifesto'
+        Assert-Eq (Get-IsoRelativeListing (Join-Path $e.Path 'payload')) $before 'payload intacto'
+        Assert-Eq (Get-RstTypes $e.Manifest) 'entry,move-intent,move-result,purge-intent,purge-result' 'manifesto registra o desfecho'
+        Assert-Eq (Get-RstTypes $script:purLog) 'run-start,declaration,confirmation,plan-check,purge-intent,purge-result,run-end' 'log completo'
+        $mr = (Read-TestCleanLogFile $e.Manifest).Records[4]
+        Assert-True ($mr.outcome -ceq 'REFUSED' -and $mr.abortReason -ceq 'PLAN_DIFFERS_FROM_VALIDATED_MEASUREMENT' -and -not ([IO.File]::ReadAllText($e.Manifest)).Contains($e.Path)) 'so o codigo do motivo, sem caminho'
+        Assert-Eq (Get-AtmQuarantineEntry -Id $e.Id -OwnSid $testIdentity.Sid).State 'ISOLATED' 'recusa do deleter: entrada continua ISOLATED'
+        $res = Invoke-PurOpen (Get-PurArgs $e (New-TestCleanOperator) (Join-Path $dir 'differs-2.jsonl'))
+        Assert-True (@($res.Results).Count -eq 1 -and $res.Results[0].Outcome -ceq 'COMPLETE' -and (Get-AtmQuarantineEntry -Id $e.Id -OwnSid $testIdentity.Sid).State -ceq 'PURGED') "nova execucao confirmada pelo operador: expurgada ($($res.Aborted)$($res.StoppedBy))"
+        $x = New-RstEntry 'purout-exc'
+        $res = Invoke-PurOpen (Get-PurArgs $x (New-TestCleanOperator) (Join-Path $dir 'exc.jsonl') @{ PurgeTreeImpl = { param($plan) throw (New-Object IO.IOException 'synthetic') } })
+        Assert-True (@($res.Results).Count -eq 1 -and $res.Results[0].Outcome -ceq 'EXCEPTION' -and $res.StoppedBy -ceq 'STOPPED_AFTER_EXCEPTION' -and $res.Results[0].ExceptionType -ceq 'IOException') "excecao ($($res.StoppedBy))"
+        Assert-Eq (Get-AtmQuarantineEntry -Id $x.Id -OwnSid $testIdentity.Sid).State 'FAILED' 'excecao: estado do payload desconhecido, entrada FAILED'
+        $u = New-RstEntry 'purout-inuse'
+        $op = New-TestCleanOperator
+        $fs = [IO.File]::Open((Join-Path $u.Path 'payload\a.txt'), 'Open', 'ReadWrite', 'None')
+        try { $res = Invoke-PurOpen (Get-PurArgs $u $op (Join-Path $dir 'inuse-plan.jsonl')) } finally { $fs.Dispose() }
+        Assert-True ($res.Aborted -ceq 'EXPURGO_RECUSADO' -and @($res.Plan.Reasons).Count -gt 0 -and $op.Calls.Count -eq 0 -and [IO.File]::Exists((Join-Path $u.Path 'payload\a.txt'))) "em uso no plano: recusado pela sonda ($(@($res.Plan.Reasons).Count) motivo(s))"
+        $impl = { param($plan) $h = [IO.File]::Open((Join-Path $plan.PayloadPath 'a.txt'), 'Open', 'ReadWrite', 'None'); try { [AgentTempManager.AtmDeleter]::DeleteTree($plan.PayloadPath, $plan.Files, $plan.Dirs, $plan.Bytes, $plan.NewestTicks, $null) } finally { $h.Dispose() } }
+        $res = Invoke-PurOpen (Get-PurArgs $u (New-TestCleanOperator) (Join-Path $dir 'inuse.jsonl') @{ PurgeTreeImpl = $impl })
+        $o = @($res.Results)[0]
+        Assert-True (@($res.Results).Count -eq 1 -and @('REFUSED', 'PARTIAL') -ccontains $o.Outcome -and $res.StoppedBy -ceq ('STOPPED_AFTER_' + $o.Outcome) -and [IO.File]::Exists((Join-Path $u.Path 'payload\a.txt'))) "arquivo em uso no deleter: nunca apagado ($($o.Outcome) $($o.AbortReason))"
+        Assert-Eq (Get-AtmQuarantineEntry -Id $u.Id -OwnSid $testIdentity.Sid).State $(if ($o.Outcome -ceq 'REFUSED') { 'ISOLATED' } else { 'FAILED' }) 'estado derivado do desfecho'
+        $script:caseNote = "arquivo em uso no deleter: $($o.Outcome) $($o.AbortReason)"
+    }
+    Test-Case 'Isolamento P4' 'Retencao (relogio injetavel, so na suite): padrao de 30 dias marca EXPIRED a entrada ISOLATED, com a data, em list, inspect e verify; politica valida de 60 dias substitui o padrao; so ISOLATED vira EXPIRED (FAILED continua FAILED); EXPIRED so marca, nada gravado nem expurgado; a entrada EXPIRED so sai pelo comando confirmado' {
+        $e = New-RstEntry 'purexp'
+        $f = New-RstEntry 'purexpf' @{ MoveTreeImpl = $isoRefused }
+        if (-not $e -or -not $f) { return }
+        $dir = New-TestCleanLogDir 'pur-exp'
+        if (-not $dir) { return }
+        $snap = Get-RstSnapshot $e.Path
+        $p60 = Get-AtmQuarantinePolicy -ConfigDir (New-PurConfig 'ret60' '{"schema":"atm.quarantine-policy/1","retentionDays":60}')
+        Assert-True ($p60.Source -ceq 'FILE' -and $p60.RetentionDays -eq 60) 'politica de 60 dias'
+        $old = Get-AtmLanguage
+        try {
+            $script:AtmQuarantineClock = { [datetime]::UtcNow.AddDays(29) }
+            $s = Get-AtmQuarantineEntry -Id $e.Id -OwnSid $testIdentity.Sid
+            Assert-True ($s.State -ceq 'ISOLATED' -and $s.ExpiresUtc -gt [datetime]::UtcNow.AddDays(29) -and $s.ExpiresUtc -le [datetime]::UtcNow.AddDays(30)) "29 dias: ISOLATED, marca em 30 dias ($($s.ExpiresUtc.ToString('o')))"
+            $script:AtmQuarantineClock = { [datetime]::UtcNow.AddDays(31) }
+            $s = Get-AtmQuarantineEntry -Id $e.Id -OwnSid $testIdentity.Sid
+            $l = Get-AtmQuarantineList -OwnSid $testIdentity.Sid
+            $le = @($l.Entries | Where-Object { $_.Id -ceq $e.Id })[0]
+            $v = Test-AtmQuarantineEntry -Id $e.Id -OwnSid $testIdentity.Sid
+            Assert-True ($s.State -ceq 'EXPIRED' -and $le.State -ceq 'EXPIRED' -and $le.ExpiresUtc -eq $s.ExpiresUtc -and $v.Result -ceq 'OK' -and $v.State -ceq 'EXPIRED') "31 dias, padrao: EXPIRED em inspect, list e verify ($($s.State) $($le.State) $($v.Result))"
+            Assert-Eq (@($l.Entries | Where-Object { $_.Id -ceq $f.Id })[0].State) 'FAILED' 'so ISOLATED vira EXPIRED'
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                $t = Get-RstHost { Show-AtmQuarantineList -List $l; Show-AtmQuarantineEntry -Entry $s }
+                Assert-True ($t.Contains('EXPIRED') -and $t.Contains((Get-AtmText 'q.expired' (Format-AtmTime $s.ExpiresUtc))) -and $t.Contains((Get-AtmText 'q.cliPurge' $e.Id)) -and $t.Contains((Format-AtmQuarantinePolicy $l.Policy))) "$lang`: EXPIRED com a data, comando de expurgo e politica"
+            }
+            Set-AtmLanguage -Requested $old
+            Assert-Eq (Get-AtmQuarantineEntry -Id $e.Id -OwnSid $testIdentity.Sid -Policy $p60).State 'ISOLATED' 'politica de 60 dias: ainda ISOLATED aos 31'
+            Assert-Eq (@((Get-AtmQuarantineList -OwnSid $testIdentity.Sid -Policy $p60).Entries | Where-Object { $_.Id -ceq $e.Id })[0].State) 'ISOLATED' 'list com a politica: ISOLATED'
+            $script:AtmQuarantineClock = { [datetime]::UtcNow.AddDays(61) }
+            Assert-Eq (Get-AtmQuarantineEntry -Id $e.Id -OwnSid $testIdentity.Sid -Policy $p60).State 'EXPIRED' 'politica de 60 dias: EXPIRED aos 61'
+            Assert-Eq (Get-RstSnapshot $e.Path) $snap 'EXPIRED so marca: payload e manifesto identicos'
+            $script:AtmQuarantineClock = { [datetime]::UtcNow.AddDays(31) }
+            $rec = New-PurPlanRecorder
+            $res = Invoke-PurOpen (Get-PurArgs $e (New-TestCleanOperator) (Join-Path $dir 'purge.jsonl') @{ PlanPresenter = $rec.Presenter })
+            Assert-True ($rec.Calls[0].Plan.Entry.State -ceq 'EXPIRED' -and @($res.Results).Count -eq 1 -and $res.Results[0].Outcome -ceq 'COMPLETE') "EXPIRED expurgada pelo comando confirmado ($($res.Aborted)$($res.StoppedBy))"
+            Assert-Eq (Get-AtmQuarantineEntry -Id $e.Id -OwnSid $testIdentity.Sid).State 'PURGED' 'PURGED nunca volta a EXPIRED'
+        } finally { $script:AtmQuarantineClock = $null; Set-AtmLanguage -Requested $old }
+    }
+    Test-Case 'Isolamento P4' 'Quota: com quotaBytes da politica atingida, list avisa (QUARANTINE_QUOTA_REACHED, uso e quota) e um novo isolamento e recusado antes de qualquer pergunta ou log; a quota nunca expurga: quarentena identica e a raiz no lugar; sem quota (padrao) o uso nem e medido' {
+        $x = New-IsoRun 'purquota'
+        if (-not $x) { return }
+        $cfg = New-PurConfig 'quota' '{"schema":"atm.quarantine-policy/1","quotaBytes":1}'
+        $x.IA['ConfigDir'] = $cfg
+        $q = $script:AtmIsolationQuarantineRoot
+        Assert-True ([IO.Directory]::Exists($q)) 'quarentena do sandbox com entradas'
+        $snap = Get-RstSnapshot $q
+        $before = Get-IsoRelativeListing $x.Root
+        $op = New-TestCleanOperator
+        $res = Invoke-IsoOpen (Get-IsoArgs $x $op)
+        Assert-True ($res.Aborted -ceq 'NENHUM_CAMINHO_ISOLAVEL' -and (Get-IsoRejectedReason $res $x.Root) -like '*QUARANTINE_QUOTA_REACHED*' -and $op.Calls.Count -eq 0 -and -not $res.EntryId -and -not (Test-Path -LiteralPath $x.Log)) "isolamento recusado pela quota ($($res.Aborted): $(Get-IsoRejectedReason $res $x.Root))"
+        Assert-Eq (Get-IsoRelativeListing $x.Root) $before 'raiz no lugar'
+        Assert-Eq (Get-RstSnapshot $q) $snap 'a quota nunca expurga: quarentena identica'
+        $pol = Get-AtmQuarantinePolicy -ConfigDir $cfg
+        $l = Get-AtmQuarantineList -OwnSid $testIdentity.Sid -Policy $pol
+        Assert-True ($pol.QuotaBytes -eq 1 -and $l.QuotaReached -and $l.UsedBytes -gt 0) "list: quota atingida ($($l.UsedBytes))"
+        $t = Get-RstHost { Show-AtmQuarantineList -List $l }
+        Assert-True ($t.Contains((Get-AtmText 'q.quotaReached')) -and $t.Contains((Get-AtmText 'q.usage' (Format-AtmMB $l.UsedBytes) (Format-AtmMB 1)))) 'aviso da quota e uso no list'
+        $l0 = Get-AtmQuarantineList -OwnSid $testIdentity.Sid -Policy (Get-AtmQuarantinePolicy -ConfigDir $cfgDir)
+        Assert-True ($null -eq $l0.UsedBytes -and -not $l0.QuotaReached) 'sem quota: uso nao medido'
+        Assert-Eq (Get-RstSnapshot $q) $snap 'list so leu'
+    }
+    Test-Case 'Isolamento P4' 'Politica config\quarantine.policy.json (esquema estrito atm.quarantine-policy/1): ausente = padrao; valida substitui (com ou sem BOM); invalida (campo extra, outro esquema, sem esquema, tipos, limites, nao JSON, vazia, grande demais) vale como DESLIGADA com aviso; autoPurge = true e lido, mostrado e avisado, e nao faz nada; capacidade: quota e espaco livre minimo fixo no codigo so recusam' {
+        $cfgP = New-PurConfig 'policy' $null
+        $pf = Join-Path $cfgP 'quarantine.policy.json'
+        $set = { param([string]$T, [bool]$Bom = $false) [IO.File]::WriteAllText($pf, $T, (New-Object Text.UTF8Encoding($Bom))) }
+        $off = { param($P) $P.RetentionDays -eq 30 -and $null -eq $P.QuotaBytes -and -not $P.AutoPurge }
+        $p0 = Get-AtmQuarantinePolicy -ConfigDir $cfgP
+        Assert-True ($p0.Source -ceq 'DEFAULT' -and (& $off $p0) -and @($p0.Warnings).Count -eq 0) 'ausente: padrao (30 dias, sem quota, autoPurge false)'
+        foreach ($bom in @($false, $true)) {
+            & $set '{"schema":"atm.quarantine-policy/1","retentionDays":7,"quotaBytes":1048576,"autoPurge":false}' $bom
+            $p1 = Get-AtmQuarantinePolicy -ConfigDir $cfgP
+            Assert-True ($p1.Source -ceq 'FILE' -and $p1.RetentionDays -eq 7 -and $p1.QuotaBytes -eq 1048576 -and -not $p1.AutoPurge -and @($p1.Warnings).Count -eq 0) "valida (BOM $bom): $($p1.Source) $($p1.RetentionDays) $($p1.QuotaBytes)"
+        }
+        $bads = @('{"schema":"atm.quarantine-policy/1","retentionDays":7,"extra":1}', '{"schema":"atm.quarantine-policy/2"}', '{"retentionDays":7}', '{"Schema":"atm.quarantine-policy/1"}',
+            '{"schema":"atm.quarantine-policy/1","retentionDays":"7"}', '{"schema":"atm.quarantine-policy/1","retentionDays":7.5}', '{"schema":"atm.quarantine-policy/1","retentionDays":0}', '{"schema":"atm.quarantine-policy/1","retentionDays":3651}',
+            '{"schema":"atm.quarantine-policy/1","quotaBytes":0}', '{"schema":"atm.quarantine-policy/1","quotaBytes":-1}', '{"schema":"atm.quarantine-policy/1","autoPurge":"yes"}', '{"schema":"atm.quarantine-policy/1","autoPurge":1}',
+            '[1,2]', 'nao e json', '', ('{"schema":"atm.quarantine-policy/1"}' + (' ' * 70000)))
+        foreach ($bad in $bads) {
+            & $set $bad
+            $pb = Get-AtmQuarantinePolicy -ConfigDir $cfgP
+            Assert-True ($pb.Source -ceq 'INVALID' -and (& $off $pb) -and (@($pb.Warnings) -join ',') -ceq 'QUARANTINE_POLICY_INVALID') "invalida vale como desligada: $(if ($bad.Length -gt 80) { $bad.Substring(0, 40) + '...' } else { $bad })"
+        }
+        & $set '{"schema":"atm.quarantine-policy/1","autoPurge":true}'
+        $pa = Get-AtmQuarantinePolicy -ConfigDir $cfgP
+        Assert-True ($pa.Source -ceq 'FILE' -and $pa.AutoPurge -and $pa.RetentionDays -eq 30 -and (@($pa.Warnings) -join ',') -ceq 'AUTOPURGE_NOT_AVAILABLE') 'autoPurge true: lido e avisado'
+        $old = Get-AtmLanguage
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                $t = (@(Get-AtmQuarantinePolicyLines -Policy $pa) | ForEach-Object { $_.Text }) -join "`n"
+                Assert-True ($t.Contains((Format-AtmQuarantinePolicy $pa)) -and $t.Contains((Get-AtmText 'q.policyWarn.AUTOPURGE_NOT_AVAILABLE')) -and $t.Contains((Get-AtmText 'q.policySource.FILE'))) "$lang`: autoPurge mostrado com o aviso"
+                $t = (@(Get-AtmQuarantinePolicyLines -Policy $pb) | ForEach-Object { $_.Text }) -join "`n"
+                Assert-True ($t.Contains((Get-AtmText 'q.policyWarn.QUARANTINE_POLICY_INVALID')) -and $t.Contains((Get-AtmText 'q.policySource.INVALID'))) "$lang`: politica invalida avisada"
+            }
+        } finally { Set-AtmLanguage -Requested $old }
+        # autoPurge = true does nothing: an EXPIRED entry stays as it is through list, inspect and verify.
+        $e = New-RstEntry 'purauto'
+        if (-not $e) { return }
+        $snap = Get-RstSnapshot $e.Path
+        $script:AtmQuarantineClock = { [datetime]::UtcNow.AddDays(31) }
+        try {
+            $l = Get-AtmQuarantineList -OwnSid $testIdentity.Sid -Policy $pa
+            $null = Get-AtmQuarantineEntry -Id $e.Id -OwnSid $testIdentity.Sid -Policy $pa
+            $v = Test-AtmQuarantineEntry -Id $e.Id -OwnSid $testIdentity.Sid -Policy $pa
+        } finally { $script:AtmQuarantineClock = $null }
+        Assert-True (@($l.Entries | Where-Object { $_.Id -ceq $e.Id })[0].State -ceq 'EXPIRED' -and $v.Result -ceq 'OK' -and $l.Policy.AutoPurge) 'EXPIRED com autoPurge true'
+        Assert-Eq (Get-RstSnapshot $e.Path) $snap 'autoPurge nao fez nada: payload e manifesto identicos'
+        $iso = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Isolate.ps1'))
+        $pol = $iso.Substring($iso.IndexOf('function Get-AtmQuarantinePolicy'), $iso.IndexOf('function Get-AtmQuarantineUsage') - $iso.IndexOf('function Get-AtmQuarantinePolicy'))
+        Assert-Eq ([regex]::Matches($iso, 'autoPurge', 'IgnoreCase').Count) ([regex]::Matches($pol, 'autoPurge', 'IgnoreCase').Count) 'autoPurge so lido na politica (motor)'
+        foreach ($n in @('agent-temp.ps1', 'lib\Tui.ps1', 'lib\Engine.Clean.ps1', 'lib\Engine.Audit.ps1', 'lib\Engine.Diagnose.ps1')) { Assert-True (-not ([IO.File]::ReadAllText((Join-Path $srcDir $n))).Contains('.AutoPurge')) "$n nao usa autoPurge" }
+        Assert-Eq ([regex]::Matches([IO.File]::ReadAllText((Join-Path $srcDir 'lib\Report.ps1')), '\.AutoPurge').Count) 1 'relatorio so mostra autoPurge'
+        # Capacity: refusals only (QUARANTINE_QUOTA_REACHED, LOW_DISK_SPACE with the minimum fixed in code); nothing purged.
+        $q = $script:AtmIsolationQuarantineRoot
+        $pq = [pscustomobject]@{ RetentionDays = 30; QuotaBytes = 1000L; AutoPurge = $false; Source = 'FILE'; Warnings = @() }
+        Assert-Eq (@(Get-AtmQuarantineCapacityRefusal -QuarantineRoot $q -Bytes 10 -Policy $pq -UsedBytes 100 -FreeBytes 1GB) -join ',') '' 'quota nao atingida'
+        Assert-Eq (@(Get-AtmQuarantineCapacityRefusal -QuarantineRoot $q -Bytes 950 -Policy $pq -UsedBytes 100 -FreeBytes 1GB) -join ',') 'QUARANTINE_QUOTA_REACHED' 'a quota seria ultrapassada'
+        Assert-Eq (@(Get-AtmQuarantineCapacityRefusal -QuarantineRoot $q -Bytes 0 -Policy $pq -UsedBytes 1000 -FreeBytes 1GB) -join ',') 'QUARANTINE_QUOTA_REACHED' 'quota atingida'
+        Assert-Eq (@(Get-AtmQuarantineCapacityRefusal -QuarantineRoot $q -Bytes 0 -Policy $p0 -FreeBytes ($script:AtmQuarantineMinFreeBytes - 1)) -join ',') 'LOW_DISK_SPACE' 'espaco livre abaixo do minimo fixo'
+        Assert-True ([regex]::Matches($iso, '\$script:AtmQuarantineMinFreeBytes\s*=').Count -eq 1 -and -not $iso.Contains('minFreeBytes')) 'minimo fixo no codigo, sem chave nova de politica'
+    }
+    Test-Case 'Isolamento P4' 'Politica preservada na atualizacao: instalada sem politica; a do administrador sobrevive ao -Update byte a byte e fica no manifesto da nova copia (verify passa); version da copia instalada mostra a politica efetiva; uma politica invalida tambem e preservada e vale como desligada' {
+        $inst = Join-Path $sandbox 'PFP4\AgentTempManager'
+        [void][IO.Directory]::CreateDirectory((Split-Path -Parent $inst))
+        $inArgs = @{ SourceDir = $srcDir; InstallDir = $inst; TrustSid = $me.Sid; SkipPath = $true; SourceWithoutManifest = $true }
+        $null = Install-AtmProduct @inArgs
+        $pf = Join-Path $inst 'config\quarantine.policy.json'
+        Assert-True (-not (Test-Path -LiteralPath $pf)) 'instalado sem politica'
+        $cmd = Join-Path $inst 'bin\agent-temp.cmd'
+        $r = Invoke-AtmTestChild -CommandLine ("`"$cmd`" version -Lang en-US") -TimeoutSec 180
+        Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('quarantine purge: DISABLED') -and $r.Text.Contains('retention 30 day(s)') -and $r.Text.Contains('default: no policy file')) "version sem politica ($($r.Exit))"
+        $text = '{"schema":"atm.quarantine-policy/1","retentionDays":7,"quotaBytes":1048576,"autoPurge":false}'
+        [IO.File]::WriteAllText($pf, $text, (New-Object Text.UTF8Encoding($false)))
+        $null = Install-AtmProduct @inArgs -Update
+        Assert-Eq ([IO.File]::ReadAllText($pf)) $text 'politica preservada byte a byte'
+        $man = Get-Content -LiteralPath (Join-Path $inst 'manifest.json') -Raw
+        Assert-True ($man.Contains('quarantine.policy.json')) 'politica no manifesto da nova copia'
+        $r = Invoke-AtmTestChild -CommandLine ("`"$cmd`" verify") -TimeoutSec 180
+        Assert-Eq $r.Exit 0 "verify da copia atualizada ($($r.Text))"
+        $r = Invoke-AtmTestChild -CommandLine ("`"$cmd`" version -Lang en-US") -TimeoutSec 180
+        Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('retention 7 day(s)') -and $r.Text.Contains('config\quarantine.policy.json') -and $r.Text.Contains('quarantine purge: DISABLED')) "version mostra a politica instalada ($($r.Exit))"
+        $bad = '{"schema":"atm.quarantine-policy/1","retentionDays":0}'
+        [IO.File]::WriteAllText($pf, $bad, (New-Object Text.UTF8Encoding($false)))
+        $null = Install-AtmProduct @inArgs -Update
+        Assert-Eq ([IO.File]::ReadAllText($pf)) $bad 'politica invalida tambem preservada'
+        $r = Invoke-AtmTestChild -CommandLine ("`"$cmd`" version -Lang en-US") -TimeoutSec 180
+        Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('QUARANTINE_POLICY_INVALID') -and $r.Text.Contains('retention 30 day(s)')) "invalida vale como desligada na copia instalada ($($r.Exit))"
+        Uninstall-AtmProduct -InstallDir $inst | Out-Null
+        Assert-True (-not (Test-Path -LiteralPath $inst)) 'desinstalado'
+    }
+    Test-Case 'Isolamento P4' 'CLI quarantine purge (processo filho, origem; trava fechada): sem -Entry sai com 2; -Entry com caminho sai com 2; entrada inexistente: o plano recusa (PURGE_REFUSED_ENTRY_NOT_FOUND, EXPURGO_RECUSADO), sai com 3 e nada e criado; version mostra a trava do expurgo DESABILITADA e a politica efetiva; help lista o comando' {
+        $shell = (Get-Process -Id $PID).Path
+        $cli = Join-Path $srcDir 'agent-temp.ps1'
+        $run = { param([string]$ArgLine, [int]$T = 180) Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -ExecutionPolicy Bypass -File `"$cli`" $ArgLine -Lang en-US -NoProgress") -TimeoutSec $T }
+        $r = & $run 'quarantine purge'; Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('quarantine requires: list')) "purge sem -Entry: exit $($r.Exit)"
+        $r = & $run ("quarantine purge -Entry `"$sandbox\x`""); Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('never a path')) "-Entry com caminho: exit $($r.Exit)"
+        $la = [Environment]::GetFolderPath('LocalApplicationData'); $home0 = [IO.Directory]::Exists((Join-Path $la 'AgentTempManager'))
+        $r = & $run 'quarantine purge -Entry 20260101T000000Z-0badf00d' 300
+        Assert-True ($r.Exit -eq 3 -and $r.Text.Contains('PURGE_REFUSED_ENTRY_NOT_FOUND') -and $r.Text.Contains('EXPURGO_RECUSADO') -and -not $r.Text.Contains('EXPURGAR ')) "purge inexistente: exit $($r.Exit)"
+        Assert-Eq ([IO.Directory]::Exists((Join-Path $la 'AgentTempManager'))) $home0 'purge com a trava fechada nunca cria a quarentena'
+        $r = & $run 'version'
+        Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('quarantine purge: DISABLED') -and $r.Text.Contains('no space is freed') -and $r.Text.Contains('retention 30 day(s)') -and $r.Text.Contains('default: no policy file')) "version: trava do expurgo e politica ($($r.Exit))"
+        $r = & $run 'help'; Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('purge -Entry <id>')) "help: exit $($r.Exit)"
+    }
+    Test-Case 'Isolamento P4' 'Camadas e estatico: uma chamada de produto ao deleter no clean e uma no expurgo (so alem da trava, depois da intencao no manifesto e no log); duas ao mover (isolar e restaurar); relatorio, TUI e lancador nunca chamam o deleter; so o lancador chama o expurgo, uma vez; costura do relogio com atribuicao unica; textos nos dois idiomas' {
+        $hits = @()
+        foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1', '.cmd') })) { $n = [regex]::Matches([IO.File]::ReadAllText($fi.FullName), 'AtmDeleter\]::DeleteTree\(').Count; if ($n -gt 0) { $hits += ('{0}:{1}' -f $fi.Name, $n) } }
+        Assert-Eq (($hits | Sort-Object) -join ',') 'Engine.Clean.ps1:1,Engine.Isolate.ps1:1' 'deleter: uma chamada de produto no clean e uma no expurgo'
+        $iso = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Isolate.ps1'))
+        Assert-Eq ([regex]::Matches($iso, 'AtmMover\]::MoveTree\(').Count) 2 'mover: isolar e restaurar'
+        $core = $iso.Substring($iso.IndexOf('function Invoke-AtmPurgeCore'))
+        $iGate = $core.IndexOf("`$state.Aborted = 'EXPURGO_REAL_DESABILITADO'")
+        $iMi = $core.IndexOf("& `$writeManifest 'purge-intent'"); $iLi = $core.IndexOf("-Type 'purge-intent'"); $iDel = $core.IndexOf('[AgentTempManager.AtmDeleter]::DeleteTree(')
+        Assert-True ($iGate -gt 0 -and $iMi -gt $iGate -and $iLi -gt $iMi -and $iDel -gt $iLi -and $iso.IndexOf('[AgentTempManager.AtmDeleter]::DeleteTree(') -gt $iso.IndexOf('function Invoke-AtmPurgeCore')) "ordem: trava $iGate < intencao no manifesto $iMi < no log $iLi < deleter $iDel"
+        foreach ($act in @('& $ConfirmationReader', 'Open-AtmCleanLog', 'Get-AtmEngineConsoleObservation', '& $PurgeTreeImpl', '& $BeforePurgeHook', "& `$writeManifest")) { Assert-True ($core.IndexOf($act) -gt $iGate) "'$act' so depois da parada da trava" }
+        $w = $iso.Substring($iso.IndexOf('function Invoke-AtmPurge {'), $iso.IndexOf('function Invoke-AtmPurgeCore') - $iso.IndexOf('function Invoke-AtmPurge {'))
+        Assert-True ($w.IndexOf('if (-not $script:AtmQuarantinePurgeEnabled) { return (Invoke-AtmPurgeCore @PSBoundParameters) }') -gt 0 -and $w.IndexOf('if (-not $script:AtmQuarantinePurgeEnabled)') -lt $w.IndexOf('Invoke-AtmUnderSharedLock') -and -not $w.Contains('Invoke-AtmInventory')) 'trava antes do lock'
+        $calls = @()
+        foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1', '.cmd') -and $_.Name -ne 'Engine.Isolate.ps1' })) { if ([IO.File]::ReadAllText($fi.FullName).Contains('Invoke-AtmPurge')) { $calls += $fi.Name } }
+        Assert-Eq ($calls -join ',') 'agent-temp.ps1' 'so o lancador chama o expurgo'
+        $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        Assert-True ([regex]::Matches($cli, 'Invoke-AtmPurge ').Count -eq 1 -and $cli.Contains("if (`$script:AtmQuarantinePurgeEnabled -and -not (Test-AtmTuiInteractive)) { Write-Host (Get-AtmText 'cli.purgeNeedsConsole')") -and $cli.Contains('-ConfirmationReader $purReader')) 'CLI: uma chamada; console exigido alem da trava'
+        foreach ($n in @('lib\Report.ps1', 'lib\Tui.ps1', 'agent-temp.ps1')) { $t = [IO.File]::ReadAllText((Join-Path $srcDir $n)); Assert-True (-not $t.Contains('AtmDeleter') -and -not $t.Contains('DeleteTree')) "$n nunca chama o deleter" }
+        Assert-True ([regex]::Matches($iso, '\$script:AtmQuarantineClock\s*=').Count -eq 1 -and $iso -match '(?m)^\$script:AtmQuarantineClock = \$null\r?$') 'costura do relogio: atribuicao unica $null no motor'
+        foreach ($l in @('en-US', 'pt-BR')) {
+            foreach ($k in @('cli.purge', 'cli.purgeDisabled', 'cli.purgeNeedsConsole', 'col.expires', 'q.expires', 'q.expired', 'q.cliPurge', 'q.policy', 'q.quotaOff', 'q.quotaBytes', 'q.usage', 'q.usageUnmeasured', 'q.quotaReached', 'q.policySource.DEFAULT', 'q.policySource.FILE', 'q.policySource.INVALID', 'q.policyWarn.QUARANTINE_POLICY_INVALID', 'q.policyWarn.AUTOPURGE_NOT_AVAILABLE', 'pur.planOnly', 'pur.gateMsg', 'pur.phraseEntry', 'pur.purged', 'pur.nothingPurged', 'pur.resultRow')) { Assert-True $script:AtmMessages[$l].ContainsKey($k) "$k ($l)" }
+        }
+        foreach ($k in @($script:AtmMessages['en-US'].Keys | Where-Object { $_ -like 'pur.*' })) { Assert-True $script:AtmMessages['pt-BR'].ContainsKey($k) "$k tambem em pt-BR" }
     }
 
     # ------------------------------------------------------------------ trusted accounts per engine (FIX-TRUSTED-SIDS)
@@ -4357,6 +4836,36 @@ exit 0
             Assert-Eq (Get-RstSnapshot $script:AtmIsolationQuarantineRoot) $snap 'quarentena e manifesto identicos: a TUI so leu'
             Assert-Eq (Get-IsoEntryCount) 1 'nenhuma entrada nova'
         } finally { $script:AtmIsolationQuarantineRoot = $saved; Set-AtmLanguage -Requested $old }
+    }
+    Test-Case 'TUI' 'Quarentena 0.3.x P4 headless (en-US e pt-BR): EXPIRED (relogio injetavel da suite) e PURGED listados com o estado; o detalhe mostra o comando da CLI de expurgo e a politica efetiva; a TUI nunca expurga nem restaura: quarentena e manifestos identicos' {
+        $saved = $script:AtmIsolationQuarantineRoot
+        [void][IO.Directory]::CreateDirectory((Join-Path $sandbox 'tuip4-home'))
+        $script:AtmIsolationQuarantineRoot = Join-Path $sandbox 'tuip4-home\AgentTempManager\Q'
+        $old = Get-AtmLanguage
+        try {
+            $a = New-RstEntry 'tuip4a'
+            $b = New-RstEntry 'tuip4b'
+            if (-not $a -or -not $b) { return }
+            $dir = New-TestCleanLogDir 'tuip4'
+            if (-not $dir) { return }
+            $pr = Invoke-PurOpen (Get-PurArgs $b (New-TestCleanOperator) (Join-Path $dir 'purge.jsonl'))
+            Assert-True (@($pr.Results).Count -eq 1 -and $pr.Results[0].Outcome -ceq 'COMPLETE') "entrada expurgada para a area ($($pr.Aborted)$($pr.StoppedBy))"
+            $snap = Get-RstSnapshot $script:AtmIsolationQuarantineRoot
+            $script:AtmQuarantineClock = { [datetime]::UtcNow.AddDays(31) }
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                $ia = Get-InvArgs -Profiles @($a.Run.Profile, $b.Run.Profile)
+                $keys = @((New-Key 'Z' 'z'), (New-Key 'Enter'), (New-Key 'Escape'), (New-Key 'Escape'), (New-Key 'Q' 'q'))
+                $o = Invoke-HeadlessTui -Keys $keys -InvArgs $ia -H 40
+                $all = $o.Frames -join "`n=====`n"
+                $has = { param([string]$T) $all.Contains($T) -or $all.Contains((ConvertTo-AtmAscii $T)) }
+                Assert-True ($all.Contains($a.Id) -and $all.Contains($b.Id) -and $all.Contains('EXPIRED') -and $all.Contains('PURGED')) "$lang`: EXPIRED e PURGED listados"
+                Assert-True ((& $has (Get-AtmText 'q.cliPurge' $a.Id)) -or (& $has (Get-AtmText 'q.cliPurge' $b.Id))) "$lang`: comando da CLI de expurgo no detalhe"
+                Assert-True ((& $has (Format-AtmQuarantinePolicy (Get-AtmQuarantinePolicy -ConfigDir $cfgDir))) -and (& $has (Get-AtmText 'tui.q.cliOnly'))) "$lang`: politica efetiva; a TUI nao restaura nem expurga"
+                foreach ($fr in $o.Frames) { foreach ($ln in ($fr -split "`n")) { Assert-True ($ln.Length -le 120) "$lang`: linha excede a largura: $($ln.Length)" } }
+            }
+        } finally { $script:AtmQuarantineClock = $null; $script:AtmIsolationQuarantineRoot = $saved; Set-AtmLanguage -Requested $old }
+        Assert-Eq (Get-RstSnapshot (Join-Path $sandbox 'tuip4-home\AgentTempManager\Q')) $snap 'quarentena e manifestos identicos: a TUI so leu'
     }
     Test-Case 'TUI' 'Navegacao headless: dashboard, usuarios, roots, detalhe, classes, erros, preview, ajuda' {
         $p = New-TestProfile 'tui'

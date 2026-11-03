@@ -57,9 +57,9 @@ try {
     # FINAL-A (F-08): every shipped gate, not only deletion: a single assignment to $false in the archive.
     $diagTxt = & $read 'src/lib/Engine.Diagnose.ps1'
     $repTxt = & $read 'src/lib/Report.ps1'
-    # 0.3.x: the isolation gate too (ADR-0013), a single assignment to $false.
+    # 0.3.x: the isolation gate too (ADR-0013), and the purge gate of its own (J-ISO-1 (C)), a single assignment to $false each.
     $isoTxt = & $read 'src/lib/Engine.Isolate.ps1'
-    foreach ($g in @(@($diagTxt, 'AtmWorktreeDiagnosticsEnabled'), @($diagTxt, 'AtmHandleDiagnosticsEnabled'), @($repTxt, 'AtmDiagnoseExportEnabled'), @($isoTxt, 'AtmIsolationEnabled'))) {
+    foreach ($g in @(@($diagTxt, 'AtmWorktreeDiagnosticsEnabled'), @($diagTxt, 'AtmHandleDiagnosticsEnabled'), @($repTxt, 'AtmDiagnoseExportEnabled'), @($isoTxt, 'AtmIsolationEnabled'), @($isoTxt, 'AtmQuarantinePurgeEnabled'))) {
         if ([regex]::Matches($g[0], '\$script:' + $g[1] + '\s*=').Count -ne 1 -or $g[0] -notmatch ('(?m)^\$script:' + $g[1] + ' = \$false\r?$')) { $gateOk = $false }
     }
     if (-not $gateOk -or $cleanTxt.Contains('AcceptProcessCoverageGap') -or -not $auditTxt.Contains("`$script:AtmVersion = '$version'")) {

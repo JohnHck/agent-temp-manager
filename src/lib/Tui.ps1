@@ -13,7 +13,8 @@
 #    export of its result (schema fields only); it never calls a collector, opens a gate or changes a state.
 #  * 0.3.x isolation: I (menu, root lists, root detail) delegates one exact root to Invoke-AtmIsolate, the default action
 #    over a root (plan only with the isolation gate closed). The Quarantine area (Z) only lists, inspects and verifies,
-#    through the isolation engine's read-only functions; it never restores (T-ISO-6) and shows the CLI command instead.
+#    through the isolation engine's read-only functions, and shows EXPIRED, PURGED and the quarantine policy; it never
+#    restores or purges (T-ISO-6) and shows the CLI commands instead.
 Set-StrictMode -Version 2.0
 
 $script:AtmTuiClassColor = @{ ACTIVE_EVIDENCE = 'Red'; RECENT = 'Yellow'; LIVENESS_UNKNOWN = 'DarkYellow'; ORPHAN_SUSPECTED = 'Cyan'; NOT_SCANNED = 'DarkGray' }
@@ -212,7 +213,7 @@ function Get-AtmTuiScreenRows {
             foreach ($e in @(if ($State.Quarantine) { $State.Quarantine.Entries })) {
                 $rows.Add(@($e.Id, (Format-AtmQuarantineState $e), $e.TargetKind, $(if ($null -ne $e.Files) { '{0:N0}' -f $e.Files } else { '-' }), $(if ($null -ne $e.Bytes) { Format-AtmMB $e.Bytes } else { '-' }), $e.OriginalPath))
                 $items.Add([pscustomobject]@{ Kind = 'qentry'; Entry = $e })
-                $colors.Add($(if ($e.State -ceq 'ISOLATED') { 'Gray' } elseif ($e.State -ceq 'RESTORED') { 'DarkGray' } else { 'Yellow' }))
+                $colors.Add($(if ($e.State -ceq 'ISOLATED') { 'Gray' } elseif ($e.State -ceq 'EXPIRED') { 'DarkYellow' } elseif ($e.State -in @('RESTORED', 'PURGED')) { 'DarkGray' } else { 'Yellow' }))
             }
         }
     }
@@ -295,7 +296,8 @@ function Get-AtmTuiTextLines {
             foreach ($k in @('tui.help1', 'tui.help2', 'tui.help3', 'tui.help4', 'tui.help5')) { & $add (Get-AtmText $k); & $add '' }
         }
         'qdetail' {
-            # inspect, and verify on request (V): both only read. Restoring is not offered here (T-ISO-6): the CLI command.
+            # inspect, and verify on request (V): both only read. Restoring and purging are not offered here (T-ISO-6): the
+            # CLI commands, and the policy (retention only marks EXPIRED; the TUI never purges).
             $e = $Screen.Filter.Entry
             foreach ($ql in (Get-AtmQuarantineEntryLines -Entry $e)) { & $add $ql }
             & $add ''
@@ -307,6 +309,8 @@ function Get-AtmTuiTextLines {
             & $add ''
             & $add (Get-AtmText 'tui.q.cliOnly') 'Cyan'
             & $add ('  ' + (Get-AtmText 'q.cliOnly' $e.Id)) 'Cyan'
+            & $add ('  ' + (Get-AtmText 'q.cliPurge' $e.Id)) 'Cyan'
+            if ($State.Quarantine) { foreach ($pl in (Get-AtmQuarantinePolicyLines -Policy $State.Quarantine.Policy -List $State.Quarantine)) { & $add $pl.Text $pl.Color } }
             & $add (Get-AtmText 'tui.q.readOnly') 'Green'
         }
     }
@@ -1068,7 +1072,7 @@ function Start-AtmTui {
                         if ($null -ne $isoPart) { $push = @{ Name = 'isolate'; Path = $isoPart.Path } }
                     }
                     # V (an entry of the quarantine area): verify, read only (T-ISO-4).
-                    elseif ($ch -match '^[vV]$' -and $scr.Name -eq 'qdetail') { $scr.Filter.Verify = Test-AtmQuarantineEntry -Id $scr.Filter.Entry.Id -OwnSid (Get-AtmTuiOwnSid $state) }
+                    elseif ($ch -match '^[vV]$' -and $scr.Name -eq 'qdetail') { $scr.Filter.Verify = Test-AtmQuarantineEntry -Id $scr.Filter.Entry.Id -OwnSid (Get-AtmTuiOwnSid $state) -Policy $(if ($state.Quarantine) { $state.Quarantine.Policy } else { $null }) }
                     elseif ($scr.Name -eq 'menu') {
                         $m = @(Get-AtmTuiMenuItems | Where-Object { $_.Key -eq $ch.ToUpperInvariant() })
                         if ($m.Count -eq 1) { $push = $m[0].Screen }
@@ -1095,10 +1099,12 @@ function Start-AtmTui {
                     'clean' { Invoke-AtmTuiClean -State $state; if (-not $headless) { try { [Console]::CursorVisible = $false } catch { $null = $_ }; Clear-Host } }
                     'isolate' { Invoke-AtmTuiIsolate -State $state -Path $push.Path; if (-not $headless) { try { [Console]::CursorVisible = $false } catch { $null = $_ }; Clear-Host } }
                     'quarantine' {
-                        # Read on entering the area (read only; a missing quarantine is not created).
-                        $state.Quarantine = Get-AtmQuarantineList -OwnSid (Get-AtmTuiOwnSid $state)
+                        # Read on entering the area (read only; a missing quarantine is not created), with the policy of the
+                        # installation (the retention marks EXPIRED; shown, never acted on).
+                        $state.Quarantine = Get-AtmQuarantineList -OwnSid (Get-AtmTuiOwnSid $state) -Policy (Get-AtmQuarantinePolicy -ConfigDir ([string]$state.InventoryArgs['ConfigDir']))
                         if ($state.Quarantine.RootProblem) { $state.Message = (Get-AtmText 'q.rootProblem' $state.Quarantine.RootProblem) }
                         elseif (@($state.Quarantine.Entries).Count -eq 0) { $state.Message = (Get-AtmText 'tui.q.empty') }
+                        else { $state.Message = (Format-AtmQuarantinePolicy $state.Quarantine.Policy) }
                         $state.Stack.Add(@{ Name = 'quarantine'; Title = $push.Title; Sel = 0; Top = 0; Count = 0; Filter = $null })
                     }
                     default {

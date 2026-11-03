@@ -77,8 +77,10 @@ SHA-256 published in that release's `SHA256SUMS.txt`, pinned in the script. The 
 
 1. install the published version and check `version` and `verify`;
 2. update to the package under test (`-Update`) and check `version` and `verify`, the older copy kept as `.previous`,
-   and the five installed gates `$false` (deletion, worktree diagnostics, handle diagnostics, diagnose export and, since
-   0.3.x phase P2, isolation);
+   and the six installed gates `$false` (deletion, worktree diagnostics, handle diagnostics, diagnose export and, since
+   0.3.x, isolation (phase P2) and purge (phase P4)); the `shipped-purge-gate` step also checks that no policy file is
+   installed, that `version` shows the purge gate disabled and the default policy, and that `quarantine purge` of an
+   entry that does not exist only plans (exit code `3`, no quarantine created);
 3. roll back and check the published version again;
 4. update again;
 5. uninstall: the directories and the PATH entry are removed.
@@ -243,7 +245,7 @@ environmental reasons that the product reports correctly (for example a TEMP fol
 write: the sandbox then inherits that ACL and the gates block it, as they should). Those failures stay failures; the
 record of a local run and its causes is in [release/V0.2-LOCAL-TEST-ENVIRONMENT.md](release/V0.2-LOCAL-TEST-ENVIRONMENT.md).
 
-## Isolation in the suite (0.3.x phases P1 to P3a)
+## Isolation in the suite (0.3.x phases P1 to P4)
 
 The isolation gate stays `$false` in the suite's process; the cases past it open it only around each call and restore it.
 The quarantine is a folder of the sandbox (the `AtmIsolationQuarantineRoot` seam; the shipped value `$null` means
@@ -280,6 +282,51 @@ The quarantine is a folder of the sandbox (the `AtmIsolationQuarantineRoot` seam
   * restore with the gate closed (plan only), past it (original path), on a conflict (the generated alternative, its own
     phrase, no merge), with reconciliation of an interrupted entry (T-ISO-5), the mover's outcomes, every refusal;
   * the CLI in a child process; the TUI headless in both languages; static layering (two mover calls).
+* **P4 (purge, retention, quota, policy):** the purge gate stays `$false` in the suite's process. `Invoke-PurOpen` opens
+  it only around each call, after checking that the quarantine is the sandbox's, and restores it. The real deleter runs
+  only on payloads in the sandbox's quarantine. A policy file is written only in a config folder of the sandbox, never
+  in the source's.
+  * the six gates: one assignment to `$false` each; the purge gate checked by the build, the e2e and `version`;
+  * the gates are independent in both directions:
+    * with the isolation gate open (and the deletion gate, which the suite opens), `purge` still stops at
+      `EXPURGO_REAL_DESABILITADO` without asking;
+    * with the purge gate open, `isolate`, `restore` and a `clean` with its own gate closed stop at their own gates;
+    * the purge needs only its own gate;
+  * the purge gate closed: the plan only (its plan id prefix and phrase); no question, no lock (another process holds it),
+    no log, nothing purged; the report says no space is freed; the quarantine and manifests identical in bytes and times;
+  * a complete purge past the gate:
+    * the declarations of the purge itself, then the phrase;
+    * `purge-intent` and `purge-result` (`automatic: false`) in the manifest and the log, with no file names;
+    * the payload gone, the entry `PURGED`, and a second purge or a restore refused;
+  * a refusal for every state: `ABANDONED`, `DIFFERS`, `PAYLOAD_MISSING`, `PURGED`, `INCOMPLETE`, `FAILED`, `RESTORED`,
+    `UNRECOGNIZED` (a junction), an invalid manifest and an entry that does not exist;
+  * every refusal before the deleter, with the manifest and payload intact:
+    * an invalid id, no presenter or reader, a wrong phrase, a refused declaration;
+    * no log, a log inside the quarantine, no console, the clean lock busy;
+    * a command line naming the quarantine (`RUNTIME_QUARANTINE_REFERENCED`), while a name that only starts like it
+      does not refuse;
+    * a payload changed after the questions (revalidation refused);
+  * the deleter's outcomes:
+    * a divergent measurement through the real deleter: refused before the first deletion, code only, the entry still
+      `ISOLATED` and purgeable later;
+    * an exception: `FAILED`;
+    * a file in use: refused by the in-use probe at plan time; opened after the revalidation, it is never deleted;
+  * retention through the suite's clock seam (`AtmQuarantineClock`, never the CLI):
+    * `EXPIRED` with the default and with a 60-day policy;
+    * only `ISOLATED` becomes `EXPIRED`, and nothing is written;
+    * an `EXPIRED` entry purged by the confirmed command;
+  * the quota refuses an isolation before any question, and nothing is purged;
+  * the policy: missing, valid (with and without BOM), invalid in every way (counted as off with a warning),
+    `autoPurge: true` read and warned with no effect; the free-space minimum fixed in code;
+  * the policy preserved byte for byte by `-Update` (in the new manifest; `verify` passes), an invalid one too, and
+    `version` of the installed copy showing it;
+  * the CLI in a child process with the gate closed; the TUI headless in both languages (`EXPIRED`, `PURGED`, the
+    policy, the purge command; it never purges);
+  * static checks:
+    * the deleter has one product call in clean and one in purge, after the gate stop and the intent;
+    * the report, the TUI and the launcher never call the deleter, and only the launcher calls the purge, once;
+    * `autoPurge` is only read and shown;
+    * the clock seam is a single `$null` assignment.
 
 ## Future: isolation, quarantine and Recovery Mode (0.3.x and V0.4)
 
@@ -303,7 +350,7 @@ administrator or a real sign-in belong to the operator, like the V4 rows.
 | Interruption and concurrency | the process ends after the `intent` record (the entry reported incomplete, never restorable as complete); a second isolation, or a clean, while the lock is held (`BUSY`); the same isolation repeated (idempotent refusal, no second move) |
 | Integrity | a change inside the target between the plan and the move refuses; the manifest compared with the content after the move; a damaged manifest or entry reported as failed |
 | Restore | to a free original location; with a conflict (the base or root recreated by a new session) refused by default and the conflicts listed; to another free location; a partial restore reported exactly; old and new sessions never mixed |
-| Quarantine management | list, inspect and verify are read-only (byte and timestamp identical); expired, abandoned and incomplete entries reported; a quota refuses new isolations; purge confirmed by default, refused while the deletion gate is closed, one entry per run with its own confirmation |
+| Quarantine management | list, inspect and verify are read-only (byte and timestamp identical); expired, abandoned and incomplete entries reported; a quota refuses new isolations; purge confirmed by default, refused while its own purge gate is closed (0.3.x P4: J-ISO-1 (C), independent of the deletion gate), one entry per run with its own confirmation |
 | Automatic purge (opt-in, ISO-D4) | off by default and shown as off; once enabled by an administrator, shown in `version` and the reports; purges only expired entries whose manifest verifies in the same run; skips incomplete, abandoned, damaged and unexpired entries; never touches the active environment; each purge logged; any failure skips the entry (fail closed); nothing purged while the deletion gate is closed |
 | Isolation as the default (ISO-D5) | isolation offered as the default action; direct deletion only through the unchanged V0.3 flow with its own confirmation |
 | Worktrees and evidence | a Git worktree or a folder of preserved evidence inside a target: reported, and the target refused unless the person names it explicitly |

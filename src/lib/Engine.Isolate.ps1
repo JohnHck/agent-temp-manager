@@ -1,8 +1,9 @@
-# AgentTempManager ISOLATION ENGINE (0.3.x, docs/adr/ADR-0013; phase P3a: isolate one session root per run). Depends on
-# Engine.Audit.ps1 and Engine.Clean.ps1, whose gates, plan check, revalidation, lock and log writer it reuses unchanged.
-# No terminal output of its own: the plan is shown through a mandatory presenter callback and the confirmation is read
-# through a mandatory reader. With the isolation gate closed (every distributed copy) it stops after the plan: it asks
-# nothing, takes no lock, opens no log, creates no quarantine and moves nothing.
+# AgentTempManager ISOLATION ENGINE (0.3.x, docs/adr/ADR-0013: isolate one session root per run, list, inspect, verify,
+# restore and purge quarantine entries). Depends on Engine.Audit.ps1 and Engine.Clean.ps1, whose gates, plan check,
+# revalidation, lock, log writer and deleter it reuses unchanged. No terminal output of its own: the plan is shown through
+# a mandatory presenter callback and the confirmation is read through a mandatory reader. With the isolation gate closed
+# (every distributed copy) isolate and restore stop after the plan: nothing is asked, locked, logged, created or moved.
+# With the purge gate closed (every distributed copy) purge stops after its plan too: nothing is purged.
 Set-StrictMode -Version 2.0
 
 # ISOLATION GATE (0.3.x): real isolation is DISABLED. Invoke-AtmIsolate applies the target rule and every gate and
@@ -10,6 +11,13 @@ Set-StrictMode -Version 2.0
 # change this: enabling isolation requires a code change in this administrator-owned, manifest-verified file, released
 # under a specific authorization. Only the automated test suite flips it, inside its own process.
 $script:AtmIsolationEnabled = $false
+
+# QUARANTINE PURGE GATE (0.3.x, J-ISO-1 (C)): purging a quarantine entry is DISABLED. quarantine purge checks the entry and
+# every gate of the purge and presents the exact plan, then stops: it asks nothing, takes no lock, opens no log and purges
+# nothing, so no space is freed. It is a gate of its own: opening the isolation gate does not open it, and it does not
+# depend on the deletion gate of clean (AtmRealDeletionEnabled). As every gate, there is no switch, environment variable,
+# config file or UI option for it; only the automated test suite flips it, inside its own process.
+$script:AtmQuarantinePurgeEnabled = $false
 
 # Codes of the 0.3.x target rule (contract section 4). Isolation is limited to the own profile (ISO-D1), and in this
 # version only to a session root (J-ISO-9 (a)): a scope (project) or the whole base is recognized and refused with its
@@ -27,6 +35,19 @@ $script:AtmQuarantineSchema = 'atm.quarantine/1'
 # (J-ISO-5 (b)). The suite replaces it inside its own process with a folder of its sandbox; the CLI and the TUI never set
 # it. It is read only past the isolation gate.
 $script:AtmIsolationQuarantineRoot = $null
+# Retention, quota and free space (contract section 10; J-ISO-6 (b)). Retention only marks an entry EXPIRED and never
+# purges; the quota (off unless the policy sets one) and the free-space minimum of the quarantine's volume only refuse new
+# isolations. The minimum is fixed in code: no policy key changes it.
+$script:AtmQuarantineDefaultRetentionDays = 30
+$script:AtmQuarantineMinFreeBytes = 64MB
+# The policy file of the installation (config\quarantine.policy.json, contract section 11.2) and its schema.
+$script:AtmQuarantinePolicyFile = 'quarantine.policy.json'
+$script:AtmQuarantinePolicySchema = 'atm.quarantine-policy/1'
+# The purge log (T1 writer, its own schema).
+$script:AtmPurgeLogSchema = 'atm.purgelog/1'
+# Test seam, single assignment: the clock of the retention (a scriptblock that returns a UTC time). $null is the system
+# clock. The suite replaces it inside its own process; the CLI and the TUI never set it.
+$script:AtmQuarantineClock = $null
 
 function Get-AtmIsolationTarget {
     <#
@@ -162,7 +183,9 @@ function Invoke-AtmIsolateCore {
         2. a fresh inventory and one runtime collection (B2-1) for the plan;
         3. the 0.3.x target rule (Get-AtmIsolationTarget), then the same gates as clean (Test-AtmCandidate -ForClean, lock
            probe included): ELIGIBLE, or the B1 restricted exception per root (J-ISO-2 (b)) only past the gate with
-           -AcceptB1ResidualRisk; RECENT blocks (J-ISO-3 (a)); a fingerprint given with a path must still match;
+           -AcceptB1ResidualRisk; RECENT blocks (J-ISO-3 (a)); a fingerprint given with a path must still match; the
+           quota of the policy and the free space of the quarantine's volume refuse (QUARANTINE_QUOTA_REACHED,
+           LOW_DISK_SPACE; section 10), here and at the revalidation;
         4. the plan id (isolation prefix) and the plan through -PlanPresenter scriptblock(verified, rejected, inventory,
            planId). With the isolation gate closed the run stops here (ISOLAMENTO_REAL_DESABILITADO).
       Past the gate:
@@ -224,6 +247,7 @@ function Invoke-AtmIsolateCore {
     $inv = Invoke-AtmInventory @ia
     $rt = Get-AtmCleanRuntimeEvidence -Inventory $inv -InventoryArgs $ia
     $inv | Add-Member -NotePropertyName RuntimeEvidence -NotePropertyValue $rt
+    $policy = Get-AtmQuarantinePolicy -ConfigDir ([string]$InventoryArgs['ConfigDir'])
     $seen = @{}
     foreach ($e in $syntaxOk) {
         $k = $e.Path.ToLowerInvariant()
@@ -238,6 +262,9 @@ function Invoke-AtmIsolateCore {
         if ($fpChanged) { $reasons += "ALTERADO_DESDE_O_PREVIEW (fingerprint $($e.Fingerprint) -> $($p.Fingerprint))" }
         $okRisk = ($acceptRisk -and [string]$g.Category -ceq $script:AtmB1ExceptionCategory -and $null -ne $g.B1Risk -and -not $fpChanged)
         if (-not $okRisk -and ($g.Category -ne 'ELIGIBLE' -or $reasons.Count -gt 0)) { $rejected.Add([pscustomobject]@{ Path = $e.Path; Source = $e.Source; Reasons = $reasons }); continue }
+        # The quota of the policy and the free space of the quarantine's volume (section 10): they refuse, never purge.
+        $cap = @(Get-AtmQuarantineCapacityRefusal -QuarantineRoot (Get-AtmQuarantineRootPath) -Bytes ([long]$p.Bytes) -Policy $policy)
+        if ($cap.Count -gt 0) { $rejected.Add([pscustomobject]@{ Path = $e.Path; Source = $e.Source; Reasons = $cap }); continue }
         $verified.Add($p)
         if ($okRisk) { $riskByPath[$p.Path] = $g.B1Risk }
     }
@@ -332,6 +359,7 @@ function Invoke-AtmIsolateCore {
                 $c = $cur[0]
                 if ($c.Fingerprint -ne $p.Fingerprint) { $why += "ALTERADO_APOS_CONFIRMACAO (fingerprint $($p.Fingerprint) -> $($c.Fingerprint))" }
                 $why += @(Get-AtmCleanGateRefusal -Gate (Test-AtmCandidate -Partition $c -Inventory $re -ForClean -RuntimeEvidence $rtRe -AcceptB1ResidualRisk:$acceptRisk) -Risk $risk)
+                $why += @(Get-AtmQuarantineCapacityRefusal -QuarantineRoot $qPath -Bytes ([long]$c.Bytes) -Policy $policy)
             }
             if ($why.Count -gt 0) {
                 $lc = Write-AtmIsolationRecord -Log $log -State $ls -Schema $script:AtmIsolateLogSchema -Type 'skip' -Fields ([ordered]@{ opId = $opId; path = $p.Path; reasons = @($why) })
@@ -464,9 +492,12 @@ function Get-AtmRecordField {
 
 function Get-AtmQuarantineEntryState {
     # The state derived from the records, in order (contract section 7.4): ISOLATED, INCOMPLETE (an intent without its
-    # result; Pending says which), FAILED, RESTORED; ABANDONED when the manifest is not this identity's.
+    # result; Pending says which), FAILED, RESTORED, PURGED; ABANDONED when the manifest is not this identity's. A purge
+    # that the deleter refused before deleting anything leaves the entry ISOLATED; any other purge outcome but a complete,
+    # verified one (part deleted, an exception, a removal not confirmed) makes it FAILED. IsolatedUtc: when the entry
+    # first became ISOLATED (its complete move-result, or its reconciliation), the start of its retention.
     param($Records, [string]$OwnSid)
-    $state = 'INCOMPLETE'; $pending = 'move'; $outcome = $null
+    $state = 'INCOMPLETE'; $pending = 'move'; $outcome = $null; $isolatedUtc = $null
     foreach ($r in @($Records)) {
         switch ([string]$r.type) {
             'move-intent' { $state = 'INCOMPLETE'; $pending = 'move' }
@@ -474,21 +505,26 @@ function Get-AtmQuarantineEntryState {
             'reconcile' { if ([string](Get-AtmRecordField $r 'result') -ceq 'OK') { $state = 'ISOLATED'; $pending = $null } }
             'restore-intent' { $state = 'INCOMPLETE'; $pending = 'restore' }
             'restore-result' { $pending = $null; $outcome = [string](Get-AtmRecordField $r 'outcome'); $state = $(if ($outcome -ceq 'COMPLETE') { 'RESTORED' } elseif (Get-AtmRecordField $r 'moved') { 'FAILED' } else { 'ISOLATED' }) }
+            'purge-intent' { $state = 'INCOMPLETE'; $pending = 'purge' }
+            'purge-result' { $pending = $null; $outcome = [string](Get-AtmRecordField $r 'outcome'); $state = $(if ($outcome -ceq 'COMPLETE') { 'PURGED' } elseif ($outcome -ceq 'REFUSED') { 'ISOLATED' } else { 'FAILED' }) }
         }
+        if ($state -ceq 'ISOLATED' -and $null -eq $isolatedUtc) { $u = Get-AtmRecordField $r 'utc'; if ($null -ne $u) { $isolatedUtc = New-Object DateTime ((ConvertTo-AtmUtcTicks $u), [DateTimeKind]::Utc) } }
     }
     $actor = [string](Get-AtmRecordField (Get-AtmRecordField $Records[0] 'actor') 'sid')
     if ($actor -cne $OwnSid) { $state = 'ABANDONED' }
-    return [pscustomobject]@{ State = $state; Pending = $pending; LastOutcome = $outcome; ActorSid = $actor }
+    return [pscustomobject]@{ State = $state; Pending = $pending; LastOutcome = $outcome; ActorSid = $actor; IsolatedUtc = $isolatedUtc }
 }
 
 function Get-AtmQuarantineEntrySummary {
     # One entry folder: its manifest, derived state, the measurement its intent recorded and the one verified after the
     # move (no file names). A manifest that breaks section 7.3, or a payload incoherent with the last record (present
-    # after a completed restore), gives State ENTRY_MANIFEST_INVALID: reported only, never restored.
-    param([string]$Path, [string]$OwnSid)
+    # after a completed restore or purge), gives State ENTRY_MANIFEST_INVALID: reported only, never restored or purged.
+    # Retention (section 10, J-ISO-6 (b)): an ISOLATED entry whose -RetentionDays have passed since it was isolated is
+    # marked EXPIRED (ExpiresUtc says when); a mark only, nothing is done to it. -NowUtc: the clock of the caller.
+    param([string]$Path, [string]$OwnSid, [int]$RetentionDays = $script:AtmQuarantineDefaultRetentionDays, $NowUtc = $null)
     $id = [IO.Path]::GetFileName($Path)
     $s = [ordered]@{ Id = $id; Path = $Path; State = 'UNRECOGNIZED'; Problem = $null; Pending = $null; LastOutcome = $null; ActorSid = $null; TargetKind = $null; OriginalPath = $null
-        CreatedUtc = $null; Files = $null; Dirs = $null; Bytes = $null; NewestWriteUtc = $null; Verified = $null; PayloadPresent = $false; Records = @() }
+        CreatedUtc = $null; Files = $null; Dirs = $null; Bytes = $null; NewestWriteUtc = $null; Verified = $null; PayloadPresent = $false; Records = @(); IsolatedUtc = $null; ExpiresUtc = $null }
     if ($id -cnotmatch $script:AtmQuarantineEntryIdPattern) { $s.Problem = 'NOT_AN_ENTRY'; return [pscustomobject]$s }
     $s.PayloadPresent = [IO.Directory]::Exists((Join-Path $Path 'payload'))
     $m = Read-AtmQuarantineManifest -EntryPath $Path -Id $id
@@ -512,29 +548,44 @@ function Get-AtmQuarantineEntrySummary {
             $oc = Get-AtmRecordField $_ 'outcome'; if ($null -eq $oc) { $oc = Get-AtmRecordField $_ 'result' }
             [pscustomobject]@{ Seq = [int]$_.recSeq; Type = [string]$_.type; Utc = (Get-AtmRecordField $_ 'utc'); Outcome = $(if ($null -ne $oc) { [string]$oc } else { $null }) } })
     if ($s.State -ceq 'RESTORED' -and $s.PayloadPresent) { $s.State = 'ENTRY_MANIFEST_INVALID'; $s.Problem = 'PAYLOAD_AFTER_RESTORE' }
+    if ($s.State -ceq 'PURGED' -and $s.PayloadPresent) { $s.State = 'ENTRY_MANIFEST_INVALID'; $s.Problem = 'PAYLOAD_AFTER_PURGE' }
+    $s.IsolatedUtc = $st.IsolatedUtc
+    if ($s.State -ceq 'ISOLATED' -and $null -ne $st.IsolatedUtc) {
+        $s.ExpiresUtc = $st.IsolatedUtc.AddDays($RetentionDays)
+        $now = $(if ($null -ne $NowUtc) { ([datetime]$NowUtc).ToUniversalTime() } else { Get-AtmQuarantineNowUtc })
+        if ($now -ge $s.ExpiresUtc) { $s.State = 'EXPIRED' }
+    }
     return [pscustomobject]$s
 }
 
 function Get-AtmQuarantineList {
     <#
       quarantine list: read only. The entries of the quarantine root of the process user, each with its derived state;
-      a folder that is not an entry, or is a reparse point, is listed as UNRECOGNIZED and never opened. Returns Root,
-      Exists, RootProblem and Entries. A missing quarantine is not created.
+      a folder that is not an entry, or is a reparse point, is listed as UNRECOGNIZED and never opened. -Policy: the
+      effective policy (Get-AtmQuarantinePolicy; the default when not given), for the retention. Returns Root, Exists,
+      RootProblem, Entries, Policy, and UsedBytes with QuotaReached when the policy sets a quota. A missing quarantine is
+      not created.
     #>
-    param([string]$Root = (Get-AtmQuarantineRootPath), [string]$OwnSid = (Get-AtmCurrentIdentity).Sid)
-    $out = [ordered]@{ Root = $Root; Exists = $false; RootProblem = $null; Entries = @() }
+    param([string]$Root = (Get-AtmQuarantineRootPath), [string]$OwnSid = (Get-AtmCurrentIdentity).Sid, $Policy = $null)
+    if ($null -eq $Policy) { $Policy = Get-AtmQuarantinePolicy }
+    $out = [ordered]@{ Root = $Root; Exists = $false; RootProblem = $null; Entries = @(); Policy = $Policy; UsedBytes = $null; QuotaReached = $false }
+    if ($null -ne $Policy.QuotaBytes) {
+        $out.UsedBytes = Get-AtmQuarantineUsage -Root $Root
+        $out.QuotaReached = ($null -eq $out.UsedBytes -or [long]$out.UsedBytes -ge [long]$Policy.QuotaBytes)
+    }
     if (-not $Root -or -not [IO.Directory]::Exists($Root)) { return [pscustomobject]$out }
     $out.Exists = $true
     if (((New-Object IO.DirectoryInfo $Root).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $out.RootProblem = 'QUARANTINE_REPARSE_POINT'; return [pscustomobject]$out }
     $own = $OwnSid
+    $now = Get-AtmQuarantineNowUtc
     $list = New-Object System.Collections.Generic.List[object]
     foreach ($d in @((New-Object IO.DirectoryInfo $Root).GetDirectories() | Sort-Object Name)) {
         if (($d.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             $list.Add([pscustomobject]@{ Id = $d.Name; Path = $d.FullName; State = 'UNRECOGNIZED'; Problem = 'REPARSE_POINT'; Pending = $null; LastOutcome = $null; ActorSid = $null; TargetKind = $null; OriginalPath = $null
-                    CreatedUtc = $null; Files = $null; Dirs = $null; Bytes = $null; NewestWriteUtc = $null; Verified = $null; PayloadPresent = $false; Records = @() })
+                    CreatedUtc = $null; Files = $null; Dirs = $null; Bytes = $null; NewestWriteUtc = $null; Verified = $null; PayloadPresent = $false; Records = @(); IsolatedUtc = $null; ExpiresUtc = $null })
             continue
         }
-        $list.Add((Get-AtmQuarantineEntrySummary -Path $d.FullName -OwnSid $own))
+        $list.Add((Get-AtmQuarantineEntrySummary -Path $d.FullName -OwnSid $own -RetentionDays $Policy.RetentionDays -NowUtc $now))
     }
     $out.Entries = $list.ToArray()
     return [pscustomobject]$out
@@ -542,12 +593,93 @@ function Get-AtmQuarantineList {
 
 function Get-AtmQuarantineEntry {
     # quarantine inspect: read only. One entry by its id (the only input accepted: never a path, T-ISO-8). $null when
-    # the id is not an entry id or no such entry exists.
-    param([string]$Id, [string]$Root = (Get-AtmQuarantineRootPath), [string]$OwnSid = (Get-AtmCurrentIdentity).Sid)
+    # the id is not an entry id or no such entry exists. -Policy: as Get-AtmQuarantineList (the retention).
+    param([string]$Id, [string]$Root = (Get-AtmQuarantineRootPath), [string]$OwnSid = (Get-AtmCurrentIdentity).Sid, $Policy = $null)
     if ($Id -cnotmatch $script:AtmQuarantineEntryIdPattern -or -not $Root) { return $null }
     $p = Join-Path $Root $Id
     if (-not [IO.Directory]::Exists($p) -or ((New-Object IO.DirectoryInfo $p).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $null }
-    return (Get-AtmQuarantineEntrySummary -Path $p -OwnSid $OwnSid)
+    $days = $(if ($null -ne $Policy) { $Policy.RetentionDays } else { $script:AtmQuarantineDefaultRetentionDays })
+    return (Get-AtmQuarantineEntrySummary -Path $p -OwnSid $OwnSid -RetentionDays $days)
+}
+
+function Get-AtmQuarantineNowUtc {
+    # The clock of the retention: the system clock, or the suite's replacement (AtmQuarantineClock, test seam).
+    if ($null -ne $script:AtmQuarantineClock) { return ([datetime](& $script:AtmQuarantineClock)).ToUniversalTime() }
+    return [datetime]::UtcNow
+}
+
+function Get-AtmQuarantinePolicy {
+    <#
+      The effective quarantine policy (contract section 11.2), read only: config\quarantine.policy.json of the
+      installation. Strict schema: one JSON object with schema = atm.quarantine-policy/1 and, optionally, retentionDays (a
+      whole number of days, 1 to 3650), quotaBytes (a whole number of bytes, at least 1) and autoPurge (true or false);
+      nothing else. A missing file is the default (30 days, no quota, autoPurge false). A file that cannot be read or
+      breaks the schema counts as OFF, the same values, with the warning QUARANTINE_POLICY_INVALID. autoPurge is read and
+      shown only: nothing purges automatically in this version (phase P6), and autoPurge = true gives the warning
+      AUTOPURGE_NOT_AVAILABLE. Returns RetentionDays, QuotaBytes ($null: no quota), AutoPurge, Source (DEFAULT, FILE,
+      INVALID) and Warnings.
+    #>
+    param([string]$ConfigDir)
+    $out = [ordered]@{ RetentionDays = $script:AtmQuarantineDefaultRetentionDays; QuotaBytes = $null; AutoPurge = $false; Source = 'DEFAULT'; Warnings = @() }
+    if (-not $ConfigDir) { return [pscustomobject]$out }
+    $f = Join-Path $ConfigDir $script:AtmQuarantinePolicyFile
+    if (-not (Test-Path -LiteralPath $f)) { return [pscustomobject]$out }
+    $doc = $null
+    try {
+        $fi = New-Object IO.FileInfo $f
+        if (($fi.Attributes -band ([IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::Directory)) -ne 0 -or $fi.Length -gt 65536) { throw 'POLICY_SHAPE' }
+        $txt = (New-Object Text.UTF8Encoding($false, $true)).GetString([IO.File]::ReadAllBytes($f)).TrimStart([char]0xFEFF)
+        $doc = ConvertFrom-Json -InputObject $txt
+    } catch { $doc = $null }
+    $isInt = { param($v) ($v -is [int] -or $v -is [long]) }
+    $ok = ($doc -is [System.Management.Automation.PSCustomObject])
+    if ($ok) {
+        $names = @($doc.PSObject.Properties | ForEach-Object { $_.Name })
+        foreach ($n in $names) { if (@('schema', 'retentionDays', 'quotaBytes', 'autoPurge') -cnotcontains $n) { $ok = $false } }
+        if (-not ($names -ccontains 'schema') -or -not ($doc.schema -is [string]) -or $doc.schema -cne $script:AtmQuarantinePolicySchema) { $ok = $false }
+        if ($ok -and $names -ccontains 'retentionDays' -and -not ((& $isInt $doc.retentionDays) -and $doc.retentionDays -ge 1 -and $doc.retentionDays -le 3650)) { $ok = $false }
+        if ($ok -and $names -ccontains 'quotaBytes' -and -not ((& $isInt $doc.quotaBytes) -and $doc.quotaBytes -ge 1)) { $ok = $false }
+        if ($ok -and $names -ccontains 'autoPurge' -and -not ($doc.autoPurge -is [bool])) { $ok = $false }
+    }
+    if (-not $ok) { $out.Source = 'INVALID'; $out.Warnings = @('QUARANTINE_POLICY_INVALID'); return [pscustomobject]$out }
+    $out.Source = 'FILE'
+    if ($names -ccontains 'retentionDays') { $out.RetentionDays = [int]$doc.retentionDays }
+    if ($names -ccontains 'quotaBytes') { $out.QuotaBytes = [long]$doc.quotaBytes }
+    if ($names -ccontains 'autoPurge') { $out.AutoPurge = [bool]$doc.autoPurge }
+    if ($out.AutoPurge) { $out.Warnings = @('AUTOPURGE_NOT_AVAILABLE') }
+    return [pscustomobject]$out
+}
+
+function Get-AtmQuarantineUsage {
+    # The logical bytes held in the quarantine root now, measured read only by the native scanner (no names kept); 0 when
+    # there is no quarantine, $null when the measurement is not complete.
+    param([string]$Root)
+    if (-not $Root -or -not [IO.Directory]::Exists($Root)) { return 0L }
+    try { Initialize-AtmNative; $x = [AgentTempManager.AtmScanner]::ScanTree($Root, 3, 4096) } catch { return $null }
+    if (-not $x.MeasurementComplete) { return $null }
+    return [long]$x.Bytes
+}
+
+function Get-AtmQuarantineCapacityRefusal {
+    <#
+      Refusals of a NEW isolation of -Bytes (contract section 10), never a purge: QUARANTINE_QUOTA_REACHED when the policy
+      sets a quota and the quarantine holds it already or would pass it (QUARANTINE_QUOTA_UNMEASURED when its usage cannot
+      be measured); LOW_DISK_SPACE when the volume of the quarantine has less free space than the minimum fixed in code
+      (the manifest and the log need room). -UsedBytes / -FreeBytes: the suite passes them to exercise the rule; otherwise
+      both are measured, read only. Returned as plain output (callers wrap it in @()).
+    #>
+    param([string]$QuarantineRoot, [long]$Bytes, $Policy, $UsedBytes = $null, $FreeBytes = $null)
+    if (-not $QuarantineRoot) { return @() }
+    $why = New-Object System.Collections.Generic.List[string]
+    if ($null -ne $Policy -and $null -ne $Policy.QuotaBytes) {
+        $used = $(if ($null -ne $UsedBytes) { $UsedBytes } else { Get-AtmQuarantineUsage -Root $QuarantineRoot })
+        if ($null -eq $used) { $why.Add('QUARANTINE_QUOTA_UNMEASURED') }
+        elseif ([long]$used -ge [long]$Policy.QuotaBytes -or ([long]$used + $Bytes) -gt [long]$Policy.QuotaBytes) { $why.Add('QUARANTINE_QUOTA_REACHED') }
+    }
+    $free = $FreeBytes
+    if ($null -eq $free) { try { $free = (New-Object IO.DriveInfo ([IO.Path]::GetPathRoot($QuarantineRoot))).AvailableFreeSpace } catch { $free = $null } }
+    if ($null -eq $free -or [long]$free -lt $script:AtmQuarantineMinFreeBytes) { $why.Add('LOW_DISK_SPACE') }
+    return $why.ToArray()
 }
 
 function ConvertTo-AtmUtcTicks {
@@ -612,18 +744,18 @@ function Test-AtmQuarantinePayload {
 function Test-AtmQuarantineEntry {
     <#
       quarantine verify: read only (T-ISO-4: nothing is written, not even to the manifest). Result: OK, DIFFERS,
-      PAYLOAD_MISSING, ENTRY_MANIFEST_INVALID, NOT_VERIFIABLE (nothing to compare: FAILED, RESTORED, no intent),
+      PAYLOAD_MISSING, ENTRY_MANIFEST_INVALID, NOT_VERIFIABLE (nothing to compare: FAILED, RESTORED, PURGED, no intent),
       ENTRY_NOT_FOUND. For an INCOMPLETE entry, Reconcilable says whether a restore would reconcile it (section 8.3:
-      payload present and equal to the intent, original path absent); only the restore records it.
+      payload present and equal to the intent, original path absent, no purge pending); only the restore records it.
     #>
-    param([string]$Id, [string]$OwnSid = (Get-AtmCurrentIdentity).Sid)
-    $e = Get-AtmQuarantineEntry -Id $Id -OwnSid $OwnSid
+    param([string]$Id, [string]$OwnSid = (Get-AtmCurrentIdentity).Sid, $Policy = $null)
+    $e = Get-AtmQuarantineEntry -Id $Id -OwnSid $OwnSid -Policy $Policy
     if ($null -eq $e) { return [pscustomobject]@{ Id = $Id; Result = 'ENTRY_NOT_FOUND'; Reason = $null; State = $null; Reconcilable = $null } }
     if ($e.State -ceq 'ENTRY_MANIFEST_INVALID') { return [pscustomobject]@{ Id = $Id; Result = 'ENTRY_MANIFEST_INVALID'; Reason = $e.Problem; State = $e.State; Reconcilable = $null } }
-    if ($null -eq $e.Files -or $e.State -ceq 'FAILED' -or $e.State -ceq 'RESTORED') { return [pscustomobject]@{ Id = $Id; Result = 'NOT_VERIFIABLE'; Reason = $e.State; State = $e.State; Reconcilable = $null } }
+    if ($null -eq $e.Files -or $e.State -in @('FAILED', 'RESTORED', 'PURGED')) { return [pscustomobject]@{ Id = $Id; Result = 'NOT_VERIFIABLE'; Reason = $e.State; State = $e.State; Reconcilable = $null } }
     $t = Test-AtmQuarantinePayload -Entry $e
     $rec = $null
-    if ($e.State -ceq 'INCOMPLETE') { $rec = ($t.Result -ceq 'OK' -and $e.OriginalPath -and -not (Test-Path -LiteralPath $e.OriginalPath)) }
+    if ($e.State -ceq 'INCOMPLETE') { $rec = ($t.Result -ceq 'OK' -and $e.Pending -cne 'purge' -and $e.OriginalPath -and -not (Test-Path -LiteralPath $e.OriginalPath)) }
     return [pscustomobject]@{ Id = $Id; Result = $t.Result; Reason = $t.Reason; State = $e.State; Reconcilable = $rec }
 }
 
@@ -662,7 +794,9 @@ function Get-AtmRestorePlan {
     if ($e.State -ceq 'ENTRY_MANIFEST_INVALID') { $out.Reasons = @('ENTRY_MANIFEST_INVALID (' + $e.Problem + ')'); return [pscustomobject]$out }
     if ($e.State -ceq 'ABANDONED' -or [string]$e.ActorSid -cne $ownSid) { $why.Add($script:AtmIsolationOwnProfileOnly) }
     elseif ($e.State -ceq 'RESTORED') { $why.Add('ENTRY_ALREADY_RESTORED') }
+    elseif ($e.State -ceq 'PURGED') { $why.Add('ENTRY_PURGED') }
     elseif ($e.State -ceq 'FAILED') { $why.Add('ENTRY_FAILED') }
+    elseif ($e.State -ceq 'INCOMPLETE' -and $e.Pending -ceq 'purge') { $why.Add('ENTRY_INCOMPLETE (PURGE_PENDING)') }
     if ($why.Count -gt 0) { $out.Reasons = $why.ToArray(); return [pscustomobject]$out }
     if ($null -eq $e.Files) { $out.Reasons = @('ENTRY_INCOMPLETE (NO_INTENT)'); return [pscustomobject]$out }
     $t = Test-AtmQuarantinePayload -Entry $e
@@ -911,6 +1045,336 @@ function Invoke-AtmRestoreCore {
         return (& $finish)
     } finally {
         if ($null -ne $dest) { try { $dest.Dispose() } catch { $null = $_ } }
+        if ($null -ne $log) { try { $log.Dispose() } catch { $null = $_ } }
+    }
+}
+
+# ---------------------------------------------------------------------------------------------
+# Purge (phase P4): one entry per run, from the launcher only, behind the purge gate of its own (J-ISO-1 (C)). The payload
+# is purged by the same deleter as clean, given the measurement the manifest recorded; the entry folder and its manifest
+# stay as the trail. Nothing here purges by itself: retention only marks EXPIRED and the quota only refuses isolations.
+# ---------------------------------------------------------------------------------------------
+
+function Get-AtmQuarantineReferenceRefusal {
+    <#
+      B2-1 extended to the quarantine (contract section 9): a process whose command line names the quarantine root, in its
+      long or short form, refuses the purge. The parsing is that of Find-AtmReferences (slashes and case folded; the name
+      followed by a separator or the end) and this run's own launcher chain is excluded, as in the inventory. Only the
+      count is kept: no process name, command line or path. A failed process snapshot refuses too.
+      Returned as plain output (callers wrap it in @()).
+    #>
+    param($Inventory, [string]$QuarantineRoot)
+    $snap = $Inventory.Snapshot
+    if ($null -eq $snap -or $snap.Failed) { return @('RUNTIME_NOT_COLLECTED (PROCESS_SNAPSHOT)') }
+    $forms = @($QuarantineRoot.TrimEnd('\'))
+    try { $sp = [AgentTempManager.AtmNative]::GetShortPath($QuarantineRoot); if ($sp) { $forms += $sp.TrimEnd('\') } } catch { $null = $_ }
+    $forms = @($forms | ForEach-Object { $_.ToLowerInvariant() } | Select-Object -Unique)
+    $self = @($Inventory.SelfPids)
+    $hits = 0
+    foreach ($proc in @($snap.Processes)) {
+        if ($null -eq $proc -or -not $proc.CommandLine -or $self -contains $proc.Pid) { continue }
+        $n = ([string]$proc.CommandLine).Replace('/', '\').ToLowerInvariant()
+        while ($n.Contains('\\')) { $n = $n.Replace('\\', '\') }
+        $hit = $false
+        foreach ($f in $forms) {
+            $i = $n.IndexOf($f, [StringComparison]::Ordinal)
+            while ($i -ge 0 -and -not $hit) {
+                $end = $i + $f.Length
+                if ($end -ge $n.Length -or $n[$end] -eq '\' -or $script:AtmRefTerminators -contains $n[$end]) { $hit = $true }
+                else { $i = $n.IndexOf($f, $end, [StringComparison]::Ordinal) }
+            }
+            if ($hit) { break }
+        }
+        if ($hit) { $hits++ }
+    }
+    if ($hits -gt 0) { return @("RUNTIME_QUARANTINE_REFERENCED ($hits)") }
+    return @()
+}
+
+function Get-AtmPurgePlanId {
+    # The plan id of a purge: its own prefix, the run, the entry and the measurement the deleter will be given.
+    param([string]$RunId, $Plan)
+    $text = 'atm-purge-plan/1;' + $RunId + ';' + $Plan.Entry.Id + ';' + (@($Plan.Files, $Plan.Dirs, $Plan.Bytes, $Plan.NewestTicks) -join ',')
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $h = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)) } finally { $sha.Dispose() }
+    return (-join @($h | ForEach-Object { $_.ToString('x2') }))
+}
+
+function Get-AtmPurgePlan {
+    <#
+      The purge plan of one entry, read only (contract section 9). The entry itself refuses with PURGE_REFUSED_<reason>
+      (never a weaker retry):
+        * it must exist as an entry (a name that is not one, or a reparse point: UNRECOGNIZED), its manifest must be valid
+          and this identity's (ABANDONED), and it must be ISOLATED or EXPIRED: INCOMPLETE, FAILED, RESTORED and PURGED
+          refuse;
+        * the verification of this run: the payload measures as the manifest recorded (DIFFERS, PAYLOAD_MISSING).
+      Then the gates of the purge, with their own codes:
+        * gate 3: the chain down to the payload (fixed drive, no reparse point); gate 4: owner and ACL of the quarantine
+          root and of the entry (Get-AtmAclProblems: the owner is this identity, no other principal outside
+          AtmTrustedWriterSids may write);
+        * gate 8: the lock probe of the payload (share mode 0 on every file and folder);
+        * B2-1: the runtime evidence of this inventory was collected, and no command line names the quarantine.
+      Returns Entry, PayloadPath, Files, Dirs, Bytes, NewestTicks (the measurement given to the deleter), Uninspectable
+      (processes whose command line could not be read, a count only) and Reasons.
+    #>
+    param([string]$Id, $Inventory, $RuntimeEvidence, $Policy = $null)
+    $out = [ordered]@{ Entry = $null; PayloadPath = $null; Files = $null; Dirs = $null; Bytes = $null; NewestTicks = $null; Uninspectable = $null; Reasons = @() }
+    $root = Get-AtmQuarantineRootPath
+    $ownSid = [string]$Inventory.Identity.Sid
+    $e = Get-AtmQuarantineEntry -Id $Id -Root $root -OwnSid $ownSid -Policy $Policy
+    if ($null -eq $e) {
+        $known = ($root -and $Id -cmatch $script:AtmQuarantineEntryIdPattern -and (Test-Path -LiteralPath (Join-Path $root $Id)))
+        $out.Reasons = @($(if ($known) { 'PURGE_REFUSED_UNRECOGNIZED' } else { 'PURGE_REFUSED_ENTRY_NOT_FOUND' }))
+        return [pscustomobject]$out
+    }
+    $out.Entry = $e
+    if ($e.State -ceq 'ENTRY_MANIFEST_INVALID') { $out.Reasons = @('PURGE_REFUSED_ENTRY_MANIFEST_INVALID (' + $e.Problem + ')'); return [pscustomobject]$out }
+    if ($e.State -ceq 'ABANDONED' -or [string]$e.ActorSid -cne $ownSid) { $out.Reasons = @('PURGE_REFUSED_ABANDONED'); return [pscustomobject]$out }
+    if (@('ISOLATED', 'EXPIRED') -cnotcontains $e.State -or $null -eq $e.Files) { $out.Reasons = @('PURGE_REFUSED_' + $e.State + $(if ($e.Pending) { ' (' + $e.Pending + ')' } else { '' })); return [pscustomobject]$out }
+    $t = Test-AtmQuarantinePayload -Entry $e
+    if ($t.Result -cne 'OK') { $out.Reasons = @('PURGE_REFUSED_' + $t.Result + $(if ($t.Reason) { ' (' + $t.Reason + ')' } else { '' })); return [pscustomobject]$out }
+    $pp = Join-Path $e.Path 'payload'
+    $out.PayloadPath = $pp; $out.Files = [long]$e.Files; $out.Dirs = [long]$e.Dirs; $out.Bytes = [long]$e.Bytes; $out.NewestTicks = ConvertTo-AtmUtcTicks $e.NewestWriteUtc
+    $why = New-Object System.Collections.Generic.List[string]
+    $chain = Test-AtmPathChain $pp
+    if ($chain.Status -ne 'OK') { $why.Add((Get-AtmText 'reason.chain' $chain.Status $chain.At)) }
+    foreach ($dir in @($root, $e.Path)) { foreach ($pb in (Get-AtmAclProblems -Path $dir -OwnerSid $ownSid)) { $why.Add($pb) } }
+    foreach ($lr in @((Get-AtmLockProbeReasons $pp).Reasons)) { $why.Add($lr) }
+    if ($null -eq $RuntimeEvidence -or $RuntimeEvidence.Failed) { $why.Add('RUNTIME_NOT_COLLECTED') }
+    foreach ($rr in @(Get-AtmQuarantineReferenceRefusal -Inventory $Inventory -QuarantineRoot $root)) { $why.Add($rr) }
+    $u = Get-AtmUninspectableKeys -Inventory $Inventory
+    $out.Uninspectable = @($u.Keys).Count + [int]$u.Unkeyed
+    $out.Reasons = @($why | Select-Object -Unique)
+    return [pscustomobject]$out
+}
+
+function Invoke-AtmPurge {
+    <#
+      quarantine purge -Entry <id> (CLI only). With the purge gate closed (every distributed copy) it shows the plan and
+      stops (EXPURGO_REAL_DESABILITADO): nothing is asked, locked, logged or purged, and no space is freed. Only the purge
+      gate is read: the isolation gate does not open it, and the deletion gate of clean is not involved. Past it, it runs
+      Invoke-AtmPurgeCore under the clean lock (B8, the same name), like isolate and restore.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Id,
+        [scriptblock]$PlanPresenter,
+        [scriptblock]$ConfirmationReader,
+        [hashtable]$InventoryArgs = @{},
+        [string]$LogFile,
+        [hashtable]$Interaction = @{},
+        [scriptblock]$BeforePurgeHook,
+        [scriptblock]$PurgeTreeImpl
+    )
+    if (-not $script:AtmQuarantinePurgeEnabled) { return (Invoke-AtmPurgeCore @PSBoundParameters) }
+    # No closure: the body runs in this session state, where the engine's functions are, and finds $purBound here.
+    $purBound = @{} + $PSBoundParameters
+    $u = Invoke-AtmUnderSharedLock -Body { Invoke-AtmPurgeCore @purBound }
+    if (-not $u.Acquired) { return (Invoke-AtmPurgeCore @PSBoundParameters -LockRefusal ('CLEAN_LOCK_' + $u.Status) -LockReleaseError $u.ReleaseError) }
+    $res = $u.Result
+    if ($null -ne $u.ReleaseError -and $null -ne $res) {
+        $res.LockReleaseError = $u.ReleaseError
+        if (-not $res.Aborted -and -not $res.StoppedBy) { if (@($res.Results).Count -gt 0) { $res.StoppedBy = 'LOCK_RELEASE_FAILED' } else { $res.Aborted = 'LOCK_RELEASE_FAILED' } }
+    }
+    return $res
+}
+
+function Invoke-AtmPurgeCore {
+    <#
+      Fail-closed purge of ONE quarantine entry, called only by Invoke-AtmPurge.
+        1. a fresh inventory, its runtime evidence, the policy and the plan (Get-AtmPurgePlan); its plan id
+           (atm-purge-plan/1), the phrase EXPURGAR <id8> <files> ARQUIVOS and the plan through -PlanPresenter
+           scriptblock(plan, inventory, planId, phrase). A refusal stops here (EXPURGO_RECUSADO); so does the purge gate
+           when closed (EXPURGO_REAL_DESABILITADO).
+      Past the purge gate:
+        2. a reader, a NEW -LogFile (T1 writer, atm.purgelog/1, outside the audited directories and the quarantine) and an
+           interactive console observed by the engine are required; the log is created before any question;
+        3. the AUT-2 declarations of this purge (J-ISO-4 (a): those of the isolation do not count): the task finished, and
+           the content needed is preserved or nothing in it needs to be kept; then the phrase. A refusal, a cancel or a
+           wrong phrase stops the run; the declaration and the confirmation are written and flushed before anything else;
+        4. after -BeforePurgeHook (tests), the plan again (a fresh inventory and evidence, the entry, its verification,
+           every gate, the same measurement and records): any difference stops the run (REVALIDATION_REFUSED);
+        5. purge-intent in the manifest (reopened with OpenExisting, then closed) and in the log, BEFORE the deleter;
+        6. the only call to the deleter in this engine: DeleteTree(<entry>\payload, files, dirs, bytes, newest, $null)
+           with the measurement of the manifest (a difference refuses before the first deletion); the absence of
+           the payload confirmed; purge-result (automatic = false) in the manifest and in the log. The entry and its
+           manifest stay as the trail (PURGED). Anything but a complete, verified purge stops the run
+           (STOPPED_AFTER_<outcome>); nothing is retried.
+      -PurgeTreeImpl / -BeforePurgeHook: test seams, never passed by the CLI; scriptblock(plan) that returns an object
+      like AtmDeleteResult. Aborted: the deleter was never called. StoppedBy: it was called.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Id,
+        [scriptblock]$PlanPresenter,
+        [scriptblock]$ConfirmationReader,
+        [hashtable]$InventoryArgs = @{},
+        [string]$LogFile,
+        [hashtable]$Interaction = @{},
+        [scriptblock]$BeforePurgeHook,
+        [scriptblock]$PurgeTreeImpl,
+        [string]$LockRefusal,
+        [string]$LockReleaseError
+    )
+    $results = New-Object System.Collections.Generic.List[object]
+    $logErrors = New-Object System.Collections.Generic.List[object]
+    $state = @{ Aborted = $null; Stopped = $null; PlanId = $null; Phrase = $null; RunId = $null; LogCreated = $false; RefusedAt = $null; Plan = $null; Declaration = $null }
+    $finish = {
+        [pscustomobject]@{
+            Id = $Id; Plan = $state.Plan; PlanId = $state.PlanId; Phrase = $state.Phrase; Aborted = $state.Aborted; StoppedBy = $state.Stopped; Results = $results.ToArray()
+            RunId = $state.RunId; LogFile = $(if ($state.RunId) { $LogFile } else { $null }); LogCreated = $state.LogCreated; LogErrors = $logErrors.ToArray()
+            LockReleaseError = $(if ($LockReleaseError) { $LockReleaseError } else { $null }); RefusedAt = $state.RefusedAt; Declaration = $state.Declaration
+        }
+    }
+    if ($LockRefusal) { $state.Aborted = $LockRefusal; return (& $finish) }
+    if ($Id -cnotmatch $script:AtmQuarantineEntryIdPattern) { $state.Aborted = 'ENTRY_ID_INVALID'; return (& $finish) }
+    if (-not $PlanPresenter) { $state.Aborted = 'SEM_APRESENTACAO'; return (& $finish) }
+    $ia = @{} + $InventoryArgs
+    $policy = Get-AtmQuarantinePolicy -ConfigDir ([string]$InventoryArgs['ConfigDir'])
+    $inv = Invoke-AtmInventory @ia
+    $plan = Get-AtmPurgePlan -Id $Id -Inventory $inv -RuntimeEvidence (Get-AtmCleanRuntimeEvidence -Inventory $inv -InventoryArgs $ia) -Policy $policy
+    $state.Plan = $plan
+    $runId = [guid]::NewGuid().ToString()
+    if (@($plan.Reasons).Count -eq 0) {
+        $state.PlanId = Get-AtmPurgePlanId -RunId $runId -Plan $plan
+        $state.Phrase = "EXPURGAR $($Id.Substring($Id.Length - 8).ToUpperInvariant()) $($plan.Files) ARQUIVOS"
+    }
+    & $PlanPresenter $plan $inv $state.PlanId $state.Phrase
+    if (@($plan.Reasons).Count -gt 0) { $state.Aborted = 'EXPURGO_RECUSADO'; return (& $finish) }
+    if (-not $script:AtmQuarantinePurgeEnabled) { $state.Aborted = 'EXPURGO_REAL_DESABILITADO'; return (& $finish) }
+
+    # ---- past the purge gate (the suite only, in its own process) ----
+    if (-not $ConfirmationReader) { $state.Aborted = 'SEM_APRESENTACAO_OU_CONFIRMACAO'; return (& $finish) }
+    if (-not $LogFile) { $state.Aborted = 'LOG_REQUIRED'; return (& $finish) }
+    $qPath = Get-AtmQuarantineRootPath
+    if ($LogFile.StartsWith($qPath.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { $state.Aborted = 'LOG_DESTINATION_NOT_ALLOWED'; return (& $finish) }
+    $console = Get-AtmEngineConsoleObservation
+    if (-not $console.Observed) { $state.Aborted = 'CONSOLE_NOT_OBSERVED'; return (& $finish) }
+    $callerName = [string]$Interaction['Caller']
+    $interactionRec = [ordered]@{ caller = $(if ($callerName -ceq 'CLI') { $callerName } else { 'DIRECT_CALL' }); consoleRequiredByCaller = ($Interaction['ConsoleRequired'] -eq $true)
+        callerFieldsVerified = $false; interactiveConsoleObserved = $true; observedBy = $console.By; identifiesRespondent = $false }
+    $state.RunId = $runId
+    $me = Get-AtmCurrentIdentity
+    $ls = @{ Id = $runId; Seq = 0 }
+    $ms = @{ Id = $Id; Seq = @($plan.Entry.Records).Count }
+    $opId = '{0}:1' -f $runId
+    $halt = { param([string]$Code) if ($results.Count -gt 0) { $state.Stopped = $Code } else { $state.Aborted = $Code } }
+    $logFail = { param([string]$Stage, [string]$Code) $logErrors.Add([pscustomobject]@{ Stage = $Stage; OpId = $null; Code = $Code }) }
+    $e = $plan.Entry
+    $entryPath = $e.Path
+    # One manifest record: the manifest reopened (OpenExisting, the same checks), written, flushed and closed.
+    $writeManifest = {
+        param([string]$Type, [System.Collections.IDictionary]$Fields)
+        $mf = [AgentTempManager.AtmCleanLog]::Pin($entryPath, $me.Sid)
+        try {
+            $c = $(if ($null -ne $mf.Error) { $mf.Error } else { $mf.OpenExisting('manifest.jsonl') })
+            if ($null -eq $c) { $c = Write-AtmIsolationRecord -Log $mf -State $ms -Schema $script:AtmQuarantineSchema -Type $Type -Fields $Fields }
+            if ($null -eq $c) { $c = $mf.Close() }
+            return $c
+        } finally { $mf.Dispose() }
+    }
+    $log = $null
+    try {
+        $opened = Open-AtmCleanLog -Path $LogFile -Inventory $inv -ProcessUserSid $me.Sid
+        $state.LogCreated = [bool]$opened.Created
+        if ($null -eq $opened.Log) { & $logFail 'open' $opened.Code; $state.Aborted = 'LOG_OPEN_FAILED'; return (& $finish) }
+        $log = $opened.Log
+        $lc = Write-AtmIsolationRecord -Log $log -State $ls -Schema $script:AtmPurgeLogSchema -Type 'run-start' -Fields ([ordered]@{ tool = $script:AtmVersion; operation = 'purge'; user = $inv.Identity.Name; sid = $inv.Identity.Sid
+                elevated = [bool]$inv.Identity.IsAdmin; entryId = $Id; planId = $state.PlanId; files = $plan.Files; dirs = $plan.Dirs; bytes = $plan.Bytes; uninspectableProcesses = $plan.Uninspectable })
+        if ($null -ne $lc) { & $logFail 'run-start' $lc; $state.Aborted = 'LOG_WRITE_FAILED'; return (& $finish) }
+
+        # AUT-2 for this purge (J-ISO-4 (a)): the task, the content decision, then the phrase bound to the entry.
+        $refusal = $null
+        $taskPhrase = Get-AtmText 'auth.phrase.task'
+        $decisionMap = Get-AtmContentDecisions
+        $choices = @($decisionMap.Keys)
+        $dec = $null
+        $tk = Test-AtmTypedPhrase -Typed (& $ConfirmationReader $taskPhrase 'task' $e.OriginalPath @($taskPhrase)) -Phrases @($taskPhrase)
+        if ($tk.Code) { $refusal = [pscustomobject]@{ Code = 'DECLARATION_' + $tk.Code; Step = 'task'; Path = $e.OriginalPath } }
+        if ($null -eq $refusal) {
+            $cd = Test-AtmTypedPhrase -Typed (& $ConfirmationReader $choices[0] 'results' $e.OriginalPath $choices) -Phrases $choices
+            if ($cd.Code) { $refusal = [pscustomobject]@{ Code = 'DECLARATION_' + $cd.Code; Step = 'results'; Path = $e.OriginalPath } } else { $dec = $decisionMap[$cd.Hit] }
+        }
+        if ($null -eq $refusal) {
+            $fc = Test-AtmTypedPhrase -Typed (& $ConfirmationReader $state.Phrase 'purge' $Id @($state.Phrase)) -Phrases @($state.Phrase)
+            if ($fc.Code) { $refusal = [pscustomobject]@{ Code = 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE'; Step = 'purge'; Path = $Id } }
+        }
+        if ($null -ne $refusal) {
+            $state.RefusedAt = $refusal
+            $lc = Write-AtmIsolationRecord -Log $log -State $ls -Schema $script:AtmPurgeLogSchema -Type 'confirmation' -Fields ([ordered]@{ accepted = $false; planId = $state.PlanId; step = $refusal.Step; refusal = $refusal.Code; interaction = $interactionRec })
+            if ($null -ne $lc) { & $logFail 'confirmation' $lc }
+            $state.Aborted = $refusal.Code
+        } else {
+            $state.Declaration = [pscustomobject]@{ TaskCompleted = $true; ContentDecision = $dec; PreservationBasis = (Get-AtmPreservationBasis $dec) }
+            $lc = Write-AtmIsolationRecord -Log $log -State $ls -Schema $script:AtmPurgeLogSchema -Type 'declaration' -Fields ([ordered]@{ entryId = $Id; declaredBy = 'OPERATOR'; taskCompleted = $true; contentDecision = $dec
+                    preservation = [ordered]@{ basis = $state.Declaration.PreservationBasis; verifiedByTool = $false } })
+            if ($null -eq $lc) { $lc = Write-AtmIsolationRecord -Log $log -State $ls -Schema $script:AtmPurgeLogSchema -Type 'confirmation' -Fields ([ordered]@{ accepted = $true; planId = $state.PlanId; entryId = $Id; interaction = $interactionRec; limitations = @($script:AtmCleanDeclarationLimitations) }) }
+            if ($null -ne $lc) { & $logFail 'confirmation' $lc; $state.Aborted = 'LOG_WRITE_FAILED' }
+        }
+        if (-not $state.Aborted) {
+            # The plan again after the questions: the entry, its verification and every gate, the same measurement.
+            if ($BeforePurgeHook) { & $BeforePurgeHook $plan }
+            $iaRe = @{} + $InventoryArgs; $iaRe['NoProgress'] = $true
+            $invRe = Invoke-AtmInventory @iaRe
+            $re = Get-AtmPurgePlan -Id $Id -Inventory $invRe -RuntimeEvidence (Get-AtmCleanRuntimeEvidence -Inventory $invRe -InventoryArgs $iaRe) -Policy $policy
+            $same = (@($re.Reasons).Count -eq 0 -and $re.Files -eq $plan.Files -and $re.Dirs -eq $plan.Dirs -and $re.Bytes -eq $plan.Bytes -and $re.NewestTicks -eq $plan.NewestTicks -and @($re.Entry.Records).Count -eq @($e.Records).Count)
+            $lc = Write-AtmIsolationRecord -Log $log -State $ls -Schema $script:AtmPurgeLogSchema -Type 'plan-check' -Fields ([ordered]@{ planId = $state.PlanId; matched = $same; reasons = @($re.Reasons) })
+            if ($null -ne $lc) { & $logFail 'plan-check' $lc; $state.Aborted = 'LOG_WRITE_FAILED' }
+            elseif (-not $same) { $state.Aborted = 'REVALIDATION_REFUSED' }
+        }
+        if (-not $state.Aborted) {
+            # The intent is written and flushed, in the manifest and in the log, BEFORE the deleter; without both, no purge.
+            $mc = & $writeManifest 'purge-intent' ([ordered]@{ opId = $opId; runId = $runId; planId = $state.PlanId; files = $plan.Files; dirs = $plan.Dirs; bytes = $plan.Bytes; automatic = $false; declaredBy = 'OPERATOR' })
+            if ($null -ne $mc) { $state.Aborted = 'MANIFEST_INTENT_FAILED' }
+            else {
+                $lc = Write-AtmIsolationRecord -Log $log -State $ls -Schema $script:AtmPurgeLogSchema -Type 'purge-intent' -Fields ([ordered]@{ opId = $opId; entryId = $Id; files = $plan.Files; dirs = $plan.Dirs; bytes = $plan.Bytes; automatic = $false })
+                if ($null -ne $lc) { & $logFail 'purge-intent' $lc; $state.Aborted = 'LOG_INTENT_FAILED' }
+            }
+        }
+        if (-not $state.Aborted) {
+            # The only call to the deleter: it pins the payload, plans it and compares the measurement of the manifest
+            # before the first deletion. An exception leaves the payload's state unknown (none, part or all of it).
+            $d = $null; $exType = $null
+            try {
+                if ($PurgeTreeImpl) { $d = & $PurgeTreeImpl $plan }
+                else { $d = [AgentTempManager.AtmDeleter]::DeleteTree($plan.PayloadPath, $plan.Files, $plan.Dirs, $plan.Bytes, $plan.NewestTicks, $null) }
+                if ($null -eq $d) { throw [InvalidOperationException]::new('DELETER_NO_RESULT') }
+            } catch { $d = $null; $exType = $_.Exception.GetBaseException().GetType().Name }
+            # Only a confirmed absence verifies the purge; access denied or any other error: not verified, never assumed.
+            $gone = $false; $vs = 'UNKNOWN'
+            if ($null -eq $exType) {
+                $pres = Get-AtmPathPresence $plan.PayloadPath
+                if ($pres -is [bool]) { $gone = -not $pres; $vs = $(if ($pres) { 'PRESENT' } else { 'GONE' }) }
+            }
+            $outcome = $(if ($null -ne $exType) { 'EXCEPTION' }
+                elseif (-not $d.Completed) { $(if ([long]$d.FilesDeleted -gt 0 -or [long]$d.DirsDeleted -gt 0) { 'PARTIAL' } else { 'REFUSED' }) }
+                elseif ($gone) { 'COMPLETE' }
+                else { 'VERIFICATION_FAILED' })
+            $known = ($null -ne $d)
+            # The deleter's reason without the path it may carry: its code only (no file names in the records).
+            $abort = $(if ($known -and $d.AbortReason) { ([regex]::Match([string]$d.AbortReason, '^[A-Z0-9_]+')).Value } else { $null })
+            $row = [pscustomobject]@{ OpId = $opId; Id = $Id; Outcome = $outcome; Attempted = $(if ($known) { [bool]$d.Attempted } else { $null }); Completed = ($known -and [bool]$d.Completed); Verified = $gone; VerifiedState = $vs
+                FilesDeleted = $(if ($known) { $d.FilesDeleted } else { $null }); DirsDeleted = $(if ($known) { $d.DirsDeleted } else { $null }); FilesPlanned = $(if ($known) { $d.FilesPlanned } else { $null })
+                DirsPlanned = $(if ($known) { $d.DirsPlanned } else { $null }); AbortReason = $abort; ExceptionType = $exType; Bytes = $plan.Bytes }
+            $results.Add($row)
+            $after = [ordered]@{ opId = $opId; outcome = $outcome; filesDeleted = $row.FilesDeleted; dirsDeleted = $row.DirsDeleted; automatic = $false; attempted = $row.Attempted; completed = $row.Completed
+                filesPlanned = $row.FilesPlanned; dirsPlanned = $row.DirsPlanned; abortReason = $abort; verifiedGone = $(if ($vs -ceq 'UNKNOWN') { 'UNKNOWN' } else { $gone }); exceptionType = $exType }
+            $mc = & $writeManifest 'purge-result' $after
+            $after['entryId'] = $Id
+            $lc = Write-AtmIsolationRecord -Log $log -State $ls -Schema $script:AtmPurgeLogSchema -Type 'purge-result' -Fields $after
+            if ($null -ne $lc) { & $logFail 'purge-result' $lc; & $halt 'LOG_RESULT_FAILED' }
+            elseif ($null -ne $mc) { & $halt 'MANIFEST_RESULT_FAILED' }
+            elseif ($outcome -cne 'COMPLETE') { & $halt ('STOPPED_AFTER_' + $outcome) }
+        }
+        # run-end only while the log has not failed; neither a failed run-end nor a failed close replaces the main code.
+        if ($logErrors.Count -eq 0) {
+            $lc = Write-AtmIsolationRecord -Log $log -State $ls -Schema $script:AtmPurgeLogSchema -Type 'run-end' -Fields ([ordered]@{ results = $results.Count; complete = @($results | Where-Object { $_.Outcome -ceq 'COMPLETE' }).Count; stoppedBy = $(if ($state.Stopped) { $state.Stopped } else { $state.Aborted }); entryId = $Id })
+            if ($null -ne $lc) { & $logFail 'run-end' $lc; if (-not $state.Aborted -and -not $state.Stopped) { & $halt 'LOG_END_FAILED' } }
+        }
+        $cc = $log.Close()
+        if ($null -ne $cc) { & $logFail 'close' $cc; if (-not $state.Aborted -and -not $state.Stopped) { & $halt 'LOG_CLOSE_FAILED' } }
+        return (& $finish)
+    } finally {
         if ($null -ne $log) { try { $log.Dispose() } catch { $null = $_ } }
     }
 }

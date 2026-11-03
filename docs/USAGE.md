@@ -534,28 +534,96 @@ agent-temp quarantine list
 agent-temp quarantine inspect -Entry <id>
 agent-temp quarantine verify  -Entry <id> | -All
 agent-temp quarantine restore -Entry <id> -LogFile <new file>
+agent-temp quarantine purge   -Entry <id> -LogFile <new file>
 ```
 
 * `-Entry` takes only an entry id (`yyyyMMddTHHmmssZ-<8 hex>`), never a path (exit code `2` otherwise).
 * `list`, `inspect` and `verify` only read, with the isolation gate open or closed: bytes and times stay identical,
   manifests included, and a missing quarantine is not created. Each entry shows its derived state (`ISOLATED`,
-  `INCOMPLETE`, `FAILED`, `RESTORED`, `ABANDONED`, or `ENTRY_MANIFEST_INVALID`). `verify` compares the payload with the
-  measurement and metadata digest the manifest recorded (`OK`, `DIFFERS`, `PAYLOAD_MISSING`, ...); a differing entry is a
-  result (exit code `0`).
+  `EXPIRED`, `INCOMPLETE`, `FAILED`, `RESTORED`, `PURGED`, `ABANDONED`, or `ENTRY_MANIFEST_INVALID`). `verify` compares
+  the payload with the measurement and metadata digest the manifest recorded (`OK`, `DIFFERS`, `PAYLOAD_MISSING`, ...); a
+  differing entry is a result (exit code `0`). `list` and `version` also show the effective quarantine policy.
 * `restore`, with the isolation gate closed (every copy), shows the plan and stops (exit code `3`). Past the gate it needs a
   console, a new log and the phrase `RESTAURAR <id8>`. When the original path exists (`RESTORE_CONFLICT`) the engine
   offers `<name>.restored-<id8>` next to it, with its own phrase; nothing is ever overwritten or merged. An `INCOMPLETE`
   entry is reconciled by the restore itself when its payload matches the intent and the original is absent.
 * The TUI: **I** isolates the selected root (the default action; plan only in every copy), **Z** opens the read-only
-  Quarantine area (list, detail, **V** verify). The TUI never restores: it shows the CLI command.
+  Quarantine area (list, detail, **V** verify), with `EXPIRED`, `PURGED` and the policy. The TUI never restores or
+  purges: it shows the CLI commands.
 
-`purge` is a later phase.
+### Purge (0.3.x, unreleased; plan only in every copy)
+
+`agent-temp quarantine purge -Entry <id>` frees the space of **one** quarantine entry per run. A sixth release gate,
+`AtmQuarantinePurgeEnabled`, is closed in every copy. It is separate from the isolation gate and from the deletion gate
+of `clean`: neither of them opens it, and it opens neither of them. The build, the installation tests and `version`
+(`quarantine purge: DISABLED`) all check it.
+
+With the purge gate closed (every copy), `purge` checks the entry and shows the plan: its state, the measurement the
+manifest recorded, the processes whose command line could not be read (a count), the plan id and the phrase
+`EXPURGAR <id8> <files> ARQUIVOS`. Then it stops with `EXPURGO_REAL_DESABILITADO` (exit code `3`). Nothing is asked, no
+lock or log is taken, nothing is purged and **no space is freed**.
+
+The plan refuses with `PURGE_REFUSED_<reason>` (exit code `3`, `EXPURGO_RECUSADO`) when the entry:
+
+* does not exist (`ENTRY_NOT_FOUND`), is not an entry or is a reparse point (`UNRECOGNIZED`), or has an invalid manifest;
+* belongs to another identity (`ABANDONED`);
+* is `INCOMPLETE`, `FAILED`, `RESTORED` or already `PURGED`;
+* does not verify in this run (`DIFFERS`, `PAYLOAD_MISSING`).
+
+It also refuses when one of the purge's own checks fails:
+
+* the path down to the payload (fixed drive, no reparse point);
+* the owner and ACL of the quarantine and of the entry;
+* the in-use probe of the payload;
+* the runtime evidence was not collected, or a process command line names the quarantine (`RUNTIME_QUARANTINE_REFERENCED`,
+  a count only).
+
+A refused entry is never retried with weaker checks.
+
+Past the purge gate (not in any copy; tested in the suite) the run needs an interactive console (exit code `6`
+otherwise) and a new `-LogFile` (`atm.purgelog/1`, outside the audited directories and the quarantine). It takes the clean
+lock, then asks:
+
+1. the declarations of **this** purge (the task finished; the content needed is preserved, or nothing in it needs to be
+   kept). Those given when the entry was isolated do not count;
+2. the phrase bound to the entry.
+
+Then it checks the plan again. A `purge-intent` record goes to the manifest and the log **before** the deleter runs. The
+deleter is the same one `clean` uses, given the measurement the manifest recorded. A difference stops it before the first
+deletion. The payload's absence is confirmed, and a `purge-result` record (`automatic: false`) goes to both. The entry
+folder and its manifest stay as the trail, and the entry becomes `PURGED`. Anything else stops the run, and nothing is
+retried. An entry that ended `REFUSED` stays `ISOLATED`; any other outcome makes it `FAILED`.
+
+### Quarantine policy, retention and quota
+
+The optional file `config\quarantine.policy.json` of the installation sets the policy. Example (synthetic values):
+
+```json
+{ "schema": "atm.quarantine-policy/1", "retentionDays": 30, "quotaBytes": 10737418240, "autoPurge": false }
+```
+
+* Strict schema: `schema` is required. `retentionDays` is a whole number of days, 1 to 3650. `quotaBytes` is a whole
+  number of bytes, at least 1. `autoPurge` is `true` or `false`. No other key is allowed.
+* A missing file means the default: 30 days, no quota, `autoPurge` false. A file that breaks the schema counts as **off**
+  (the same defaults) and shows `QUARANTINE_POLICY_INVALID`.
+* **Retention** only marks an `ISOLATED` entry `EXPIRED` once its days have passed since the isolation completed. `list`
+  and `inspect` show the date. Retention never purges, and only `ISOLATED` entries become `EXPIRED`. An `EXPIRED` entry
+  leaves the quarantine only through `restore` or a confirmed `purge`.
+* **Quota:** when the quarantine holds `quotaBytes` or more, or a new isolation would exceed it, `list` warns and
+  `isolate` refuses the root (`QUARANTINE_QUOTA_REACHED`; `QUARANTINE_QUOTA_UNMEASURED` when the quarantine's usage
+  cannot be measured). `isolate` also refuses when the quarantine's volume has less
+  free space than a minimum fixed in code (`LOW_DISK_SPACE`). Neither rule ever purges anything.
+* `autoPurge: true` is read and shown, with a warning, but does nothing in this version: nothing is ever purged
+  automatically.
+* An update keeps the installed policy file as it is, like `projects.local.json`. A policy file edited after an update
+  makes `verify` report the copy as modified, as an edited `projects.local.json` does.
 
 ## Exit codes
 
 `0` ok (for `diagnose`, partial coverage included) · `1` unknown command · `2` invalid clean invocation, or a refused
 `-PseudonymKeyFile`, or `authorize` without `-Path`/`-RecordFile`, or `isolate` without a path or with
-`-IncludeOtherUsers` · `3` clean aborted (nothing deleted), `isolate` stopped after the plan (nothing moved), or, only with
+`-IncludeOtherUsers` · `3` clean aborted (nothing deleted), `isolate`, `quarantine restore` or `quarantine purge` stopped
+after the plan (nothing moved or purged), or, only with
 deletion enabled (not in any published copy), stopped before completing (Clean log, above); `authorize`: nothing recorded ·
 `4` no manifest (source checkout, `verify` only) · `5` integrity mismatch (a listed file missing, altered or
 unreadable, a missing or unreadable `providers` directory, an unlisted library or provider, an unreadable or

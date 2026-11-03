@@ -21,9 +21,10 @@ src/
 ## Layering rules (enforced by tests)
 
 * `Engine.Audit.ps1` never writes to the terminal and never deletes. Progress goes through a callback.
-* `Engine.Clean.ps1` contains the **only** call to the deleter, reached only after every gate, the plan
+* `Engine.Clean.ps1` contains clean's **only** call to the deleter, reached only after every gate, the plan
   presenter, the typed confirmation and a per-path revalidation. It refuses to run without both a plan
-  presenter and a confirmation reader (`SEM_APRESENTACAO_OU_CONFIRMACAO`).
+  presenter and a confirmation reader (`SEM_APRESENTACAO_OU_CONFIRMACAO`). Since 0.3.x P4 the only other product call
+  to the deleter is the quarantine purge in `Engine.Isolate.ps1` (below), behind its own gate.
 * `Report.ps1` and `Tui.ps1` never reference deletion APIs. The TUI's cleanup screen only collects an
   allowlist and forwards it to `Invoke-AtmClean`.
 * Providers only read evidence. They never decide eligibility.
@@ -87,7 +88,15 @@ Collection -> normalization -> evidence -> correlation -> presentation:
   the intent recorded before it. The TUI calls `Invoke-AtmIsolate` and the read-only functions only; it never restores
   (T-ISO-6).
 
-**Later phases:** `purge` (P4).
+* P4: `Invoke-AtmPurge` (CLI only) purges the payload of one entry. It sits behind the purge gate, its own and separate
+  from the isolation and deletion gates (J-ISO-1 (C)), and runs under the same lock. It makes the second and last
+  product call to the deleter (`AtmDeleter.DeleteTree` with the manifest's measurement), after the intent is recorded in
+  the manifest and the log. The entry and its manifest stay as the trail.
+  * The retention, the quota and the policy (`Get-AtmQuarantinePolicy`, `config\quarantine.policy.json`) are read-only
+    engine functions. Retention only marks `EXPIRED`, and the quota only refuses new isolations.
+  * The report and the TUI show `EXPIRED`, `PURGED` and the policy. They never call the purge or the deleter.
+
+**Later phases:** automatic purge (P6; `autoPurge` is read and shown, nothing more).
 
 ### Planned layering (ADR-0013)
 
@@ -99,9 +108,10 @@ layering:
 * An isolation engine of its own. It reuses the inventory, the clean gates other than gate 2 (it has its own target
   rule), the B2-1 evidence, the AUT-2 confirmation, the T1 log and pinned writer, and the B8 lock. It contains the
   only call that moves a target, through a pinned handle, behind its own closed release gate.
-* **Purge**, a deletion of a quarantine entry, goes through the clean engine's single deleter call and the deletion
-  gate. That holds for a confirmed purge and for an opted-in automatic one (ISO-D4). The isolation engine never
-  deletes.
+* **Purge**, a deletion of a quarantine entry, goes through the same deleter and pinning as clean. Decision J-ISO-1 (C)
+  puts it behind a gate of its own rather than the deletion gate: one deleter call in the isolation engine, used only
+  for the payload of an entry (0.3.x P4). That holds for a confirmed purge and for an opted-in automatic one (ISO-D4).
+  Isolating and restoring never delete.
 * Presentation never moves anything: the CLI and the TUI only collect the exact targets and forward them, as they do
   for clean.
 * The diagnose engine stays read-only and never uses the isolation engine.

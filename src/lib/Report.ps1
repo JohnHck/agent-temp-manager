@@ -373,16 +373,39 @@ function Format-AtmQuarantineState {
     return $(if ($q) { '{0} ({1})' -f $Entry.State, $q } else { [string]$Entry.State })
 }
 
+function Format-AtmQuarantinePolicy {
+    # The effective quarantine policy in one line (version, quarantine list, the TUI): retention, quota, autoPurge, source.
+    param($Policy)
+    $quota = $(if ($null -ne $Policy.QuotaBytes) { Get-AtmText 'q.quotaBytes' $Policy.QuotaBytes (Format-AtmMB $Policy.QuotaBytes) } else { Get-AtmText 'q.quotaOff' })
+    return (Get-AtmText 'q.policy' $Policy.RetentionDays $quota (Get-AtmYesNo ([bool]$Policy.AutoPurge)) (Get-AtmText ('q.policySource.' + $Policy.Source)))
+}
+
+function Get-AtmQuarantinePolicyLines {
+    # The policy line, its warnings (an invalid file counts as off; autoPurge does nothing in this version) and, with a
+    # quota, the usage of the quarantine. Each item: Text and Color.
+    param($Policy, $List = $null)
+    $L = New-Object System.Collections.Generic.List[object]
+    $L.Add([pscustomobject]@{ Text = (Format-AtmQuarantinePolicy $Policy); Color = 'Gray' })
+    foreach ($w in @($Policy.Warnings)) { $L.Add([pscustomobject]@{ Text = (Get-AtmText ('q.policyWarn.' + $w)); Color = 'Yellow' }) }
+    if ($null -ne $List -and $null -ne $Policy.QuotaBytes) {
+        if ($null -eq $List.UsedBytes) { $L.Add([pscustomobject]@{ Text = (Get-AtmText 'q.usageUnmeasured'); Color = 'Yellow' }) }
+        else { $L.Add([pscustomobject]@{ Text = (Get-AtmText 'q.usage' (Format-AtmMB $List.UsedBytes) (Format-AtmMB $Policy.QuotaBytes)); Color = 'Gray' }) }
+        if ($List.QuotaReached) { $L.Add([pscustomobject]@{ Text = (Get-AtmText 'q.quotaReached'); Color = 'Yellow' }) }
+    }
+    return $L.ToArray()
+}
+
 function Show-AtmQuarantineList {
-    # quarantine list (read only): one row per entry with its derived state; the original path is shown only here, on
-    # this machine (contract section 8.1).
+    # quarantine list (read only): one row per entry with its derived state and, for an isolated entry, when its retention
+    # ends; the original path is shown only here, on this machine (contract section 8.1). Then the policy.
     param($List)
     Write-AtmHeader (Get-AtmText 'q.listHeader' $List.Root)
     if ($List.RootProblem) { Write-Host ('  ' + (Get-AtmText 'q.rootProblem' $List.RootProblem)) -ForegroundColor Red; return }
     if (-not $List.Exists) { Write-Host ('  ' + (Get-AtmText 'q.noQuarantine')) }
     Write-AtmTable (@($List.Entries) | ForEach-Object { New-AtmRow ([ordered]@{ 'col.entry' = $_.Id; 'col.state' = (Format-AtmQuarantineState $_); 'col.target' = $_.TargetKind; 'col.filesShort' = $_.Files
-                    'col.mb' = $(if ($null -ne $_.Bytes) { Format-AtmMB $_.Bytes } else { '-' }); 'col.created' = (Format-AtmTime $_.CreatedUtc); 'col.original' = $_.OriginalPath }) })
+                    'col.mb' = $(if ($null -ne $_.Bytes) { Format-AtmMB $_.Bytes } else { '-' }); 'col.created' = (Format-AtmTime $_.CreatedUtc); 'col.expires' = (Format-AtmTime $_.ExpiresUtc); 'col.original' = $_.OriginalPath }) })
     Write-Host ('  ' + (Get-AtmText 'q.count' @($List.Entries).Count))
+    foreach ($pl in (Get-AtmQuarantinePolicyLines -Policy $List.Policy -List $List)) { Write-Host ('  ' + $pl.Text) -ForegroundColor $pl.Color }
     Write-Host ('  ' + (Get-AtmText 'q.readOnly')) -ForegroundColor Green
 }
 
@@ -393,6 +416,7 @@ function Get-AtmQuarantineEntryLines {
     $L.Add((Get-AtmText 'q.state' (Format-AtmQuarantineState $Entry)))
     $L.Add((Get-AtmText 'q.target' $(if ($Entry.TargetKind) { $Entry.TargetKind } else { '-' }) $(if ($Entry.OriginalPath) { $Entry.OriginalPath } else { '-' })))
     $L.Add((Get-AtmText 'q.created' (Format-AtmTime $Entry.CreatedUtc)))
+    if ($null -ne $Entry.ExpiresUtc) { $L.Add((Get-AtmText $(if ($Entry.State -ceq 'EXPIRED') { 'q.expired' } else { 'q.expires' }) (Format-AtmTime $Entry.ExpiresUtc))) }
     if ($null -ne $Entry.Files) { $L.Add((Get-AtmText 'q.measure' $Entry.Files $Entry.Dirs $Entry.Bytes (Format-AtmTime $Entry.NewestWriteUtc))) }
     if ($null -ne $Entry.Verified) { $L.Add((Get-AtmText 'q.verified' $Entry.Verified.Files $Entry.Verified.Dirs $Entry.Verified.Bytes $Entry.Verified.Digest)) }
     $L.Add((Get-AtmText 'q.payload' (Get-AtmYesNo ([bool]$Entry.PayloadPresent))))
@@ -407,6 +431,7 @@ function Show-AtmQuarantineEntry {
     foreach ($l in (Get-AtmQuarantineEntryLines -Entry $Entry)) { Write-Host ('  ' + $l) }
     Write-Host ''
     Write-Host ('  ' + (Get-AtmText 'q.cliOnly' $Entry.Id)) -ForegroundColor Cyan
+    Write-Host ('  ' + (Get-AtmText 'q.cliPurge' $Entry.Id)) -ForegroundColor Cyan
     Write-Host ('  ' + (Get-AtmText 'q.readOnly')) -ForegroundColor Green
 }
 
@@ -464,6 +489,55 @@ function Show-AtmRestoreResult {
     $done = @($Result.Results | Where-Object { $_.Outcome -ceq 'COMPLETE' })
     if ($done.Count -gt 0) { Write-Host ('  ' + (Get-AtmText 'rst.restored' $done[0].Destination)) -ForegroundColor Green }
     elseif (@($Result.Results | Where-Object { $_.Moved }).Count -eq 0) { Write-Host ('  ' + (Get-AtmText 'rst.nothingMoved')) -ForegroundColor Green }
+}
+
+function Show-AtmPurgePlan {
+    # quarantine purge (plan): the entry, the measurement the deleter will be given, the refusals, the plan id and phrase.
+    # With the purge gate closed it says that nothing is purged and no space is freed.
+    param($Plan, [string]$PlanId, [string]$Phrase)
+    if ($null -eq $Plan.Entry) { Write-AtmHeader (Get-AtmText 'pur.refusedHeader'); foreach ($r in @($Plan.Reasons)) { Write-Host ('  - ' + $r) -ForegroundColor Yellow }; return }
+    Write-AtmHeader (Get-AtmText 'pur.planHeader' $Plan.Entry.Id)
+    Write-Host ('  ' + (Get-AtmText 'q.state' (Format-AtmQuarantineState $Plan.Entry)))
+    if ($Plan.Entry.OriginalPath) { Write-Host ('  ' + (Get-AtmText 'pur.original' $Plan.Entry.OriginalPath)) }
+    if ($null -ne $Plan.Entry.ExpiresUtc) { Write-Host ('  ' + (Get-AtmText $(if ($Plan.Entry.State -ceq 'EXPIRED') { 'q.expired' } else { 'q.expires' }) (Format-AtmTime $Plan.Entry.ExpiresUtc))) }
+    if ($null -ne $Plan.Files) { Write-Host ('  ' + (Get-AtmText 'pur.measure' $Plan.Files $Plan.Dirs (Format-AtmMB $Plan.Bytes))) }
+    if ($null -ne $Plan.Uninspectable) { Write-Host ('  ' + (Get-AtmText 'pur.uninspectable' $Plan.Uninspectable)) -ForegroundColor $(if ($Plan.Uninspectable -gt 0) { 'Yellow' } else { 'Gray' }) }
+    if (@($Plan.Reasons).Count -gt 0) {
+        Write-AtmHeader (Get-AtmText 'pur.refusedHeader')
+        foreach ($r in @($Plan.Reasons)) { Write-Host ('  - ' + $r) -ForegroundColor Yellow }
+        return
+    }
+    Write-Host ('  ' + (Get-AtmText 'pur.trail'))
+    Write-Host ('  ' + (Get-AtmText 'pur.planId' $PlanId))
+    Write-Host ('  ' + (Get-AtmText 'pur.phrase' $Phrase))
+    if (-not $script:AtmQuarantinePurgeEnabled) { Write-Host ('  ' + (Get-AtmText 'pur.planOnly')) -ForegroundColor Yellow }
+    Write-Host ''
+    Write-Host ('  ' + (Get-AtmText 'pur.nothingYet')) -ForegroundColor Black -BackgroundColor Yellow
+}
+
+function Show-AtmPurgeResult {
+    param($Result)
+    Write-AtmHeader (Get-AtmText 'pur.resultHeader')
+    if ($Result.Aborted) {
+        # Aborted: the deleter was never called in this run.
+        Write-Host ('  ' + (Get-AtmText 'pur.aborted' $Result.Aborted)) -ForegroundColor Yellow
+        if ($Result.Aborted -eq 'EXPURGO_REAL_DESABILITADO') { Write-Host ('  ' + (Get-AtmText 'pur.gateMsg')) -ForegroundColor Yellow }
+        if ($Result.Aborted -eq 'LOG_REQUIRED') { Write-Host ('  ' + (Get-AtmText 'clean.logRequired')) -ForegroundColor Yellow }
+        if ($Result.Aborted -eq 'CONSOLE_NOT_OBSERVED') { Write-Host ('  ' + (Get-AtmText 'clean.consoleRequired')) -ForegroundColor Yellow }
+        if ($Result.RefusedAt) { Write-Host ('  ' + (Get-AtmText 'clean.refusedAt' $Result.RefusedAt.Step $(if ($Result.RefusedAt.Path) { $Result.RefusedAt.Path } else { '-' }))) -ForegroundColor Yellow }
+        if ($Result.Aborted -eq 'CLEAN_LOCK_ABANDONED') { Write-Host ('  ' + (Get-AtmText 'clean.lockAbandoned')) -ForegroundColor Yellow }
+        elseif ([string]$Result.Aborted -like 'CLEAN_LOCK_*') { Write-Host ('  ' + (Get-AtmText 'clean.lockUnavailable' $Result.Aborted)) -ForegroundColor Yellow }
+    }
+    if ($Result.StoppedBy) { Write-Host ('  ' + (Get-AtmText 'pur.stopped' $Result.StoppedBy)) -ForegroundColor Red }
+    foreach ($row in @($Result.Results)) {
+        $why = $(if ($row.AbortReason) { ' - ' + $row.AbortReason } elseif ($row.ExceptionType) { ' - ' + $row.ExceptionType } else { '' })
+        Write-Host ('  ' + (Get-AtmText 'pur.resultRow' $row.Outcome $row.Id $(if ($null -ne $row.FilesDeleted) { $row.FilesDeleted } else { '?' }) $(if ($null -ne $row.FilesPlanned) { $row.FilesPlanned } else { '?' }) $(if ($null -ne $row.DirsDeleted) { $row.DirsDeleted } else { '?' }) $(if ($null -ne $row.DirsPlanned) { $row.DirsPlanned } else { '?' }) $why)) -ForegroundColor $(if ($row.Outcome -ceq 'COMPLETE') { 'Green' } else { 'Red' })
+    }
+    foreach ($e in @($Result.LogErrors)) { Write-Host ('  ' + (Get-AtmText 'clean.logError' $e.Stage '-' $e.Code)) -ForegroundColor Red }
+    if ($Result.LockReleaseError) { Write-Host ('  ' + (Get-AtmText 'clean.lockReleaseFailed' $Result.LockReleaseError)) -ForegroundColor Red }
+    $done = @($Result.Results | Where-Object { $_.Outcome -ceq 'COMPLETE' })
+    if ($done.Count -gt 0) { Write-Host ('  ' + (Get-AtmText 'pur.purged' $done[0].Id (Format-AtmMB $done[0].Bytes))) -ForegroundColor Green }
+    elseif (@($Result.Results).Count -eq 0) { Write-Host ('  ' + (Get-AtmText 'pur.nothingPurged')) -ForegroundColor Green }
 }
 
 function Show-AtmDiscardPresentation {
@@ -524,6 +598,10 @@ function Read-AtmCleanAnswer {
         # Restore: the phrase is bound to the entry; the destination it confirms is shown with it.
         Write-Host ('  ' + (Get-AtmText 'rst.phraseDestination' $RootPath)) -ForegroundColor Cyan
         Write-Host (Get-AtmText 'cli.typePhrase' $Phrase) -ForegroundColor Yellow
+    } elseif ($Kind -ceq 'purge') {
+        # Purge: the phrase is bound to the entry and to its number of files; what it purges cannot be restored.
+        Write-Host ('  ' + (Get-AtmText 'pur.phraseEntry' $RootPath)) -ForegroundColor Cyan
+        Write-Host (Get-AtmText 'cli.typePhrase' $Phrase) -ForegroundColor Magenta
     } else { Write-Host (Get-AtmText 'cli.typePhrase' $Phrase) -ForegroundColor Yellow }
     # The phrase just shown is passed as a second argument (Read-Host ignores it; the headless TUI tests echo it).
     return (& $LineReader (Get-AtmText 'cli.confirmPrompt') $Phrase)

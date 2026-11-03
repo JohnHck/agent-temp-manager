@@ -99,11 +99,12 @@ function Get-AtmTreeEntries {
 }
 
 function Copy-AtmTree {
-    # Copies regular files only; refuses reparse points; skips local/private config.
+    # Copies regular files only; refuses reparse points; skips local/private config (the site's project rules and the
+    # administrator's quarantine policy, which an update carries over from the installed copy).
     param([string]$From, [string]$To)
     foreach ($item in (Get-AtmTreeEntries -Root $From)) {
         $rel = $item.Rel
-        if ($rel -like 'config\projects.local.json' -or $rel -like 'manifest.json' -or $rel -like 'install-state.json') { continue }
+        if ($rel -like 'config\projects.local.json' -or $rel -like 'config\quarantine.policy.json' -or $rel -like 'manifest.json' -or $rel -like 'install-state.json') { continue }
         $dst = Join-Path $To $rel
         if ($item.IsDir) { [void][IO.Directory]::CreateDirectory($dst) }
         else { [void][IO.Directory]::CreateDirectory((Split-Path -Parent $dst)); [IO.File]::Copy($item.Full, $dst, $false) }
@@ -496,7 +497,7 @@ function Assert-AtmStagedCopy {
     param([string]$Staging)
     if ($null -eq $script:AtmVerifiedManifest) { return }
     $exp = @{}
-    foreach ($k in $script:AtmVerifiedManifest.Keys) { if ($k -ne 'config\projects.local.json' -and $k -ne 'install-state.json') { $exp[$k] = $script:AtmVerifiedManifest[$k] } }
+    foreach ($k in $script:AtmVerifiedManifest.Keys) { if ($k -ne 'config\projects.local.json' -and $k -ne 'config\quarantine.policy.json' -and $k -ne 'install-state.json') { $exp[$k] = $script:AtmVerifiedManifest[$k] } }
     Test-AtmTreeAgainstManifest -Root $Staging -Expected $exp
 }
 
@@ -564,6 +565,11 @@ function Invoke-AtmInstallUnlocked {
             Copy-Item -LiteralPath $ProjectsFile -Destination (Join-Path $staging 'config\projects.local.json')
         } elseif ($exists -and (Test-Path -LiteralPath (Join-Path $InstallDir 'config\projects.local.json'))) {
             Copy-Item -LiteralPath (Join-Path $InstallDir 'config\projects.local.json') -Destination (Join-Path $staging 'config\projects.local.json')
+        }
+        # 0.3.x (contract section 11.2): the administrator's quarantine policy is carried over by an update as it is, so an
+        # update never turns it off in silence. It is read by the product (strict schema; invalid counts as off), never here.
+        if ($exists -and (Test-Path -LiteralPath (Join-Path $InstallDir 'config\quarantine.policy.json') -PathType Leaf)) {
+            Copy-Item -LiteralPath (Join-Path $InstallDir 'config\quarantine.policy.json') -Destination (Join-Path $staging 'config\quarantine.policy.json')
         }
         New-AtmNativeAssembly -Root $staging
         Write-AtmManifest -Root $staging -Version $version

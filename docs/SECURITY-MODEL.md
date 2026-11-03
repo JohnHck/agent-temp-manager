@@ -616,7 +616,8 @@ profile in V0.4.
 * **A loaded profile:** a loaded user hive neither proves nor rules out activity. Any process or session of that user,
   or any unknown, refuses.
 * **The quarantine holds sensitive data** for as long as it is kept. Its DACL and its retention are part of the design.
-* **Purge is a deletion:** irreversible, behind the deletion gate, and confirmed by default.
+* **Purge is a deletion:** irreversible, behind a gate of its own (the purge gate, since 0.3.x phase P4; see below), and
+  confirmed by default.
 * **Opt-in automatic purge** (ISO-D4): off by default and enabled only by an administrator. It is visible in `version`
   and the reports, and covers only expired entries with an intact manifest. It never touches the active environment,
   logs each purge and fails closed.
@@ -661,6 +662,63 @@ owner, never enables privileges and never terminates processes.
        far the run got: an incomplete or failed entry.
 
   Purge (a deletion) is not part of this flow.
+
+### Purge gate and flow (0.3.x phase P4)
+
+* **Purge gate:** `$script:AtmQuarantinePurgeEnabled`, `$false` in every shipped copy. It is a single assignment in
+  `Engine.Isolate.ps1`, with no option, environment variable or configuration file. It is the sixth gate:
+  * the build refuses an archive without it;
+  * the suite and the install e2e check all six gates;
+  * `version` shows it.
+
+  The gates are independent. The purge reads only its own gate, and isolation, restore and clean never read it. Opening
+  the isolation gate or the deletion gate does not open the purge, and opening the purge gate opens neither of them; the
+  suite checks both directions.
+
+  Closed, `quarantine purge -Entry <id>` checks the entry and every purge gate, shows the plan and stops
+  (`EXPURGO_REAL_DESABILITADO`). It asks nothing, takes no lock, opens no log and purges nothing, and the report says that
+  no space is freed.
+* **Why a gate of its own (decision J-ISO-1 (C)):** purge is the only irreversible step of the quarantine.
+  * (A), waiting for the deletion gate, would tie the purge to the release of real clean.
+  * (B), the isolation gate, is refused because it couples two risks in one decision: opening isolation, which is
+    reversible (restore brings the root back), would also open an irreversible deletion.
+  * With its own gate, isolation and restore can be released after their own validation, and the purge only after its
+    own. Until then it behaves like (A): plan only.
+* **What the purge targets:** narrower than clean. The payload of one quarantine entry created by the product. It is
+  outside the active environment, under a protected DACL, with an exact measurement recorded in its manifest.
+* **The purge gates**, all re-run after the questions:
+  * the entry: present, not a reparse point, a valid manifest, this identity's, `ISOLATED` or `EXPIRED`;
+  * the verification in the same run: the payload matches the measurement and metadata digest recorded;
+  * the path down to the payload (gate 3);
+  * the owner and ACL of the quarantine and of the entry (gate 4, with the trusted list declared in `Engine.Clean.ps1`,
+    OWNER RIGHTS included);
+  * the in-use probe with no sharing (gate 8);
+  * the runtime evidence collected, with B2-1 extended to the quarantine: a command line that names it, in its long or
+    short form, refuses (a count is kept, never the command line).
+
+  A refusal is `PURGE_REFUSED_<reason>`, and nothing is retried with weaker checks.
+* **Past the gate** (the suite only, in its own process):
+  1. The run takes the clean lock (B8, the same name). It needs an interactive console observed by the engine and a
+     new log (`atm.purgelog/1`, the T1 writer, outside the audited directories and the quarantine).
+  2. The declarations of this purge (AUT-2, J-ISO-4 (a); those given at the isolation do not count), then the phrase
+     `EXPURGAR <id8> <files> ARQUIVOS`, bound to the entry.
+  3. Everything is checked again; any difference refuses.
+  4. `purge-intent` is written and flushed in the manifest (reopened with `OpenExisting`) and in the log **before** the
+     deleter.
+  5. One call to the deleter: `AtmDeleter.DeleteTree(<entry>\payload, files, dirs, bytes, newest, $null)`, the same
+     deleter and pinning as clean, given the manifest's measurement. A difference refuses before the first deletion.
+  6. The absence of the payload is confirmed, and `purge-result` (`automatic: false`, the deleter's reason as a code
+     only) is written to both. The entry and its manifest stay as the trail (`PURGED`).
+  7. Anything else stops the run, and nothing is retried. A refusal leaves the entry `ISOLATED`; a partial purge, an
+     exception or an unconfirmed absence leaves it `FAILED`.
+* **Limits of this phase:**
+  * the processes whose command line cannot be read (the B1 class) are counted in the plan and the log, but are not a
+    purge gate of their own;
+  * retention only marks `EXPIRED`, and the quota only refuses new isolations; neither ever purges;
+  * `autoPurge` in the policy is read and shown but does nothing: there is no automatic purge and no scheduled task in
+    0.3.x P4;
+  * the policy file (`config\quarantine.policy.json`, strict schema) is administrator configuration in the installation.
+    An invalid file counts as off, and an update keeps it as it is.
 
 ### Native primitives (0.3.x phase P1)
 
