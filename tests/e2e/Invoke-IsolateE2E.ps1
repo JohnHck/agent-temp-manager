@@ -215,7 +215,11 @@ function Assert-Entry([string]$Path) {
     # Containment: canonical, under a base of this run (the run root's, or one planted in this run on another volume),
     # the nonce of this run, no reparse point in the chain.
     Assert ([string]::Equals([IO.Path]::GetFullPath($Path), $Path, [StringComparison]::Ordinal)) 'entrada nao canonica'
-    $b = @(@(@{ Base = $ctx['Base']; Top = $runRoot }) + @($ctx.ExtraBases) | Where-Object { $_.Base -and $Path.StartsWith($_.Base + '\', [StringComparison]::OrdinalIgnoreCase) })
+    # A list, not array addition: @(hashtable) + @(list) throws 'argument types do not match' (5.1 and 7).
+    $bases = New-Object System.Collections.Generic.List[object]
+    $bases.Add(@{ Base = $ctx['Base']; Top = $runRoot })
+    foreach ($e in $ctx.ExtraBases) { $bases.Add($e) }
+    $b = @($bases | Where-Object { $_.Base -and $Path.StartsWith($_.Base + '\', [StringComparison]::OrdinalIgnoreCase) })
     Assert ($b.Count -eq 1) 'entrada fora da base desta execucao'
     $nf = Join-Path $Path 'ATM-E2E-NONCE.txt'
     Assert ((Test-Path -LiteralPath $nf -PathType Leaf) -and [IO.File]::ReadAllText($nf) -ceq $nonce) 'entrada sem o nonce desta execucao'
