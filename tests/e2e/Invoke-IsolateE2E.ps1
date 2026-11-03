@@ -273,11 +273,11 @@ function Assert-Isolated($C, [string]$Label) {
     # from their files, the derived state; the original path gone and the payload carrying this run's nonce.
     $r = $C.Res
     $root = $ctx.Roots[$Label]
+    # Any entry this run created is attributed to it first (the quarantine snapshot allows only those), even if it stopped.
+    if ($r.EntryId) { $ctx.EntryIds.Add([string]$r.EntryId); $summary.quarantine.entriesCreated = $ctx.EntryIds.Count }
     Assert (-not $r.Aborted -and -not $r.StoppedBy) "Aborted=$($r.Aborted) StoppedBy=$($r.StoppedBy) rejected=$(@($r.Rejected | ForEach-Object { Get-Codes $_.Reasons }) -join ';')"
     Assert (@($r.Results).Count -eq 1 -and $r.Results[0].Outcome -ceq 'COMPLETE' -and $r.Results[0].Moved -eq $true -and $r.Results[0].Verified -eq $true) "resultado: $(@($r.Results | ForEach-Object { $_.Outcome }) -join ',')"
     Assert ([string]$r.EntryId -cmatch '^\d{8}T\d{6}Z-[0-9a-f]{8}$') 'id da entrada fora do formato'
-    $ctx.EntryIds.Add([string]$r.EntryId)
-    $summary.quarantine.entriesCreated = $ctx.EntryIds.Count
     Assert ([string]::Equals([string]$r.EntryPath, (Join-Path $qRoot $r.EntryId), [StringComparison]::OrdinalIgnoreCase)) 'entrada fora da quarentena do usuario'
     Assert (-not (Test-Path -LiteralPath $root.Path)) 'caminho original ainda existe'
     $pay = Join-Path $r.EntryPath 'payload'
@@ -571,6 +571,7 @@ Case 'ISO-purge-one-entry' {
     $op = New-Operator
     $res = Invoke-AtmPurge -Id $id -PlanPresenter $purPresenter -ConfirmationReader $op.Reader -InventoryArgs $ia -LogFile (New-E2ELogPath 'ISO-purge.jsonl') -Interaction $interaction
     Assert (-not $res.Aborted -and -not $res.StoppedBy) "Aborted=$($res.Aborted) StoppedBy=$($res.StoppedBy) razoes=$(Get-PlanCodes $res)"
+    Assert ([long]$res.Plan.Files -eq 3) "arquivos no plano do expurgo: $($res.Plan.Files), esperado 3"
     Assert ($res.Phrase -ceq ('EXPURGAR ' + $id.Substring($id.Length - 8).ToUpperInvariant() + ' 3 ARQUIVOS') -and ($op.Calls -join ',') -ceq 'task,results,purge') "frase/perguntas: $($op.Calls -join ',')"
     Assert (@($res.Results).Count -eq 1 -and $res.Results[0].Outcome -ceq 'COMPLETE' -and $res.Results[0].Verified -eq $true) "resultado: $(@($res.Results | ForEach-Object { $_.Outcome }) -join ',')"
     Assert (-not (Test-Path -LiteralPath (Join-Path $ep 'payload')) -and (Test-Path -LiteralPath (Join-Path $ep 'manifest.jsonl'))) 'payload presente ou manifesto ausente'
@@ -599,7 +600,8 @@ Case 'snapshot-run-root' {
     $allowed = {
         param([string]$k, [string]$kind)
         if ($ctx.ConflictTouched -and (Test-Under $k $conflictScopeRel)) { return $true }
-        if ($kind -ceq 'Removed' -and $ctx.Purged -and (Test-Under $k $purgeRel)) { return $true }
+        # The purge root left the run root when it was isolated (purged or not afterwards).
+        if ($kind -ceq 'Removed' -and $ctx.Iso.ContainsKey('purge') -and (Test-Under $k $purgeRel)) { return $true }
         if ($kind -ceq 'Added' -and $ctx.Logs.Contains($(if ($k.StartsWith('log\', [StringComparison]::OrdinalIgnoreCase)) { $k.Substring(4) } else { '' }))) { return $true }
         return $false
     }
