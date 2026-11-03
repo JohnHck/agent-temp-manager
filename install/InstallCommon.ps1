@@ -758,7 +758,9 @@ function Get-AtmUninstallAutoPurgeTaskNotice {
         }
         $own = Get-AtmInstallAutoPurgeTaskName -Sid ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
         $names = New-Object System.Collections.Generic.List[string]
-        foreach ($t in $folder.GetTasks(1)) { $names.Add([string]$t.Name) }
+        # Indexed (1-based), never enumerated: the same in Windows PowerShell and in PowerShell 7.
+        $tasks = $folder.GetTasks(1)
+        for ($i = 1; $i -le [int]$tasks.Count; $i++) { $names.Add([string]$tasks.Item($i).Name) }
         if ($names.Contains($own)) { $out.Add((Get-AtmText 'inst.apTaskWarn' ($script:AtmInstallAutoPurgeTaskFolder + '\' + $own))) }
         $others = @($names | Where-Object { $_ -cmatch '^AutoPurge-[0-9a-f]{16}$' -and $_ -cne $own }).Count
         if ($others -gt 0) { $out.Add((Get-AtmText 'inst.apTaskOthers' $others)) }

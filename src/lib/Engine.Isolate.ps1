@@ -1792,9 +1792,9 @@ function Get-AtmAutoPurgeTaskState {
             $st.Reasons = @(Test-AtmAutoPurgeTaskMatch -Task $t -Sid $me.Sid -Name $name -EntryPoint (Get-AtmAutoPurgeEntryPoint))
             $st.State = $(if ($st.Reasons.Count -gt 0) { 'DIVERGENT' } else { 'PRESENT' })
             $st.Enabled = [bool]$t.Enabled
-            # The scheduler reports "none" as a date in 1899.
+            # No next run: a date in 1899. Never run: SCHED_S_TASK_HAS_NOT_RUN (0x00041303), with a last run in 1999.
             $nr = [datetime]$t.NextRunTime; if ($nr.Year -gt 1900) { $st.NextRunTime = $nr }
-            $lr = [datetime]$t.LastRunTime; if ($lr.Year -gt 1900) { $st.LastRunTime = $lr; $st.LastResult = ('0x{0:X8}' -f [int]$t.LastTaskResult) }
+            $lr = [datetime]$t.LastRunTime; if ([int]$t.LastTaskResult -ne 267011 -and $lr.Year -gt 1999) { $st.LastRunTime = $lr; $st.LastResult = ('0x{0:X8}' -f [int]$t.LastTaskResult) }
         }
     } catch { $st.State = 'UNREADABLE'; $st.Reasons = @(Get-AtmTaskSchedulerCode $_.Exception) }
     return [pscustomobject]$st

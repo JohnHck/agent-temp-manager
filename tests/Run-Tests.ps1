@@ -5413,7 +5413,7 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
             $ns = New-Object Xml.XmlNamespaceManager($x.NameTable); $ns.AddNamespace('t', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
             Assert-True ($null -eq $x.SelectSingleNode('//t:Password', $ns) -and $x.SelectSingleNode('//t:Principal/t:LogonType', $ns).InnerText -ceq 'InteractiveToken' -and $x.SelectSingleNode('//t:Principal/t:RunLevel', $ns).InnerText -ceq 'LeastPrivilege') 'tarefa registrada: sem senha, InteractiveToken, LeastPrivilege'
             Assert-True ([int]$td.Actions.Count -eq 1 -and [int]$td.Actions.Item(1).Type -eq 0 -and [string]$td.Actions.Item(1).Path -ceq $want.Path -and [string]$td.Actions.Item(1).Arguments -ceq $want.Arguments) 'uma acao exata: o ponto de entrada'
-            Assert-True ([datetime]$t.NextRunTime -gt [datetime]::Now -and ([datetime]$t.LastRunTime).Year -lt 1900) 'primeira execucao no futuro; nunca executada'
+            Assert-True ([datetime]$t.NextRunTime -gt [datetime]::Now -and [int]$t.LastTaskResult -eq 267011 -and $null -eq $r.Task.LastRunTime) 'primeira execucao no futuro; nunca executada (SCHED_S_TASK_HAS_NOT_RUN; o estado nao mostra ultima execucao)'
             Assert-True ([bool]$td.Settings.StartWhenAvailable -and -not [bool]$td.Settings.DisallowStartIfOnBatteries -and [string]$td.Triggers.Item(1).RandomDelay -ceq 'PT1H') 'perdida roda na proxima oportunidade, tambem na bateria, com atraso'
             $xml0 = [string]$t.Xml
             $asked.Clear()
