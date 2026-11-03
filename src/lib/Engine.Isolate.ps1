@@ -1531,8 +1531,8 @@ function Invoke-AtmAutoPurgeCore {
         4. a NEW log of the pass (Open-AtmAutoPurgeLog, atm.autopurgelog/1); run-start, then one skip record per skipped
            entry (its id and codes, never a path);
         5. for each candidate: after -BeforePurgeHook (tests), the plan again with a fresh inventory (the same
-           measurement and records, still EXPIRED, every gate): a difference skips it (REVALIDATION_REFUSED). Then
-           Invoke-AtmPurgeDeletion -Automatic, the path of the manual purge: purge-intent and purge-result carry
+           measurement and records, still EXPIRED, every gate): a difference skips it (REVALIDATION_REFUSED). Then the
+           path of the manual purge (Invoke-AtmPurgeDeletion, automatic): purge-intent and purge-result carry
            automatic = true and declaredBy = AUTOMATIC_POLICY in the manifest and in the log. An intent not written to
            the manifest, or a deleter that refused before deleting anything, skips the entry; any other outcome but
            COMPLETE, or a record of the log not written, stops the pass (the rest NOT_REACHED).

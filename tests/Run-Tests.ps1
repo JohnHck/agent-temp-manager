@@ -5054,6 +5054,21 @@ exit 0
         $iArgs = $ep.IndexOf('if ($args.Count -gt 0) {'); $iChk = $ep.IndexOf('$integrity = Test-AtmAutoPurgeIntegrity'); $iBad = $ep.IndexOf('if ($integrity.Problems.Count -gt 0) {'); $iLoad = $ep.IndexOf(". (Join-Path `$here 'lib\Engine.Audit.ps1')")
         Assert-True ($iArgs -gt 0 -and $iArgs -lt $iChk -and $iChk -lt $iBad -and $iBad -lt $iLoad) "argumentos recusados antes de tudo; manifesto conferido antes de carregar ($iArgs < $iChk < $iBad < $iLoad)"
         Assert-True ($ep.Contains("'lib\Engine.Audit.ps1', 'lib\I18n.ps1', 'lib\Engine.Clean.ps1', 'lib\Engine.Isolate.ps1', 'lib\Engine.Diagnose.ps1', 'lib\Report.ps1', 'bin\agent-temp-autopurge.ps1'") -and $ep.Contains("-Filter '*.ps1' -File -Force")) 'toda biblioteca carregada e o proprio ponto de entrada precisam estar no manifesto; providers com -Force'
+        # The entry point's check is a copy of the launcher's rules (agent-temp.ps1 is not changed in this phase): every
+        # rule line must stay identical in both, so the two checks cannot drift apart.
+        $launcher = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        $rules = @'
+try { $p = [string]$e.path; $h = [string]$e.sha256 } catch { $p = ''; $h = '' }
+$segments = @($p -split '\\')
+if ($p -notmatch '^[A-Za-z0-9_. -]+(\\[A-Za-z0-9_. -]+)*$' -or $segments -contains '.' -or $segments -contains '..' -or
+$h -notmatch '^[0-9A-Fa-f]{64}$' -or $r.Listed.ContainsKey($k)) {
+try { $found = @(Get-ChildItem -LiteralPath $providersDir -Filter '*.ps1' -File -Force -ErrorAction Stop | Sort-Object Name) } catch { $found = $null }
+$r.Providers = @($found | Where-Object { $r.Listed.ContainsKey(('providers\' + $_.Name).ToLowerInvariant()) })
+$loadedKeys = @($r.Providers | ForEach-Object { ('providers\' + $_.Name).ToLowerInvariant() })
+foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.ps1$' })) {
+'@
+        foreach ($rl in @($rules -split "`r?`n" | Where-Object { $_.Trim() })) { Assert-True ($launcher.Contains($rl.Trim()) -and $ep.Contains($rl.Trim())) "regra identica no lancador e no ponto de entrada: $($rl.Trim().Substring(0, [Math]::Min(60, $rl.Trim().Length)))" }
+        Assert-True ($launcher.Contains('if ($loadedKeys -notcontains $k -and (Test-Path -LiteralPath (Join-Path $here $k) -PathType Leaf)) {') -and $ep.Contains('if ($loadedKeys -notcontains $k -and (Test-Path -LiteralPath (Join-Path $here $k) -PathType Leaf)) {')) 'provider listado e nao enumerado recusado nos dois'
         Assert-Eq ([regex]::Matches($ep, 'Invoke-AtmAutoPurge ').Count) 1 'uma chamada da passada'
         foreach ($pat in @('AtmDeleter', 'DeleteTree', 'ConfirmationReader', 'Read-Host', 'AtmQuarantinePurgeEnabled', 'PurgeTreeImpl', 'BeforePurgeHook', 'Invoke-AtmPurge ')) { Assert-True (-not $ep.Contains($pat)) "ponto de entrada sem '$pat'" }
         Assert-Eq @([IO.File]::ReadAllBytes($epPath) | Where-Object { $_ -gt 127 }).Count 0 'ponto de entrada so em ASCII'
