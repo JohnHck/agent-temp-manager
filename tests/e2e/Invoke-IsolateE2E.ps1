@@ -144,7 +144,7 @@ Case 'identity' {
     $(if ($isAdmin) { 'elevated administrator' } else { 'standard user, not elevated' })
 }
 Case 'installed-before' {
-    $bad = Get-InstalledGateProblems
+    $bad = @(Get-InstalledGateProblems)
     Assert ($bad.Count -eq 0) "travas instaladas que nao sao uma unica atribuicao `$false: $($bad -join ',')"
     $v = Invoke-InstalledVerify
     Assert ($v -eq 0) "agent-temp verify exit $v"
@@ -627,7 +627,7 @@ Case 'temp-pre-existing' {
 Case 'installed-after' {
     Assert ($loaded.AtmIsolationEnabled -eq $false -and $loaded.AtmQuarantinePurgeEnabled -eq $false -and $loaded.AtmRealDeletionEnabled -eq $false) 'trava carregada da instalacao nao era $false'
     Assert ($script:AtmRealDeletionEnabled -eq $false) 'trava de exclusao aberta neste processo'
-    $bad = Get-InstalledGateProblems
+    $bad = @(Get-InstalledGateProblems)
     Assert ($bad.Count -eq 0) "travas instaladas alteradas: $($bad -join ',')"
     $v = Invoke-InstalledVerify
     Assert ($v -eq 0) "agent-temp verify exit $v"
