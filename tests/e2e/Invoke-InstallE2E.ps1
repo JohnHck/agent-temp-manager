@@ -392,6 +392,32 @@ Step 'shipped-purge-gate' {
     Assert ((Test-Path -LiteralPath $q) -eq $qBefore) 'purge criou a quarentena'
     'installed purge gate = $false; version shows it disabled and the default policy; purge plan-only, exit 3'
 }
+Step 'installed-autopurge-entry-point' {
+    # 0.3.x isolation, phase P6a: the entry point of the automatic purge is installed and listed in the manifest. Run by
+    # hand from a new process with no policy installed it does nothing (exit 0, one status line, no log folder); any
+    # argument is refused (exit 2). No scheduled task exists.
+    $ep = Join-Path $installDir 'bin\agent-temp-autopurge.ps1'
+    $m = [IO.File]::ReadAllText((Join-Path $installDir 'manifest.json')) | ConvertFrom-Json
+    Assert ([IO.File]::Exists($ep) -and @($m.files | Where-Object { [string]$_.path -ceq 'bin\agent-temp-autopurge.ps1' }).Count -eq 1) 'ponto de entrada ausente ou fora do manifesto'
+    $home0 = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'AgentTempManager'
+    $seen0 = @([IO.Directory]::Exists($home0), [IO.Directory]::Exists((Join-Path $home0 'AutoPurgeLog')))
+    $run = {
+        param([string[]]$A)
+        $out = & $installerExe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $ep @A 2>&1
+        [pscustomobject]@{ Code = $LASTEXITCODE; Text = (@($out | ForEach-Object { "$_" }) -join "`r`n") }
+    }
+    $r = & $run @()
+    [IO.File]::WriteAllText((Join-Path $OutDir 'agent-temp-autopurge-off.txt'), $r.Text)
+    Assert ($r.Code -eq 0 -and $r.Text.Contains('autoPurge = true') -and @($r.Text.Trim() -split "`r`n").Count -eq 1) "sem politica: exit $($r.Code) ($($r.Text))"
+    $r = & $run @('now')
+    [IO.File]::WriteAllText((Join-Path $OutDir 'agent-temp-autopurge-args.txt'), $r.Text)
+    Assert ($r.Code -eq 2 -and $r.Text.Contains('takes no arguments')) "argumento: exit $($r.Code)"
+    $seen1 = @([IO.Directory]::Exists($home0), [IO.Directory]::Exists((Join-Path $home0 'AutoPurgeLog')))
+    Assert (($seen1 -join ',') -ceq ($seen0 -join ',')) 'o ponto de entrada criou uma pasta no perfil'
+    $t = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -like '*AgentTemp*' -or $_.TaskPath -like '*AgentTemp*' })
+    Assert ($t.Count -eq 0) 'existe uma tarefa agendada do produto'
+    'installed entry point listed in the manifest; no policy: exit 0, one status line, nothing created; an argument: exit 2; no scheduled task'
+}
 Step 'shipped-worktree-diagnostics-gate' {
     # P3-B0: reading repositories and running Git in them stay closed in every shipped copy.
     $diag = [IO.File]::ReadAllText((Join-Path $installDir 'lib\Engine.Diagnose.ps1'))

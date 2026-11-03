@@ -622,7 +622,8 @@ profile in V0.4.
   confirmed by default.
 * **Opt-in automatic purge** (ISO-D4): off by default and enabled only by an administrator. It is visible in `version`
   and the reports, and covers only expired entries with an intact manifest. It never touches the active environment,
-  logs each purge and fails closed.
+  logs each purge and fails closed. Since phase P6a it has an entry point run by hand (see "Automatic purge: the entry
+  point" below); no scheduled task exists.
 
 Unchanged by the proposal: the clean gates, B1, RECENT, and the rule that the tool never changes an existing ACL or
 owner, never enables privileges and never terminates processes.
@@ -719,10 +720,46 @@ owner, never enables privileges and never terminates processes.
   * the processes whose command line cannot be read (the B1 class) are counted in the plan and the log, but are not a
     purge gate of their own;
   * retention only marks `EXPIRED`, and the quota only refuses new isolations; neither ever purges;
-  * `autoPurge` in the policy is read and shown but does nothing: there is no automatic purge and no scheduled task in
-    0.3.x P4;
+  * `autoPurge` in the policy turns on the automatic purge of phase P6a only (below); no scheduled task exists;
   * the policy file (`config\quarantine.policy.json`, strict schema) is administrator configuration in the installation.
     An invalid file counts as off, and an update keeps it as it is.
+
+### Automatic purge: the entry point (0.3.x phase P6a)
+
+The automatic purge (contract section 11, ISO-D4, J-ISO-7 (ii)) has one entry point, `bin\agent-temp-autopurge.ps1`, and
+one engine pass, `Invoke-AtmAutoPurge`; a static suite test checks that the entry point is its only caller and that
+the CLI and the TUI never call it. **No scheduled task, service or credential exists in this phase**: the pass runs only
+when someone runs the entry point by hand, as the user who runs it.
+
+* **What authorizes it.** Only the administrator's policy file in the installation (`autoPurge: true`, valid schema).
+  There is no question, phrase or declaration, so no parameter of the interactive commands accepts a confirmation
+  automatically: the entry point takes no argument at all, and the interactive commands are unchanged.
+* **Integrity.** The entry point checks the manifest with the launcher's rules before it loads any code (the files it
+  loads and itself must be listed; no unlisted provider) and refuses a copy without a manifest. It is listed in the
+  manifest, required by the installer and checked by the build.
+* **Limits (contract section 11.1).** Only the process user's own `EXPIRED` entries whose `verify` is `OK` in the same
+  pass, and only their `payload`, inside the quarantine. `ABANDONED`, `INCOMPLETE`, `FAILED` and `UNRECOGNIZED` entries are
+  never purged. Any error or doubt skips the entry, and nothing is retried with weaker checks. The purge gate governs:
+  closed (every distributed copy), the pass only reports what it would purge, with no lock, log or purge.
+* **The same path as the manual purge.** The plan of `quarantine purge` (verify, gates 3, 4 and 8, B2-1 extended to the
+  quarantine), checked again just before the deleter; the same deleter call with the manifest's measurement (one
+  reference to the deleter in the engine, shared by both purges); the clean lock (B8, the same name; busy, the pass ends
+  with nothing purged); `purge-intent` before the deleter and `purge-result` after it, in the manifest and in the pass's
+  own log (`atm.autopurgelog/1`, the T1 writer, `%LOCALAPPDATA%\AgentTempManager\AutoPurgeLog`, outside the quarantine),
+  with `automatic: true` and `declaredBy: AUTOMATIC_POLICY`. Records carry codes and entry ids, never file names.
+* **Mitigations (contract section 11.3).** A minimum retention fixed in code: with `retentionDays` below 7 nothing expires
+  automatically. An entry whose id or any manifest record is dated after the clock is skipped (`FUTURE_DATE`), so a clock
+  set back or forward cannot make a recent entry look expired.
+* **Visibility.** While the policy has `autoPurge: true`, `version`, `quarantine list`, the TUI's quarantine screen and
+  every report show `AUTOMATIC PURGE ON` and say that only a manual run of the entry point acts.
+* **Declared risks.**
+  * Once enabled (past the purge gate, in a later release), what it purges cannot be restored. The administrator's
+    policy authorizes every pass: nobody confirms each entry.
+  * The pass trusts the system clock for `EXPIRED`. The minimum retention and `FUTURE_DATE` limit a wrong clock; they
+    do not detect a clock moved forward after an entry was isolated.
+  * JSON exports and the TUI screens other than the quarantine's do not show the notice; the policy line of `version`
+    and of `quarantine list` does.
+  * The scheduled task and the elevation it may need are phase P6b, not in this version.
 
 ### Native primitives (0.3.x phase P1)
 

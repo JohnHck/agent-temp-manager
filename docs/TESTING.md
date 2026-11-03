@@ -323,7 +323,8 @@ The quarantine is a folder of the sandbox (the `AtmIsolationQuarantineRoot` seam
     * an `EXPIRED` entry purged by the confirmed command;
   * the quota refuses an isolation before any question, and nothing is purged;
   * the policy: missing, valid (with and without BOM), invalid in every way (counted as off with a warning),
-    `autoPurge: true` read and warned with no effect; the free-space minimum fixed in code;
+    `autoPurge: true` read and warned (`AUTOPURGE_ON`; list, inspect and verify never purge); the free-space minimum
+    fixed in code;
   * the policy preserved byte for byte by `-Update` (in the new manifest; `verify` passes), an invalid one too, and
     `version` of the installed copy showing it;
   * the CLI in a child process with the gate closed; the TUI headless in both languages (`EXPIRED`, `PURGED`, the
@@ -331,8 +332,35 @@ The quarantine is a folder of the sandbox (the `AtmIsolationQuarantineRoot` seam
   * static checks:
     * the deleter has one product call in clean and one in purge, after the gate stop and the intent;
     * the report, the TUI and the launcher never call the deleter, and only the launcher calls the purge, once;
-    * `autoPurge` is only read and shown;
+    * `autoPurge` is read only by the policy and by the automatic pass, and shown by the report;
     * the clock seam is a single `$null` assignment.
+* Automatic purge entry point (0.3.x P6a, area `Isolamento P6a`). Each in-process case uses a quarantine of its own in
+  the sandbox and the clock seam; the purge gate opens only around each call:
+  * the policy missing, invalid or off: `AUTOPURGE_OFF`, one status line, no lock (another process holds it), no log
+    folder, the `EXPIRED` entry identical;
+  * on, past the gate: before expiry nothing is purged (`STATE_ISOLATED`); once expired only the `EXPIRED` entry whose
+    verify is `OK` is purged through the real deleter; `DIFFERS`, `FAILED`, `INCOMPLETE`, `ABANDONED`, `UNRECOGNIZED`
+    and `FUTURE_DATE` (a manifest record and an entry id dated after the clock) are skipped with their reason and stay
+    identical; `purge-intent` and `purge-result` carry `automatic: true` and `declaredBy: AUTOMATIC_POLICY` in the
+    manifest and in the new log (`atm.autopurgelog/1`, outside the quarantine, no file names); a 7-day retention (the
+    minimum) is accepted;
+  * the purge gate closed: report only (`WOULD_PURGE`), no lock, no log, no log folder, the quarantine identical;
+  * limits: a 5-day retention refused before the quarantine is read; the clean lock busy (`CLEAN_LOCK_BUSY`, nothing
+    purged, no log); a plan changed before the deleter skipped (`REVALIDATION_REFUSED`), a deleter refusal skipped and
+    the pass going on, an exception stopping the pass (the rest `NOT_REACHED`); the lock free afterwards;
+  * the notice in both languages: on, the policy lines and every report say `AUTOMATIC PURGE ON`; off, invalid or
+    missing, nothing;
+  * the entry point in child processes on a staged copy with a manifest (never where it would read the runner's own
+    quarantine): an argument (exit 2); no manifest, a library or the entry point itself changed, an unlisted provider
+    (exit 5); the policy missing, invalid or off (exit 0, one status line, nothing created); a 5-day retention (exit 3);
+    `version` and `diagnose` of the copy with `autoPurge: true` showing the notice;
+  * static checks: only the entry point calls the pass, and the CLI and the TUI never do; the entry point has no
+    parameter block, refuses arguments first and checks the manifest before loading, is ASCII only and never calls the
+    deleter; the pass has no reader, presenter or phrase; one deleter reference in the engine; the minimum fixed in
+    code; every report function shows the notice; the texts in both languages; the installer and the build require
+    the entry point.
+* Install e2e step `installed-autopurge-entry-point`: the installed entry point is in the manifest; with no policy it
+  exits 0 with one status line and creates nothing; an argument exits 2; no scheduled task of the product exists.
 
 ## Real isolation on disposable VMs (0.3.x ISO-P5a and P5b)
 

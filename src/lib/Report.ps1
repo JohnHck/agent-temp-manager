@@ -80,6 +80,7 @@ function Get-AtmStatusText { param([string]$Code) return (Get-AtmText "status.$C
 
 function Show-AtmAudit {
     param($Inventory, [string]$User, [string]$Project, [string]$Root)
+    Show-AtmAutoPurgeNotice
     $inv = $Inventory
     $all = @($inv.Partitions | Where-Object { $_.Kind -ne 'NotScanned' })
     $sel = Select-AtmPartitions -Inventory $inv -User $User -Project $Project -Root $Root
@@ -239,6 +240,7 @@ function ConvertTo-AtmExportJson {
 function Show-AtmPathDetail {
     # Drill-down: direct children of one audited path, each measured once (no reparse traversal).
     param($Inventory, [string]$Path)
+    Show-AtmAutoPurgeNotice
     if (Test-AtmAllowListPathSyntax $Path) { Write-AtmHeader (Get-AtmText 'detail.title' $Path); Write-Host ('  ' + (Get-AtmText 'detail.badPath')) -ForegroundColor Red; return }
     $full = [IO.Path]::GetFullPath($Path)
     $base = @($Inventory.Bases | Where-Object { $_.Status -eq 'OK' -and ($full.StartsWith($_.Path + '\', [StringComparison]::OrdinalIgnoreCase) -or [string]::Equals($full, $_.Path, [StringComparison]::OrdinalIgnoreCase)) })
@@ -277,6 +279,7 @@ function Show-AtmRuntimeNotices {
 
 function Show-AtmPreview {
     param($Inventory, $Rows, [string]$User, [string]$Project, [string]$Root)
+    Show-AtmAutoPurgeNotice
     $rt = @(@($Rows) | Where-Object { $null -ne $_ -and $_.PSObject.Properties['Runtime'] -and $null -ne $_.Runtime } | Select-Object -First 1)
     if ($rt.Count -gt 0) { Show-AtmRuntimeNotices -Runtime $rt[0].Runtime }
     $sel = @(Select-AtmPartitions -Inventory $Inventory -User $User -Project $Project -Root $Root)
@@ -312,6 +315,7 @@ function Show-AtmPreview {
 
 function Show-AtmCleanPlan {
     param($Verified, $Rejected, $Inventory)
+    Show-AtmAutoPurgeNotice
     if ($null -ne $Inventory -and $Inventory.PSObject.Properties['RuntimeEvidence']) { Show-AtmRuntimeNotices -Runtime $Inventory.RuntimeEvidence }
     Write-AtmHeader (Get-AtmText 'clean.rejectedHeader')
     Write-AtmTable (@($Rejected) | ForEach-Object { New-AtmRow ([ordered]@{ 'col.origin' = $_.Source; 'col.path' = $_.Path; 'col.reasons' = (@($_.Reasons) -join ' ; ') }) })
@@ -328,6 +332,7 @@ function Show-AtmCleanPlan {
 function Show-AtmIsolatePlan {
     # 0.3.x isolation (plan only): the refused paths, the exact set that passed every gate, its plan id and totals.
     param($Verified, $Rejected, $Inventory, [string]$PlanId)
+    Show-AtmAutoPurgeNotice
     if ($null -ne $Inventory -and $Inventory.PSObject.Properties['RuntimeEvidence']) { Show-AtmRuntimeNotices -Runtime $Inventory.RuntimeEvidence }
     Write-AtmHeader (Get-AtmText 'iso.rejectedHeader')
     Write-AtmTable (@($Rejected) | ForEach-Object { New-AtmRow ([ordered]@{ 'col.origin' = $_.Source; 'col.path' = $_.Path; 'col.reasons' = (@($_.Reasons) -join ' ; ') }) })
@@ -342,6 +347,7 @@ function Show-AtmIsolatePlan {
 
 function Show-AtmIsolateResult {
     param($Result)
+    Show-AtmAutoPurgeNotice
     Write-AtmHeader (Get-AtmText 'iso.resultHeader')
     if ($Result.Aborted) {
         # Aborted: the mover was never called in this run.
@@ -381,8 +387,8 @@ function Format-AtmQuarantinePolicy {
 }
 
 function Get-AtmQuarantinePolicyLines {
-    # The policy line, its warnings (an invalid file counts as off; autoPurge does nothing in this version) and, with a
-    # quota, the usage of the quarantine. Each item: Text and Color.
+    # The policy line, its warnings (an invalid file counts as off; autoPurge on, and what acts on it) and, with a quota,
+    # the usage of the quarantine. Each item: Text and Color.
     param($Policy, $List = $null)
     $L = New-Object System.Collections.Generic.List[object]
     $L.Add([pscustomobject]@{ Text = (Format-AtmQuarantinePolicy $Policy); Color = 'Gray' })
@@ -393,6 +399,45 @@ function Get-AtmQuarantinePolicyLines {
         if ($List.QuotaReached) { $L.Add([pscustomobject]@{ Text = (Get-AtmText 'q.quotaReached'); Color = 'Yellow' }) }
     }
     return $L.ToArray()
+}
+
+function Get-AtmAutoPurgeNoticeLines {
+    # Contract section 11 (P6a): while the policy of this copy (config next to lib, as the CLI reads it) has autoPurge =
+    # true, every report says so, with what acts on it. Nothing when it is absent, invalid or off; a policy that cannot
+    # be read shows nothing here (the policy line of version and quarantine list reports it).
+    param([string]$ConfigDir = (Join-AtmPath (Split-Path $PSScriptRoot -Parent) 'config'))
+    $p = $null
+    try { $p = Get-AtmQuarantinePolicy -ConfigDir $ConfigDir } catch { return @() }
+    if ($p.Source -cne 'FILE' -or -not $p.AutoPurge) { return @() }
+    return @((Get-AtmText 'q.policyWarn.AUTOPURGE_ON'))
+}
+
+function Show-AtmAutoPurgeNotice {
+    # The notice of Get-AtmAutoPurgeNoticeLines, at the top of every report.
+    foreach ($l in @(Get-AtmAutoPurgeNoticeLines)) { Write-Host ('  ' + $l) -ForegroundColor Magenta }
+}
+
+function Show-AtmAutoPurgeResult {
+    # bin\agent-temp-autopurge.ps1: the result of one automatic pass. Off or below the minimum retention: one status
+    # line. Otherwise one row per entry (its decision and reasons: codes, never a path).
+    param($Result)
+    if ($Result.Aborted -ceq 'AUTOPURGE_OFF') { Write-Host (Get-AtmText 'ap.off'); return }
+    if ($Result.Aborted -ceq 'AUTOPURGE_RETENTION_BELOW_MINIMUM') { Write-Host (Get-AtmText 'ap.retentionMin' $Result.Policy.RetentionDays $script:AtmAutoPurgeMinRetentionDays) -ForegroundColor Yellow; return }
+    Write-AtmHeader (Get-AtmText 'ap.header')
+    foreach ($pl in (Get-AtmQuarantinePolicyLines -Policy $Result.Policy)) { Write-Host ('  ' + $pl.Text) -ForegroundColor $pl.Color }
+    foreach ($row in @($Result.Entries)) {
+        $why = $(if (@($row.Reasons).Count -gt 0) { ' - ' + (@($row.Reasons) -join ' ; ') } else { '' })
+        Write-Host ('  ' + (Get-AtmText 'ap.row' $row.Decision $row.Id $why)) -ForegroundColor $(if ($row.Decision -ceq 'PURGED') { 'Green' } elseif ($row.Decision -ceq 'WOULD_PURGE') { 'Cyan' } elseif ($row.Decision -ceq 'SKIPPED') { 'Gray' } else { 'Red' })
+    }
+    if ($Result.Aborted -ceq 'EXPURGO_REAL_DESABILITADO') { Write-Host ('  ' + (Get-AtmText 'ap.gateClosed' @($Result.Entries | Where-Object { $_.Decision -ceq 'WOULD_PURGE' }).Count)) -ForegroundColor Yellow }
+    elseif ([string]$Result.Aborted -like 'CLEAN_LOCK_*') { Write-Host ('  ' + (Get-AtmText 'ap.busy' $Result.Aborted)) -ForegroundColor Yellow }
+    elseif ($Result.Aborted) { Write-Host ('  ' + (Get-AtmText 'ap.aborted' $Result.Aborted)) -ForegroundColor Yellow }
+    if ($Result.StoppedBy) { Write-Host ('  ' + (Get-AtmText 'ap.stopped' $Result.StoppedBy)) -ForegroundColor Red }
+    foreach ($e in @($Result.LogErrors)) { Write-Host ('  ' + (Get-AtmText 'clean.logError' $e.Stage '-' $e.Code)) -ForegroundColor Red }
+    if ($Result.LockReleaseError) { Write-Host ('  ' + (Get-AtmText 'clean.lockReleaseFailed' $Result.LockReleaseError)) -ForegroundColor Red }
+    $done = @($Result.Results | Where-Object { $_.Outcome -ceq 'COMPLETE' })
+    if (-not $Result.Aborted -or $done.Count -gt 0) { Write-Host ('  ' + (Get-AtmText 'ap.done' $done.Count (Format-AtmMB (Get-AtmSum $done 'Bytes')) @($Result.Entries | Where-Object { $_.Decision -ceq 'SKIPPED' }).Count)) -ForegroundColor Green }
+    if ($Result.LogFile) { Write-Host ('  ' + (Get-AtmText 'ap.logFile' $Result.LogFile $Result.RunId)) }
 }
 
 function Show-AtmQuarantineList {
@@ -427,6 +472,7 @@ function Get-AtmQuarantineEntryLines {
 
 function Show-AtmQuarantineEntry {
     param($Entry)
+    Show-AtmAutoPurgeNotice
     Write-AtmHeader (Get-AtmText 'q.entryHeader' $Entry.Id)
     foreach ($l in (Get-AtmQuarantineEntryLines -Entry $Entry)) { Write-Host ('  ' + $l) }
     Write-Host ''
@@ -438,6 +484,7 @@ function Show-AtmQuarantineEntry {
 function Show-AtmQuarantineVerify {
     # quarantine verify (read only): one row per entry; a differing entry is a result, not an error.
     param($Results)
+    Show-AtmAutoPurgeNotice
     Write-AtmHeader (Get-AtmText 'q.verifyHeader')
     Write-AtmTable (@($Results) | ForEach-Object { New-AtmRow ([ordered]@{ 'col.entry' = $_.Id; 'col.result' = $_.Result; 'col.reasons' = $_.Reason; 'col.state' = $_.State
                     'col.reconcilable' = $(if ($null -eq $_.Reconcilable) { '-' } else { Get-AtmYesNo ([bool]$_.Reconcilable) }) }) })
@@ -448,6 +495,7 @@ function Show-AtmRestorePlan {
     # quarantine restore (plan): the entry, its destination (original, or the alternative generated by the engine on a
     # conflict), the refusals, the plan id. Counts only for what exists at the original path: never names.
     param($Plan, $Inventory, [string]$PlanId)
+    Show-AtmAutoPurgeNotice
     if ($null -eq $Plan.Entry) { Write-AtmHeader (Get-AtmText 'rst.refusedHeader'); foreach ($r in @($Plan.Reasons)) { Write-Host ('  - ' + $r) -ForegroundColor Yellow }; return }
     Write-AtmHeader (Get-AtmText 'rst.planHeader' $Plan.Entry.Id)
     Write-Host ('  ' + (Get-AtmText 'q.state' (Format-AtmQuarantineState $Plan.Entry)))
@@ -471,6 +519,7 @@ function Show-AtmRestorePlan {
 
 function Show-AtmRestoreResult {
     param($Result)
+    Show-AtmAutoPurgeNotice
     Write-AtmHeader (Get-AtmText 'rst.resultHeader')
     if ($Result.Aborted) {
         # Aborted: the mover was never called in this run.
@@ -495,6 +544,7 @@ function Show-AtmPurgePlan {
     # quarantine purge (plan): the entry, the measurement the deleter will be given, the refusals, the plan id and phrase.
     # With the purge gate closed it says that nothing is purged and no space is freed.
     param($Plan, [string]$PlanId, [string]$Phrase)
+    Show-AtmAutoPurgeNotice
     if ($null -eq $Plan.Entry) { Write-AtmHeader (Get-AtmText 'pur.refusedHeader'); foreach ($r in @($Plan.Reasons)) { Write-Host ('  - ' + $r) -ForegroundColor Yellow }; return }
     Write-AtmHeader (Get-AtmText 'pur.planHeader' $Plan.Entry.Id)
     Write-Host ('  ' + (Get-AtmText 'q.state' (Format-AtmQuarantineState $Plan.Entry)))
@@ -517,6 +567,7 @@ function Show-AtmPurgePlan {
 
 function Show-AtmPurgeResult {
     param($Result)
+    Show-AtmAutoPurgeNotice
     Write-AtmHeader (Get-AtmText 'pur.resultHeader')
     if ($Result.Aborted) {
         # Aborted: the deleter was never called in this run.
@@ -544,6 +595,7 @@ function Show-AtmDiscardPresentation {
     # AUT-1: what the operator is asked to authorize, then the technical result apart from it (a root can be authorized
     # by the operator and stay technically blocked), then the limits. Age is information only.
     param($Presentation)
+    Show-AtmAutoPurgeNotice
     $pr = $Presentation; $p = $pr.Partition
     Write-AtmHeader (Get-AtmText 'auth.header')
     Write-Host ('  ' + (Get-AtmText 'auth.plan' $pr.PlanId (Format-AtmTime $pr.PresentedUtc)))
@@ -567,6 +619,7 @@ function Show-AtmDiscardPresentation {
 
 function Show-AtmDiscardResult {
     param($Result)
+    Show-AtmAutoPurgeNotice
     Write-AtmHeader (Get-AtmText 'auth.resultHeader')
     if ($Result.Accepted) {
         Write-Host ('  ' + (Get-AtmText 'auth.accepted' $Result.AuthorizationId $Result.PlanId $Result.RecordFile)) -ForegroundColor Green
@@ -609,6 +662,7 @@ function Read-AtmCleanAnswer {
 
 function Show-AtmCleanResult {
     param($Result)
+    Show-AtmAutoPurgeNotice
     Write-AtmHeader (Get-AtmText 'clean.resultHeader')
     # T1: log failures are always shown with the operation they belong to; none of them undoes anything.
     $logLines = {
@@ -666,6 +720,7 @@ function Format-AtmUtcIso { param($Utc) if ($null -eq $Utc) { return $null } ret
 
 function Show-AtmDiagnose {
     param($Result)
+    Show-AtmAutoPurgeNotice
     $r = $Result
     Write-AtmHeader (Get-AtmText 'diag.title')
     $id = $r.Identity

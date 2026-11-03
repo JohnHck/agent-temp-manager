@@ -68,6 +68,12 @@ try {
         $za.Dispose(); $za = $null; [IO.File]::Delete($zip)
         throw 'Release recusada: o arquivo gerado nao contem a trava de exclusao/versao esperadas.'
     }
+    # 0.3.x P6a: the entry point of the automatic purge is shipped and listed in the manifest the installation verifies.
+    $null = & $read 'src/bin/agent-temp-autopurge.ps1'
+    if (@((& $read 'src/manifest.json' | ConvertFrom-Json).files | Where-Object { [string]$_.path -ceq 'bin\agent-temp-autopurge.ps1' }).Count -ne 1) {
+        $za.Dispose(); $za = $null; [IO.File]::Delete($zip)
+        throw 'Release recusada: bin\agent-temp-autopurge.ps1 fora do manifesto.'
+    }
     # V0.3 V2 (D1): no CI-only file, under any folder or letter case.
     $ciLeaves = @($ciOnly | ForEach-Object { Split-Path -Leaf $_ })
     if (@($za.Entries | Where-Object { $ciLeaves -contains (Split-Path -Leaf $_.FullName.Replace('/', '\')) }).Count -gt 0) {

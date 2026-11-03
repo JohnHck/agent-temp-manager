@@ -45,6 +45,12 @@ $script:AtmQuarantinePolicyFile = 'quarantine.policy.json'
 $script:AtmQuarantinePolicySchema = 'atm.quarantine-policy/1'
 # The purge log (T1 writer, its own schema).
 $script:AtmPurgeLogSchema = 'atm.purgelog/1'
+# The automatic purge (contract section 11, J-ISO-7 (ii), phase P6a): the log of each pass (T1 writer, its own schema),
+# in a folder at a place fixed in code next to the quarantine root (outside it), and the minimum retention fixed in code
+# (section 11.3): with retentionDays below it nothing expires automatically. No policy key changes either.
+$script:AtmAutoPurgeLogSchema = 'atm.autopurgelog/1'
+$script:AtmAutoPurgeLogFolder = 'AutoPurgeLog'
+$script:AtmAutoPurgeMinRetentionDays = 7
 # Test seam, single assignment: the clock of the retention (a scriptblock that returns a UTC time). $null is the system
 # clock. The suite replaces it inside its own process; the CLI and the TUI never set it.
 $script:AtmQuarantineClock = $null
@@ -635,10 +641,10 @@ function Get-AtmQuarantinePolicy {
       installation. Strict schema: one JSON object with schema = atm.quarantine-policy/1 and, optionally, retentionDays (a
       whole number of days, 1 to 3650), quotaBytes (a whole number of bytes, at least 1) and autoPurge (true or false);
       nothing else. A missing file is the default (30 days, no quota, autoPurge false). A file that cannot be read or
-      breaks the schema counts as OFF, the same values, with the warning QUARANTINE_POLICY_INVALID. autoPurge is read and
-      shown only: nothing purges automatically in this version (phase P6), and autoPurge = true gives the warning
-      AUTOPURGE_NOT_AVAILABLE. Returns RetentionDays, QuotaBytes ($null: no quota), AutoPurge, Source (DEFAULT, FILE,
-      INVALID) and Warnings.
+      breaks the schema counts as OFF, the same values, with the warning QUARANTINE_POLICY_INVALID. autoPurge = true
+      turns the automatic purge on (phase P6a): only the entry point bin\agent-temp-autopurge.ps1 acts on it (no scheduled
+      task exists), within the limits of section 11.1, and it gives the warning AUTOPURGE_ON wherever the policy is shown.
+      Returns RetentionDays, QuotaBytes ($null: no quota), AutoPurge, Source (DEFAULT, FILE, INVALID) and Warnings.
     #>
     param([string]$ConfigDir)
     $out = [ordered]@{ RetentionDays = $script:AtmQuarantineDefaultRetentionDays; QuotaBytes = $null; AutoPurge = $false; Source = 'DEFAULT'; Warnings = @() }
@@ -667,7 +673,7 @@ function Get-AtmQuarantinePolicy {
     if ($names -ccontains 'retentionDays') { $out.RetentionDays = [int]$doc.retentionDays }
     if ($names -ccontains 'quotaBytes') { $out.QuotaBytes = [long]$doc.quotaBytes }
     if ($names -ccontains 'autoPurge') { $out.AutoPurge = [bool]$doc.autoPurge }
-    if ($out.AutoPurge) { $out.Warnings = @('AUTOPURGE_NOT_AVAILABLE') }
+    if ($out.AutoPurge) { $out.Warnings = @('AUTOPURGE_ON') }
     return [pscustomobject]$out
 }
 
@@ -1215,12 +1221,12 @@ function Invoke-AtmPurgeCore {
            wrong phrase stops the run; the declaration and the confirmation are written and flushed before anything else;
         4. after -BeforePurgeHook (tests), the plan again (a fresh inventory and evidence, the entry, its verification,
            every gate, the same measurement and records): any difference stops the run (REVALIDATION_REFUSED);
-        5. purge-intent in the manifest (reopened with OpenExisting, then closed) and in the log, BEFORE the deleter;
-        6. the only call to the deleter in this engine: DeleteTree(<entry>\payload, files, dirs, bytes, newest, $null)
-           with the measurement of the manifest (a difference refuses before the first deletion); the absence of
-           the payload confirmed; purge-result (automatic = false) in the manifest and in the log. The entry and its
-           manifest stay as the trail (PURGED). Anything but a complete, verified purge stops the run
-           (STOPPED_AFTER_<outcome>); nothing is retried.
+        5. and 6. Invoke-AtmPurgeDeletion, the path the automatic pass shares: purge-intent in the manifest (reopened
+           with OpenExisting, then closed) and in the log, BEFORE the deleter; the only call to the deleter in this
+           engine: DeleteTree(<entry>\payload, files, dirs, bytes, newest, $null) with the measurement of the manifest
+           (a difference refuses before the first deletion); the absence of the payload confirmed; purge-result
+           (automatic = false) in the manifest and in the log. The entry and its manifest stay as the trail (PURGED).
+           Anything but a complete, verified purge stops the run (STOPPED_AFTER_<outcome>); nothing is retried.
       -PurgeTreeImpl / -BeforePurgeHook: test seams, never passed by the CLI; scriptblock(plan) that returns an object
       like AtmDeleteResult. Aborted: the deleter was never called. StoppedBy: it was called.
     #>
@@ -1277,23 +1283,10 @@ function Invoke-AtmPurgeCore {
     $state.RunId = $runId
     $me = Get-AtmCurrentIdentity
     $ls = @{ Id = $runId; Seq = 0 }
-    $ms = @{ Id = $Id; Seq = @($plan.Entry.Records).Count }
     $opId = '{0}:1' -f $runId
     $halt = { param([string]$Code) if ($results.Count -gt 0) { $state.Stopped = $Code } else { $state.Aborted = $Code } }
     $logFail = { param([string]$Stage, [string]$Code) $logErrors.Add([pscustomobject]@{ Stage = $Stage; OpId = $null; Code = $Code }) }
     $e = $plan.Entry
-    $entryPath = $e.Path
-    # One manifest record: the manifest reopened (OpenExisting, the same checks), written, flushed and closed.
-    $writeManifest = {
-        param([string]$Type, [System.Collections.IDictionary]$Fields)
-        $mf = [AgentTempManager.AtmCleanLog]::Pin($entryPath, $me.Sid)
-        try {
-            $c = $(if ($null -ne $mf.Error) { $mf.Error } else { $mf.OpenExisting('manifest.jsonl') })
-            if ($null -eq $c) { $c = Write-AtmIsolationRecord -Log $mf -State $ms -Schema $script:AtmQuarantineSchema -Type $Type -Fields $Fields }
-            if ($null -eq $c) { $c = $mf.Close() }
-            return $c
-        } finally { $mf.Dispose() }
-    }
     $log = $null
     try {
         $opened = Open-AtmCleanLog -Path $LogFile -Inventory $inv -ProcessUserSid $me.Sid
@@ -1344,52 +1337,298 @@ function Invoke-AtmPurgeCore {
             elseif (-not $same) { $state.Aborted = 'REVALIDATION_REFUSED' }
         }
         if (-not $state.Aborted) {
-            # The intent is written and flushed, in the manifest and in the log, BEFORE the deleter; without both, no purge.
-            $mc = & $writeManifest 'purge-intent' ([ordered]@{ opId = $opId; runId = $runId; planId = $state.PlanId; files = $plan.Files; dirs = $plan.Dirs; bytes = $plan.Bytes; automatic = $false; declaredBy = 'OPERATOR' })
-            if ($null -ne $mc) { $state.Aborted = 'MANIFEST_INTENT_FAILED' }
-            else {
-                $lc = Write-AtmIsolationRecord -Log $log -State $ls -Schema $script:AtmPurgeLogSchema -Type 'purge-intent' -Fields ([ordered]@{ opId = $opId; entryId = $Id; files = $plan.Files; dirs = $plan.Dirs; bytes = $plan.Bytes; automatic = $false })
-                if ($null -ne $lc) { & $logFail 'purge-intent' $lc; $state.Aborted = 'LOG_INTENT_FAILED' }
-            }
-        }
-        if (-not $state.Aborted) {
-            # The only call to the deleter: it pins the payload, plans it and compares the measurement of the manifest
-            # before the first deletion. An exception leaves the payload's state unknown (none, part or all of it).
-            $d = $null; $exType = $null
-            try {
-                if ($PurgeTreeImpl) { $d = & $PurgeTreeImpl $plan }
-                else { $d = [AgentTempManager.AtmDeleter]::DeleteTree($plan.PayloadPath, $plan.Files, $plan.Dirs, $plan.Bytes, $plan.NewestTicks, $null) }
-                if ($null -eq $d) { throw [InvalidOperationException]::new('DELETER_NO_RESULT') }
-            } catch { $d = $null; $exType = $_.Exception.GetBaseException().GetType().Name }
-            # Only a confirmed absence verifies the purge; access denied or any other error: not verified, never assumed.
-            $gone = $false; $vs = 'UNKNOWN'
-            if ($null -eq $exType) {
-                $pres = Get-AtmPathPresence $plan.PayloadPath
-                if ($pres -is [bool]) { $gone = -not $pres; $vs = $(if ($pres) { 'PRESENT' } else { 'GONE' }) }
-            }
-            $outcome = $(if ($null -ne $exType) { 'EXCEPTION' }
-                elseif (-not $d.Completed) { $(if ([long]$d.FilesDeleted -gt 0 -or [long]$d.DirsDeleted -gt 0) { 'PARTIAL' } else { 'REFUSED' }) }
-                elseif ($gone) { 'COMPLETE' }
-                else { 'VERIFICATION_FAILED' })
-            $known = ($null -ne $d)
-            # The deleter's reason without the path it may carry: its code only (no file names in the records).
-            $abort = $(if ($known -and $d.AbortReason) { ([regex]::Match([string]$d.AbortReason, '^[A-Z0-9_]+')).Value } else { $null })
-            $row = [pscustomobject]@{ OpId = $opId; Id = $Id; Outcome = $outcome; Attempted = $(if ($known) { [bool]$d.Attempted } else { $null }); Completed = ($known -and [bool]$d.Completed); Verified = $gone; VerifiedState = $vs
-                FilesDeleted = $(if ($known) { $d.FilesDeleted } else { $null }); DirsDeleted = $(if ($known) { $d.DirsDeleted } else { $null }); FilesPlanned = $(if ($known) { $d.FilesPlanned } else { $null })
-                DirsPlanned = $(if ($known) { $d.DirsPlanned } else { $null }); AbortReason = $abort; ExceptionType = $exType; Bytes = $plan.Bytes }
-            $results.Add($row)
-            $after = [ordered]@{ opId = $opId; outcome = $outcome; filesDeleted = $row.FilesDeleted; dirsDeleted = $row.DirsDeleted; automatic = $false; attempted = $row.Attempted; completed = $row.Completed
-                filesPlanned = $row.FilesPlanned; dirsPlanned = $row.DirsPlanned; abortReason = $abort; verifiedGone = $(if ($vs -ceq 'UNKNOWN') { 'UNKNOWN' } else { $gone }); exceptionType = $exType }
-            $mc = & $writeManifest 'purge-result' $after
-            $after['entryId'] = $Id
-            $lc = Write-AtmIsolationRecord -Log $log -State $ls -Schema $script:AtmPurgeLogSchema -Type 'purge-result' -Fields $after
-            if ($null -ne $lc) { & $logFail 'purge-result' $lc; & $halt 'LOG_RESULT_FAILED' }
-            elseif ($null -ne $mc) { & $halt 'MANIFEST_RESULT_FAILED' }
-            elseif ($outcome -cne 'COMPLETE') { & $halt ('STOPPED_AFTER_' + $outcome) }
+            # The intent, the deleter and the result: Invoke-AtmPurgeDeletion, the same path as the automatic pass.
+            $pd = Invoke-AtmPurgeDeletion -Plan $plan -OpId $opId -RunId $runId -PlanId $state.PlanId -Log $log -LogState $ls -LogSchema $script:AtmPurgeLogSchema -Sid $me.Sid -PurgeTreeImpl $PurgeTreeImpl
+            foreach ($le in @($pd.LogErrors)) { $logErrors.Add($le) }
+            if ($null -ne $pd.Row) { $results.Add($pd.Row) }
+            if ($pd.Aborted) { $state.Aborted = $pd.Aborted } elseif ($pd.Halt) { & $halt $pd.Halt }
         }
         # run-end only while the log has not failed; neither a failed run-end nor a failed close replaces the main code.
         if ($logErrors.Count -eq 0) {
             $lc = Write-AtmIsolationRecord -Log $log -State $ls -Schema $script:AtmPurgeLogSchema -Type 'run-end' -Fields ([ordered]@{ results = $results.Count; complete = @($results | Where-Object { $_.Outcome -ceq 'COMPLETE' }).Count; stoppedBy = $(if ($state.Stopped) { $state.Stopped } else { $state.Aborted }); entryId = $Id })
+            if ($null -ne $lc) { & $logFail 'run-end' $lc; if (-not $state.Aborted -and -not $state.Stopped) { & $halt 'LOG_END_FAILED' } }
+        }
+        $cc = $log.Close()
+        if ($null -ne $cc) { & $logFail 'close' $cc; if (-not $state.Aborted -and -not $state.Stopped) { & $halt 'LOG_CLOSE_FAILED' } }
+        return (& $finish)
+    } finally {
+        if ($null -ne $log) { try { $log.Dispose() } catch { $null = $_ } }
+    }
+}
+
+function Invoke-AtmPurgeDeletion {
+    <#
+      The purge of one planned entry, the path shared by the manual purge (Invoke-AtmPurgeCore) and the automatic pass
+      (Invoke-AtmAutoPurgeCore); reached only past the purge gate, under the clean lock:
+        1. purge-intent in the manifest (reopened with OpenExisting, then closed) and in the log, BEFORE the deleter;
+        2. the only call to the deleter in this engine: DeleteTree(<entry>\payload, files, dirs, bytes, newest, $null)
+           with the measurement of the manifest (a difference refuses before the first deletion); an exception leaves
+           the payload's state unknown (none, part or all of it);
+        3. the absence of the payload confirmed (never assumed); purge-result in the manifest and in the log.
+      -Automatic: both records carry automatic = true and declaredBy = AUTOMATIC_POLICY (contract section 11.1);
+      without it they are the manual purge's (automatic = false; declaredBy = OPERATOR in the manifest's intent).
+      -PurgeTreeImpl: the manual purge's test seam. Returns Aborted (an intent was not written: the deleter was never
+      called), Halt (the deleter was called and the run must stop: a result not written, or any outcome but COMPLETE),
+      Row (the result) and LogErrors.
+    #>
+    param($Plan, [string]$OpId, [string]$RunId, [string]$PlanId, $Log, [hashtable]$LogState, [string]$LogSchema, [string]$Sid, [switch]$Automatic, [scriptblock]$PurgeTreeImpl)
+    $out = [ordered]@{ Aborted = $null; Halt = $null; Row = $null; LogErrors = @() }
+    $errs = New-Object System.Collections.Generic.List[object]
+    $done = { $out.LogErrors = $errs.ToArray(); [pscustomobject]$out }
+    $id = [string]$Plan.Entry.Id
+    $entryPath = [string]$Plan.Entry.Path
+    $ms = @{ Id = $id; Seq = @($Plan.Entry.Records).Count }
+    $auto = [bool]$Automatic
+    $by = $(if ($auto) { 'AUTOMATIC_POLICY' } else { 'OPERATOR' })
+    # One manifest record: the manifest reopened (OpenExisting, the same checks), written, flushed and closed.
+    $writeManifest = {
+        param([string]$Type, [System.Collections.IDictionary]$Fields)
+        $mf = [AgentTempManager.AtmCleanLog]::Pin($entryPath, $Sid)
+        try {
+            $c = $(if ($null -ne $mf.Error) { $mf.Error } else { $mf.OpenExisting('manifest.jsonl') })
+            if ($null -eq $c) { $c = Write-AtmIsolationRecord -Log $mf -State $ms -Schema $script:AtmQuarantineSchema -Type $Type -Fields $Fields }
+            if ($null -eq $c) { $c = $mf.Close() }
+            return $c
+        } finally { $mf.Dispose() }
+    }
+    # The intent is written and flushed, in the manifest and in the log, BEFORE the deleter; without both, no purge.
+    $mc = & $writeManifest 'purge-intent' ([ordered]@{ opId = $OpId; runId = $RunId; planId = $PlanId; files = $Plan.Files; dirs = $Plan.Dirs; bytes = $Plan.Bytes; automatic = $auto; declaredBy = $by })
+    if ($null -ne $mc) { $out.Aborted = 'MANIFEST_INTENT_FAILED'; return (& $done) }
+    $li = [ordered]@{ opId = $OpId; entryId = $id; files = $Plan.Files; dirs = $Plan.Dirs; bytes = $Plan.Bytes; automatic = $auto }
+    if ($auto) { $li['declaredBy'] = $by }
+    $lc = Write-AtmIsolationRecord -Log $Log -State $LogState -Schema $LogSchema -Type 'purge-intent' -Fields $li
+    if ($null -ne $lc) { $errs.Add([pscustomobject]@{ Stage = 'purge-intent'; OpId = $null; Code = $lc }); $out.Aborted = 'LOG_INTENT_FAILED'; return (& $done) }
+    # The only call to the deleter: it pins the payload, plans it and compares the measurement of the manifest before
+    # the first deletion.
+    $d = $null; $exType = $null
+    try {
+        if ($PurgeTreeImpl) { $d = & $PurgeTreeImpl $Plan }
+        else { $d = [AgentTempManager.AtmDeleter]::DeleteTree($Plan.PayloadPath, $Plan.Files, $Plan.Dirs, $Plan.Bytes, $Plan.NewestTicks, $null) }
+        if ($null -eq $d) { throw [InvalidOperationException]::new('DELETER_NO_RESULT') }
+    } catch { $d = $null; $exType = $_.Exception.GetBaseException().GetType().Name }
+    # Only a confirmed absence verifies the purge; access denied or any other error: not verified, never assumed.
+    $gone = $false; $vs = 'UNKNOWN'
+    if ($null -eq $exType) {
+        $pres = Get-AtmPathPresence $Plan.PayloadPath
+        if ($pres -is [bool]) { $gone = -not $pres; $vs = $(if ($pres) { 'PRESENT' } else { 'GONE' }) }
+    }
+    $outcome = $(if ($null -ne $exType) { 'EXCEPTION' }
+        elseif (-not $d.Completed) { $(if ([long]$d.FilesDeleted -gt 0 -or [long]$d.DirsDeleted -gt 0) { 'PARTIAL' } else { 'REFUSED' }) }
+        elseif ($gone) { 'COMPLETE' }
+        else { 'VERIFICATION_FAILED' })
+    $known = ($null -ne $d)
+    # The deleter's reason without the path it may carry: its code only (no file names in the records).
+    $abort = $(if ($known -and $d.AbortReason) { ([regex]::Match([string]$d.AbortReason, '^[A-Z0-9_]+')).Value } else { $null })
+    $row = [pscustomobject]@{ OpId = $OpId; Id = $id; Outcome = $outcome; Attempted = $(if ($known) { [bool]$d.Attempted } else { $null }); Completed = ($known -and [bool]$d.Completed); Verified = $gone; VerifiedState = $vs
+        FilesDeleted = $(if ($known) { $d.FilesDeleted } else { $null }); DirsDeleted = $(if ($known) { $d.DirsDeleted } else { $null }); FilesPlanned = $(if ($known) { $d.FilesPlanned } else { $null })
+        DirsPlanned = $(if ($known) { $d.DirsPlanned } else { $null }); AbortReason = $abort; ExceptionType = $exType; Bytes = $Plan.Bytes }
+    $out.Row = $row
+    $after = [ordered]@{ opId = $OpId; outcome = $outcome; filesDeleted = $row.FilesDeleted; dirsDeleted = $row.DirsDeleted; automatic = $auto; attempted = $row.Attempted; completed = $row.Completed
+        filesPlanned = $row.FilesPlanned; dirsPlanned = $row.DirsPlanned; abortReason = $abort; verifiedGone = $(if ($vs -ceq 'UNKNOWN') { 'UNKNOWN' } else { $gone }); exceptionType = $exType }
+    if ($auto) { $after['declaredBy'] = $by }
+    $mc = & $writeManifest 'purge-result' $after
+    $after['entryId'] = $id
+    $lc = Write-AtmIsolationRecord -Log $Log -State $LogState -Schema $LogSchema -Type 'purge-result' -Fields $after
+    if ($null -ne $lc) { $errs.Add([pscustomobject]@{ Stage = 'purge-result'; OpId = $null; Code = $lc }); $out.Halt = 'LOG_RESULT_FAILED' }
+    elseif ($null -ne $mc) { $out.Halt = 'MANIFEST_RESULT_FAILED' }
+    elseif ($outcome -cne 'COMPLETE') { $out.Halt = 'STOPPED_AFTER_' + $outcome }
+    return (& $done)
+}
+
+# ---------------------------------------------------------------------------------------------
+# Automatic purge (contract section 11, J-ISO-7 (ii), phase P6a): the pass behind bin\agent-temp-autopurge.ps1, its only
+# caller. No scheduled task exists in this phase: the pass runs only when that entry point is run. It asks nothing (the
+# administrator's policy is the authorization, ISO-D4) and is not a parameter of the interactive CLI.
+# ---------------------------------------------------------------------------------------------
+
+function Test-AtmAutoPurgeFutureDate {
+    # FUTURE_DATE (contract section 11.3): the time in the entry's id, or in any record of its manifest, is after -NowUtc
+    # (a clock set back, or records written with a clock ahead). A time that cannot be read is a doubt: $true too.
+    param($Entry, [datetime]$NowUtc)
+    $ticks = New-Object System.Collections.Generic.List[long]
+    try {
+        if ([string]$Entry.Id -cmatch $script:AtmQuarantineEntryIdPattern) {
+            $ticks.Add([datetime]::ParseExact($Entry.Id.Substring(0, 16), 'yyyyMMdd\THHmmss\Z', [Globalization.CultureInfo]::InvariantCulture, ([Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal)).Ticks)
+        }
+        foreach ($r in @($Entry.Records)) { if ($null -ne $r.Utc -and '' -ne $r.Utc) { $ticks.Add((ConvertTo-AtmUtcTicks $r.Utc)) } }
+    } catch { return $true }
+    foreach ($t in $ticks) { if ($t -gt $NowUtc.ToUniversalTime().Ticks) { return $true } }
+    return $false
+}
+
+function Open-AtmAutoPurgeLog {
+    <#
+      A NEW log for one pass: <parent of the quarantine root>\AutoPurgeLog\<yyyyMMddTHHmmssZ>-<8 hex>.jsonl, outside the
+      quarantine, at a place fixed in code. A missing folder is created relative to its pinned parent
+      (AtmSafeCreate.CreateNewDirectory: never an existing name, never through a reparse point, protected DACL of the
+      new object only); then the T1 writer (Open-AtmCleanLog: the folder policy of AtmCleanLog.Pin, the audited
+      directories rule, a new file). Returns Log, Path, Code and Created (a file was created; it is never removed).
+    #>
+    param([string]$QuarantineRoot, [string]$RunId, $Inventory, [string]$ProcessUserSid)
+    $out = [ordered]@{ Log = $null; Path = $null; Code = $null; Created = $false }
+    $parent = [IO.Path]::GetDirectoryName($QuarantineRoot)
+    $dir = Join-Path $parent $script:AtmAutoPurgeLogFolder
+    if (-not [IO.Directory]::Exists($dir)) {
+        $pin = [AgentTempManager.AtmSafeCreate]::Pin($parent)
+        try {
+            if (-not $pin.IsPinned) { $out.Code = 'AUTOPURGE_LOG_PARENT_' + $pin.Error; return [pscustomobject]$out }
+            $n = [AgentTempManager.AtmSafeCreate]::CreateNewDirectory($pin, $script:AtmAutoPurgeLogFolder, $ProcessUserSid)
+            try { if ($null -ne $n.Error -and $n.Error -cne 'EXISTS') { $out.Code = 'AUTOPURGE_LOG_CREATE_' + $n.Error; return [pscustomobject]$out } } finally { $n.Dispose() }
+        } finally { $pin.Dispose() }
+    }
+    $out.Path = Join-Path $dir ([datetime]::UtcNow.ToString('yyyyMMdd\THHmmss\Z', [Globalization.CultureInfo]::InvariantCulture) + '-' + $RunId.Substring(0, 8) + '.jsonl')
+    $o = Open-AtmCleanLog -Path $out.Path -Inventory $Inventory -ProcessUserSid $ProcessUserSid
+    $out.Log = $o.Log; $out.Code = $o.Code; $out.Created = [bool]$o.Created
+    return [pscustomobject]$out
+}
+
+function Invoke-AtmAutoPurge {
+    <#
+      The automatic purge pass (contract section 11.1), called only by bin\agent-temp-autopurge.ps1: never by the
+      interactive CLI or the TUI. It has no reader, phrase or console: nothing is ever answered for an operator.
+        * autoPurge must be true in a valid policy (config\quarantine.policy.json under -InventoryArgs.ConfigDir);
+          absent, invalid or off: nothing else is read or done (AUTOPURGE_OFF);
+        * retentionDays below the minimum fixed in code: nothing expires automatically (AUTOPURGE_RETENTION_BELOW_MINIMUM);
+        * the purge gate governs. Closed (every distributed copy): the pass only reports what it would purge
+          (EXPURGO_REAL_DESABILITADO): no lock, no log, nothing purged. Past it, the clean lock (B8, the same name) is
+          taken without waiting (busy: the pass ends with nothing purged and no log) and Invoke-AtmAutoPurgeCore runs
+          under it.
+      -BeforePurgeHook / -PurgeTreeImpl: the manual purge's test seams, never passed by the entry point.
+    #>
+    [CmdletBinding()]
+    param([hashtable]$InventoryArgs = @{}, [scriptblock]$BeforePurgeHook, [scriptblock]$PurgeTreeImpl)
+    $policy = Get-AtmQuarantinePolicy -ConfigDir ([string]$InventoryArgs['ConfigDir'])
+    $empty = { param([string]$Code) [pscustomobject]@{ Policy = $policy; Aborted = $Code; StoppedBy = $null; Entries = @(); Results = @(); RunId = $null; LogFile = $null; LogCreated = $false; LogErrors = @(); LockReleaseError = $null } }
+    if ($policy.Source -cne 'FILE' -or -not $policy.AutoPurge) { return (& $empty 'AUTOPURGE_OFF') }
+    if ([int]$policy.RetentionDays -lt $script:AtmAutoPurgeMinRetentionDays) { return (& $empty 'AUTOPURGE_RETENTION_BELOW_MINIMUM') }
+    if (-not $script:AtmQuarantinePurgeEnabled) { return (Invoke-AtmAutoPurgeCore -Policy $policy @PSBoundParameters) }
+    # No closure: the body runs in this session state, where the engine's functions are, and finds $apBound here.
+    $apBound = @{} + $PSBoundParameters
+    $u = Invoke-AtmUnderSharedLock -Body { Invoke-AtmAutoPurgeCore -Policy $policy @apBound }
+    if (-not $u.Acquired) { $r = & $empty ('CLEAN_LOCK_' + $u.Status); $r.LockReleaseError = $u.ReleaseError; return $r }
+    $res = $u.Result
+    # A failed release never replaces the main code; with none it makes the pass incomplete.
+    if ($null -ne $u.ReleaseError -and $null -ne $res) {
+        $res.LockReleaseError = $u.ReleaseError
+        if (-not $res.Aborted -and -not $res.StoppedBy) { if (@($res.Results).Count -gt 0) { $res.StoppedBy = 'LOCK_RELEASE_FAILED' } else { $res.Aborted = 'LOCK_RELEASE_FAILED' } }
+    }
+    return $res
+}
+
+function Invoke-AtmAutoPurgeCore {
+    <#
+      The pass itself (contract section 11.1), called only by Invoke-AtmAutoPurge, which owns the lock past the gate.
+        1. a fresh inventory, its runtime evidence and the quarantine of the process user (Get-AtmQuarantineList, with
+           the retention of -Policy and the clock of the retention). A missing quarantine: nothing to do
+           (QUARANTINE_ABSENT, no log); a quarantine that is a reparse point: refused (QUARANTINE_REPARSE_POINT);
+        2. each entry, in order: a date after the clock skips it first (FUTURE_DATE); only an EXPIRED entry goes on
+           (ABANDONED, INCOMPLETE, FAILED, UNRECOGNIZED, an invalid manifest, ISOLATED not yet expired, RESTORED or
+           PURGED: skipped with its state, STATE_<state>); then the plan of the manual purge (Get-AtmPurgePlan: verify
+           OK in this pass, gates 3, 4 and 8, B2-1 extended to the quarantine), and EXPIRED again in it. Any reason
+           skips the entry; there is never a weaker retry;
+        3. purge gate closed: the report only (WOULD_PURGE or SKIPPED, with the reasons) and EXPURGO_REAL_DESABILITADO.
+      Past the gate (under the lock):
+        4. a NEW log of the pass (Open-AtmAutoPurgeLog, atm.autopurgelog/1); run-start, then one skip record per skipped
+           entry (its id and codes, never a path);
+        5. for each candidate: after -BeforePurgeHook (tests), the plan again with a fresh inventory (the same
+           measurement and records, still EXPIRED, every gate): a difference skips it (REVALIDATION_REFUSED). Then
+           Invoke-AtmPurgeDeletion -Automatic, the path of the manual purge: purge-intent and purge-result carry
+           automatic = true and declaredBy = AUTOMATIC_POLICY in the manifest and in the log. An intent not written to
+           the manifest, or a deleter that refused before deleting anything, skips the entry; any other outcome but
+           COMPLETE, or a record of the log not written, stops the pass (the rest NOT_REACHED).
+      Entries: Id, Decision (PURGED, WOULD_PURGE, SKIPPED, STOPPED, NOT_REACHED) and Reasons. Returns arrays only.
+    #>
+    [CmdletBinding()]
+    param($Policy, [hashtable]$InventoryArgs = @{}, [scriptblock]$BeforePurgeHook, [scriptblock]$PurgeTreeImpl)
+    $rows = New-Object System.Collections.Generic.List[object]
+    $byId = @{}
+    $results = New-Object System.Collections.Generic.List[object]
+    $logErrors = New-Object System.Collections.Generic.List[object]
+    $state = @{ Aborted = $null; Stopped = $null; RunId = $null; LogFile = $null; LogCreated = $false }
+    $finish = {
+        [pscustomobject]@{ Policy = $Policy; Aborted = $state.Aborted; StoppedBy = $state.Stopped; Entries = $rows.ToArray(); Results = $results.ToArray(); RunId = $state.RunId
+            LogFile = $state.LogFile; LogCreated = $state.LogCreated; LogErrors = $logErrors.ToArray(); LockReleaseError = $null }
+    }
+    $ia = @{} + $InventoryArgs
+    $inv = Invoke-AtmInventory @ia
+    $rt = Get-AtmCleanRuntimeEvidence -Inventory $inv -InventoryArgs $ia
+    $qRoot = Get-AtmQuarantineRootPath
+    if (-not $qRoot) { $state.Aborted = 'QUARANTINE_PATH_INVALID'; return (& $finish) }
+    $list = Get-AtmQuarantineList -Root $qRoot -OwnSid ([string]$inv.Identity.Sid) -Policy $Policy
+    if ($list.RootProblem) { $state.Aborted = [string]$list.RootProblem; return (& $finish) }
+    if (-not $list.Exists) { $state.Aborted = 'QUARANTINE_ABSENT'; return (& $finish) }
+    $now = Get-AtmQuarantineNowUtc
+    $cands = New-Object System.Collections.Generic.List[object]
+    foreach ($en in @($list.Entries)) {
+        $why = @()
+        if (Test-AtmAutoPurgeFutureDate -Entry $en -NowUtc $now) { $why = @('FUTURE_DATE') }
+        elseif ([string]$en.State -cne 'EXPIRED') { $why = @('STATE_' + $en.State + $(if ($en.Problem) { ' (' + $en.Problem + ')' } elseif ($en.Pending) { ' (' + $en.Pending + ')' } else { '' })) }
+        else {
+            $plan = Get-AtmPurgePlan -Id $en.Id -Inventory $inv -RuntimeEvidence $rt -Policy $Policy
+            if (@($plan.Reasons).Count -gt 0) { $why = @($plan.Reasons) }
+            elseif ($null -eq $plan.Entry -or [string]$plan.Entry.State -cne 'EXPIRED') { $why = @('STATE_' + $(if ($null -ne $plan.Entry) { $plan.Entry.State } else { 'UNKNOWN' })) }
+            else { $cands.Add($plan) }
+        }
+        $row = [pscustomobject]@{ Id = [string]$en.Id; Decision = $(if (@($why).Count -gt 0) { 'SKIPPED' } else { 'CANDIDATE' }); Reasons = @($why) }
+        $rows.Add($row); $byId[$row.Id] = $row
+    }
+    if (-not $script:AtmQuarantinePurgeEnabled) {
+        foreach ($r in $rows) { if ($r.Decision -ceq 'CANDIDATE') { $r.Decision = 'WOULD_PURGE' } }
+        $state.Aborted = 'EXPURGO_REAL_DESABILITADO'
+        return (& $finish)
+    }
+
+    # ---- past the purge gate (the suite only, in its own process), under the clean lock ----
+    $me = Get-AtmCurrentIdentity
+    $runId = [guid]::NewGuid().ToString()
+    $halt = { param([string]$Code) if ($results.Count -gt 0) { $state.Stopped = $Code } else { $state.Aborted = $Code } }
+    $logFail = { param([string]$Stage, [string]$Code) $logErrors.Add([pscustomobject]@{ Stage = $Stage; OpId = $null; Code = $Code }) }
+    $unreached = { foreach ($r in $rows) { if ($r.Decision -ceq 'CANDIDATE') { $r.Decision = 'NOT_REACHED' } } }
+    $opened = Open-AtmAutoPurgeLog -QuarantineRoot $qRoot -RunId $runId -Inventory $inv -ProcessUserSid $me.Sid
+    $state.LogCreated = [bool]$opened.Created
+    if ($null -eq $opened.Log) { & $logFail 'open' $opened.Code; $state.Aborted = 'LOG_OPEN_FAILED'; & $unreached; return (& $finish) }
+    $state.RunId = $runId; $state.LogFile = $opened.Path
+    $log = $opened.Log
+    $ls = @{ Id = $runId; Seq = 0 }
+    $skipRec = { param($Row) $c = Write-AtmIsolationRecord -Log $log -State $ls -Schema $script:AtmAutoPurgeLogSchema -Type 'skip' -Fields ([ordered]@{ entryId = $Row.Id; reasons = @($Row.Reasons) }); if ($null -ne $c) { & $logFail 'skip' $c; & $halt 'LOG_WRITE_FAILED' } }
+    try {
+        $lc = Write-AtmIsolationRecord -Log $log -State $ls -Schema $script:AtmAutoPurgeLogSchema -Type 'run-start' -Fields ([ordered]@{ tool = $script:AtmVersion; operation = 'autopurge'; user = $inv.Identity.Name; sid = $inv.Identity.Sid
+                elevated = [bool]$inv.Identity.IsAdmin; declaredBy = 'AUTOMATIC_POLICY'; retentionDays = $Policy.RetentionDays; minRetentionDays = $script:AtmAutoPurgeMinRetentionDays; clockUtc = $now.ToString('o')
+                entries = $rows.Count; candidates = $cands.Count })
+        if ($null -ne $lc) { & $logFail 'run-start' $lc; $state.Aborted = 'LOG_WRITE_FAILED' }
+        foreach ($r in @($rows | Where-Object { $_.Decision -ceq 'SKIPPED' })) { if (-not $state.Aborted) { & $skipRec $r } }
+        $n = 0
+        foreach ($plan in $cands) {
+            $row = $byId[[string]$plan.Entry.Id]
+            if ($state.Aborted -or $state.Stopped) { $row.Decision = 'NOT_REACHED'; continue }
+            $n++
+            $opId = '{0}:{1}' -f $runId, $n
+            # The plan again, immediately before the deleter: a fresh inventory and evidence, the entry, its verification,
+            # every gate, the same measurement and records, still EXPIRED.
+            if ($BeforePurgeHook) { & $BeforePurgeHook $plan }
+            $iaRe = @{} + $InventoryArgs; $iaRe['NoProgress'] = $true
+            $invRe = Invoke-AtmInventory @iaRe
+            $re = Get-AtmPurgePlan -Id $plan.Entry.Id -Inventory $invRe -RuntimeEvidence (Get-AtmCleanRuntimeEvidence -Inventory $invRe -InventoryArgs $iaRe) -Policy $Policy
+            $same = (@($re.Reasons).Count -eq 0 -and $null -ne $re.Entry -and [string]$re.Entry.State -ceq 'EXPIRED' -and $re.Files -eq $plan.Files -and $re.Dirs -eq $plan.Dirs -and $re.Bytes -eq $plan.Bytes -and
+                $re.NewestTicks -eq $plan.NewestTicks -and @($re.Entry.Records).Count -eq @($plan.Entry.Records).Count)
+            $lc = Write-AtmIsolationRecord -Log $log -State $ls -Schema $script:AtmAutoPurgeLogSchema -Type 'plan-check' -Fields ([ordered]@{ opId = $opId; entryId = $row.Id; matched = $same; reasons = @($re.Reasons) })
+            if ($null -ne $lc) { & $logFail 'plan-check' $lc; & $halt 'LOG_WRITE_FAILED'; $row.Decision = 'NOT_REACHED'; continue }
+            if (-not $same) { $row.Decision = 'SKIPPED'; $row.Reasons = @(@('REVALIDATION_REFUSED') + @($re.Reasons)); & $skipRec $row; continue }
+            $pd = Invoke-AtmPurgeDeletion -Plan $plan -OpId $opId -RunId $runId -PlanId (Get-AtmPurgePlanId -RunId $runId -Plan $plan) -Log $log -LogState $ls -LogSchema $script:AtmAutoPurgeLogSchema -Sid $me.Sid -Automatic -PurgeTreeImpl $PurgeTreeImpl
+            foreach ($le in @($pd.LogErrors)) { $logErrors.Add($le) }
+            if ($pd.Aborted -ceq 'MANIFEST_INTENT_FAILED') { $row.Decision = 'SKIPPED'; $row.Reasons = @('MANIFEST_INTENT_FAILED'); & $skipRec $row; continue }
+            if ($pd.Aborted) { $row.Decision = 'STOPPED'; $row.Reasons = @($pd.Aborted); & $halt $pd.Aborted; continue }
+            $results.Add($pd.Row)
+            if ($pd.Row.Outcome -ceq 'COMPLETE' -and -not $pd.Halt) { $row.Decision = 'PURGED'; continue }
+            # A deleter that refused before deleting anything leaves the entry as it was: skipped, the pass goes on.
+            if ($pd.Halt -ceq 'STOPPED_AFTER_REFUSED') { $row.Decision = 'SKIPPED'; $row.Reasons = @('DELETER_REFUSED' + $(if ($pd.Row.AbortReason) { ' (' + $pd.Row.AbortReason + ')' } else { '' })); continue }
+            $row.Decision = 'STOPPED'; $row.Reasons = @($pd.Halt)
+            & $halt $pd.Halt
+        }
+        # run-end only while the log has not failed; neither a failed run-end nor a failed close replaces the main code.
+        if ($logErrors.Count -eq 0) {
+            $lc = Write-AtmIsolationRecord -Log $log -State $ls -Schema $script:AtmAutoPurgeLogSchema -Type 'run-end' -Fields ([ordered]@{ results = $results.Count; purged = @($rows | Where-Object { $_.Decision -ceq 'PURGED' }).Count
+                    skipped = @($rows | Where-Object { $_.Decision -ceq 'SKIPPED' }).Count; stoppedBy = $(if ($state.Stopped) { $state.Stopped } else { $state.Aborted }) })
             if ($null -ne $lc) { & $logFail 'run-end' $lc; if (-not $state.Aborted -and -not $state.Stopped) { & $halt 'LOG_END_FAILED' } }
         }
         $cc = $log.Close()

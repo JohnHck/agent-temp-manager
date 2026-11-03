@@ -615,10 +615,48 @@ The optional file `config\quarantine.policy.json` of the installation sets the p
   `isolate` refuses the root (`QUARANTINE_QUOTA_REACHED`; `QUARANTINE_QUOTA_UNMEASURED` when the quarantine's usage
   cannot be measured). `isolate` also refuses when the quarantine's volume has less
   free space than a minimum fixed in code (`LOW_DISK_SPACE`). Neither rule ever purges anything.
-* `autoPurge: true` is read and shown, with a warning, but does nothing in this version: nothing is ever purged
-  automatically.
+* `autoPurge: true` turns the automatic purge on (below). It acts only when `bin\agent-temp-autopurge.ps1` is run.
+  While it is on, `version`, `quarantine list`, the TUI's quarantine screen and every report show
+  `AUTOMATIC PURGE ON` and say that only running that entry point by hand acts.
 * An update keeps the installed policy file as it is, like `projects.local.json`. A policy file edited after an update
   makes `verify` report the copy as modified, as an edited `projects.local.json` does.
+
+### Automatic purge (0.3.x phase P6a)
+
+`bin\agent-temp-autopurge.ps1` in the installation is the entry point of the automatic purge. **No scheduled task
+exists in this version**: nothing runs it but a person running it by hand. It is not a command or a parameter of
+`agent-temp` and of the TUI, and it asks nothing: the administrator's policy is the authorization.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Program Files\AgentTempManager\bin\agent-temp-autopurge.ps1"
+```
+
+* **No arguments.** Any argument is refused (exit 2) before anything is read.
+* **Integrity first.** It loads the installed library only if every file of the manifest matches its SHA-256, every
+  library it loads (and the entry point itself) is listed and no unlisted provider exists, the launcher's rules (exit
+  5). A copy without `manifest.json` is refused too: it runs only from an installation.
+* **Off unless the policy says so.** With no policy file, an invalid one, or `autoPurge: false`, it does nothing,
+  creates no log and exits 0 with one status line.
+* **Minimum retention.** With `retentionDays` below 7 (a minimum fixed in code) nothing expires automatically: it is
+  refused (exit 3) with nothing read or done.
+* **The purge gate governs.** With the gate closed (every distributed copy) the pass reads the quarantine of the user
+  who runs it and only reports, for each entry, what it would purge (`WOULD_PURGE`) or why it skips it. It takes no lock,
+  writes no log and purges nothing (exit 0).
+* **Past the gate** (the suite only, in its own process) the pass:
+  1. takes the clean lock (B8, the same name) without waiting; busy: it ends with nothing purged and no log (exit 3);
+  2. writes a new log of the pass, `atm.autopurgelog/1` (the T1 writer), in `%LOCALAPPDATA%\AgentTempManager\AutoPurgeLog`,
+     next to the quarantine and outside it;
+  3. purges only the user's own `EXPIRED` entries whose `verify` is `OK` in the same pass, through the plan, gates and
+     deleter of `quarantine purge` (without the declarations and the phrase). The plan is checked again just before the
+     deleter; `purge-intent` and `purge-result` carry `automatic: true` and `declaredBy: AUTOMATIC_POLICY` in the manifest
+     and in the log.
+* **Skipped, with the reason, never retried with weaker checks:** an entry whose id or any manifest record is dated after
+  the clock (`FUTURE_DATE`); any state but `EXPIRED` (`STATE_ISOLATED`, `STATE_INCOMPLETE (...)`, `STATE_FAILED`,
+  `STATE_ABANDONED`, `STATE_UNRECOGNIZED (...)`, ...); any refusal of the purge plan (`PURGE_REFUSED_<reason>` and the
+  gates); a plan that changed before the deleter (`REVALIDATION_REFUSED`); a deleter that refused before deleting
+  anything (`DELETER_REFUSED`). Any other outcome stops the pass, and the remaining entries are `NOT_REACHED`.
+* **Exit codes:** `0` off, report only, quarantine absent, or done; `2` an argument; `3` the minimum retention, the lock
+  not available, or a pass that ended or stopped on an error; `5` integrity; `10` unexpected (its type only).
 
 ## Exit codes
 
