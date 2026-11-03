@@ -3,7 +3,7 @@
   agent-temp-autopurge (Agent Temp Manager): the entry point of the automatic quarantine purge (contract section 11,
   phase P6a). It takes no parameter. It acts only when config\quarantine.policy.json is valid and has autoPurge = true,
   and only on the process user's own EXPIRED entries; with the purge gate closed (every distributed copy) it only
-  reports what it would purge. No scheduled task runs it in this version: it acts only when run by hand.
+  reports what it would purge. It runs from the user's optional scheduled task (J-ISO-7, schedule-autopurge) or by hand.
   Exit codes: 0 off, report only or done; 2 an argument was given; 3 refused or stopped (retention below the minimum,
   the clean lock not available, a pass that ended or stopped on an error); 5 installation integrity; 10 unexpected.
 #>
