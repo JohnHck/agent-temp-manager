@@ -12,7 +12,7 @@ never move.
 | [V0.2](#v02--windows-runtime-diagnostics) | Windows Runtime Diagnostics, including Git worktrees | No (read-only) |
 | [V0.2.1](#v021--desktop-gui-and-live-monitoring) | Desktop GUI and live monitoring (while the window is open) | No (read-only presentation) |
 | [V0.3](#v03--selective-real-cleanup) | Selective real cleanup | Yes: deletes approved temporary paths only |
-| [0.3.x](#03x--isolation-and-quarantine-of-the-own-profile) | Isolation and quarantine of the own profile (ADR-0013; after 0.3.0 is published) | Yes: moves approved temporary paths into a quarantine and back; purge deletes behind the deletion gate |
+| [0.3.x](#03x--isolation-and-quarantine-of-the-own-profile) | Isolation and quarantine of the own profile (ADR-0013; after 0.3.0 is published) | Yes: moves approved temporary paths into a quarantine and back; purge deletes behind the purge gate of its own (J-ISO-1 (C)) |
 | [V0.4](#v04--assisted-recovery) | Assisted recovery of services and environments; Recovery Mode for another user's profile (ADR-0013) | Yes: reversible operations, each authorized individually |
 | [V0.5](#v05--preventive-monitoring) | Persistent preventive monitoring, alerts, growth trends | No (observes and alerts) |
 | [V1.0](#v10--stabilization-and-multi-agent-support) | Stabilization and extensible multi-agent support | Same limits as V0.3 and V0.4 |
@@ -291,7 +291,8 @@ it intact, so it can be inspected and restored, and manage the quarantine it goe
   * List, inspect, verify, restore and purge.
   * Retention marks entries as expired (7, 15 or 30 days are examples), and quotas warn and refuse new isolations.
   * Abandoned and incomplete entries are reported and never purged automatically.
-  * Purge is irreversible: confirmed by default, one entry per run, through the V0.3 deleter and its gate.
+  * Purge is irreversible: confirmed by default, one entry per run, through the V0.3 deleter and its pinning, behind
+    the purge gate of its own (J-ISO-1 (C)).
   * Automatic purge only when an administrator opts in: expired entries with an intact manifest only, never the
     active environment, off by default, visible in `version` and the reports, each purge logged, fail closed.
 
@@ -308,7 +309,7 @@ it intact, so it can be inspected and restored, and manage the quarantine it goe
 * Any activity evidence or unknown refuses. No process is terminated and no existing ACL or owner is changed.
 * Every isolation can be restored, or its manifest states exactly why not. No restore overwrites newer content.
 * By default nothing in the quarantine is purged without its own confirmation. An opted-in automatic purge respects
-  every limit above, and nothing is purged while the deletion gate is closed.
+  every limit above, and nothing is purged while the purge gate is closed.
 * The own-profile rows of
   [TESTING.md](TESTING.md#future-isolation-quarantine-and-recovery-mode-03x-and-v04) pass on disposable VMs.
 
@@ -316,7 +317,7 @@ it intact, so it can be inspected and restored, and manage the quarantine it goe
 evidence); the dedicated base runbook; ISO-D2.
 
 **Safety limits.** Own profile only. Moves approved agent temporary paths into the quarantine and back; deletes only
-through purge, behind the deletion gate. No ACL or owner changes on existing objects, no process, service or session
+through purge, behind the purge gate (J-ISO-1 (C)). No ACL or owner changes on existing objects, no process, service or session
 changes, nothing outside an agent's temporary area.
 
 ---

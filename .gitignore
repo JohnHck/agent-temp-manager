@@ -1,6 +1,7 @@
 dist/
 *.local.json
 !*.local.example.json
+quarantine.policy.json
 src/manifest.json
 src/install-state.json
 test-results*.json

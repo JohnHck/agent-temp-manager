@@ -173,7 +173,9 @@ the artifact sanitizer and privacy scanner apply as they do today.
   never purged automatically.
 * **Purge** is irreversible. By default it is **confirmed** (ISO-D4, decided):
   * one entry per run, with its own typed confirmation bound to the entry id and its totals;
-  * through the V0.3 deleter, its pinning and its gate, so it is not available while the deletion gate is closed.
+  * through the V0.3 deleter and its pinning, behind a release gate of its own, the purge gate (decision J-ISO-1 (C),
+    0.3.x phase P4), so it is not available while the purge gate is closed. The purge gate is independent of the
+    deletion gate and of the isolation gate.
 * **Automatic purge** exists only as an explicit, opt-in configuration, never as the default (ISO-D4). Any
   implementation must respect at least these limits:
   * **Expired entries only:** only quarantine entries whose retention has expired.
@@ -184,7 +186,8 @@ the artifact sanitizer and privacy scanner apply as they do today.
     visible in `version` and in every report while it is on.
   * **Logged:** every automatic purge is recorded with the entry id, its totals and the outcome.
   * **Fail closed:** any error, doubt or failed check skips that entry. Nothing is retried in a weaker way.
-  * **Same deleter, same gates:** the V0.3 deleter, pinning and gates. A closed deletion gate means no automatic purge.
+  * **Same deleter, same gates:** the V0.3 deleter and pinning, and the purge's own gates (J-ISO-1 (C)). A closed purge
+    gate means no automatic purge.
 
   The scheduling mechanism (a task, a run at the next command, or something else) is not decided here. It belongs to
   the technical contract of the implementation and must meet PRIV-3 (no stored credentials).

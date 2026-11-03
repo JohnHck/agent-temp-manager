@@ -4406,7 +4406,7 @@ exit 0
         $again = Invoke-PurOpen (Get-PurArgs $e $op2 (Join-Path $dir 'again.jsonl'))
         Assert-True ($again.Aborted -ceq 'EXPURGO_RECUSADO' -and (@($again.Plan.Reasons) -join ';') -ceq 'PURGE_REFUSED_PURGED' -and $op2.Calls.Count -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $dir 'again.jsonl'))) "expurgar de novo: recusado ($(@($again.Plan.Reasons) -join ';'))"
     }
-    Test-Case 'Isolamento P4' 'Recusas por estado (gate aberto, antes de qualquer pergunta ou log; manifesto intacto; nunca uma nova tentativa com verificacao mais fraca): ABANDONED, DIFFERS, PAYLOAD_MISSING, PURGED, INCOMPLETE, FAILED, RESTORED, UNRECOGNIZED, ENTRY_MANIFEST_INVALID e entrada inexistente' {
+    Test-Case 'Isolamento P4' 'Recusas por estado (gate aberto, antes de qualquer pergunta ou log; manifesto intacto; nunca uma nova tentativa com verificacao mais fraca): ABANDONED, DIFFERS, PAYLOAD_MISSING, PURGED, payload depois de PURGED (PAYLOAD_AFTER_PURGE), expurgo interrompido (INCOMPLETE purge: restauracao tambem recusa, nunca reconciliavel, nada excluido), INCOMPLETE, FAILED, RESTORED, UNRECOGNIZED, ENTRY_MANIFEST_INVALID e entrada inexistente' {
         $dir = New-TestCleanLogDir 'pur-states'
         if (-not $dir) { return }
         $script:purN = 0
@@ -4431,6 +4431,18 @@ exit 0
         Set-RstManifestLines -Path $a.Manifest -Keep 3 -Append @([ordered]@{ schema = 'atm.quarantine/1'; type = 'purge-intent'; id = $a.Id; recSeq = 4; utc = $u; opId = 'x:1'; files = 2; dirs = 1; bytes = 2148; automatic = $false }, [ordered]@{ schema = 'atm.quarantine/1'; type = 'purge-result'; id = $a.Id; recSeq = 5; utc = $u; opId = 'x:1'; outcome = 'COMPLETE'; automatic = $false })
         Assert-Eq (Get-AtmQuarantineEntry -Id $a.Id -OwnSid $testIdentity.Sid).State 'PURGED' 'purge-result COMPLETE sem payload: PURGED'
         & $refuse $a 'PURGE_REFUSED_PURGED' 'ja expurgada'
+        # A payload present while the manifest says PURGED: an invalid entry, never purged.
+        [IO.Directory]::Move((Join-Path $a.Path 'payload-fora'), (Join-Path $a.Path 'payload'))
+        & $refuse $a 'PURGE_REFUSED_ENTRY_MANIFEST_INVALID (PAYLOAD_AFTER_PURGE)' 'payload depois de PURGED'
+        # purge-intent without purge-result (an interrupted purge): INCOMPLETE, refused by purge and restore, not reconcilable.
+        Set-RstManifestLines -Path $a.Manifest -Keep 3 -Append @([ordered]@{ schema = 'atm.quarantine/1'; type = 'purge-intent'; id = $a.Id; recSeq = 4; utc = $u; opId = 'x:2'; files = 2; dirs = 1; bytes = 2148; automatic = $false })
+        $s = Get-AtmQuarantineEntry -Id $a.Id -OwnSid $testIdentity.Sid
+        Assert-True ($s.State -ceq 'INCOMPLETE' -and $s.Pending -ceq 'purge') "purge-intent sem resultado: INCOMPLETE (purge) ($(Format-AtmQuarantineState $s))"
+        & $refuse $a 'PURGE_REFUSED_INCOMPLETE (purge)' 'expurgo interrompido'
+        $rr = Invoke-AtmRestore -Id $a.Id -PlanPresenter (New-RstPlanRecorder).Presenter -InventoryArgs $a.Run.IA
+        Assert-True ($rr.Aborted -ceq 'RESTAURACAO_RECUSADA' -and (@($rr.Plan.Reasons) -join ';') -like '*ENTRY_INCOMPLETE (PURGE_PENDING)*') "expurgo interrompido: restauracao recusada ($(@($rr.Plan.Reasons) -join ';'))"
+        Assert-True ((Test-AtmQuarantineEntry -Id $a.Id -OwnSid $testIdentity.Sid).Reconcilable -eq $false) 'expurgo interrompido: nunca reconciliavel'
+        Assert-True ([IO.File]::Exists((Join-Path $a.Path 'payload\a.txt')) -and [IO.File]::Exists((Join-Path $a.Path 'payload\sub\b.bin'))) 'expurgo interrompido: nada excluido'
         Set-RstManifestLines -Path $a.Manifest -Keep 2
         & $refuse $a 'PURGE_REFUSED_INCOMPLETE (move)' 'intencao sem resultado'
         $b = New-RstEntry 'purstatef' @{ MoveTreeImpl = $isoRefused }
@@ -4859,9 +4871,15 @@ exit 0
                 $o = Invoke-HeadlessTui -Keys $keys -InvArgs $ia -H 40
                 $all = $o.Frames -join "`n=====`n"
                 $has = { param([string]$T) $all.Contains($T) -or $all.Contains((ConvertTo-AtmAscii $T)) }
-                Assert-True ($all.Contains($a.Id) -and $all.Contains($b.Id) -and $all.Contains('EXPIRED') -and $all.Contains('PURGED')) "$lang`: EXPIRED e PURGED listados"
+                # The state of each entry is on its own row of the list (the policy line also says EXPIRED: never counted).
+                $lines = @($all -split "`n")
+                $rowA = @($lines | Where-Object { $_.Contains($a.Id) -and $_ -cmatch '\bEXPIRED\b' -and -not $_.Contains('ISOLATED') })
+                $rowB = @($lines | Where-Object { $_.Contains($b.Id) -and $_ -cmatch '\bPURGED\b' })
+                Assert-True ($rowA.Count -ge 1 -and $rowB.Count -ge 1) "$lang`: a linha da entrada isolada diz EXPIRED e a da expurgada diz PURGED"
                 Assert-True ((& $has (Get-AtmText 'q.cliPurge' $a.Id)) -or (& $has (Get-AtmText 'q.cliPurge' $b.Id))) "$lang`: comando da CLI de expurgo no detalhe"
-                Assert-True ((& $has (Format-AtmQuarantinePolicy (Get-AtmQuarantinePolicy -ConfigDir $cfgDir))) -and (& $has (Get-AtmText 'tui.q.cliOnly'))) "$lang`: politica efetiva; a TUI nao restaura nem expurga"
+                # At 120 columns the policy line wraps (hard, by characters): its first 40 characters are on one line.
+                $polHead = (Format-AtmQuarantinePolicy (Get-AtmQuarantinePolicy -ConfigDir $cfgDir)).Substring(0, 40)
+                Assert-True ((& $has $polHead) -and $polHead.Contains('30') -and (& $has (Get-AtmText 'tui.q.cliOnly'))) "$lang`: politica efetiva (retencao de 30 dias); a TUI nao restaura nem expurga"
                 foreach ($fr in $o.Frames) { foreach ($ln in ($fr -split "`n")) { Assert-True ($ln.Length -le 120) "$lang`: linha excede a largura: $($ln.Length)" } }
             }
         } finally { $script:AtmQuarantineClock = $null; $script:AtmIsolationQuarantineRoot = $saved; Set-AtmLanguage -Requested $old }
