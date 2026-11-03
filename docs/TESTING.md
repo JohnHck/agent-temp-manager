@@ -328,6 +328,56 @@ The quarantine is a folder of the sandbox (the `AtmIsolationQuarantineRoot` seam
     * `autoPurge` is only read and shown;
     * the clock seam is a single `$null` assignment.
 
+## Real isolation on disposable VMs (0.3.x ISO-P5a)
+
+The same `install e2e` jobs (every OS and installer shell of the matrix) also run the **real** isolation, restore and
+purge, end to end, through `tests/e2e/Invoke-IsolateE2E.ps1`, after the V2 legs and before the uninstall. The pattern is
+the V2 one; what differs:
+
+* **CI-only.** `tools/Build-Release.ps1` leaves the harness out of the release archive and refuses an archive that
+  contains it; the e2e step `package-excludes-ci-harness` checks the extracted package.
+* **Gates.** It loads the *installed* engine into its own process and opens the isolation gate and the purge gate there
+  only, in memory. The deletion gate of clean stays closed (the purge reads only its own gate). The six installed gates
+  and the SHA-256 of every installed file are checked before and after, with `agent-temp verify`.
+* **Real parts.** The real mover, the real deleter of the purge, the T1 logs (`atm.isolatelog/1`, `atm.purgelog/1`) in
+  real files, the manifests, the real B8 lock name, the real revalidation, and the **real quarantine of each account**
+  (`%LOCALAPPDATA%\AgentTempManager\Q`, never the suite's seam). The only seam is the console observation
+  (`TEST_SEAM`): every confirmation is automated by the harness, never a human acceptance. The entries stay in the VM's
+  quarantine as the trail.
+* **Containment.** As V2: a run root created atomically with a protected DACL, the run's nonce in each planted root,
+  every entry checked before isolate is called and again by the plan presenter before any question. The restore's
+  destination must be under the run's base and the purge takes only entries created in that run.
+* **One scope per case.** The restore refuses when a sibling of its destination is `RECENT` or `ACTIVE_EVIDENCE`, so
+  each case plants its root in a scope of its own. Recency is simulated (120 hours, recorded as `recencySimulated`).
+* **Cases, in both legs** (A: the standard user, B1 restricted exception with `-AcceptB1ResidualRisk`; B: elevated):
+  * the whole base and a scope directory: refused (`NENHUM_CAMINHO_ISOLAVEL` with `ISOLAMENTO_BASE_NAO_LIBERADA_0_3X` /
+    `ISOLAMENTO_ESCOPO_NAO_LIBERADO_0_3X`, J-ISO-9 a); no question, no log, the quarantine unchanged;
+  * leg A only: without `-AcceptB1ResidualRisk`, refused by B1;
+  * one session root isolated by the real mover: the log (`run-start, plan, confirmation, plan-check, move-intent,
+    move-result, run-end`) and the manifest (`entry, move-intent, move-result`) read back from their files, the entry
+    `ISOLATED`, the original path gone, the lock `BUSY` from another process during the run and free after it;
+  * restore to the free original path: the tree identical by SHA-256, size and write time; the entry `RESTORED`;
+  * restore on a conflict (the original path recreated after the isolation): the engine's alternative
+    `<name>.restored-<id8>` with its own phrase; the recreated path unchanged (nothing overwritten or merged, T-ISO-8);
+  * purge of one entry after the purge's own declarations: the payload gone, the entry and manifest kept, `PURGED`;
+  * snapshots: the run root (only the purged root, the conflict scope and the run's logs may differ) and the
+    quarantine's area (only the run's entries may appear); the temp folder reported as in V2.
+* **Leg B** isolates only when the process coverage measured in that run is complete; otherwise the isolate, restore
+  and purge cases are `NAO_TESTADO`, never forced. The refusals run in both legs.
+* **Process churn.** A refusal before the mover caused by new processes of the runner (`PLAN_CHANGED_BEFORE_EXECUTION`
+  or `REVALIDATION_REFUSED`, new uninspectable identities) is retried up to 3 fresh runs; if every attempt is refused
+  that way, the case is `NAO_TESTADO` with the identities that explain it. An unexplained refusal fails.
+* **Evidence.** Only the harness summary is uploaded (codes, counts and labels; no path, account name or SID), through
+  the artifact sanitizer. The raw logs stay in the run root and the manifests in the quarantine.
+* **Section 6.1 (rename with an open handle inside the tree)** is measured on every image (Windows Server 2022 and
+  2025, Windows 11 ARM64) by the existing step `iso-p1-rename-with-open-handles`; its line is in each job's summary.
+* **Not in P5a (phase P5b):** an interruption after `move-intent` reconciled by a later restore; clean and isolate
+  contending in both orders (`BUSY`); a file opened by a harness process; a junction swapped in the window; another
+  fixed volume; 200,000 files with the time measured.
+* **Not tested here.** The CLI and the TUI past the gates (opening them there would mean changing the installed copy);
+  isolation without the B1 exception in leg A (a standard user's coverage is incomplete); UAC prompts and filtered
+  tokens (the runners have UAC disabled).
+
 ## Future: isolation, quarantine and Recovery Mode (0.3.x and V0.4)
 
 Criteria proposed by [ADR-0013](adr/ADR-0013-isolation-quarantine-recovery-mode.md) for accepting an implementation.

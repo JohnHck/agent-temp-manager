@@ -7,6 +7,7 @@ Work for 0.3.x, which comes after 0.3.0 is published (ADR-0013, ROADMAP "0.3.x")
 **A sixth, `AtmQuarantinePurgeEnabled`, is closed in every copy too**: in every copy `quarantine purge` only plans, and
 no space is freed.
 
+* Isolation, phase P5a (CI only, nothing shipped changes): the real isolate, restore (free and conflict) and purge, and the base and scope refusals, run end to end on the disposable `install e2e` VMs by the CI-only harness `tests/e2e/Invoke-IsolateE2E.ps1`, in both legs, with the gates opened only in its own process.
 * Isolation, phase P4: `agent-temp quarantine purge -Entry <id> -LogFile <new file>`, retention, quota and policy.
   * The purge has a gate of its own (J-ISO-1 (C)). It is independent of the isolation gate and of the deletion gate, and
     is checked by the build, the install e2e (six gates) and `version`.

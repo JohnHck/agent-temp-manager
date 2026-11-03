@@ -15,7 +15,8 @@
     each update to this package; then the same for the published 0.2.0 package (the latest published version;
     SHA-256 pinned), which also checks the installed manifest version. Before the uninstall, V0.3 V2: the REAL clean of
     roots planted by tests\e2e\Invoke-CleanE2E.ps1 (CI-only, never shipped), as the standard user (leg A) and elevated
-    (leg B); only the harness summaries are kept.
+    (leg B); only the harness summaries are kept. Then 0.3.x ISO-P5a: the REAL isolation, restore and purge of roots
+    planted by tests\e2e\Invoke-IsolateE2E.ps1 (CI-only, never shipped), in the same two legs; only its summaries are kept.
   Writes summary.json and raw outputs to -OutDir. Exit code = number of failed steps (NOT TESTED is not a failure
   and not a pass).
 #>
@@ -131,7 +132,10 @@ Step 'package-excludes-ci-harness' {
     # V0.3 V2 (D1): the CI-only harness of the real clean is never in the release package.
     $found = @(Get-ChildItem -LiteralPath $pkg -Recurse -File -Filter 'Invoke-CleanE2E.ps1')
     Assert ($found.Count -eq 0) 'pacote contem o harness da CI (Invoke-CleanE2E.ps1)'
-    'tests\e2e\Invoke-CleanE2E.ps1 absent from the package'
+    # 0.3.x ISO-P5: nor the CI-only harness of the real isolation, restore and purge.
+    $foundIso = @(Get-ChildItem -LiteralPath $pkg -Recurse -File -Filter 'Invoke-IsolateE2E.ps1')
+    Assert ($foundIso.Count -eq 0) 'pacote contem o harness da CI (Invoke-IsolateE2E.ps1)'
+    'tests\e2e\Invoke-CleanE2E.ps1 and tests\e2e\Invoke-IsolateE2E.ps1 absent from the package'
 }
 
 Step 'install' {
@@ -672,6 +676,47 @@ Step 'v2-clean-leg-B-elevated' {
     $con = Join-Path $work 'v2-clean-B-console.txt'
     & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Invoke-CleanE2E.ps1') -Leg B -InstallDir $installDir -SummaryFile $sum -WorkDir (Join-Path $work 'v2-B') -DisposableMachine *> $con
     Read-V2Summary $sum $LASTEXITCODE $con
+}
+# 0.3.x ISO-P5a: the REAL isolation, restore and purge of roots planted by tests\e2e\Invoke-IsolateE2E.ps1 itself, against
+# this installation, in the installer's shell, with the quarantine in each account's own LocalAppData. The harness opens
+# the isolation and purge gates only in its own process memory; the installed copy stays closed (six gates and the
+# SHA-256 of every installed file checked by the harness before and after). Only its summary is kept here (codes,
+# counts and labels; the raw logs stay in the harness's run root and the manifests in the quarantine, never uploaded).
+function Read-IsoSummary([string]$File, [int]$Exit, [string]$Console) {
+    if (-not (Test-Path -LiteralPath $File)) {
+        $tail = $(if (Test-Path -LiteralPath $Console) { (@(Get-Content -LiteralPath $Console -Tail 15) -join ' / ') } else { '' })
+        $tail = [regex]::Replace([regex]::Replace($tail, 'S-1-5-21-[0-9-]+', '<sid>'), [regex]::Escape($userName), '<account>', 'IgnoreCase')
+        throw "harness de isolamento sem resumo (exit $Exit): $tail"
+    }
+    [IO.File]::Copy($File, (Join-Path $OutDir (Split-Path -Leaf $File)), $true)
+    $s = [IO.File]::ReadAllText($File) | ConvertFrom-Json
+    $bad = @($s.cases.PSObject.Properties | Where-Object { $_.Value.status -eq 'FAIL' } | ForEach-Object { "$($_.Name): $($_.Value.detail)" })
+    $nt = @($s.cases.PSObject.Properties | Where-Object { $_.Value.status -eq 'NOT_TESTED' } | ForEach-Object { $_.Name })
+    Assert ($bad.Count -eq 0 -and $Exit -eq 0) ("ISO FAIL (exit $Exit): " + ($bad -join ' | '))
+    "$($s.passed) PASS / 0 FAIL / $($s.notTested) NOT_TESTED [$($nt -join ', ')]; $($s.shell); coverage complete=$($s.processCoverage.complete); quarantine entries created $($s.quarantine.entriesCreated)"
+}
+Step 'iso-p5-isolate-leg-A-standard-user' {
+    # Leg A: the standard user of this VM (not elevated): B1 restricted exception, its own quarantine. The harness is
+    # copied to a folder that user can read; the guard is passed explicitly.
+    if (-not $cred) { throw 'usuario de teste indisponivel' }
+    $copy = Join-Path $userDir 'Invoke-IsolateE2E.ps1'
+    [IO.File]::Copy((Join-Path $PSScriptRoot 'Invoke-IsolateE2E.ps1'), $copy, $true)
+    $sum = Join-Path $userDir 'iso-p5-A-summary.json'
+    $con = Join-Path $userDir 'iso-p5-A-console.txt'
+    $cmdLine = "/c `"`"$installerExe`" -NoProfile -ExecutionPolicy Bypass -File `"$copy`" -Leg A -InstallDir `"$installDir`" -SummaryFile `"$sum`" -WorkDir `"$(Join-Path $userDir 'iso-A')`" -DisposableMachine > `"$con`" 2>&1`""
+    try {
+        $p = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') -ArgumentList $cmdLine -Credential $cred -LoadUserProfile -WorkingDirectory $userDir -WindowStyle Hidden -PassThru -Wait
+    } catch { $script:notTested = $true; return "processo como usuario comum nao iniciou neste runner: $($_.Exception.Message)" }
+    Read-IsoSummary $sum $p.ExitCode $con
+}
+Step 'iso-p5-isolate-leg-B-elevated' {
+    # Leg B: the elevated runner account: isolation only if the process coverage measured by the harness is complete.
+    $work = Join-Path ([IO.Path]::GetTempPath()) ('atm-e2e-iso-B-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    [void][IO.Directory]::CreateDirectory($work)
+    $sum = Join-Path $work 'iso-p5-B-summary.json'
+    $con = Join-Path $work 'iso-p5-B-console.txt'
+    & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Invoke-IsolateE2E.ps1') -Leg B -InstallDir $installDir -SummaryFile $sum -WorkDir (Join-Path $work 'iso-B') -DisposableMachine *> $con
+    Read-IsoSummary $sum $LASTEXITCODE $con
 }
 # V0.3 V3c X2 (CI evidence; it does not replace the V4 row of the operator, J5): the REAL clean lock held by one identity
 # and tried by the other, in both orders: the standard user (not elevated) and this elevated account. Taking this lock
