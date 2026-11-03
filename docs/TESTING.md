@@ -271,6 +271,12 @@ The quarantine is a folder of the sandbox (the `AtmIsolationQuarantineRoot` seam
       not verified) each stop the run, with the outcome recorded;
   * the B1 exception per root (its risk phrase, then the confirmation);
   * the quarantine: created with protected DACLs, an acceptable existing one used unchanged, a junction refused;
+  * another volume (ISO-FIX-VOL): the quarantine seam on a drive letter that does not exist on the machine (`NAO_TESTADO`
+    with none free), so nothing can be created there. The root is refused at the plan with exactly `MOVE_OTHER_VOLUME`:
+    gate closed (another process holds the lock), past the gate (no question, no log, no entry, the lock free
+    afterwards) and under the B1 exception; with the gates refusing, the code is reported with theirs. The shared rule
+    (path roots, ignoring case), one literal of the code, called by the isolate and restore plans, before the capacity
+    rules and the stop of the gate;
   * an interruption: a child process that ends itself inside the stand-in mover leaves `move-intent` without
     `move-result` in both files (the entry is incomplete);
   * 200,000 files (heavy: `NAO_TESTADO` with `-SkipHeavy`, as in CI);
@@ -396,8 +402,9 @@ the V2 one; what differs:
     mover refuses, nothing is moved through the junction; the sentinel, the junction and the root (renamed aside) are
     unchanged;
   * another fixed volume: a base planted on the runner's second fixed volume (the user environment pointed at it for
-    that case only). Measured: where it is refused (at the plan, or by the mover with `OTHER_VOLUME` after
-    `move-intent`) and that nothing is moved. No second fixed volume, or one this account cannot write to: `NAO_TESTADO`;
+    that case only). Since ISO-FIX-VOL the plan must refuse it (`MOVE_OTHER_VOLUME`, `NENHUM_CAMINHO_ISOLAVEL`): no
+    question, no log, no entry, the root and the volume identical. A refusal by the mover (`OTHER_VOLUME`, the second
+    barrier) fails the case. No second fixed volume, or one this account cannot write to: `NAO_TESTADO`;
   * 200,000 files (one root of 200 folders of 1,000 one-byte files), in **one x64 job only** (windows-2025, installer
     pwsh, `ATM_E2E_HEAVY`): the plant, the isolation and the restore timed (`heavy` in the summary), the statistics
     identical before and after. The case must end within 35 minutes of the harness start, so the job keeps room for its

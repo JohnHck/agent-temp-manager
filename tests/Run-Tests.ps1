@@ -3767,6 +3767,68 @@ exit 0
             Assert-Eq @(Get-ChildItem -LiteralPath $tgt -Force).Count 0 'nada criado no alvo da juncao'
         } finally { $script:AtmIsolationQuarantineRoot = $saved }
     }
+    Test-Case 'Isolamento P3a' 'Outro volume (contrato 4.2 e 5): raiz em outro volume que a quarentena recusada no plano com MOVE_OTHER_VOLUME, com a trava fechada e alem dela (nada perguntado, nenhum log, nenhuma entrada, lock livre depois), tambem sob a excecao B1; regra comum aos dois planos, por raiz de caminho sem caixa, valida antes de a quarentena existir' {
+        # The common rule (Get-AtmOtherVolumeRefusal): path roots as text, ignoring case.
+        Assert-Eq (@(Get-AtmOtherVolumeRefusal -Path 'C:\a\b' -QuarantinePath 'c:\u\AgentTempManager\Q') -join ',') '' 'mesmo volume (caixa diferente)'
+        Assert-Eq (@(Get-AtmOtherVolumeRefusal -Path 'D:\a\b' -QuarantinePath 'C:\u\AgentTempManager\Q') -join ',') 'MOVE_OTHER_VOLUME' 'outra letra de unidade'
+        Assert-Eq (@(Get-AtmOtherVolumeRefusal -Path '\\srv\share\a' -QuarantinePath 'C:\u\AgentTempManager\Q') -join ',') 'MOVE_OTHER_VOLUME' 'compartilhamento de rede'
+        Assert-Eq (@(Get-AtmOtherVolumeRefusal -Path 'C:\a\b' -QuarantinePath '') -join ',') '' 'sem quarentena: nada aqui (QUARANTINE_PATH_INVALID cobre alem da trava)'
+        # The quarantine seam on a drive letter that does not exist on this machine: the rule holds before the quarantine
+        # exists, and even a regression could create nothing there.
+        $used = @([IO.DriveInfo]::GetDrives() | ForEach-Object { $_.Name.Substring(0, 1).ToUpperInvariant() })
+        $free = @([char[]]'ZYXWVUTSRQPONMLKJIHGFE' | ForEach-Object { [string]$_ } | Where-Object { $used -notcontains $_ -and -not [IO.Directory]::Exists($_ + ':\') } | Select-Object -First 1)
+        if ($free.Count -eq 0) { $script:caseSkipped = $true; $script:caseNote = 'nenhuma letra de unidade livre nesta maquina para a quarentena simulada em outro volume'; return }
+        $qOther = $free[0] + ':\atm-iso-other-volume\AgentTempManager\Q'
+        $x = New-IsoRun 'isovol'
+        if (-not $x) { return }
+        $before = Get-IsoRelativeListing $x.Root
+        $n0 = Get-IsoEntryCount
+        $saved = $script:AtmIsolationQuarantineRoot
+        try {
+            $script:AtmIsolationQuarantineRoot = $qOther
+            # Gate closed: the plan only. The lock is held by another process (a run that took it would refuse BUSY).
+            $rec = New-IsoPlanRecorder
+            $h = Start-TestLockHolder -Name $script:AtmCleanLockName -Mode release
+            try {
+                Assert-Eq $h.Status 'ACQUIRED' 'lock ocupado por outro processo'
+                $res = Invoke-AtmIsolate -Entries @([pscustomobject]@{ Source = 't'; Path = $x.Root; Fingerprint = $null }) -PlanPresenter $rec.Presenter -InventoryArgs $x.IA
+            } finally { $null = Stop-TestLockHolderByGo $h }
+            Assert-True ($res.Aborted -ceq 'NENHUM_CAMINHO_ISOLAVEL' -and (Get-IsoRejectedReason $res $x.Root) -ceq 'MOVE_OTHER_VOLUME' -and $rec.Calls.Count -eq 0) "trava fechada: recusada no plano, sem tentar o lock ($($res.Aborted): $(Get-IsoRejectedReason $res $x.Root))"
+            # Past the gate (in this process only; not through Invoke-IsoOpen, whose guard keeps the quarantine in the sandbox).
+            $op = New-TestCleanOperator
+            $script:AtmIsolationEnabled = $true
+            try { $a = Get-IsoArgs $x $op; $res = Invoke-AtmIsolate @a } finally { $script:AtmIsolationEnabled = $false }
+            Assert-True ($res.Aborted -ceq 'NENHUM_CAMINHO_ISOLAVEL' -and (Get-IsoRejectedReason $res $x.Root) -ceq 'MOVE_OTHER_VOLUME') "alem da trava: recusada no plano ($($res.Aborted): $(Get-IsoRejectedReason $res $x.Root))"
+            Assert-True ($op.Calls.Count -eq 0 -and -not $res.LogCreated -and -not (Test-Path -LiteralPath $x.Log) -and -not $res.EntryId -and @($res.Results).Count -eq 0) 'nada perguntado, nenhum log, nenhuma entrada, mover nunca chamado'
+            $h = Start-TestLockHolder -Name $script:AtmCleanLockName -Mode release
+            try { Assert-Eq $h.Status 'ACQUIRED' 'lock livre depois da recusa' } finally { $null = Stop-TestLockHolderByGo $h }
+            # Under the B1 exception (-AcceptB1ResidualRisk past the gate): refused all the same, before the risk phrase.
+            $y = New-IsoRun 'isovolb1' (New-TestB1Context 'isovolb1')
+            if ($y) {
+                $opb = New-TestCleanOperator
+                $script:AtmIsolationEnabled = $true
+                try { $a = Get-IsoArgs $y $opb @{ AcceptB1ResidualRisk = $true }; $res = Invoke-AtmIsolate @a } finally { $script:AtmIsolationEnabled = $false }
+                Assert-True ($res.Aborted -ceq 'NENHUM_CAMINHO_ISOLAVEL' -and (Get-IsoRejectedReason $res $y.Root) -ceq 'MOVE_OTHER_VOLUME' -and $opb.Calls.Count -eq 0 -and -not (Test-Path -LiteralPath $y.Log)) "sob B1: recusada no plano ($($res.Aborted): $(Get-IsoRejectedReason $res $y.Root))"
+                # Without the switch the gates refuse the root; the volume code is reported with them.
+                $res = Invoke-AtmIsolate -Entries @([pscustomobject]@{ Source = 't'; Path = $y.Root; Fingerprint = $null }) -PlanPresenter (New-IsoPlanRecorder).Presenter -InventoryArgs $y.IA
+                Assert-True ((Get-IsoRejectedReason $res $y.Root) -like '*MOVE_OTHER_VOLUME*') "com os gates recusando, o codigo do volume tambem ($(Get-IsoRejectedReason $res $y.Root))"
+                Assert-True ([IO.Directory]::Exists($y.Root)) 'raiz B1 no lugar'
+            }
+        } finally { $script:AtmIsolationQuarantineRoot = $saved }
+        Assert-Eq (Get-IsoRelativeListing $x.Root) $before 'raiz identica'
+        Assert-Eq (Get-IsoEntryCount) $n0 'nenhuma entrada na quarentena do sandbox'
+        Assert-True (-not [IO.Directory]::Exists($free[0] + ':\')) 'nada criado na unidade simulada'
+        # Static: one literal of the code, in the common rule, called by both plans; in the isolate plan before the capacity
+        # rules and before the stop of the gate (so before any question, log or entry).
+        $iso = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Isolate.ps1'))
+        Assert-Eq ([regex]::Matches($iso, "'MOVE_OTHER_VOLUME'").Count) 1 'um unico literal MOVE_OTHER_VOLUME, na regra comum'
+        $core = $iso.Substring($iso.IndexOf('function Invoke-AtmIsolateCore'), $iso.IndexOf('function Read-AtmQuarantineManifest') - $iso.IndexOf('function Invoke-AtmIsolateCore'))
+        $iVol = $core.IndexOf('Get-AtmOtherVolumeRefusal -Path $p.Path -QuarantinePath (Get-AtmQuarantineRootPath)')
+        Assert-True ($iVol -gt 0 -and $iVol -lt $core.IndexOf('Get-AtmQuarantineCapacityRefusal') -and $iVol -lt $core.IndexOf("'ISOLAMENTO_REAL_DESABILITADO'")) 'plano do isolamento: regra comum antes da capacidade e da parada da trava'
+        $rp = $iso.Substring($iso.IndexOf('function Get-AtmRestorePlan {'), $iso.IndexOf('function Invoke-AtmRestore {') - $iso.IndexOf('function Get-AtmRestorePlan {'))
+        Assert-True ($rp.Contains('Get-AtmOtherVolumeRefusal -Path $parent -QuarantinePath $e.Path')) 'plano da restauracao: a mesma regra comum'
+        Assert-True (-not $iso.Contains('GetPathRoot($parent)')) 'nenhuma comparacao de volume fora da regra comum'
+    }
     Test-Case 'Isolamento P3a' 'Interrupcao entre a intencao e o resultado: processo filho que sai sozinho dentro do mover simulado deixa move-intent sem move-result no log e no manifesto (entrada INCOMPLETE); raiz intacta' {
         $dir = New-TestCleanLogDir 'iso-interrupt'
         if (-not $dir) { return }

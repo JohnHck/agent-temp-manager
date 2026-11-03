@@ -99,6 +99,21 @@ function Get-AtmQuarantineRootPath {
     return (Join-Path $la 'AgentTempManager\Q')
 }
 
+function Get-AtmOtherVolumeRefusal {
+    <#
+      MOVE_OTHER_VOLUME when -Path is on another volume than -QuarantinePath (contract sections 4.2 and 5): the rule of
+      both plans (isolate: the root against the quarantine root; restore: the destination's parent against the entry).
+      The path roots are compared as text, ignoring case, so the rule holds before the quarantine exists. The mover keeps
+      its own check of the volume serial numbers (OTHER_VOLUME) as the second barrier: a mount point that passes this
+      comparison is still refused there. Empty when either path is missing. Returned as plain output (callers wrap it in
+      @()).
+    #>
+    param([string]$Path, [string]$QuarantinePath)
+    if (-not $Path -or -not $QuarantinePath) { return @() }
+    if ([string]::Equals([IO.Path]::GetPathRoot($Path), [IO.Path]::GetPathRoot($QuarantinePath), [StringComparison]::OrdinalIgnoreCase)) { return @() }
+    return @('MOVE_OTHER_VOLUME')
+}
+
 function Open-AtmQuarantine {
     <#
       The quarantine root, pinned for the run. When it does not exist it is created: new folders relative to pinned parents
@@ -183,9 +198,11 @@ function Invoke-AtmIsolateCore {
         2. a fresh inventory and one runtime collection (B2-1) for the plan;
         3. the 0.3.x target rule (Get-AtmIsolationTarget), then the same gates as clean (Test-AtmCandidate -ForClean, lock
            probe included): ELIGIBLE, or the B1 restricted exception per root (J-ISO-2 (b)) only past the gate with
-           -AcceptB1ResidualRisk; RECENT blocks (J-ISO-3 (a)); a fingerprint given with a path must still match; the
-           quota of the policy and the free space of the quarantine's volume refuse (QUARANTINE_QUOTA_REACHED,
-           LOW_DISK_SPACE; section 10), here and at the revalidation;
+           -AcceptB1ResidualRisk; RECENT blocks (J-ISO-3 (a)); a fingerprint given with a path must still match; a root
+           on another volume than the quarantine refuses (MOVE_OTHER_VOLUME, sections 4.2 and 5: nothing is asked,
+           logged or created; past the gate the lock B8 was taken before the plan, as for every refusal of the plan, and
+           is released); the quota of the policy and the free space of the quarantine's volume refuse
+           (QUARANTINE_QUOTA_REACHED, LOW_DISK_SPACE; section 10), here and at the revalidation;
         4. the plan id (isolation prefix) and the plan through -PlanPresenter scriptblock(verified, rejected, inventory,
            planId). With the isolation gate closed the run stops here (ISOLAMENTO_REAL_DESABILITADO).
       Past the gate:
@@ -261,7 +278,11 @@ function Invoke-AtmIsolateCore {
         $fpChanged = [bool]($e.Fingerprint -and $e.Fingerprint -ne $p.Fingerprint)
         if ($fpChanged) { $reasons += "ALTERADO_DESDE_O_PREVIEW (fingerprint $($e.Fingerprint) -> $($p.Fingerprint))" }
         $okRisk = ($acceptRisk -and [string]$g.Category -ceq $script:AtmB1ExceptionCategory -and $null -ne $g.B1Risk -and -not $fpChanged)
-        if (-not $okRisk -and ($g.Category -ne 'ELIGIBLE' -or $reasons.Count -gt 0)) { $rejected.Add([pscustomobject]@{ Path = $e.Path; Source = $e.Source; Reasons = $reasons }); continue }
+        # Another volume than the quarantine (sections 4.2 and 5): refused here, under the B1 exception too, before the
+        # capacity rules (whose free space is the quarantine's volume).
+        $vol = @(Get-AtmOtherVolumeRefusal -Path $p.Path -QuarantinePath (Get-AtmQuarantineRootPath))
+        if (-not $okRisk -and ($g.Category -ne 'ELIGIBLE' -or $reasons.Count -gt 0)) { $rejected.Add([pscustomobject]@{ Path = $e.Path; Source = $e.Source; Reasons = @($reasons + $vol) }); continue }
+        if ($vol.Count -gt 0) { $rejected.Add([pscustomobject]@{ Path = $e.Path; Source = $e.Source; Reasons = $vol }); continue }
         # The quota of the policy and the free space of the quarantine's volume (section 10): they refuse, never purge.
         $cap = @(Get-AtmQuarantineCapacityRefusal -QuarantineRoot (Get-AtmQuarantineRootPath) -Bytes ([long]$p.Bytes) -Policy $policy)
         if ($cap.Count -gt 0) { $rejected.Add([pscustomobject]@{ Path = $e.Path; Source = $e.Source; Reasons = $cap }); continue }
@@ -812,7 +833,7 @@ function Get-AtmRestorePlan {
         $chain = Test-AtmPathChain $parent
         if ($chain.Status -ne 'OK') { $why.Add((Get-AtmText 'reason.chain' $chain.Status $chain.At)) }
         foreach ($dir in @($parent, [string]$base[0].Path)) { foreach ($pb in (Get-AtmAclProblems -Path $dir -OwnerSid $ownSid)) { $why.Add($pb) } }
-        if (-not [string]::Equals([IO.Path]::GetPathRoot($parent), [IO.Path]::GetPathRoot($e.Path), [StringComparison]::OrdinalIgnoreCase)) { $why.Add('MOVE_OTHER_VOLUME') }
+        foreach ($v in @(Get-AtmOtherVolumeRefusal -Path $parent -QuarantinePath $e.Path)) { $why.Add($v) }
         # Gate 5 and B2-1 over the parent: what lives under it now (the agent may have recreated it).
         foreach ($sib in @($Inventory.Partitions | Where-Object { $_.Path -and [string]::Equals([IO.Path]::GetDirectoryName([string]$_.Path), $parent, [StringComparison]::OrdinalIgnoreCase) })) {
             $cls = [string](Get-AtmRecordField $sib 'Class'); if ($cls -in @('ACTIVE_EVIDENCE', 'RECENT')) { $why.Add('RESTORE_PARENT_' + $cls) }

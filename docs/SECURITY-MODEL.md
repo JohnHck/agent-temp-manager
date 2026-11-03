@@ -610,7 +610,9 @@ profile in V0.4.
 * **Non-atomic tree move:** one rename is atomic only for the name of one directory. Writers that already hold handles
   inside the tree keep writing into it after the move.
 * **Open files:** an open entry below a target can make the move fail; the target then stays where it was.
-* **Same volume only:** a move to another volume would be a copy plus a deletion, and is refused.
+* **Same volume only:** a move to another volume would be a copy plus a deletion, and is refused. The isolate and
+  restore plans refuse it first (`MOVE_OTHER_VOLUME`, the path roots compared with the quarantine's, before any question,
+  log or entry); the mover's check of the volume serial numbers (`OTHER_VOLUME`) stays as the second barrier.
 * **Inherited permissions:** a same-volume rename keeps the security descriptor. Inherited entries are not recomputed
   from the quarantine folder.
 * **A loaded profile:** a loaded user hive neither proves nor rules out activity. Any process or session of that user,
@@ -633,8 +635,10 @@ owner, never enables privileges and never terminates processes.
   * the suite and the install e2e check it;
   * `version` shows it.
 
-  Closed, `isolate` applies the target rule (own profile, one session root) and every clean gate, shows the plan, and
-  stops. It asks nothing, takes no lock, opens no log, creates no quarantine and moves nothing.
+  Closed, `isolate` applies the target rule (own profile, one session root) and every clean gate, refuses a root on
+  another volume than the quarantine (`MOVE_OTHER_VOLUME`, contract sections 4.2 and 5), shows the plan, and stops. It
+  asks nothing, takes no lock, opens no log, creates no quarantine and moves nothing. Past the gate the same refusal
+  comes in the plan, under the lock the run already holds (released at the end), before any question, log or entry.
 * **Past the gate** (the suite only, in its own process):
   1. The run takes the clean lock (B8, the same name: an isolation and a clean never run together). One root per run.
   2. It needs a new log file (`atm.isolatelog/1`, the T1 writer, outside the audited directories and the quarantine)
@@ -733,7 +737,10 @@ the mover; a static suite test checks it.
     newest write. A reparse point, a read-only or system file, or an enumeration error refuses. The tree also gets a
     SHA-256 digest of its metadata: names, kinds, sizes, write times and attributes, never content. The measurement
     must equal the validated one passed in.
-  * **Refusals before the rename.** Another volume refuses (the volume serial numbers differ). So does a path that
+  * **Refusals before the rename.** Another volume refuses (`OTHER_VOLUME`: the volume serial numbers differ). This is
+    the second barrier: the plans already refuse another drive root (`MOVE_OTHER_VOLUME`), and a mount point that passes
+    that comparison still fails closed here, with nothing moved. The two codes differ on purpose (contract section 5
+    names the plan's). So does a path that
     would only pass 259 characters because the destination is longer: unless the source already held such a path, the
     runtime has not shown it can enumerate one.
   * **The rename.** It goes through the root's handle (`NtSetInformationFile`, `FileRenameInformation`) into the pinned

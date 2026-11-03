@@ -494,7 +494,9 @@ What `isolate` does:
    * runtime evidence blocks or needs investigation;
    * the B1 restricted exception per root, with `-AcceptB1ResidualRisk`, is considered only past the isolation gate, as
      clean considers it only past the deletion gate.
-5. It shows the exact plan with its plan id, followed by `NOTHING HAS BEEN MOVED`.
+5. It refuses a root on another volume than the quarantine (`MOVE_OTHER_VOLUME`), under the B1 exception too: the move
+   would be a copy plus a deletion. The drive roots are compared, so the rule holds before the quarantine exists.
+6. It shows the exact plan with its plan id, followed by `NOTHING HAS BEEN MOVED`.
 
 It then stops, with exit code `3`:
 * `ISOLAMENTO_REAL_DESABILITADO` when a path passed every check;

@@ -29,7 +29,8 @@
   the base); a file held open by a helper process of this harness, before the plan and between the revalidation and the
   mover; a process that ends by itself after move-intent (this script started again as a CHILD, Environment.Exit, never a
   forced termination) and the restore that reconciles the entry; clean and isolate contending for the lock in both orders
-  (BUSY); a junction swapped in for the root between the revalidation and the mover; a root on a second fixed volume;
+  (BUSY); a junction swapped in for the root between the revalidation and the mover; a root on a second fixed volume
+  (refused at the plan with MOVE_OTHER_VOLUME since ISO-FIX-VOL);
   200,000 files with the time measured (-Heavy, one x64 job). The windows inside the flow use the engine's existing mover
   seam (-MoveTreeImpl) with a wrapper that calls the REAL mover with exactly the engine's arguments, plus the attack (no
   new seam in the product). The clean that contends for the lock runs in a child that opens the deletion gate in its own
@@ -1006,16 +1007,17 @@ Case 'ISO-second-volume' {
     Assert-TreeSame $rp $ctx.Roots['vol'].Tree 'raiz do segundo volume'
     $dv = Compare-Snapshot $volBefore (Get-Snapshot $vr ([long]::MaxValue))
     Assert ((Get-DiffCount $dv) -eq 0) "segundo volume alterado: $(Get-DiffCount $dv)"
-    if ($r.Aborted -ceq 'NENHUM_CAMINHO_ISOLAVEL') {
-        $codes = Get-Codes $r.Rejected[0].Reasons
-        $summary.secondVolume = 'REFUSED_AT_PLAN'
-        if ($codes -match 'VOLUME') { return "a root on another fixed volume than the quarantine: refused at the plan ($codes); nothing created or moved" }
-        return (NotTested "the root on the second volume did not reach the volume rule; refused at the plan for other reasons: $codes")
+    # ISO-FIX-VOL: the plan refuses it (contract sections 4.2 and 5); a refusal by the mover (the second barrier) fails.
+    if ($r.Aborted -cne 'NENHUM_CAMINHO_ISOLAVEL') {
+        $summary.secondVolume = $(if (@($r.Results).Count -gt 0) { 'REACHED_THE_MOVER' } else { 'NOT_REFUSED_AT_PLAN' })
+        Assert $false "segundo volume nao recusado no plano: Aborted=$($r.Aborted) StoppedBy=$($r.StoppedBy) $(@($r.Results | ForEach-Object { $_.AbortReason }) -join ';')"
     }
-    $s = Assert-StoppedRefused $c 'vol' 'segundo volume'
-    Assert ($s.Code -match 'OTHER_VOLUME') "recusa do mover: $($s.Code)"
-    $summary.secondVolume = 'REFUSED_BY_MOVER'
-    "a root on another fixed volume than the quarantine: the plan does not refuse it (the target rule and the gates accept it); the real mover refused it ($($s.Code)) after move-intent, nothing moved; entry FAILED with no payload, log $($s.Types); the root and the second volume identical. Finding: contract section 4 lists a base on another volume as not isolable; the refusal happens at the mover, not at the plan; $(Get-AttemptText $c)"
+    $codes = Get-Codes $r.Rejected[0].Reasons
+    Assert ($codes -ceq 'MOVE_OTHER_VOLUME') "motivo da recusa no plano: $codes"
+    Assert ($c.Calls.Count -eq 0 -and -not $r.LogCreated -and -not (Test-Path -LiteralPath $c.Log) -and $null -eq $r.EntryId -and @($r.Results).Count -eq 0) "recusa no plano com efeito: perguntas $($c.Calls.Count), log $($r.LogCreated), entrada $($r.EntryId)"
+    Assert-QuarantineUnchanged 'segundo volume'
+    $summary.secondVolume = 'REFUSED_AT_PLAN'
+    "a root on another fixed volume than the quarantine: refused at the plan (MOVE_OTHER_VOLUME, NENHUM_CAMINHO_ISOLAVEL); no question, no log, no entry; the root and the second volume identical; $(Get-AttemptText $c)"
 }
 Case 'ISO-junction-swapped-in-window' {
     $nt = & $needEligible; if ($nt) { return $nt }

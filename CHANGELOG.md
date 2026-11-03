@@ -7,6 +7,7 @@ Work for 0.3.x, which comes after 0.3.0 is published (ADR-0013, ROADMAP "0.3.x")
 **A sixth, `AtmQuarantinePurgeEnabled`, is closed in every copy too**: in every copy `quarantine purge` only plans, and
 no space is freed.
 
+* Isolation, ISO-FIX-VOL: the isolate plan refuses a root on another volume than the quarantine (`MOVE_OTHER_VOLUME`, contract sections 4.2 and 5), under the B1 exception too, before any question, log or entry; the rule (drive roots compared, ignoring case) is shared with the restore plan. The mover's own check (`OTHER_VOLUME`, volume serial numbers) stays unchanged as the second barrier. The e2e case of the second volume now requires the refusal at the plan.
 * Isolation, phase P5b (CI only, nothing shipped changes): the same harness adds the section 6.1 measurement to its summary, a file held open by a harness process (before the plan and in the move window), an interruption after `move-intent` reconciled by the restore, clean and isolate contending in both orders (`BUSY`), a junction swapped in the window, a second fixed volume, and 200,000 files timed in one x64 job.
 * Isolation, phase P5a (CI only, nothing shipped changes): the real isolate, restore (free and conflict) and purge, and the base and scope refusals, run end to end on the disposable `install e2e` VMs by the CI-only harness `tests/e2e/Invoke-IsolateE2E.ps1`, in both legs, with the gates opened only in its own process.
 * Isolation, phase P4: `agent-temp quarantine purge -Entry <id> -LogFile <new file>`, retention, quota and policy.
