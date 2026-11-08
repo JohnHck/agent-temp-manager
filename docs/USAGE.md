@@ -72,7 +72,7 @@ agent-temp preview
 Paths are grouped into **A. blocked**, **B. needs investigation**, **C. technically eligible** (for human
 review). Eligible paths are printed as allowlist lines `path|fingerprint`.
 
-### Runtime evidence in preview and plan (V0.3 B2-1, unreleased)
+### Runtime evidence in preview and plan (V0.3 B2-1; 0.3.0)
 
 `preview`, the plan of `clean` and the TUI preview also run the read-only V0.2 collectors once (the same ones as
 `diagnose`, over the inventory just taken, without CPU sampling) and add reasons to refuse. They never remove one and
@@ -241,7 +241,7 @@ agent-temp clean -AllowListFile list.txt -LogFile D:\logs\clean.jsonl
 `EXCLUSAO_REAL_DESABILITADA_V0_1`; no confirmation is requested and nothing is deleted. Steps 3-4 above describe
 the behaviour of a future release in which deletion is explicitly authorized.
 
-### Plan-bound confirmation (V0.3 AUT-2, unreleased; past the deletion gate only)
+### Plan-bound confirmation (V0.3 AUT-2; 0.3.0; past the deletion gate only, which is closed in every copy)
 
 With the deletion gate closed (every distributed copy) nothing below happens: the plan is shown and the run stops, with
 no question, no console requirement and no log. Past the gate, after the B8 lock, the gates, the plan and the log
@@ -298,7 +298,7 @@ Nothing reads an AUT-1 record as permission: `authorize` stays an independent re
 Administrator-only switch: `-IncludeOtherUsers`. Incomplete process coverage can only be accepted through the B1
 restricted exception below.
 
-### B1 restricted exception (`-AcceptB1ResidualRisk`; V0.3, unreleased; past the deletion gate only)
+### B1 restricted exception (`-AcceptB1ResidualRisk`; V0.3; 0.3.0; past the deletion gate only, which is closed in every copy)
 
 A change of the product contract (until V0.2: "no override"). A root whose only refusal is the incomplete process
 coverage (B1) is shown as **`ELIGIBLE_WITH_DECLARED_RISK`** (never `ELIGIBLE`) when every condition holds: own profile,
@@ -323,7 +323,7 @@ opens real roots for it and shows the category unprobed). RECENT is unchanged (i
   accounts, elevated or protected processes; the root's own session is still detected through the session registry),
   working directories, handles shared for delete, IPC and environment, read-only use, writes that keep every statistic.
 
-### Discard authorization (`authorize`; V0.3 AUT-1, unreleased)
+### Discard authorization (`authorize`; V0.3 AUT-1; 0.3.0)
 
 ```powershell
 agent-temp authorize -Path "C:\Users\alice\AppData\Local\Temp\claude\<slug>\<uuid>" -RecordFile D:\records\auth-1.jsonl
@@ -409,7 +409,7 @@ Exit codes of `authorize`: `0` recorded (written, flushed and closed), `2` missi
 recorded (refused, declined, cancelled, plan changed, or a recording failure; a file kept after a failure is said so and
 is not a recorded authorization), `6` no interactive console.
 
-### Clean log (`-LogFile`; V0.3 T1, unreleased)
+### Clean log (`-LogFile`; V0.3 T1; 0.3.0)
 
 With the deletion gate closed (every published copy, 0.2.0 included) `-LogFile` keeps the plan-only behaviour: the
 destination is only checked against the audited directories, and no log is required, created or opened.
@@ -439,7 +439,7 @@ In a future release in which real deletion is explicitly enabled:
   last record can be missing or incomplete.
 * A log file created before a refusal or a failure is kept as it is; it is never deleted.
 
-### One clean at a time (V0.3 B8, unreleased)
+### One clean at a time (V0.3 B8; 0.3.0)
 
 With the deletion gate closed (every published copy) nothing changes: no lock is taken.
 

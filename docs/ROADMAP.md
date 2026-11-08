@@ -207,7 +207,8 @@ operator's pilot (V5) and its own gate. Release record, V4 results and publicati
   decision: a write keeping every statistic, a real exception inside the deleter, a real log write failure, an
   interruption in the middle of the tree; the elevated leg's in-deleter cases while its coverage is incomplete. Details
   and limits: [TESTING.md](TESTING.md#v3-as-a-whole).
-* V4 (privilege matrix, operator): not started. Its rows with the gate closed are a prerequisite for publishing 0.3.0.
+* V4 (privilege matrix, operator): **done** (2026-11-07, deletion gate closed). Rows not tested, and why, are recorded in
+  [release/V0.3-RC.md](release/V0.3-RC.md) (section G).
 * V5 (operator pilot on one real root): not started. It is a prerequisite for any release with the gate open.
 
 **Deliverables.**

@@ -11400,6 +11400,13 @@ try {
         Assert-True ($rd.Contains('**Version 0.3.0.** Its publication is the GitHub Release `v0.3.0` only, created with the maintainer''s explicit') -and $rd.Contains('SHA256SUMS.txt') -and -not $rd.Contains('Latest published version: 0.2.0') -and $rd.Contains('**Real deletion is disabled in every copy.**')) 'README: versao 0.3.0 pela GitHub Release, 0.2.0 nao mais a ultima publicada, exclusao desabilitada'
         foreach ($doc in @('README.md', 'docs\ROADMAP.md')) { Assert-True (-not ([IO.File]::ReadAllText((Join-Path $repoRoot $doc)) -match '(?i)0\.3\.0[^.\n]{0,40}release candidate[^.\n]{0,20}not published|0\.3\.0 candidate\b')) "$($doc): sem o texto de release candidate nao publicado da 0.3.0" }
         foreach ($doc in @('docs\USAGE.md', 'docs\DIAGNOSE-SCHEMA.md')) { Assert-True (-not ([IO.File]::ReadAllText((Join-Path $repoRoot $doc)) -match '(?i)Published only as the GitHub Release `v0\.3\.0`')) "$($doc): sem alegar publicacao da 0.3.0" }
+        # The V0.3 items of USAGE and SECURITY-MODEL name version 0.3.0 instead of "unreleased" (the deletion gate stays
+        # closed in every copy); the ROADMAP no longer says V4 has not started.
+        foreach ($doc in @('docs\USAGE.md', 'docs\SECURITY-MODEL.md')) {
+            $t = [IO.File]::ReadAllText((Join-Path $repoRoot $doc))
+            Assert-True ($t -notmatch '(?i)V0\.3[^\r\n]{0,60}unreleased' -and $t.Contains('(V0.3 AUT-2; 0.3.0; past the deletion gate only, which is closed in every copy)')) "$($doc): itens V0.3 com a versao 0.3.0, sem unreleased"
+        }
+        Assert-True (-not ([IO.File]::ReadAllText((Join-Path $repoRoot 'docs\ROADMAP.md')).Contains('V4 (privilege matrix, operator): not started'))) 'ROADMAP: V4 nao mais como nao iniciada'
         # Release record: the release branch, the publication blockers and the authorization still open.
         $rc = [IO.File]::ReadAllText((Join-Path $repoRoot 'docs\release\V0.3-RC.md'))
         Assert-True ($rc -match '(?m)^# V0\.3: release record \(0\.3\.0\)\r?$' -and $rc.Contains('Branch `release/0.3.x`, from `bc28523`') -and -not $rc.Contains('**Release candidate, not published:**') -and $rc -match '(?m)^## G\. Publication blockers\r?$' -and $rc -match '(?m)^\| Publication authorization:[^\r\n]*\| OPEN \|\r?$') 'registro da release: branch release/0.3.x, bloqueantes de publicacao, autorizacao em aberto'

@@ -3,7 +3,7 @@
 ## 0.3.0
 
 Its publication is the GitHub Release `v0.3.0` (tag `v0.3.0`) only, created with the maintainer's explicit
-authorization. **Real deletion stays disabled in every copy**: with the deletion gate closed, `clean` still only validates
+approval. **Real deletion stays disabled in every copy**: with the deletion gate closed, `clean` still only validates
 and shows the plan. What changes for users is listed in
 [docs/release/V0.3.0-RELEASE-NOTES.md](docs/release/V0.3.0-RELEASE-NOTES.md): `ELIGIBLE_WITH_DECLARED_RISK` shown as "not
 released" in preview, audit and the TUI; the `authorize` command; the V0.2 runtime evidence in preview and the plan. The
