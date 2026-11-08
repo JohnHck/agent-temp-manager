@@ -73,7 +73,7 @@ isolated sandbox.
    no ancestor/ambiguous reference, registry and config readable, class `ORPHAN_SUSPECTED` without flags.
 6. Process coverage: must be complete. Processes of other accounts (services, automations, elevated sessions) are
    invisible to non-administrators, and protected processes stay uninspectable even for administrators, so on a
-   typical Windows host this gate blocks deletion. **B1 restricted exception (V0.3, unreleased; a change of the product
+   typical Windows host this gate blocks deletion. **B1 restricted exception (V0.3, version 0.3.0; a change of the product
    contract decided by the maintainer, not a technical fix):** the incomplete coverage becomes a residual risk accepted
    per root, only when ALL hold (`Get-AtmB1ExceptionRisk`, Engine.Clean.ps1): B1 is the only V0.1 reason; own profile,
    no `-IncludeOtherUsers`, token not elevated; a Claude Code `SessionRoot` of class `ORPHAN_SUSPECTED` without flags;
@@ -273,8 +273,8 @@ called by `Invoke-AtmGitCommand`):
   file was created, verified through its handle and written. Every refusal fails closed. Residuals: the X-01 limits
   (volume root not pinned; a refusal after the creation can leave a file) and the reads by textual path after earlier
   checks (F-01 residual) are listed in release/V0.2-SECURITY-AUDIT. `clean -LogFile` (F-04): the published 0.2.0
-  still appends by name (latent while the deletion gate is closed); V0.3 T1 replaces it, unreleased (next item).
-* **Clean log (V0.3 T1, F-04; unreleased; reached only past the deletion gate):** one new file per run, created
+  still appends by name (latent while the deletion gate is closed); V0.3 T1 replaces it in 0.3.0 (next item).
+* **Clean log (V0.3 T1, F-04; 0.3.0; reached only past the deletion gate, which is closed in every copy):** one new file per run, created
   relative to the pinned folder (`OBJ_DONT_REPARSE`, `FILE_CREATE`, reparse points refused, protected DACL: owner,
   SYSTEM, Administrators) and kept open for the run: append-only access, write-through, shared for reading only. Before
   each record the handle is checked again (plain file, one link, same volume, final path as created); each record is
@@ -292,7 +292,7 @@ called by `Invoke-AtmGitCommand`):
   change made before the check, never one made between the check and the write; after the run the same identity can
   change or delete the log. Test seams (stand-in deleter, presence check and
   writer) exist only in `Invoke-AtmClean`, past the gate, and no other file references them (static test).
-* **Discard authorization (V0.3 AUT-1; unreleased):** `agent-temp authorize` records the operator's declaration for ONE
+* **Discard authorization (V0.3 AUT-1; 0.3.0):** `agent-temp authorize` records the operator's declaration for ONE
   root bound to the plan just presented (`Invoke-AtmDiscardAuthorization`, Engine.Clean.ps1): three separate confirmations
   (task finished; the content decision, either "needed results preserved" (`OPERATOR_DECLARED`) or "nothing needed"
   (`NOTHING_NEEDED_DISCARD_ACCEPTED`); discard of the content presented), an interactive console required by the CLI
@@ -323,7 +323,7 @@ called by `Invoke-AtmGitCommand`):
   * **RECENT:** `Set-AtmClassification` (Engine.Audit.ps1) sets the class `RECENT` when the newest write is less than
     `$script:AtmRecentHours` (72) old, and `Get-AtmCandidateGate` blocks `ACTIVE_EVIDENCE` and `RECENT` before every
     other gate; so a root written in the last 72 h cannot be evaluated as eligible. Age is shown as information only.
-* **Plan-bound confirmation in clean (V0.3 AUT-2; unreleased; past the deletion gate only):** `Invoke-AtmCleanCore`
+* **Plan-bound confirmation in clean (V0.3 AUT-2; 0.3.0; past the deletion gate only, which is closed in every copy):** `Invoke-AtmCleanCore`
   (no other executor) requires an interactive console observed by the engine (`Test-AtmDiscardConsoleObserved`; the
   suite replaces it through `$script:AtmCleanConsoleSource`, `$null` in every copy, assigned once, read only past the
   gate) and checked by the CLI; asks, for each root of the executable set with its path, the task and the AUT-1 content
@@ -339,7 +339,7 @@ called by `Invoke-AtmGitCommand`):
   closed the plan-only flow is unchanged (no question, console or log). No AUT-1 record is read. Limits: declarations
   are not verified; the console is not proof of presence; the identity is the process's; the plan id rests on
   statistics (a write that keeps them all is not seen); the users/sessions/elevation matrix is not tested.
-* **Runtime evidence as refusals (V0.3 B2-1; unreleased):** preview, the clean plan and each root's revalidation run the
+* **Runtime evidence as refusals (V0.3 B2-1; 0.3.0):** preview, the clean plan and each root's revalidation run the
   V0.2 collectors once over the inventory just taken (`Get-AtmRuntimeRefusals`, Engine.Diagnose.ps1; the clean engine
   only consumes its refusals and never reads the dependency correlation itself). A refusal can only keep or raise a
   category (BLOCKED > INVESTIGATE > ELIGIBLE); the V0.1 gates, B1 (process coverage) included, are unchanged and run
@@ -352,7 +352,7 @@ called by `Invoke-AtmGitCommand`):
   references and live sessions; B2-1 adds verified identities and provenance, a stricter session check, and refusals
   for failed or timed-out collection. **It adds reasons to refuse; it does not demonstrate non-use and does not resolve
   the authorization of real deletion.**
-* **Clean lock (V0.3 B8; unreleased; past the deletion gate only):** `Invoke-AtmClean` takes the named kernel mutex
+* **Clean lock (V0.3 B8; 0.3.0; past the deletion gate only, which is closed in every copy):** `Invoke-AtmClean` takes the named kernel mutex
   `Global\AgentTempManager.Clean` (`AtmCleanLock`, Native.cs) without waiting, before the first inventory, and releases it
   last, after the log, in a `finally`, once and only by the owner thread; a nested acquisition in the same process is
   refused without touching the outer one. The name is fixed (no local, per-user or random fallback; the suite uses its

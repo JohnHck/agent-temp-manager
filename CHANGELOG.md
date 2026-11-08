@@ -63,15 +63,19 @@ no space is freed.
 * Isolation, phase P1: native primitives in `Native.cs` (the mover, new directory, append to an existing record). Measured
   on every CI image: an open handle inside a tree makes the rename fail, and nothing moves.
 
-## 0.3.0 (release candidate, not published)
+## 0.3.0
 
-Not published: no tag, no GitHub Release. **Real deletion stays disabled in every copy**: with the deletion gate closed,
-`clean` still only validates and shows the plan. What changes for users is listed in
+Its publication is the GitHub Release `v0.3.0` (tag `v0.3.0`) only, created with the maintainer's explicit
+approval. **Real deletion stays disabled in every copy**: with the deletion gate closed, `clean` still only validates
+and shows the plan. What changes for users is listed in
 [docs/release/V0.3.0-RELEASE-NOTES.md](docs/release/V0.3.0-RELEASE-NOTES.md): `ELIGIBLE_WITH_DECLARED_RISK` shown as "not
 released" in preview, audit and the TUI; the `authorize` command; the V0.2 runtime evidence in preview and the plan. The
-entries below that say "past the deletion gate" are inactive in every copy. Publication requires the operator's
-privilege-matrix rows with the gate closed (V4); a release with the gate open requires the operator's pilot (V5) and its
-own gate. Candidate record: [docs/release/V0.3-RC.md](docs/release/V0.3-RC.md).
+entries below that say "past the deletion gate" are inactive in every copy. The operator ran the dedicated base runbook
+and the privilege-matrix rows with the gate closed (V4) on a real machine; a release with the gate open requires the
+operator's pilot (V5) and its own gate. Release record: [docs/release/V0.3-RC.md](docs/release/V0.3-RC.md).
+
+* Since the release candidate: no code change after `0c17a9f`. Up to `bc28523` only documentation changed (ADR-0013,
+  PROPOSED, and the 2026-11-01 incident record). Isolation and quarantine (0.3.x) are not part of 0.3.0.
 
 * Installer hardening (V0.3 BROADCAST-GUARD): the environment broadcast writes its child's script in the current TEMP
   and runs it elevated, so it now refuses (the existing compile-failure error) unless that TEMP is the private,

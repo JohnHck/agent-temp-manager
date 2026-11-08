@@ -13751,7 +13751,7 @@ try {
         $br = [IO.File]::ReadAllText((Join-Path (Split-Path -Parent $testsDir) 'tools\Build-Release.ps1'))
         foreach ($g in @('AtmRealDeletionEnabled', 'AtmWorktreeDiagnosticsEnabled', 'AtmHandleDiagnosticsEnabled', 'AtmDiagnoseExportEnabled')) { Assert-True ($br.Contains($g)) "F-08: release confere $g no arquivo" }
     }
-    Test-Case 'Instalacao' 'V0.3 RC: versao 0.3.0 coerente - fonte unica, instalador, manifesto, CLI, build; changelog e notas como candidato NAO publicado; 0.2.0 preservada como a ultima publicada' {
+    Test-Case 'Instalacao' 'V0.3 RC: versao 0.3.0 coerente - fonte unica, instalador, manifesto, CLI, build; changelog, notas, README e ROADMAP finais (publicacao somente pela GitHub Release v0.3.0, sem alegar publicacao)' {
         $repoRoot = Split-Path -Parent $testsDir
         Assert-Eq $script:AtmVersion '0.3.0' 'versao 0.3.0 na fonte'
         $auditSrc = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Audit.ps1'))
@@ -13765,21 +13765,23 @@ try {
         Assert-True ($LASTEXITCODE -eq 0 -and $o -match 'agent-temp 0\.3\.0\b') 'version da CLI'
         $br = [IO.File]::ReadAllText((Join-Path $repoRoot 'tools\Build-Release.ps1'))
         Assert-True ($br.Contains('$version = Get-AtmSourceVersion') -and $br.Contains('"agent-temp-manager-$version"') -and $br.Contains('$script:AtmVersion = ''$version''')) 'build: nome do arquivo e versao conferida no arquivo vem da fonte'
-        # Changelog: 0.3.0 as a release candidate, not published (the Unreleased entries consolidated into it); 0.2.0 and
-        # 0.1.0 kept as published.
+        # Changelog: the final 0.3.0 entry (publication is the GitHub Release v0.3.0 only, never claimed as done), with no
+        # candidate text; 0.2.0 and 0.1.0 kept as published.
         $cl = [IO.File]::ReadAllText((Join-Path $repoRoot 'CHANGELOG.md'))
-        # 0.3.x (ISO-P3a): work after the candidate may sit in one "Unreleased (0.3.x ...)" section above 0.3.0; no other.
+        # 0.3.x (ISO-P3a): work after 0.3.0 may sit in one "Unreleased (0.3.x ...)" section above 0.3.0; no other.
         $unrel = @([regex]::Matches($cl, '(?m)^## Unreleased.*$'))
         $unrelOk = ($unrel.Count -eq 0) -or ($unrel.Count -eq 1 -and $unrel[0].Value -match '^## Unreleased \(0\.3\.x[^)]*\)\r?$' -and $unrel[0].Index -lt $cl.IndexOf('## 0.3.0'))
-        Assert-True ($cl -match '(?m)^## 0\.3\.0 \(release candidate, not published\)\r?$' -and $unrelOk -and $cl -match '(?m)^## 0\.2\.0\r?$' -and $cl -match '(?m)^## 0\.1\.0\r?$') 'changelog: 0.3.0 candidato nao publicado, Unreleased so a da 0.3.x acima dela, 0.2.0 e 0.1.0 preservadas'
+        Assert-True ($cl -match '(?m)^## 0\.3\.0\r?$' -and $unrelOk -and $cl -match '(?m)^## 0\.2\.0\r?$' -and $cl -match '(?m)^## 0\.1\.0\r?$') 'changelog: entrada 0.3.0 final, Unreleased so a da 0.3.x acima dela, 0.2.0 e 0.1.0 preservadas'
         Assert-True ($cl.IndexOf('## 0.3.0') -lt $cl.IndexOf('## 0.2.0') -and $cl.IndexOf('## 0.2.0') -lt $cl.IndexOf('## 0.1.0') -and $cl -match 'GitHub Release `v0\.2\.0`') 'changelog: ordem 0.3.0, 0.2.0, 0.1.0; 0.2.0 publicada pela GitHub Release v0.2.0'
         $c3 = $cl.Substring($cl.IndexOf('## 0.3.0'), $cl.IndexOf('## 0.2.0') - $cl.IndexOf('## 0.3.0'))
-        Assert-True (-not $c3.Contains('Published only as') -and $c3.Contains('Not published')) 'changelog: a entrada 0.3.0 nunca alega publicacao'
-        # Release notes 0.3.0 (new): the candidate status in both languages, never a publication claim.
+        Assert-True ($c3.Contains('Its publication is the GitHub Release `v0.3.0` (tag `v0.3.0`) only, created with the maintainer''s explicit') -and $c3 -notmatch 'release candidate, not published|Not published' -and $c3 -notmatch '(?i)\b(was|has been|is now) published') 'changelog: entrada 0.3.0 cita so a GitHub Release v0.3.0, sem o texto de candidato e sem alegar publicacao'
+        # Release notes 0.3.0: the final title and the publication only through the GitHub Release, in both languages,
+        # without the candidate status and never claiming publication; a section on what changed since the candidate.
         $en = [IO.File]::ReadAllText((Join-Path $repoRoot 'docs\release\V0.3.0-RELEASE-NOTES.md'))
         $pt = [IO.File]::ReadAllText((Join-Path $repoRoot 'docs\release\V0.3.0-RELEASE-NOTES.pt-BR.md'))
-        Assert-True ($en -match '(?m)^# Agent Temp Manager 0\.3\.0: release notes \(release candidate, NOT published\)\r?$' -and $en -notmatch 'Publication of this version is the GitHub Release') 'notas en-US 0.3.0: candidato nao publicado, sem alegar publicacao'
-        Assert-True ($pt -match '(?m)^# Agent Temp Manager 0\.3\.0: notas de vers.o \(candidato, N.O publicado\)\r?$' -and $pt -notmatch 'A publica..o desta vers.o . a GitHub Release') 'notas pt-BR 0.3.0: candidato nao publicado, sem alegar publicacao'
+        Assert-True ($en -match '(?m)^# Agent Temp Manager 0\.3\.0: release notes\r?$' -and $en.Contains('Publication of this version is the GitHub Release `v0.3.0`, created only with the maintainer''s explicit approval') -and $en -notmatch 'release candidate, NOT published|This is a release candidate' -and $en -match '(?m)^## Since the release candidate\r?$') 'notas en-US 0.3.0: titulo final, publicacao somente pela GitHub Release, sem o status de candidato'
+        Assert-True ($pt -match '(?m)^# Agent Temp Manager 0\.3\.0: notas de vers.o\r?$' -and $pt -match 'A publica..o desta vers.o . a GitHub Release `v0\.3\.0`, criada somente com a aprova..o expl.cita do mantenedor' -and $pt -notmatch 'candidato, N.O publicado|Este . um candidato' -and $pt -match '(?m)^## Desde o release candidate\r?$') 'notas pt-BR 0.3.0: titulo final, publicacao somente pela GitHub Release, sem o status de candidato'
+        foreach ($t in @($en, $pt)) { Assert-True ($t -notmatch '(?i)\b(was|has been|is now) published|\bfoi publicad') 'notas 0.3.0: nenhuma alegacao de que a publicacao aconteceu' }
         foreach ($s in @('ORPHAN_SUSPECTED', 'EXCLUSAO_REAL_DESABILITADA_V0_1', 'ELIGIBLE_WITH_DECLARED_RISK', 'authorize', '-AcceptB1ResidualRisk')) { Assert-True ($en.Contains($s) -and $pt.Contains($s)) "notas 0.3.0: $s documentado" }
         foreach ($g in @('AtmRealDeletionEnabled', 'AtmWorktreeDiagnosticsEnabled', 'AtmHandleDiagnosticsEnabled', 'AtmDiagnoseExportEnabled')) {
             Assert-True ($en.Contains("$g = `$false") -and $pt.Contains("$g = `$false")) "notas 0.3.0: trava $g listada como fechada"
@@ -13788,12 +13790,22 @@ try {
         $en2 = [IO.File]::ReadAllText((Join-Path $repoRoot 'docs\release\V0.2.0-RELEASE-NOTES.md'))
         $pt2 = [IO.File]::ReadAllText((Join-Path $repoRoot 'docs\release\V0.2.0-RELEASE-NOTES.pt-BR.md'))
         Assert-True ($en2.Contains('Publication of this version is the GitHub Release `v0.2.0`, created only with the maintainer''s explicit approval') -and $pt2 -match 'A publica..o desta vers.o . a GitHub Release `v0\.2\.0`, criada somente com a aprova..o expl.cita do mantenedor') 'notas 0.2.0 inalteradas (publicadas)'
-        # README: 0.2.0 the latest published; 0.3.0 a candidate, not published; deletion disabled in every copy.
+        # README: version 0.3.0, published only through the GitHub Release v0.3.0 (verified against its SHA256SUMS.txt);
+        # 0.2.0 no longer named the latest published; deletion disabled in every copy.
         $rd = [IO.File]::ReadAllText((Join-Path $repoRoot 'README.md'))
-        Assert-True ($rd.Contains('**Latest published version: 0.2.0**') -and $rd.Contains('**0.3.0 is a release candidate, not published.**') -and $rd.Contains('**Real deletion is disabled in every copy.**')) 'README: 0.2.0 publicada, 0.3.0 candidato, exclusao desabilitada'
+        Assert-True ($rd.Contains('**Version 0.3.0.** Its publication is the GitHub Release `v0.3.0` only, created with the maintainer''s explicit') -and $rd.Contains('SHA256SUMS.txt') -and -not $rd.Contains('Latest published version: 0.2.0') -and $rd.Contains('**Real deletion is disabled in every copy.**')) 'README: versao 0.3.0 pela GitHub Release, 0.2.0 nao mais a ultima publicada, exclusao desabilitada'
+        foreach ($doc in @('README.md', 'docs\ROADMAP.md')) { Assert-True (-not ([IO.File]::ReadAllText((Join-Path $repoRoot $doc)) -match '(?i)0\.3\.0[^.\n]{0,40}release candidate[^.\n]{0,20}not published|0\.3\.0 candidate\b')) "$($doc): sem o texto de release candidate nao publicado da 0.3.0" }
         foreach ($doc in @('docs\USAGE.md', 'docs\DIAGNOSE-SCHEMA.md')) { Assert-True (-not ([IO.File]::ReadAllText((Join-Path $repoRoot $doc)) -match '(?i)Published only as the GitHub Release `v0\.3\.0`')) "$($doc): sem alegar publicacao da 0.3.0" }
+        # The V0.3 items of USAGE and SECURITY-MODEL name version 0.3.0 instead of "unreleased" (the deletion gate stays
+        # closed in every copy); the ROADMAP no longer says V4 has not started.
+        foreach ($doc in @('docs\USAGE.md', 'docs\SECURITY-MODEL.md')) {
+            $t = [IO.File]::ReadAllText((Join-Path $repoRoot $doc))
+            Assert-True ($t -notmatch '(?i)V0\.3[^\r\n]{0,60}unreleased' -and $t.Contains('(V0.3 AUT-2; 0.3.0; past the deletion gate only, which is closed in every copy)')) "$($doc): itens V0.3 com a versao 0.3.0, sem unreleased"
+        }
+        Assert-True (-not ([IO.File]::ReadAllText((Join-Path $repoRoot 'docs\ROADMAP.md')).Contains('V4 (privilege matrix, operator): not started'))) 'ROADMAP: V4 nao mais como nao iniciada'
+        # Release record: the release branch, the publication blockers and the authorization still open.
         $rc = [IO.File]::ReadAllText((Join-Path $repoRoot 'docs\release\V0.3-RC.md'))
-        Assert-True ($rc.Contains('**Release candidate, not published:**') -and $rc -match '(?m)^## G\. Publication blockers\r?$') 'registro do candidato com bloqueantes de publicacao'
+        Assert-True ($rc -match '(?m)^# V0\.3: release record \(0\.3\.0\)\r?$' -and $rc.Contains('Branch `release/0.3.x`, from `bc28523`') -and -not $rc.Contains('**Release candidate, not published:**') -and $rc -match '(?m)^## G\. Publication blockers\r?$' -and $rc -match '(?m)^\| Publication authorization:[^\r\n]*\| OPEN \|\r?$') 'registro da release: branch release/0.3.x, bloqueantes de publicacao, autorizacao em aberto'
     }
     Test-Case 'Camadas' 'P5-B-S: todo script (src, install, tests) com texto nao ASCII comeca com BOM UTF-8 (o Windows PowerShell 5.1 leria o arquivo como ANSI e corromperia o texto)' {
         # -Include is ignored with -LiteralPath on Windows PowerShell 5.1: filtered by extension (scripts only; the .cmd

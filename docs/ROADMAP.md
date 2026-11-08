@@ -191,9 +191,10 @@ persistent monitoring (that is V0.5).
 **Objectives.** Enable real deletion of temporary paths that a human selected and approved, with the protections
 already built in V0.1 and the evidence gathered in V0.2.
 
-**Status: 0.3.0 is a release candidate, not published; real deletion is disabled in every copy.** It is to be published
-with the deletion gate closed, after the operator's privilege rows with the gate closed (V4). A release with the gate
-open comes only after the operator's pilot (V5) and its own gate. Candidate record and publication blockers:
+**Status: version 0.3.0, with the deletion gate closed; real deletion is disabled in every copy.** Its publication is
+the GitHub Release `v0.3.0` only, created with the maintainer's explicit approval. The operator ran the dedicated base
+runbook and the privilege rows with the gate closed (V4) before it. A release with the gate open comes only after the
+operator's pilot (V5) and its own gate. Release record, V4 results and publication blockers:
 [release/V0.3-RC.md](release/V0.3-RC.md).
 
 **Validation stages (every distributed copy keeps real deletion disabled).**
@@ -207,7 +208,8 @@ open comes only after the operator's pilot (V5) and its own gate. Candidate reco
   decision: a write keeping every statistic, a real exception inside the deleter, a real log write failure, an
   interruption in the middle of the tree; the elevated leg's in-deleter cases while its coverage is incomplete. Details
   and limits: [TESTING.md](TESTING.md#v3-as-a-whole).
-* V4 (privilege matrix, operator): not started. Its rows with the gate closed are a prerequisite for publishing 0.3.0.
+* V4 (privilege matrix, operator): **done** (2026-11-07, deletion gate closed). Rows not tested, and why, are recorded in
+  [release/V0.3-RC.md](release/V0.3-RC.md) (section G).
 * V5 (operator pilot on one real root): not started. It is a prerequisite for any release with the gate open.
 
 **Deliverables.**
