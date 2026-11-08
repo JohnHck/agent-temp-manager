@@ -260,9 +260,8 @@ anything outside an agent's temporary area; no ACL changes, no service or proces
 
 **Status: placement decided by the maintainer (ISO-D1, 2026-11-01); design in
 [ADR-0013](adr/ADR-0013-isolation-quarantine-recovery-mode.md) (PARTIALLY ACCEPTED); nothing implemented.** A release
-after 0.3.0 that depends on 0.3.0 being published. It does not widen the 0.3.0 candidate. Work for 0.3.x may land on
-`main` before 0.3.0 is published; the `v0.3.0` tag still goes to the audited candidate SHA
-([release/V0.3-RC.md](release/V0.3-RC.md)). Origin: the
+after 0.3.0 that depends on it. It is not part of 0.3.0. Work for 0.3.x lands on `main`; the `v0.3.0` tag goes on the
+audited head of `release/0.3.x`, not on `main` ([release/V0.3-RC.md](release/V0.3-RC.md)). Origin: the
 [2026-11-01 incident](incidents/2026-11-01-profile-login-temp-isolation.md), observed operational evidence, not a
 root cause. **Isolation is containment and recovery, not prevention:** the dedicated base (`CLAUDE_CODE_TMPDIR`)
 still comes first, and the system TEMP stays an exception.
