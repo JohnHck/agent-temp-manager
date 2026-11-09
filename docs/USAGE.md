@@ -521,6 +521,21 @@ session root per run.
    nothing is discarded.
 3. **Checks.** The plan is checked again, and the root is revalidated immediately before the move. Any difference
    stops the run with nothing moved.
+   * The plan check stops the run with `PLAN_CHANGED_BEFORE_EXECUTION`. Its log record `plan-check` has `matched` and
+     `reasons`, the first check that failed, in this order:
+     * `ROOT_NOT_SEEN_ONCE (N)`: the root is seen N times (0, or more than 1) in the fresh inventory;
+     * `PLAN_ITEM_CHANGED`: its statistics changed. `changedFields` names which ones: `path`, `fingerprint`, `files`,
+       `dirs`, `bytes`, `newestWrite`;
+     * the gates' refusals, each as its leading code. For example: `B1_EXCEPTION_NEW_UNINSPECTABLE_PROCESS (N)` (a
+       new process not inspectable, with the count) or `B1_EXCEPTION_NO_LONGER_APPLIES`. A reason without a leading
+       code is `UNCODED_REASON`.
+   * A matched plan check records `reasons: []`.
+   * The record holds only codes, counts and field names: never process identities, names or command lines, accounts,
+     SIDs, paths or localized text.
+
+   ```
+   {"type":"plan-check","planId":"5e0c…","matched":false,"reasons":["PLAN_ITEM_CHANGED"],"changedFields":["files","bytes"]}
+   ```
 4. **Quarantine.** The root is moved, intact, on the same volume, to a new entry
    `%LOCALAPPDATA%\AgentTempManager\Q\<yyyyMMddTHHmmssZ>-<8 hex>\payload`. Next to it is a `manifest.jsonl`
    (`atm.quarantine/1`), which records the original path, the acting identity, the intent and the result, with no file

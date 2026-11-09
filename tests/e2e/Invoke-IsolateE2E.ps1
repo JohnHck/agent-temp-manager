@@ -339,6 +339,8 @@ function Assert-Isolated($C, [string]$Label) {
     $cat = $(if ($Leg -eq 'A') { 'ELIGIBLE_WITH_DECLARED_RISK' } else { 'ELIGIBLE' })
     Assert ($recs[1].category -ceq $cat -and [bool]$recs[0].b1Exception -eq ($Leg -eq 'A') -and [bool]$conf.b1ResidualRiskAccepted -eq ($Leg -eq 'A')) "categoria/excecao B1 no log: $($recs[1].category)"
     Assert ($recs[3].matched -eq $true -and $recs[4].entryId -ceq $r.EntryId -and $recs[5].outcome -ceq 'COMPLETE' -and $recs[5].verified -eq $true) 'plan-check/move-intent/move-result divergentes'
+    # ISO-PLANCHECK-REASONS: a matched plan-check records an empty reasons list and no changedFields.
+    Assert ($null -ne $recs[3].PSObject.Properties['reasons'] -and @($recs[3].reasons).Count -eq 0 -and $null -eq $recs[3].PSObject.Properties['changedFields']) "plan-check casado sem reasons vazio: $(@($recs[3].PSObject.Properties.Name) -join ',')"
     Assert ($recs[6].complete -eq 1 -and $recs[6].entryId -ceq $r.EntryId) 'run-end divergente'
     $man = Read-E2ELog (Join-Path $r.EntryPath 'manifest.jsonl')
     $mt = Get-Types $man

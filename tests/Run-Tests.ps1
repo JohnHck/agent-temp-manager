@@ -3707,6 +3707,96 @@ exit 0
         Assert-True (@((Read-TestCleanLogFile ($x.Log + '.g')).Records | ForEach-Object { $_.type }) -contains 'skip') 'skip registrado'
         Assert-True ([IO.Directory]::Exists($x.Root)) 'raiz ainda no lugar'
     }
+    Test-Case 'Isolamento P3a' 'ISO-PLANCHECK-REASONS: o plan-check do isolate grava reasons (so codigos, contagens e nomes de campo): raiz ausente, chave mudada, processo novo sob B1, raiz fora da excecao B1, cada um PLAN_CHANGED_BEFORE_EXECUTION; matched true com reasons vazio; processo que saiu nao recusa; nunca chave de processo, caminho ou texto localizado' {
+        # The one plan-check line of a log, raw (for the privacy checks) and parsed.
+        $pcOf = {
+            param([string]$Log)
+            $ln = @([IO.File]::ReadAllLines($Log) | Where-Object { $_ -and ($_ | ConvertFrom-Json).type -ceq 'plan-check' })
+            Assert-Eq $ln.Count 1 'um registro plan-check'
+            return [pscustomobject]@{ Line = [string]$ln[0]; Rec = ($ln[0] | ConvertFrom-Json) }
+        }
+        $fieldsOf = { param($Pc) $pr = $Pc.Rec.PSObject.Properties['changedFields']; if ($null -eq $pr) { return $null }; return @($pr.Value) }
+        # Only codes, counts and field names: no process identity (pid@ticks), no path (raw or JSON-escaped), no localized text.
+        $private = {
+            param($Pc, [string]$Root, [string]$Label)
+            $esc = $Root.Replace('\', '\\')
+            Assert-True (-not $Pc.Line.Contains('@') -and -not $Pc.Line.Contains($Root) -and -not $Pc.Line.Contains($esc)) "${Label}: sem chave de processo nem caminho ($($Pc.Line))"
+            foreach ($c in @($Pc.Rec.reasons)) { Assert-True ([string]$c -cmatch '^[A-Z][A-Z0-9_]*( \(\d+\))?$') "${Label}: motivo so como codigo ($c)" }
+            $cf = & $fieldsOf $Pc
+            foreach ($f in @($cf)) { if ($null -ne $f) { Assert-True (@('path', 'fingerprint', 'files', 'dirs', 'bytes', 'newestWrite') -ccontains [string]$f) "${Label}: changedFields so com nomes ($f)" } }
+        }
+        $refused = { param($Res, $Pc, [string]$Label) Assert-True ($Res.Aborted -ceq 'PLAN_CHANGED_BEFORE_EXECUTION' -and @($Res.Results).Count -eq 0 -and $Pc.Rec.matched -eq $false) "${Label}: PLAN_CHANGED_BEFORE_EXECUTION, matched false ($($Res.Aborted); $($Pc.Line))" }
+        $n0 = Get-IsoEntryCount
+
+        # matched: true -> reasons [] and no changedFields (stopped afterwards at the revalidation, nothing moved).
+        $x = New-IsoRun 'isopc-ok'
+        if (-not $x) { return }
+        $res = Invoke-IsoOpen (Get-IsoArgs $x (New-TestCleanOperator) @{ BeforeMoveHook = { param($part) [IO.File]::WriteAllText((Join-Path $part.Path 'pc-hook.txt'), 'x') } })
+        $pc = & $pcOf $x.Log
+        Assert-True ($res.Aborted -ceq 'REVALIDATION_REFUSED' -and $pc.Rec.matched -eq $true -and @($pc.Rec.reasons).Count -eq 0 -and $pc.Line.Contains('"reasons":[]') -and $null -eq (& $fieldsOf $pc)) "matched: reasons vazio, sem changedFields ($($res.Aborted); $($pc.Line))"
+        & $private $pc $x.Root 'matched'
+
+        # The root is not in the fresh inventory (renamed while the operator answered): ROOT_NOT_SEEN_ONCE (0).
+        $x = New-IsoRun 'isopc-gone'
+        if (-not $x) { return }
+        $pcRoot = $x.Root; $pcAway = $x.Root + '-fora'
+        $op = New-TestCleanOperator -Answers @{ confirm = { param($ph) [IO.Directory]::Move($pcRoot, $pcAway); $null }.GetNewClosure() }
+        $res = Invoke-IsoOpen (Get-IsoArgs $x $op)
+        $pc = & $pcOf $x.Log
+        & $refused $res $pc 'raiz ausente'
+        Assert-True ((@($pc.Rec.reasons) -join '|') -ceq 'ROOT_NOT_SEEN_ONCE (0)' -and $null -eq (& $fieldsOf $pc)) "raiz ausente: ROOT_NOT_SEEN_ONCE (0) ($($pc.Line))"
+        & $private $pc $pcRoot 'raiz ausente'
+        [IO.Directory]::Move($pcAway, $pcRoot)
+
+        # The plan item key changed (a file added while the operator answered): PLAN_ITEM_CHANGED with the field names.
+        $x = New-IsoRun 'isopc-key'
+        if (-not $x) { return }
+        $pcPlus = Join-Path $x.Root 'durante-pc.txt'
+        $op = New-TestCleanOperator -Answers @{ confirm = { param($ph) [IO.File]::WriteAllText($pcPlus, 'novo'); $null }.GetNewClosure() }
+        $res = Invoke-IsoOpen (Get-IsoArgs $x $op)
+        $pc = & $pcOf $x.Log
+        & $refused $res $pc 'chave mudada'
+        $cf = @(& $fieldsOf $pc)
+        Assert-True ((@($pc.Rec.reasons) -join '|') -ceq 'PLAN_ITEM_CHANGED' -and $cf -ccontains 'files' -and $cf -ccontains 'bytes' -and $cf -cnotcontains 'path' -and $cf -cnotcontains 'dirs') "chave mudada: PLAN_ITEM_CHANGED, changedFields $($cf -join ',') ($($pc.Line))"
+        & $private $pc $x.Root 'chave mudada'
+
+        # B1: a new process not inspectable while the operator answered: B1_EXCEPTION_NEW_UNINSPECTABLE_PROCESS (1).
+        $ctx = New-TestB1Context 'isopc-b1new'
+        $x = New-IsoRun 'isopc-b1new' $ctx
+        if (-not $x) { return }
+        $pcProcs = $ctx.Procs; $pcLate = New-TestRuntimeProc 873 'late-iso.exe' $null ((Get-Date).AddMinutes(-1))
+        $op = New-TestCleanOperator -Answers @{ confirm = { param($ph) [void]$pcProcs.Add($pcLate); $null }.GetNewClosure() }
+        $res = Invoke-IsoOpen (Get-IsoArgs $x $op @{ AcceptB1ResidualRisk = $true })
+        $pc = & $pcOf $x.Log
+        & $refused $res $pc 'B1 processo novo'
+        Assert-True ((@($pc.Rec.reasons) -join '|') -ceq 'B1_EXCEPTION_NEW_UNINSPECTABLE_PROCESS (1)') "B1 processo novo: o codigo com a contagem ($($pc.Line))"
+        & $private $pc $x.Root 'B1 processo novo'
+
+        # B1: the root left the exception (a duplicate PID makes the process snapshot PARTIAL): B1_EXCEPTION_NO_LONGER_APPLIES.
+        $ctx = New-TestB1Context 'isopc-b1out'
+        $x = New-IsoRun 'isopc-b1out' $ctx
+        if (-not $x) { return }
+        $pcProcs = $ctx.Procs; $pcDup = [pscustomobject]@{ ProcessId = 1; Name = 'idle.exe'; ParentProcessId = 0; CommandLine = 'idle.exe'; CreationDate = (Get-Date).AddHours(-1) }
+        $op = New-TestCleanOperator -Answers @{ confirm = { param($ph) [void]$pcProcs.Add($pcDup); $null }.GetNewClosure() }
+        $res = Invoke-IsoOpen (Get-IsoArgs $x $op @{ AcceptB1ResidualRisk = $true })
+        $pc = & $pcOf $x.Log
+        & $refused $res $pc 'B1 fora da excecao'
+        Assert-True (@($pc.Rec.reasons) -ccontains 'B1_EXCEPTION_NO_LONGER_APPLIES' -and $null -eq (& $fieldsOf $pc)) "B1 fora da excecao: B1_EXCEPTION_NO_LONGER_APPLIES entre os codigos ($($pc.Line))"
+        & $private $pc $x.Root 'B1 fora da excecao'
+
+        # Decision unchanged: an accepted process that left does not refuse (matched, reasons []); stopped afterwards at
+        # the revalidation, nothing moved.
+        $ctx = New-TestB1Context 'isopc-b1gone' 1 $false @((New-TestRuntimeProc 874 'gone-iso.exe' $null ((Get-Date).AddHours(-2))))
+        $x = New-IsoRun 'isopc-b1gone' $ctx
+        if (-not $x) { return }
+        $pcProcs = $ctx.Procs
+        $op = New-TestCleanOperator -Answers @{ confirm = { param($ph) $i = -1; for ($j = 0; $j -lt $pcProcs.Count; $j++) { if ($pcProcs[$j].ProcessId -eq 874) { $i = $j } }; if ($i -ge 0) { $pcProcs.RemoveAt($i) }; $null }.GetNewClosure() }
+        $res = Invoke-IsoOpen (Get-IsoArgs $x $op @{ AcceptB1ResidualRisk = $true; BeforeMoveHook = { param($part) [IO.File]::WriteAllText((Join-Path $part.Path 'pc-hook.txt'), 'x') } })
+        $pc = & $pcOf $x.Log
+        Assert-True (@($pcProcs | Where-Object { $_.ProcessId -eq 874 }).Count -eq 0 -and $res.Aborted -ceq 'REVALIDATION_REFUSED' -and $pc.Rec.matched -eq $true -and @($pc.Rec.reasons).Count -eq 0) "processo que saiu: nao recusa na conferencia ($($res.Aborted); $($pc.Line))"
+        & $private $pc $x.Root 'processo que saiu'
+        Assert-Eq (Get-IsoEntryCount) $n0 'nenhuma entrada criada'
+    }
     Test-Case 'Isolamento P3a' 'Desfechos do mover (costura -MoveTreeImpl e mover real): intencao gravada no log e no manifesto ANTES da chamada; recusa, excecao, arquivo em uso (mover real recusa) e mudanca na janela (movido e nao verificado) param a execucao com o manifesto registrando o desfecho' {
         $cases = @(
             @{ Name = 'refused'; Want = 'REFUSED'; Impl = { param($c, $e, $n) $script:isoSeen = @((Get-IsoLiveLastType $script:isoLog), (Get-IsoLiveLastType (Join-Path $e.ParentPath 'manifest.jsonl'))); [pscustomobject]@{ Moved = $false; Verified = $false; RenameStatus = $null; AbortReason = 'SYNTHETIC_REFUSED'; FilesAfter = -1; DirsAfter = -1; BytesAfter = -1; DigestPlanned = $null; DigestAfter = $null } } },

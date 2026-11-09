@@ -185,6 +185,37 @@ function Write-AtmIsolationRecord {
     try { return $Log.AppendLine($line) } catch { return ('WRITE_' + $_.Exception.GetBaseException().GetType().Name) }
 }
 
+function Get-AtmIsolatePlanCheck {
+    <#
+      The plan check of isolate (Invoke-AtmIsolateCore, step 7) and why it did not match, for the log. The same three
+      checks as always, in the same order and with the same short-circuit: the planned root must be seen exactly once in
+      the fresh inventory (ROOT_NOT_SEEN_ONCE (N)); then its plan item key must be unchanged (PLAN_ITEM_CHANGED, with the
+      names of the components that changed in ChangedFields); then the gates (Get-AtmCleanGateRefusal), each reason
+      reduced to its leading code (B1_EXCEPTION_NEW_UNINSPECTABLE_PROCESS keeps its count; a reason without a leading code
+      is UNCODED_REASON). Only codes, counts and field names: never process identities, names, command lines, accounts,
+      SIDs, paths or localized text. The caller refuses on any reason, as before (PLAN_CHANGED_BEFORE_EXECUTION).
+    #>
+    param($Planned, $Inventory, $RuntimeEvidence, [bool]$AcceptRisk, $Risk)
+    $m3 = @($Inventory.Partitions | Where-Object { [string]::Equals($_.Path, $Planned.Path, [StringComparison]::Ordinal) -and $_.Kind -ne 'NotScanned' -and $_.Kind -ne 'BaseLooseFiles' })
+    if ($m3.Count -ne 1) { return [pscustomobject]@{ Reasons = @("ROOT_NOT_SEEN_ONCE ($($m3.Count))"); ChangedFields = @() } }
+    $now = $m3[0]
+    if ((Get-AtmCleanPlanItemKey $now) -cne (Get-AtmCleanPlanItemKey $Planned)) {
+        # The components of Get-AtmCleanPlanItemKey, compared as it compares them; only their names are kept.
+        $ticks = { param($x) if ($x.NewestWriteTimeUtc) { [string]([datetime]$x.NewestWriteTimeUtc).ToUniversalTime().Ticks } else { '' } }
+        $fields = @(foreach ($f in @(@('path', 'Path'), @('fingerprint', 'Fingerprint'), @('files', 'Files'), @('dirs', 'Dirs'), @('bytes', 'Bytes'))) {
+                if ([string]$now.($f[1]) -cne [string]$Planned.($f[1])) { $f[0] } })
+        if ((& $ticks $now) -cne (& $ticks $Planned)) { $fields += 'newestWrite' }
+        return [pscustomobject]@{ Reasons = @('PLAN_ITEM_CHANGED'); ChangedFields = @($fields) }
+    }
+    $why = @(Get-AtmCleanGateRefusal -Gate (Test-AtmCandidate -Partition $now -Inventory $Inventory -ForClean -RuntimeEvidence $RuntimeEvidence -AcceptB1ResidualRisk:$AcceptRisk) -Risk $Risk)
+    $codes = @(foreach ($w in $why) {
+            $t = [string]$w
+            if ($t -cmatch '^B1_EXCEPTION_NEW_UNINSPECTABLE_PROCESS \(\d+\)$') { $t }
+            elseif ($t -cmatch '^([A-Z][A-Z0-9_]*)(?=$|[\s:(])') { $Matches[1] }
+            else { 'UNCODED_REASON' } })
+    return [pscustomobject]@{ Reasons = @($codes); ChangedFields = @() }
+}
+
 function Invoke-AtmIsolate {
     <#
       Entry point of isolate (CLI). With the isolation gate closed (every distributed copy) it runs the plan-only flow of
@@ -385,11 +416,11 @@ function Invoke-AtmIsolateCore {
             $iaChk = @{} + $InventoryArgs; $iaChk['NoProgress'] = $true
             $invChk = Invoke-AtmInventory @iaChk
             $rtChk = Get-AtmCleanRuntimeEvidence -Inventory $invChk -InventoryArgs $iaChk
-            $m3 = @($invChk.Partitions | Where-Object { [string]::Equals($_.Path, $p.Path, [StringComparison]::Ordinal) -and $_.Kind -ne 'NotScanned' -and $_.Kind -ne 'BaseLooseFiles' })
-            $changed = ($m3.Count -ne 1)
-            if (-not $changed) { $changed = ((Get-AtmCleanPlanItemKey $m3[0]) -cne (Get-AtmCleanPlanItemKey $p)) }
-            if (-not $changed) { $changed = (@(Get-AtmCleanGateRefusal -Gate (Test-AtmCandidate -Partition $m3[0] -Inventory $invChk -ForClean -RuntimeEvidence $rtChk -AcceptB1ResidualRisk:$acceptRisk) -Risk $risk).Count -gt 0) }
-            $lc = Write-AtmIsolationRecord -Log $log -State $ls -Schema $script:AtmIsolateLogSchema -Type 'plan-check' -Fields ([ordered]@{ planId = $state.PlanId; matched = (-not $changed) })
+            $chk = Get-AtmIsolatePlanCheck -Planned $p -Inventory $invChk -RuntimeEvidence $rtChk -AcceptRisk $acceptRisk -Risk $risk
+            $changed = (@($chk.Reasons).Count -gt 0)
+            $pcf = [ordered]@{ planId = $state.PlanId; matched = (-not $changed); reasons = @($chk.Reasons) }
+            if (@($chk.ChangedFields).Count -gt 0) { $pcf['changedFields'] = @($chk.ChangedFields) }
+            $lc = Write-AtmIsolationRecord -Log $log -State $ls -Schema $script:AtmIsolateLogSchema -Type 'plan-check' -Fields $pcf
             if ($null -ne $lc) { & $logFail 'plan-check' $lc; $state.Aborted = 'LOG_WRITE_FAILED' }
             elseif ($changed) { $state.Aborted = 'PLAN_CHANGED_BEFORE_EXECUTION' }
         }
