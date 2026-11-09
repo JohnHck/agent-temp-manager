@@ -72,7 +72,7 @@ and verify without write access to the install directory, uninstall (directory a
 uploaded as artifacts.
 
 Then each published version is installed and taken through the same cycle on every OS and installer shell: 0.1.0,
-0.1.1 and 0.2.0, the latest published version. Each package is the asset of its GitHub Release, accepted only with the
+0.1.1, 0.2.0 and 0.3.0, the latest published version. Each package is the asset of its GitHub Release, accepted only with the
 SHA-256 published in that release's `SHA256SUMS.txt`, pinned in the script. The cycle is:
 
 1. install the published version and check `version` and `verify`;
@@ -85,7 +85,8 @@ SHA-256 published in that release's `SHA256SUMS.txt`, pinned in the script. The 
 4. update again;
 5. uninstall: the directories and the PATH entry are removed.
 
-The 0.2.0 cycle also checks the installed manifest's version at each step. A download that fails is `NAO_TESTADO`,
+The 0.2.0 and 0.3.0 cycles also check the installed manifest's version at each step. The 0.3.0 cycle also checks the
+four 0.3.0 gates `$false` once 0.3.0 is installed and after the rollback. A download that fails is `NAO_TESTADO`,
 never a pass.
 
 ## Real clean on disposable VMs (V0.3 V2)

@@ -8040,8 +8040,8 @@ try {
         # for that message under <InstallDir>.staging-, never for the installer under test.
         $e2e = [IO.File]::ReadAllText((Join-Path $testsDir 'e2e\Invoke-InstallE2E.ps1'))
         $calls = @([regex]::Matches($e2e, '(?m)^\s*\$na = Invoke-PublishedFreshInstall ''([0-9.]+)'' \$script:(v0[0-9]{2}Pkg)\r?$') | ForEach-Object { $_.Groups[1].Value + '/' + $_.Groups[2].Value })
-        Assert-Eq ($calls -join ',') '0.1.0/v010Pkg,0.1.1/v011Pkg,0.2.0/v020Pkg' 'nova tentativa so nos tres passos de instalacao nova das versoes publicadas'
-        Assert-Eq ([regex]::Matches($e2e, 'Invoke-PublishedFreshInstall').Count) 4 'definicao + tres chamadas, nenhuma outra'
+        Assert-Eq ($calls -join ',') '0.1.0/v010Pkg,0.1.1/v011Pkg,0.2.0/v020Pkg,0.3.0/v030Pkg' 'nova tentativa so nos quatro passos de instalacao nova das versoes publicadas'
+        Assert-Eq ([regex]::Matches($e2e, 'Invoke-PublishedFreshInstall').Count) 5 'definicao + quatro chamadas, nenhuma outra'
         $fr = $e2e.Substring($e2e.IndexOf('function Invoke-PublishedFreshInstall'), $e2e.IndexOf('$pkg = $null') - $e2e.IndexOf('function Invoke-PublishedFreshInstall'))
         Assert-True ($fr.Contains('Assert ([bool]$PkgDir -and $PkgDir -ne $pkg)') -and $fr.Contains("`"Could not find a part of the path '`" + [regex]::Escape(`"`$installDir.staging-`") + `"[0-9a-f]{8}\\[^']*'`"") -and $fr.Contains('Assert ($m.Success -and $code -ne 0)')) 'nova tentativa: nunca o pacote sob teste; so a mensagem sob .staging-; outra falha continua FAIL'
         Assert-True (([regex]::Matches($fr, 'Install-AgentTempManager\.ps1')).Count -eq 2 -and $fr.Contains("xversion-install-`$Version-retry.txt") -and $fr.IndexOf('Uninstall-AgentTempManager.ps1') -lt $fr.LastIndexOf('Install-AgentTempManager.ps1') -and $fr.Contains('machine not clean for a new attempt')) 'uma unica nova tentativa, depois da maquina limpa pelo desinstalador sob teste'
@@ -13841,18 +13841,20 @@ try {
         $br = [IO.File]::ReadAllText((Join-Path (Split-Path -Parent $testsDir) 'tools\Build-Release.ps1'))
         foreach ($g in @('AtmRealDeletionEnabled', 'AtmWorktreeDiagnosticsEnabled', 'AtmHandleDiagnosticsEnabled', 'AtmDiagnoseExportEnabled')) { Assert-True ($br.Contains($g)) "F-08: release confere $g no arquivo" }
     }
-    Test-Case 'Instalacao' 'V0.3 RC: versao 0.3.0 coerente - fonte unica, instalador, manifesto, CLI, build; changelog, notas, README e ROADMAP finais (publicacao somente pela GitHub Release v0.3.0, sem alegar publicacao)' {
+    Test-Case 'Instalacao' 'V0.3 RC: versao 0.3.0 coerente - publicada somente pela GitHub Release v0.3.0; a main informa 0.3.1 (nao publicada) na fonte unica, instalador, manifesto, CLI e build; changelog, notas, README e ROADMAP finais (sem alegar publicacao da 0.3.1 nem chama-la de candidata)' {
         $repoRoot = Split-Path -Parent $testsDir
-        Assert-Eq $script:AtmVersion '0.3.0' 'versao 0.3.0 na fonte'
+        # MAIN-VERSION-0.3.1: the source on main reports 0.3.1, which is not published (not a release, not a candidate);
+        # 0.3.0 stays the latest published version, so everything below about 0.3.0 is unchanged.
+        Assert-Eq $script:AtmVersion '0.3.1' 'versao 0.3.1 na fonte'
         $auditSrc = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Audit.ps1'))
         Assert-Eq ([regex]::Matches($auditSrc, '\$script:AtmVersion\s*=').Count) 1 'uma unica atribuicao da versao'
-        Assert-Eq (Get-AtmSourceVersion -SourceDir $srcDir) '0.3.0' 'versao lida pelo instalador e pelo build'
+        Assert-Eq (Get-AtmSourceVersion -SourceDir $srcDir) '0.3.1' 'versao lida pelo instalador e pelo build'
         $vm = Join-Path $sandbox 'rc030-version'; [void][IO.Directory]::CreateDirectory($vm)
         Copy-AtmTree -From $srcDir -To $vm
         Write-AtmManifest -Root $vm -Version (Get-AtmSourceVersion -SourceDir $vm)
-        Assert-Eq ([IO.File]::ReadAllText((Join-Path $vm 'manifest.json')) | ConvertFrom-Json).version '0.3.0' 'manifesto escrito com a versao da fonte'
+        Assert-Eq ([IO.File]::ReadAllText((Join-Path $vm 'manifest.json')) | ConvertFrom-Json).version '0.3.1' 'manifesto escrito com a versao da fonte'
         $o = (& cmd.exe /c "`"$(Join-Path $srcDir 'bin\agent-temp.cmd')`" version -Lang en-US" 2>&1) -join "`n"
-        Assert-True ($LASTEXITCODE -eq 0 -and $o -match 'agent-temp 0\.3\.0\b') 'version da CLI'
+        Assert-True ($LASTEXITCODE -eq 0 -and $o -match 'agent-temp 0\.3\.1\b') 'version da CLI'
         $br = [IO.File]::ReadAllText((Join-Path $repoRoot 'tools\Build-Release.ps1'))
         Assert-True ($br.Contains('$version = Get-AtmSourceVersion') -and $br.Contains('"agent-temp-manager-$version"') -and $br.Contains('$script:AtmVersion = ''$version''')) 'build: nome do arquivo e versao conferida no arquivo vem da fonte'
         # Changelog: the final 0.3.0 entry (publication is the GitHub Release v0.3.0 only, never claimed as done), with no
@@ -13863,6 +13865,14 @@ try {
         $unrelOk = ($unrel.Count -eq 0) -or ($unrel.Count -eq 1 -and $unrel[0].Value -match '^## Unreleased \(0\.3\.x[^)]*\)\r?$' -and $unrel[0].Index -lt $cl.IndexOf('## 0.3.0'))
         Assert-True ($cl -match '(?m)^## 0\.3\.0\r?$' -and $unrelOk -and $cl -match '(?m)^## 0\.2\.0\r?$' -and $cl -match '(?m)^## 0\.1\.0\r?$') 'changelog: entrada 0.3.0 final, Unreleased so a da 0.3.x acima dela, 0.2.0 e 0.1.0 preservadas'
         Assert-True ($cl.IndexOf('## 0.3.0') -lt $cl.IndexOf('## 0.2.0') -and $cl.IndexOf('## 0.2.0') -lt $cl.IndexOf('## 0.1.0') -and $cl -match 'GitHub Release `v0\.2\.0`') 'changelog: ordem 0.3.0, 0.2.0, 0.1.0; 0.2.0 publicada pela GitHub Release v0.2.0'
+        # MAIN-VERSION-0.3.1: the Unreleased section names 0.3.1 and says it is not published; no document says 0.3.1 was
+        # published or calls it a release candidate; README and ROADMAP do not name it (0.3.0 the latest published).
+        Assert-True ($unrel.Count -eq 1 -and $unrel[0].Value -match '^## Unreleased \(0\.3\.x: 0\.3\.1, after 0\.3\.0\)\r?$' -and $cl.Substring(0, $cl.IndexOf('## 0.3.0')).Contains('The code in this section reports version 0.3.1, which is not published')) 'changelog: Unreleased da 0.3.x informa 0.3.1, nao publicada'
+        $v031Claim = '(?i)0\.3\.1[^\r\n]{0,80}(\b(was|has been|is now) published|release candidate|\bcandidat|\bfoi publicad)|(\b(published|publicad[ao]s?)|release candidate|\bcandidat)[^\r\n]{0,20}\b0\.3\.1\b|GitHub Release `?v0\.3\.1\b'
+        foreach ($md in @(Get-ChildItem -LiteralPath $repoRoot -Recurse -File -Filter '*.md' | Where-Object { $_.FullName.Substring($repoRoot.Length) -notmatch '^[\\/]?(\.git|\.claude|node_modules|dist)[\\/]' })) {
+            Assert-True (-not ([IO.File]::ReadAllText($md.FullName) -match $v031Claim)) "$($md.Name): sem alegar publicacao da 0.3.1 nem chama-la de candidata"
+        }
+        foreach ($doc in @('README.md', 'docs\ROADMAP.md')) { Assert-True (-not ([IO.File]::ReadAllText((Join-Path $repoRoot $doc)).Contains('0.3.1'))) "$($doc): nao cita a 0.3.1 (a ultima publicada continua 0.3.0)" }
         $c3 = $cl.Substring($cl.IndexOf('## 0.3.0'), $cl.IndexOf('## 0.2.0') - $cl.IndexOf('## 0.3.0'))
         Assert-True ($c3.Contains('Its publication is the GitHub Release `v0.3.0` (tag `v0.3.0`) only, created with the maintainer''s explicit') -and $c3 -notmatch 'release candidate, not published|Not published' -and $c3 -notmatch '(?i)\b(was|has been|is now) published') 'changelog: entrada 0.3.0 cita so a GitHub Release v0.3.0, sem o texto de candidato e sem alegar publicacao'
         # Release notes 0.3.0: the final title and the publication only through the GitHub Release, in both languages,

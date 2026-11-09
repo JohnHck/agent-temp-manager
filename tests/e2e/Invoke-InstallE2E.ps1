@@ -12,8 +12,9 @@
     directory; uninstall (directory and PATH entry removed); then the published 0.1.0 package (GitHub Release asset,
     SHA-256 pinned) installed, updated to this package, rolled back to 0.1.0, updated again and uninstalled; then the
     same for the published 0.1.1 package (SHA-256 pinned), with the four gates checked in the installation after
-    each update to this package; then the same for the published 0.2.0 package (the latest published version;
-    SHA-256 pinned), which also checks the installed manifest version. Before the uninstall, V0.3 V2: the REAL clean of
+    each update to this package; then the same for the published 0.2.0 package (SHA-256 pinned), which also checks
+    the installed manifest version; then the same for the published 0.3.0 package (the latest published version;
+    SHA-256 pinned), which also checks the four 0.3.0 gates once 0.3.0 is installed. Before the uninstall, V0.3 V2: the REAL clean of
     roots planted by tests\e2e\Invoke-CleanE2E.ps1 (CI-only, never shipped), as the standard user (leg A) and elevated
     (leg B); only the harness summaries are kept. Then 0.3.x ISO-P5a: the REAL isolation, restore and purge of roots
     planted by tests\e2e\Invoke-IsolateE2E.ps1 (CI-only, never shipped), in the same two legs; only its summaries are kept.
@@ -74,7 +75,7 @@ function Invoke-Agent([string]$ArgLine, [string]$Tag) {
 function Assert([bool]$Cond, [string]$Msg) { if (-not $Cond) { throw $Msg } }
 
 function Invoke-PublishedFreshInstall([string]$Version, [string]$PkgDir) {
-    # INSTALL-RACE (auditor's decision, option b). The published installers (0.1.0, 0.1.1, 0.2.0; pinned by hash) compile
+    # INSTALL-RACE (auditor's decision, option b). The published installers (0.1.0, 0.1.1, 0.2.0, 0.3.0; pinned by hash) compile
     # the PATH broadcast in their own process; under Windows PowerShell 5.1 a compiler temp folder can disappear while
     # their cleanup walks the private TEMP. ONE new attempt, only of the fresh install of a published version, only when
     # the failure is "Could not find a part of the path" under <InstallDir>.staging-, and only after the uninstaller
@@ -1070,7 +1071,7 @@ Step 'xversion-update-again-from-0.1.1-and-uninstall' {
     Assert (-not (([Environment]::GetEnvironmentVariable('Path', 'Machine')) -match 'AgentTempManager')) 'PATH ainda contem o produto'
     "updated to $rcVersion again ($g), uninstalled"
 }
-# V0.3 (publication blocker of the 0.3.0 candidate): from the published 0.2.0 (the latest published version) to this
+# V0.3 (publication blocker of the 0.3.0 candidate): from the published 0.2.0 (the latest published version then) to this
 # package and back, after the 0.1.1 path above (which ends uninstalled); the same cycle. The 0.2.0 package is the asset
 # of the GitHub Release v0.2.0, accepted only with the SHA-256 published in that release's SHA256SUMS.txt (pinned here;
 # the same value as the digest GitHub reports for the asset) and never run before that check; a download that fails is
@@ -1132,6 +1133,82 @@ Step 'xversion-update-again-from-0.2.0-and-uninstall' {
     $mv = & $manifestVersion $installDir; Assert ($mv -ceq $rcVersion) "manifesto instalado: $mv"
     $g = & $installedGates
     & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pkg 'install\Uninstall-AgentTempManager.ps1') *> (Join-Path $OutDir 'xversion-uninstall-0.2.0.txt')
+    Assert ($LASTEXITCODE -eq 0) "uninstall exit $LASTEXITCODE"
+    Assert (-not (Test-Path $installDir) -and -not (Test-Path "$installDir.previous")) 'diretorios ainda existem'
+    Assert (-not (([Environment]::GetEnvironmentVariable('Path', 'Machine')) -match 'AgentTempManager')) 'PATH ainda contem o produto'
+    "updated to $rcVersion again (manifest $mv, $g), uninstalled"
+}
+# MAIN-VERSION-0.3.1: from the published 0.3.0 (the latest published version) to this package and back, after the 0.2.0
+# path above (which ends uninstalled); the same cycle. The 0.3.0 package is the asset of the GitHub Release v0.3.0,
+# accepted only with the SHA-256 published in that release's SHA256SUMS.txt (pinned here) and never run before that
+# check; a download that fails is NOT TESTED, never a pass. Once 0.3.0 is installed its four gates (0.3.0 has no
+# isolation engine) are checked; after each update to this package, the six. The installed manifest's version too.
+$v030Sha = 'A124CB71A379669168252C9714A79DE0031CCFB61BA7E0C821404C0DD7BF0CAB'
+$v030Url = 'https://github.com/JohnHck/agent-temp-manager/releases/download/v0.3.0/agent-temp-manager-0.3.0.zip'
+$v030Dir = Join-Path $env:ProgramFiles 'AgentTempManager-v030'
+$script:v030Pkg = $null
+$installedGates030 = {
+    $files = @{ AtmRealDeletionEnabled = 'lib\Engine.Clean.ps1'; AtmWorktreeDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmHandleDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmDiagnoseExportEnabled = 'lib\Report.ps1' }
+    foreach ($g in $files.Keys) {
+        $t = [IO.File]::ReadAllText((Join-Path $installDir $files[$g]))
+        Assert ([regex]::Matches($t, ('\$script:' + $g + '\s*=')).Count -eq 1 -and $t -match ('\$script:' + $g + ' = \$false')) "trava instalada $g nao e uma unica atribuicao a `$false"
+    }
+    'four installed 0.3.0 gates $false'
+}
+Step 'xversion-0.3.0-package' {
+    [void][IO.Directory]::CreateDirectory($v030Dir)
+    $zip030 = Join-Path $v030Dir 'agent-temp-manager-0.3.0.zip'
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $v030Url -OutFile $zip030 -UseBasicParsing
+    } catch { $script:notTested = $true; return "0.3.0 package not downloadable on this runner: $($_.Exception.GetType().Name)" }
+    $h = (Get-FileHash -LiteralPath $zip030 -Algorithm SHA256).Hash
+    Assert ($h -eq $v030Sha) "0.3.0 package hash $h != published $v030Sha"
+    Expand-Archive -LiteralPath $zip030 -DestinationPath $v030Dir -Force
+    $script:v030Pkg = @(Get-ChildItem -LiteralPath $v030Dir -Directory)[0].FullName
+    "published 0.3.0 package, SHA-256 $h"
+}
+Step 'xversion-install-0.3.0' {
+    if (-not $script:v030Pkg) { $script:notTested = $true; return '0.3.0 package unavailable' }
+    Assert (-not (Test-Path $installDir)) 'instalacao anterior ainda presente'
+    $na = Invoke-PublishedFreshInstall '0.3.0' $script:v030Pkg
+    $r = Invoke-Agent 'version -Lang en-US' 'xversion-version-0.3.0'; Assert ($r.Code -eq 0 -and $r.Text -match 'agent-temp 0\.3\.0\b') "0.3.0 version: exit $($r.Code)"
+    $r = Invoke-Agent 'verify' 'xversion-verify-0.3.0'; Assert ($r.Code -eq 0) "0.3.0 verify exit $($r.Code)"
+    $mv = & $manifestVersion $installDir; Assert ($mv -ceq '0.3.0') "manifesto instalado: $mv"
+    $g = & $installedGates030
+    "0.3.0 installed and verified (manifest 0.3.0, $g)" + $na
+}
+Step 'xversion-update-from-0.3.0' {
+    if (-not $script:v030Pkg) { $script:notTested = $true; return '0.3.0 package unavailable' }
+    & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pkg 'install\Install-AgentTempManager.ps1') -Update *> (Join-Path $OutDir 'xversion-update-from-0.3.0.txt')
+    Assert ($LASTEXITCODE -eq 0) "update exit $LASTEXITCODE"
+    $r = Invoke-Agent 'version -Lang en-US' 'xversion-version-updated-from-0.3.0'
+    Assert ($r.Code -eq 0 -and $r.Text -match ('agent-temp ' + [regex]::Escape($rcVersion) + '\b')) "version after update: exit $($r.Code)"
+    $r = Invoke-Agent 'verify' 'xversion-verify-updated-from-0.3.0'; Assert ($r.Code -eq 0) "verify exit $($r.Code)"
+    $mv = & $manifestVersion $installDir; Assert ($mv -ceq $rcVersion) "manifesto instalado depois da atualizacao: $mv"
+    $mp = & $manifestVersion "$installDir.previous"; Assert ($mp -ceq '0.3.0') "manifesto da copia anterior: $mp"
+    $g = & $installedGates
+    "0.3.0 -> $rcVersion (manifest $mv), 0.3.0 kept as previous (manifest $mp), $g"
+}
+Step 'xversion-rollback-to-0.3.0' {
+    if (-not $script:v030Pkg) { $script:notTested = $true; return '0.3.0 package unavailable' }
+    & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pkg 'install\Restore-AgentTempManagerPrevious.ps1') *> (Join-Path $OutDir 'xversion-rollback-to-0.3.0.txt')
+    Assert ($LASTEXITCODE -eq 0) "rollback exit $LASTEXITCODE"
+    $r = Invoke-Agent 'version -Lang en-US' 'xversion-version-rolledback-0.3.0'; Assert ($r.Code -eq 0 -and $r.Text -match 'agent-temp 0\.3\.0\b') "version after rollback: exit $($r.Code)"
+    $r = Invoke-Agent 'verify' 'xversion-verify-rolledback-0.3.0'; Assert ($r.Code -eq 0) "verify exit $($r.Code)"
+    $mv = & $manifestVersion $installDir; Assert ($mv -ceq '0.3.0') "manifesto depois do rollback: $mv"
+    $g = & $installedGates030
+    "back to 0.3.0, verified (manifest 0.3.0, $g)"
+}
+Step 'xversion-update-again-from-0.3.0-and-uninstall' {
+    if (-not $script:v030Pkg) { $script:notTested = $true; return '0.3.0 package unavailable' }
+    & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pkg 'install\Install-AgentTempManager.ps1') -Update *> (Join-Path $OutDir 'xversion-update2-from-0.3.0.txt')
+    Assert ($LASTEXITCODE -eq 0) "second update exit $LASTEXITCODE"
+    $r = Invoke-Agent 'version -Lang en-US' 'xversion-version-updated2-from-0.3.0'; Assert ($r.Code -eq 0 -and $r.Text -match ('agent-temp ' + [regex]::Escape($rcVersion) + '\b')) "version: exit $($r.Code)"
+    $r = Invoke-Agent 'verify' 'xversion-verify-updated2-from-0.3.0'; Assert ($r.Code -eq 0) "verify exit $($r.Code)"
+    $mv = & $manifestVersion $installDir; Assert ($mv -ceq $rcVersion) "manifesto instalado: $mv"
+    $g = & $installedGates
+    & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pkg 'install\Uninstall-AgentTempManager.ps1') *> (Join-Path $OutDir 'xversion-uninstall-0.3.0.txt')
     Assert ($LASTEXITCODE -eq 0) "uninstall exit $LASTEXITCODE"
     Assert (-not (Test-Path $installDir) -and -not (Test-Path "$installDir.previous")) 'diretorios ainda existem'
     Assert (-not (([Environment]::GetEnvironmentVariable('Path', 'Machine')) -match 'AgentTempManager')) 'PATH ainda contem o produto'

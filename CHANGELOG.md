@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased (0.3.x, after 0.3.0)
+## Unreleased (0.3.x: 0.3.1, after 0.3.0)
 
 Work for 0.3.x, which comes after 0.3.0 (ADR-0013, ROADMAP "0.3.x"). It is not part of 0.3.0.
+The code in this section reports version 0.3.1, which is not published: 0.3.0 is the latest published version.
 **A fifth release gate, `AtmIsolationEnabled`, is closed in every copy**: in every copy `isolate` only plans.
 **A sixth, `AtmQuarantinePurgeEnabled`, is closed in every copy too**: in every copy `quarantine purge` only plans, and
 no space is freed.
