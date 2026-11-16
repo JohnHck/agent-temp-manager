@@ -15392,7 +15392,11 @@ if ($null -eq $res.env) {
     $script:guiInvCalls = 0; $script:guiPrevCalls = 0; $script:guiDrDuring = $null
     $script:AtmGuiInventorySource = { param($a) $script:guiInvCalls++; & $a.ProgressCallback 50 'C:\SENTINEL-PROGRESS\base'; $script:guiInv }
     # The second call asks the window to close while the preview runs: the window must stay open until the call ends.
-    $script:AtmGuiPreviewSource = { param($i, $a) $null = $i; $null = $a; $script:guiPrevCalls++; if ($script:guiPrevCalls -eq 2) { $script:guiForm.Close(); $script:guiDrDuring = [string]$script:guiForm.DialogResult }; $script:guiPrev }
+    # The window turns any exception of the source into a failed preview, so the source records its own here.
+    $script:guiPrevError = $null
+    $script:AtmGuiPreviewSource = { param($i, $a) $null = $i; $null = $a; $script:guiPrevCalls++
+        try { if ($script:guiPrevCalls -eq 2) { $script:guiForm.Close(); $script:guiDrDuring = [string]$script:guiForm.DialogResult } } catch { $script:guiPrevError = $_.Exception.GetType().Name + ': ' + $_.Exception.Message; throw }
+        $script:guiPrev }
     $script:guiSnaps = New-Object System.Collections.Generic.List[object]
     $script:guiError = $null; $script:guiClosed = $false; $script:guiForm = $null
     $hook = { param($f)
@@ -15425,6 +15429,7 @@ if ($null -eq $res.env) {
     $res.error = $script:guiError
     $res.closed = $script:guiClosed
     $res.drDuring = $script:guiDrDuring
+    $res.prevError = $script:guiPrevError
     $res.disposed = ($null -ne $script:guiForm -and [bool]$script:guiForm.IsDisposed)
     $k2 = & $kids
     $res.newProcesses = @($k2 | Where-Object { $k1 -notcontains $_ }).Count
@@ -15442,6 +15447,7 @@ if ($null -eq $res.env) {
             $j = Get-Content -LiteralPath $out -Raw -Encoding UTF8 | ConvertFrom-Json
             if ($null -ne $j.env) { $script:caseSkipped = $true; $script:caseNote = "runner sem janela possivel ($($j.env)): NAO_TESTADO"; return }
             Assert-True ($null -eq $j.error -and [int]$j.code -eq 0) "janela P4a ${lang}: sem erro em nenhum passo, saida 0 ($($j.error); $($j.code))"
+            Assert-True ($null -eq $j.prevError) "janela P4a ${lang}: a fonte do preview nao falhou ($($j.prevError))"
             $snaps = @($j.snaps)
             Assert-Eq (@($snaps | ForEach-Object { $_.step }) -join ',') 'start,P,Return,Escape,D8,Escape,F5,P' "janela P4a ${lang}: todos os passos"
             # The expected screens, computed over the same inventory and preview in this process and language.

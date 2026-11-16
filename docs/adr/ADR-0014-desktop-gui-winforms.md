@@ -469,7 +469,9 @@ diagnose area. P4b is not implemented. What P4a implements, with the gate closed
     and the screen;
   * while it runs, the screen keys, the screen buttons and Refresh are disabled, and the window shows a fixed catalog
     text (`tui.computingPreview`, the TUI's own), with no percentage. The engine offers no progress callback, so the
-    limit of section 5 applies as declared: a single blocking call can delay repainting until it returns;
+    limit of section 5 applies as declared: a single blocking call can delay repainting until it returns. The
+    preview's runtime collection (a read-only diagnose pass, which starts no process) is bounded by its own deadline,
+    60 seconds by default;
   * a close request during the call is deferred: `FormClosing` cancels it and records it, and the window closes once
     the call ends. The close button stays enabled;
   * a failure shows only the exception type, never its message; nothing is changed, and the next opening of `P` or
