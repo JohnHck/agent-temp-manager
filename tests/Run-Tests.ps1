@@ -888,6 +888,9 @@ foreach ($k in @('__ua__', '__dnf__', '__io__')) {
     $mk = { param($Sid, $Name, $Root, $Temp, $Env) [void][IO.Directory]::CreateDirectory($Root); [pscustomobject]@{ Sid = $Sid; UserName = "TEST\$Name"; ProfilePath = $Root; Loaded = $true; Special = $false; Origin = 'Test'; EnvStatus = $Env; TempCandidates = @([pscustomobject]@{ TempPath = $Temp; Source = 'test' }); EnvValues = @{}; EnvKnown = ($Env -ceq 'OK'); Notes = @() } }
     $p2t = Join-Path $Fix 'inv\p2\AppData\Local\Temp'; [void][IO.Directory]::CreateDirectory((Join-Path $p2t 'claude'))
     $ps = @((& $mk 'S-1-5-21-1-2-3-9201' 'exa' (Join-Path $Fix 'inv\p1') (Join-Path $Fix 'inv\p1\__ua__\Temp') 'OK'), (& $mk 'S-1-5-21-1-2-3-9202' 'exb' (Join-Path $Fix 'inv\p2') $p2t 'OK'), (& $mk 'S-1-5-21-1-2-3-9203' 'exc' (Join-Path $Fix 'inv\p3') (Join-Path $Fix 'inv\p3\__ua__\Temp') 'NOT_LOADED'))
+    # F05-OWNER-ATTRIBUTION: the only base read here (exb's) is attributed to exb only as its owner: dubbed, no ACL read
+    # or changed (the other two bases are under a denied component, so no owner is read for them).
+    $script:AtmBaseOwnerSource = { param([string]$Path) 'S-1-5-21-1-2-3-9202' }
     $ia = @{ ProfilesOverride = $ps; ProcessesOverride = @([pscustomobject]@{ ProcessId = 1; Name = 'idle.exe'; ParentProcessId = 0; CommandLine = 'idle.exe'; CreationDate = (Get-Date).AddHours(-1) }); IdentityOverride = [pscustomobject]@{ Sid = 'S-1-5-21-1-2-3-9202'; Name = 'TEST\exb'; IsAdmin = $false }; NowUtc = [datetime]::UtcNow.AddDays(10); NoProgress = $true; ConfigDir = (Join-Path $Src 'config') }
     $res.inventory = & $hist @(1..5 | ForEach-Object {
         $i = Invoke-AtmInventory @ia
