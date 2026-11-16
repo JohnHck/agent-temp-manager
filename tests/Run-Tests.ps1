@@ -4483,7 +4483,7 @@ exit 0
         $br = [IO.File]::ReadAllText((Join-Path $root 'tools\Build-Release.ps1'))
         Assert-True ($br.Contains("@(`$isoTxt, 'AtmQuarantinePurgeEnabled')") -and $br.Contains("@(`$isoTxt, 'AtmIsolationEnabled')") -and $br.Contains("@(`$repTxt, 'AtmDiagnoseExportEnabled')")) 'build recusa o pacote sem as travas fechadas, a do expurgo inclusive'
         $e2e = [IO.File]::ReadAllText((Join-Path $testsDir 'e2e\Invoke-InstallE2E.ps1'))
-        Assert-True ($e2e.Contains("AtmQuarantinePurgeEnabled = 'lib\Engine.Isolate.ps1'") -and $e2e.Contains("Step 'shipped-purge-gate'") -and $e2e.Contains('six installed gates')) 'e2e confere as seis travas instaladas'
+        Assert-True ($e2e.Contains("AtmQuarantinePurgeEnabled = 'lib\Engine.Isolate.ps1'") -and $e2e.Contains("Step 'shipped-purge-gate'") -and $e2e.Contains('seven installed gates')) 'e2e confere as travas instaladas (seis ate a 0.3.x; sete desde a V0.2.1 P1, com a da GUI)'
         $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
         Assert-True ($cli.Contains("Get-AtmText 'cli.purge' `$(if (`$script:AtmQuarantinePurgeEnabled)") -and $cli.Contains('Get-AtmQuarantinePolicyLines -Policy (Get-AtmQuarantinePolicy')) 'version mostra a trava do expurgo e a politica efetiva'
         $iso = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Isolate.ps1'))
@@ -14402,7 +14402,8 @@ $res.afterGui = (& $wf)
             $pc = Join-Path $pl ('Gui-' + $k + '.ps1')
             $content = $(if ($k -eq 'using') { $plants[$k][0] + "`r`n" + $guiText } else { $guiText + "`r`n" + $plants[$k][0] + "`r`n" })
             [IO.File]::WriteAllText($pc, $content, (New-Object Text.UTF8Encoding $false))
-            $pv = @(& $guiCheck @($pc, $modelCopy))
+            # The checker returns its array whole (return , ...); @() here would nest it one level down.
+            $pv = & $guiCheck @($pc, $modelCopy)
             Assert-True (@($pv | Where-Object { $_.Contains($plants[$k][1]) }).Count -ge 1) "plantado ${k}: detectado ($($pv -join ' | '))"
         }
         Assert-Eq (@($gui | ForEach-Object { (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash }) -join ',') $hashBefore 'arquivos reais inalterados'

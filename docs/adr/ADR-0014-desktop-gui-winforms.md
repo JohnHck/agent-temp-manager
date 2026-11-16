@@ -343,4 +343,17 @@ What P1 implements, with the gate closed in every copy:
   * `Get-AtmIdentityState` is an identity collector. The TUI and report layering test keeps forbidding it there; the
     GUI may call it for the header, as `version` does.
   * `Get-AtmAutoPurgeNoticeLines` is left out of the list until GUI-D1 is decided.
-* GUI-D7 measurement: pending; the CI result is recorded below in a follow-up commit of the same branch.
+* GUI-D7 measurement. CI run 43821833767 (PR #101) measured each job in a new process of its own shell, started with
+  `-File` as the launcher starts it:
+
+  | Job | Edition and version | CLR | Apartment | Environment | System.Windows.Forms |
+  |---|---|---|---|---|---|
+  | test (powershell), x64 | Desktop 5.1 | 4.0.30319 | STA | OK | loads (4.0.0.0) |
+  | test ARM64 (powershell) | Desktop 5.1 | 4.0.30319 | STA | OK | loads (4.0.0.0) |
+  | test (pwsh), x64 | Core 7.6.9 | 10.0.14 | STA | OK | loads (10.0.0.0) |
+  | test ARM64 (pwsh, subset) | Core 7.6.10 | 10.0.15 | STA | OK | loads (10.0.0.0) |
+
+  On these runners `pwsh` runs STA and Windows Forms loads, so GUI-D7 (a) would open the window there. The real-window
+  case ran on both Windows PowerShell jobs, where the window opened and closed in en-US and pt-BR. That case stays
+  `NOT_TESTED` on `pwsh` in P1, as GUI-D7 sets out; whether to run it on `pwsh` is decided in a later phase. The
+  installed product always runs Windows PowerShell 5.1.
