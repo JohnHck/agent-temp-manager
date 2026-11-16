@@ -14445,11 +14445,16 @@ if ($null -eq $res.env) {
     $b1 = & $names $Sandbox; $b2 = & $names (Join-Path $Src 'config'); $b3 = & $names $temp -Top
     $k1 = & $kids
     $script:AtmGuiEnabled = $true
+    # An exception in an event handler ends the child with its message, instead of a modal error dialog that would hang
+    # it until the timeout.
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.Application]::SetUnhandledExceptionMode([System.Windows.Forms.UnhandledExceptionMode]::ThrowException)
     # The dubbed inventory source: audit N has 10*N files. Audit 2 receives an F5 while it runs (ignored, never queued);
     # audit 3 receives a close request between two progress callbacks (cancelled at the next one).
     $script:guiCalls = 0; $script:guiForm = $null; $script:guiKey = $null; $script:guiEnd3 = $false; $script:guiProgress = @()
     $mini = { param([int]$Files) [pscustomobject]@{ Profiles = @(); Partitions = @([pscustomobject]@{ Kind = 'Root'; Class = 'ORPHAN_SUSPECTED'; Bytes = [long]2097152; Files = $Files; Dirs = 2; AllocatedBytesEstimate = [long]2101248; ErrorCount = 0; MeasurementComplete = $true }); InaccessibleProfiles = @(); UnverifiedTempProfiles = @(); NotAuditedProfiles = @(); CoverageComplete = $true; StartedUtc = [datetime]::UtcNow; FinishedUtc = [datetime]::UtcNow } }
-    $f5 = { $script:guiKey.Invoke($script:guiForm, @((New-Object System.Windows.Forms.KeyEventArgs ([System.Windows.Forms.Keys]::F5)))) }
+    # The event argument is created with ::new, never New-Object: reflection receives the object itself, not a wrapper.
+    $f5 = { $ka = [System.Windows.Forms.KeyEventArgs]::new([System.Windows.Forms.Keys]::F5); $null = $script:guiKey.Invoke($script:guiForm, [object[]]@($ka)) }
     $script:AtmGuiInventorySource = {
         param($a)
         $script:guiCalls++
