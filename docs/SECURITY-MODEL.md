@@ -897,6 +897,15 @@ Integrity at install and at every run:
   manifest; only listed providers are loaded. `verify` reports every problem and loads nothing when one exists; it
   loads only the verified message catalog for its summary when every file matches (R-B5). An installation
   without its precompiled DLL refuses to compile at run time.
+* Limitation F-14 (unlisted files outside `providers`): a file in the installation that the manifest does not list is
+  never loaded (the launcher loads a fixed list of libraries and only the listed providers; an unlisted provider is
+  refused), and it does not make any command fail. Since F14-VERIFY-WARN, `verify` **warns** about it: after the
+  check above it walks the whole installation (hidden and system files included, reparse points never followed) and
+  prints a `WARN` line with the relative name of every unlisted file (only `manifest.json` and `install-state.json` at
+  the root are left out), of every reparse point and of every folder it cannot list. Warnings never change the exit
+  code (`0` with no problem, `5` with problems). An administrator's `config\quarantine.policy.json` created in the
+  installation is one of them until the next update records it in the manifest; until then an edit to it is not
+  detected. The other commands do not walk the installation.
 * The administrative scripts load the message catalog (`lib\I18n.ps1`, code) only after its SHA-256 matches the
   package's `src\manifest.json` or, for uninstall and rollback, the installed copy's manifest. A package without a
   manifest (a git checkout) is loaded unverified only with the explicit `-SourceWithoutManifest`; otherwise

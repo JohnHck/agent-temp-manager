@@ -135,6 +135,38 @@ function Test-AtmLauncherIntegrity {
     return $r
 }
 
+function Get-AtmLauncherUnlisted {
+    # F-14 (verify only; after the integrity check; loads nothing; never changes the exit code): every file of the
+    # installation the manifest does not list is a warning, except manifest.json and install-state.json at the root. A
+    # reparse point is a warning and is never followed; a folder that cannot be listed is a warning, with no exception
+    # text. -Force: hidden and system files are listed too. Relative names only, never an absolute path.
+    param([hashtable]$Listed)
+    $warn = New-Object System.Collections.Generic.List[string]
+    $stack = New-Object System.Collections.Generic.Stack[object]
+    $stack.Push(@($here, ''))
+    while ($stack.Count -gt 0) {
+        $cur = $stack.Pop()
+        $items = $null
+        try { $items = @(Get-ChildItem -LiteralPath $cur[0] -Force -ErrorAction Stop) } catch { $items = $null }
+        if ($null -eq $items) { $warn.Add("$(if ($cur[1]) { $cur[1] } else { '.' }) (folder cannot be listed / pasta que nao pode ser listada)"); continue }
+        foreach ($e in $items) {
+            $rel = $(if ($cur[1]) { $cur[1] + '\' + $e.Name } else { $e.Name })
+            if (($e.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $warn.Add("$rel (reparse point, not followed / ponto de reparse, nao seguido)"); continue }
+            if (($e.Attributes -band [IO.FileAttributes]::Directory) -ne 0) { $stack.Push(@($e.FullName, $rel)); continue }
+            $k = $rel.ToLowerInvariant()
+            if ($Listed.ContainsKey($k) -or $k -ceq 'manifest.json' -or $k -ceq 'install-state.json') { continue }
+            # An unlisted provider script is already a problem (FAIL) of the integrity check: not repeated as a warning.
+            if ($k -match '^providers\\[^\\]+\.ps1$') { continue }
+            # The administrator's quarantine policy created in the installation is listed only by the next update.
+            $hint = $(if ($k -ceq 'config\quarantine.policy.json') { '; policy file not in the manifest until the next update: running the installer again (-Update) records it / arquivo de politica fora do manifesto ate a proxima atualizacao: rodar o instalador de novo (-Update) passa a registra-lo' } else { '' })
+            $warn.Add("$rel (not in manifest / fora do manifesto$hint)")
+        }
+    }
+    $out = $warn.ToArray()
+    [Array]::Sort($out, [StringComparer]::OrdinalIgnoreCase)
+    return $out
+}
+
 try { $integrity = Test-AtmLauncherIntegrity }
 catch {
     # Unexpected failure of the check itself: an installation is refused (exit 5, no exception text); a source
@@ -148,15 +180,23 @@ catch {
 if ($Command -eq 'verify') {
     # Decided before anything is loaded; on failure nothing is loaded at all.
     if (-not $integrity.Installed) { Write-Host 'manifest.json missing (not running from an installation). / manifest.json ausente (execucao fora de uma instalacao).' -ForegroundColor Yellow; exit 4 }
+    # F-14: files the manifest does not list are warnings only (WARN, yellow), with OK and FAIL; a warning never turns
+    # exit 0 into 5. Only with a readable manifest (otherwise every file would be unlisted).
+    $warnings = @()
+    if ($integrity.Listed.Count -gt 0) {
+        try { $warnings = @(Get-AtmLauncherUnlisted -Listed $integrity.Listed) } catch { $warnings = @('. (installation not fully scanned / instalacao nao varrida por inteiro)') }
+    }
     foreach ($line in $integrity.Lines) { Write-Host ("  {0,-4} {1}" -f $line[0], $line[1]) -ForegroundColor $(if ($line[0] -eq 'OK') { 'Green' } else { 'Red' }) }
+    foreach ($w in $warnings) { Write-Host ("  {0,-4} {1}" -f 'WARN', $w) -ForegroundColor Yellow }
     if ($integrity.Problems.Count -gt 0) {
-        Write-Host ('Version {0}; {1} problem(s); nothing was loaded or run. / Versao {0}; {1} problema(s); nada foi carregado nem executado.' -f $integrity.Version, $integrity.Problems.Count) -ForegroundColor Red
+        Write-Host ('Version {0}; {1} problem(s); {2} warning(s); nothing was loaded or run. / Versao {0}; {1} problema(s); {2} aviso(s); nada foi carregado nem executado.' -f $integrity.Version, $integrity.Problems.Count, $warnings.Count) -ForegroundColor Red
         exit 5
     }
     # Every file matched its SHA-256: the message catalog is verified and only it is loaded, for the summary.
     . (Join-Path $here 'lib\I18n.ps1')
     Set-AtmLanguage -Requested $Lang
     Write-Host (Get-AtmText 'cli.verifySummary' $integrity.Version 0)
+    if ($warnings.Count -gt 0) { Write-Host (Get-AtmText 'cli.verifyWarnings' $warnings.Count) -ForegroundColor Yellow } else { Write-Host (Get-AtmText 'cli.verifyWarnings' 0) }
     exit 0
 }
 if ($integrity.Problems.Count -gt 0) {

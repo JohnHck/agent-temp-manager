@@ -34,7 +34,7 @@ pwsh       -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1       
 | TUI | headless navigation of every screen, ASCII fallback, 60x20 terminal, cleanup through the engine |
 | Layering | TUI/report contain no deletion APIs; audit engine neither prints nor deletes; single deletion call site |
 | Providers | contract validation, test-only second provider through the same engine and gates |
-| Installer | copy + manifest + verify, tamper detection, ACL audit, refusal without elevation, launcher exit codes |
+| Installer | copy + manifest + verify, tamper detection, ACL audit, refusal without elevation, launcher exit codes; `verify` warns (`WARN`, relative name, exit code unchanged) about unlisted files in `lib`, the root, `config`, a new folder, a hidden file, the policy outside the manifest (with its hint) and a reparse point, never followed (F14-VERIFY-WARN) |
 | Security review regressions | rename/junction swap of subdirectory, scope and base during deletion is impossible (with a no-pin control), pre-existing redirection refused, third-party write ACL on base blocks, `%WINDIR%\Temp` shared, unexpected `procStart` never means "ended", drill-down/output path validation, no command-line fragments in evidence |
 | Native assembly | installer-compiled DLL loads only with matching manifest hash (5.1 and 7); tampered DLL refused |
 | I18n | catalog parity and identical placeholders; every used key translated; language resolution and safe fallback; en-US audit/preview/plan/TUI with no pt-BR text; identical engine codes across languages; CLI `-Lang`/`ATM_LANG`; ASCII transliteration |
@@ -67,7 +67,8 @@ Manual rows: [docs/release/PRIVILEGE-MATRIX-RUNBOOK.md](release/PRIVILEGE-MATRIX
 job builds the release once; each `install e2e` job installs that same zip (SHA-256 checked) on Windows Server 2025,
 Windows Server 2022 or Windows 11 ARM64, with the installer under PowerShell 5.1 or 7, and checks: installed release
 gate, CLI from a new process with the machine PATH, clean of an old session root stops without deleting it, update,
-rollback, tamper detection (exit 5) and repair, a real standard user (created only in the VM) running audit, preview
+rollback, tamper detection (exit 5) and repair, an unlisted file in `lib\` shown by `verify` as `WARN` with exit 0
+and gone once moved out, a real standard user (created only in the VM) running audit, preview
 and verify without write access to the install directory, uninstall (directory and PATH entry removed). Evidence is
 uploaded as artifacts.
 

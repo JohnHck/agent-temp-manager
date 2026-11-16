@@ -635,6 +635,9 @@ The optional file `config\quarantine.policy.json` of the installation sets the p
   and every report show `AUTOMATIC PURGE ON`.
 * An update keeps the installed policy file as it is, like `projects.local.json`. A policy file edited after an update
   makes `verify` report the copy as modified, as an edited `projects.local.json` does.
+* A policy file created directly in the installation is not in the manifest until the next update, which records it
+  (running the installer again with `-Update`). Until then `verify` shows it as a `WARN` line with that hint, and still
+  exits `0`; an edit to it is not detected until it is recorded.
 
 ### Automatic purge (0.3.x phases P6a and P6b)
 
@@ -708,6 +711,30 @@ agent-temp quarantine unschedule-autopurge
 * **Uninstall** never removes a task, yours or another user's. If yours exists, it warns and says how to remove it; other
   users' tasks are only counted. Without the installation a task fails closed: its action, the entry point, no longer
   exists, so it does nothing. Run `unschedule-autopurge` before uninstalling, or remove the task in Task Scheduler.
+
+## Verify (installed copy)
+
+`agent-temp verify` checks every file the installation's `manifest.json` lists (SHA-256) before any product code is
+loaded, and prints one line per item: `OK`, or `FAIL` for a problem (exit code `5`, nothing loaded).
+
+It also walks the whole installation, hidden and system files included, and prints a yellow `WARN` line, with the
+relative name only, for:
+
+* a file the manifest does not list (`manifest.json` and `install-state.json` at the root are the only files left out);
+* a reparse point (junction, symbolic link), which is never followed;
+* a folder that cannot be listed (no exception text).
+
+The summary says how many warnings there were. **Warnings never change the exit code**: `0` with no problem, even with
+warnings; `5` with problems (and the warnings are shown too); `4` outside an installation. An unlisted file is never
+loaded: the launcher loads a fixed list of libraries and only the listed providers, and an unlisted provider is a
+problem (`FAIL`), not a warning. The other commands do not walk the installation. Example (synthetic):
+
+```text
+  OK   providers\ClaudeDesktop.ps1
+  WARN lib\notes.txt (not in manifest / fora do manifesto)
+Version x.y.z; 0 mismatching file(s).
+1 warning(s) (WARN: not covered by the manifest and never loaded; the exit code does not change).
+```
 
 ## Exit codes
 

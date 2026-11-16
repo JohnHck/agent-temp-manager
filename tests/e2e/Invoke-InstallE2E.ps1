@@ -519,6 +519,23 @@ Step 'installed-tamper-variants' {
     $r = Invoke-Agent 'verify' 'verify-after-variants'; Assert ($r.Code -eq 0) "restaurado: verify exit $($r.Code)"
     'provider missing, provider planted and manifest altered: each refused (exit 5); restored: verify 0'
 }
+Step 'installed-verify-unlisted-warning' {
+    # F14-VERIFY-WARN: on this run's own installation. Before: verify 0 with no warning (the installer leaves nothing
+    # outside the manifest but manifest.json and install-state.json). A file planted in lib\ is a WARN with its relative
+    # name and exit 0; it is then moved out of the installation, as the step above undoes its own, and verify is back to
+    # no warning.
+    $r = Invoke-Agent 'verify -Lang en-US' 'verify-unlisted-before'
+    Assert ($r.Code -eq 0 -and $r.Text -notmatch '(?m)^\s+WARN\s' -and $r.Text.Contains('0 warning(s)')) "instalacao real antes do plantio: verify exit $($r.Code), com aviso ou sem resumo"
+    $extra = Join-Path $installDir 'lib\F14Unlisted.txt'
+    [IO.File]::WriteAllText($extra, '# planted by e2e')
+    try {
+        $r = Invoke-Agent 'verify -Lang en-US' 'verify-unlisted-planted'
+        Assert ($r.Code -eq 0 -and $r.Text -match '(?m)^\s+WARN\s+lib\\F14Unlisted\.txt \(not in manifest' -and $r.Text.Contains('1 warning(s)') -and -not $r.Text.Contains($installDir)) "arquivo nao listado em lib: verify exit $($r.Code), sem a linha WARN"
+    } finally { [IO.File]::Move($extra, (Join-Path $OutDir 'F14Unlisted.txt.aside')) }
+    $r = Invoke-Agent 'verify -Lang en-US' 'verify-unlisted-after'
+    Assert ($r.Code -eq 0 -and $r.Text -notmatch '(?m)^\s+WARN\s' -and $r.Text.Contains('0 warning(s)')) "depois de tirar o arquivo: verify exit $($r.Code), ainda com aviso"
+    'installation with no warning; unlisted file in lib: WARN (relative name) with exit 0; moved out: verify 0, no warning'
+}
 Step 'installed-encoding' {
     # FINAL-B: every installed script with non-ASCII text keeps its UTF-8 BOM (Windows PowerShell 5.1 would read it in
     # the ANSI code page otherwise); the manifest check already proves the bytes equal the package's.

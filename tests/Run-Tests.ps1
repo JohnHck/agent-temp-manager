@@ -6550,6 +6550,93 @@ function global:Get-FileHash { param([string]$LiteralPath, [string]$Algorithm)
         }
         $script:caseNote = 'codigos de saida: ' + ($seen -join '; ')
     }
+    # F14-VERIFY-WARN (F-14 option a): verify lists every file the manifest does not list as WARN (relative name), with no
+    # change to the exit codes; manifest.json and install-state.json at the root are the only files left out.
+    $f14Verify = {
+        param([string]$Cmd, [string]$Arguments)
+        $r = Invoke-AtmTestChild -CommandLine ("`"$Cmd`" $Arguments") -TimeoutSec 180
+        if ($r.TimedOut) { throw "CHILD_TIMEOUT: $Arguments" }
+        [pscustomobject]@{ Exit = $r.Exit; Text = [string]$r.Text }
+    }
+    $f14Warn = { param([string]$Text, [string]$Rel) [regex]::IsMatch($Text, '(?m)^\s+WARN\s+' + [regex]::Escape($Rel) + ' \(') }
+    Test-Case 'Instalacao' 'F14-VERIFY-WARN: verify avisa (WARN, caminho relativo) sobre arquivo nao listado em lib, raiz, config, pasta nova e oculto, com a dica so na politica fora do manifesto; saida 0; manifest.json e install-state.json da raiz sem aviso; avisos e problema juntos dao 5; nenhum caminho absoluto; outros comandos inalterados; politica registrada sem aviso e editada da 5' {
+        $inst = Join-Path $sandbox 'PF-f14\AgentTempManager'
+        [void][IO.Directory]::CreateDirectory($inst)
+        Copy-AtmTree -From $srcDir -To $inst
+        New-AtmNativeAssembly -Root $inst
+        # Second copy (same files, no manifest yet) for the policy recorded by the manifest.
+        $inst2 = Join-Path $sandbox 'PF-f14b\AgentTempManager'
+        [void][IO.Directory]::CreateDirectory($inst2)
+        Copy-AtmTree -From $inst -To $inst2
+        Write-AtmManifest -Root $inst -Version (Get-AtmSourceVersion -SourceDir $srcDir)
+        [IO.File]::WriteAllText((Join-Path $inst 'install-state.json'), '{"product":"Agent Temp Manager"}')
+        $cmd = Join-Path $inst 'bin\agent-temp.cmd'
+        $r = & $f14Verify $cmd 'verify -Lang en-US'
+        Assert-True ($r.Exit -eq 0 -and $r.Text -notmatch '(?m)^\s+WARN\s' -and $r.Text.Contains('0 warning(s)')) "copia integra: saida 0, nenhum aviso ($($r.Text))"
+        # Unlisted files: lib, root, config, a new folder, a hidden file, install-state.json inside a subfolder and the
+        # administrator's policy created in the installation (not in the manifest until the next update).
+        $planted = @('lib\f14-extra.txt', 'f14-root.txt', 'config\f14-config.txt', 'f14-new\f14-new.txt', 'lib\f14-hidden.txt', 'lib\install-state.json', 'config\quarantine.policy.json')
+        [void][IO.Directory]::CreateDirectory((Join-Path $inst 'f14-new'))
+        foreach ($rel in $planted) { [IO.File]::WriteAllText((Join-Path $inst $rel), '{ "schema": "atm.quarantine-policy/1", "retentionDays": 30, "autoPurge": false }') }
+        [IO.File]::SetAttributes((Join-Path $inst 'lib\f14-hidden.txt'), [IO.FileAttributes]::Hidden)
+        $r = & $f14Verify $cmd 'verify -Lang en-US'
+        Assert-Eq $r.Exit 0 "avisos nao mudam a saida ($($r.Text))"
+        foreach ($rel in $planted) { Assert-True (& $f14Warn $r.Text $rel) "WARN com o caminho relativo: $rel" }
+        Assert-True (-not [regex]::IsMatch($r.Text, '(?m)^\s+WARN\s+(manifest\.json|install-state\.json) \(')) 'manifest.json e install-state.json da raiz sem aviso'
+        Assert-True ([regex]::IsMatch($r.Text, '(?m)^\s+WARN\s+config\\quarantine\.policy\.json \(not in manifest / fora do manifesto; policy file not in the manifest until the next update: running the installer again \(-Update\) records it / ')) 'politica fora do manifesto: WARN com a dica'
+        Assert-Eq ([regex]::Matches($r.Text, 'running the installer again').Count) 1 'a dica so na linha da politica'
+        Assert-True ($r.Text.Contains("$($planted.Count) warning(s)")) "resumo com o numero de avisos ($($r.Text))"
+        Assert-True (-not $r.Text.Contains($inst) -and -not $r.Text.Contains($sandbox)) 'nenhum caminho absoluto na saida'
+        $rp = & $f14Verify $cmd 'verify -Lang pt-BR'
+        Assert-True ($rp.Exit -eq 0 -and $rp.Text.Contains("$($planted.Count) aviso(s)")) "resumo em pt-BR ($($rp.Text))"
+        # The other commands are unchanged: no scan, exit 0 with unlisted files outside providers.
+        $o = & $f14Verify $cmd 'version'
+        Assert-True ($o.Exit -eq 0 -and $o.Text -notmatch '(?m)^\s+WARN\s') "version: saida 0, sem varredura ($($o.Exit))"
+        # Warnings and a problem together: exit 5, both shown.
+        $clean = Join-Path $inst 'lib\Engine.Clean.ps1'
+        $orig = [IO.File]::ReadAllBytes($clean)
+        try {
+            [IO.File]::AppendAllText($clean, '# f14')
+            $r = & $f14Verify $cmd 'verify -Lang en-US'
+            Assert-True ($r.Exit -eq 5 -and [regex]::IsMatch($r.Text, '(?m)^\s+FAIL\s+lib\\Engine\.Clean\.ps1') -and (& $f14Warn $r.Text 'lib\f14-extra.txt') -and $r.Text.Contains("1 problem(s); $($planted.Count) warning(s)")) "problema e avisos juntos: saida 5 ($($r.Text))"
+        } finally { [IO.File]::WriteAllBytes($clean, $orig) }
+        # An unlisted provider is still refused (a problem, not a warning).
+        $prov = Join-Path $inst 'providers\F14Extra.ps1'
+        [IO.File]::WriteAllText($prov, '# f14')
+        try {
+            $o = & $f14Verify $cmd 'version'
+            Assert-Eq $o.Exit 5 'provider nao listado recusado (version)'
+            $r = & $f14Verify $cmd 'verify -Lang en-US'
+            Assert-True ($r.Exit -eq 5 -and [regex]::IsMatch($r.Text, '(?m)^\s+FAIL\s+providers\\F14Extra\.ps1') -and -not (& $f14Warn $r.Text 'providers\F14Extra.ps1')) "provider nao listado: FAIL, nao WARN ($($r.Text))"
+        } finally { [IO.File]::Move($prov, (Join-Path $sandbox 'F14Extra.ps1.aside')) }
+        # The policy recorded by the manifest (as an update records it): no warning; edited afterwards: a problem (5).
+        $pol = Join-Path $inst2 'config\quarantine.policy.json'
+        [IO.File]::WriteAllText($pol, '{ "schema": "atm.quarantine-policy/1", "retentionDays": 30, "autoPurge": false }')
+        Write-AtmManifest -Root $inst2 -Version (Get-AtmSourceVersion -SourceDir $srcDir)
+        [IO.File]::WriteAllText((Join-Path $inst2 'install-state.json'), '{"product":"Agent Temp Manager"}')
+        $cmd2 = Join-Path $inst2 'bin\agent-temp.cmd'
+        $r = & $f14Verify $cmd2 'verify -Lang en-US'
+        Assert-True ($r.Exit -eq 0 -and $r.Text -notmatch '(?m)^\s+WARN\s' -and $r.Text.Contains('0 warning(s)')) "politica registrada no manifesto: sem aviso ($($r.Text))"
+        [IO.File]::AppendAllText($pol, ' ')
+        $r = & $f14Verify $cmd2 'verify -Lang en-US'
+        Assert-True ($r.Exit -eq 5 -and [regex]::IsMatch($r.Text, '(?m)^\s+FAIL\s+config\\quarantine\.policy\.json') -and -not (& $f14Warn $r.Text 'config\quarantine.policy.json')) "politica registrada e editada: problema, saida 5 ($($r.Text))"
+    }
+    Test-Case 'Instalacao' 'F14-VERIFY-WARN: ponto de reparse dentro da instalacao vira WARN com o nome relativo e a varredura nao desce por ele; saida 0' {
+        $inst = Join-Path $sandbox 'PF-f14r\AgentTempManager'
+        [void][IO.Directory]::CreateDirectory($inst)
+        Copy-AtmTree -From $srcDir -To $inst
+        New-AtmNativeAssembly -Root $inst
+        Write-AtmManifest -Root $inst -Version (Get-AtmSourceVersion -SourceDir $srcDir)
+        $target = Join-Path $sandbox 'f14-reparse-target'
+        [void][IO.Directory]::CreateDirectory($target)
+        [IO.File]::WriteAllText((Join-Path $target 'f14-inner.txt'), 'x')
+        try { New-Junction -Link (Join-Path $inst 'lib\f14-junction') -Target $target } catch { $script:caseSkipped = $true; $script:caseNote = 'junction nao pode ser criada neste ambiente (mklink /J recusado)'; return }
+        $r = & $f14Verify (Join-Path $inst 'bin\agent-temp.cmd') 'verify -Lang en-US'
+        Assert-Eq $r.Exit 0 "ponto de reparse: aviso, nao problema ($($r.Text))"
+        Assert-True ([regex]::IsMatch($r.Text, '(?m)^\s+WARN\s+lib\\f14-junction \(reparse point, not followed / ponto de reparse, nao seguido\)')) 'WARN com o nome relativo do ponto de reparse'
+        Assert-True (-not $r.Text.Contains('f14-inner.txt') -and $r.Text.Contains('1 warning(s)')) 'varredura nao desce pelo ponto de reparse'
+        Assert-True (-not $r.Text.Contains($inst) -and -not $r.Text.Contains($target)) 'nenhum caminho absoluto na saida'
+    }
     Test-Case 'Executor' 'FINAL-B-S: processos de teste dentro de Job Object - saida normal e extensa (truncamento declarado), prazo, descendente que segura o pipe ou excede o prazo encerrado so como membro do job; sentinela externa criada pelo harness intacta; falhas do executor com codigo seguro; nenhum PID usado para encerrar' {
         $ps51 = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
         $dir = Join-Path $sandbox 'executor'; [void][IO.Directory]::CreateDirectory($dir)
