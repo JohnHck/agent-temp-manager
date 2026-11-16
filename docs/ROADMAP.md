@@ -159,6 +159,11 @@ writes anything (no fetch, no prune, no index refresh that changes files).
 
 **Status: not started.** It lands on `main` under the order rule above: dark, with its acceptance proven in CI.
 
+**Design:** [ADR-0014](adr/ADR-0014-desktop-gui-winforms.md). The technology is decided: WinForms on Windows
+PowerShell 5.1 / .NET Framework (maintainer decision D-B, 2026-11-16). The GUI ships behind a release gate of its own,
+closed in every copy (D-A); that gate covers the presentation, not anything the engines decide. The record lists the
+architecture, the phases and its open decisions (GUI-D1...).
+
 **Objectives.** Offer the V0.1 audit and preview and the V0.2 diagnostics in a native Windows desktop window, for
 users who do not work in a terminal, and refresh them live while the window is open. V0.2.1 is a new presentation
 layer only: it adds no decision, no gate and no system change.

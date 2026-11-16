@@ -23,6 +23,7 @@ record lists its own open decisions, with an id prefix of its own (`ISO-D1`...).
 | [ADR-0011](ADR-0011-file-based-worktree-diagnostics.md) | File-based worktree diagnostics without Git (file gate and Git gate) | PROPOSED (architecture approved in principle; nothing activated) | P3 |
 | [ADR-0012](ADR-0012-service-account-privacy.md) | Service account privacy (replaces ADR-0005 rule 6) | ACCEPTED (maintainer decision, PR #42 gate) | P2 |
 | [ADR-0013](ADR-0013-isolation-quarantine-recovery-mode.md) | Isolation, quarantine and Recovery Mode | PARTIALLY ACCEPTED (maintainer decisions ISO-D1, ISO-D4, ISO-D5 on 2026-11-01; ISO-D2, ISO-D3, ISO-D6 PROPOSED; nothing implemented) | 0.3.x (own profile), V0.4 (Recovery Mode) |
+| [ADR-0014](ADR-0014-desktop-gui-winforms.md) | Desktop GUI and live monitoring in WinForms | ACCEPTED for the technology and the architecture (maintainer decisions D-B and D-A, 2026-11-16); GUI-D1 to GUI-D11 PROPOSED; nothing implemented | V0.2.1 (P1 to P6) |
 
 ## Template
 
