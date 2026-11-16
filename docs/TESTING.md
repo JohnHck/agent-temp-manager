@@ -405,9 +405,9 @@ The quarantine is a folder of the sandbox (the `AtmIsolationQuarantineRoot` seam
     action, run as registered once the installation is gone, exits non-zero with nothing created (fail closed); the
     harness then removes it.
 
-## Desktop GUI in the suite (V0.2.1 phases P1 to P3)
+## Desktop GUI in the suite (V0.2.1 phases P1 to P4a)
 
-The suite areas `GUI P1`, `GUI P2` and `GUI P3` cover `agent-temp gui` ([ADR-0014](adr/ADR-0014-desktop-gui-winforms.md)). None
+The suite areas `GUI P1`, `GUI P2`, `GUI P3` and `GUI P4a` cover `agent-temp gui` ([ADR-0014](adr/ADR-0014-desktop-gui-winforms.md)). None
 of their cases opens a window in a shipped copy: the gate stays closed in every file, and the cases that go past it open
 it only in their own process memory.
 
@@ -450,9 +450,22 @@ is tested.
 | Static (P3) | the closed list has exactly the four new names; a planted call to the CLI path drill-down is detected; no timer, no editable text field, no closure; the controls are only labels, lists and buttons; each screen has a button with an accessible name from the catalog; the new keys exist in both languages |
 | Real window (P3) | Windows PowerShell only, in a job-object process with a timeout, with the inventory dubbed. The walk dashboard, `2`, `Enter`, `Enter`, `Esc` three times, `9`, `Esc`, the projects button, `Esc`, and `Esc` on the dashboard, which closes the window. Each step checks the screen title, a known line of the screen, the identity and the state. Runs in en-US and pt-BR; no child process and no new file is left behind. `NAO_TESTADO` on PowerShell 7 and when no window can be shown |
 
+`GUI P4a`, the preview of the cleanup (keys `P` and `8`). Over the P3 inventories, the preview is dubbed with rows of
+the four categories (`BLOCKED`, `INVESTIGATE`, `ELIGIBLE`, `ELIGIBLE_WITH_DECLARED_RISK`); two roots of the same size are
+both `BLOCKED`, so that the order of ties is tested. P3's navigation case now expects `8` to open the blocked paths.
+
+| Case | What it checks |
+|---|---|
+| Parity with the TUI | no window, en-US and pt-BR, the complete, partial, denied and multi inventories: the rows of `P` and `8` equal the TUI's `gates` rows for the same preview, cell by cell, in the same order (category, then bytes descending); the titles, the columns and the notice; the short label of `ELIGIBLE_WITH_DECLARED_RISK`; `Enter` on every row of `P` opens a detail equal to the TUI's detail lines with one `Preview` line; a detail opened from the roots screen has no `Preview` line and no notice. The case note carries the table: inventory, screen, TUI lines, view-model lines, equal |
+| When the preview runs | before the first audit `P` and `8` make no call; the first audit makes none either; the first `P` calls once, then `8`, `Enter` and `Esc` use the kept result; the call gets the session's inventory and the launcher's arguments; the fixed text is set before the call; requests during an audit or a preview are ignored; a new audit discards the result and goes back to the dashboard with the catalog text; a failed audit keeps it; a failed preview shows only the exception type, never its message, and the next opening calls again; the call counts are checked at each step; an inventory and a preview read back from a CLIXML export give the same screens |
+| Static (P4a) | the closed list still has 21 names; `Invoke-AtmPreview` appears once in the GUI files, inside `Invoke-AtmGuiPreview`; the preview seam is a single `$null` assignment; no timer, no editable text field, no closure, no cancel button; a planted call to `Test-AtmCandidate`, an engine helper outside the list, is detected; the keys are `1` to `9` and `P`; the form handles `P` in its key handler, defers a close during the preview and shows the notice; the new keys exist in both languages |
+| Real window (P4a) | Windows PowerShell only, in a job-object process with a timeout, with the inventory and the preview dubbed. The walk dashboard, `P`, `Enter` (the detail with the `Preview` line), `Esc`, `8`, `Esc`, `F5`, `P` (the preview is called again). The second preview call asks the window to close: the window stays open until the call ends, then closes. Each step checks the screen title, the visible rows, the notice line, the `Preview` line and the audit and preview call counts. Runs in en-US and pt-BR; no child process and no new file is left behind. `NAO_TESTADO` on PowerShell 7 and when no window can be shown |
+
 The read-only case (sandbox identical in names, sizes, times and attributes) also runs a GUI session, with no window,
 that audits the sandbox three times through the real engine and walks the new screens between the audits: users, a
 user's roots and a detail; projects, a project's roots and a detail; coverage and errors, then roots and a detail.
+Since P4a it also opens `P`, `8` and `P` again with the real preview engine (one call, then the kept result), opens the
+detail of a preview row, and checks the sandbox is still identical.
 
 The install e2e adds the step `shipped-gui-gate`: the installed `lib\Gui.ps1` has the single `$false` assignment, both
 GUI files are in the manifest, `version` shows the gate disabled, and `agent-temp gui` exits with code 7 in en-US and

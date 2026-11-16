@@ -3049,6 +3049,8 @@ exit 0
         try {
             $script:AtmGuiInventorySource = { param($a) $m = @{} + $script:guiRoArgs; $m['ProgressCallback'] = $a['ProgressCallback']; $m['NoProgress'] = $false; Invoke-AtmInventory @m }
             $gs = Initialize-AtmGuiSession -ConfigDir $cfgDir
+            # V0.2.1 P4a: the session's inventory arguments are the dubbed profile's, as the preview receives them.
+            $gs.InventoryArgs = @{} + $script:guiRoArgs
             # V0.2.1 P3: between the audits the session moves through the new screens (users, projects, roots, the detail,
             # coverage and errors), each computed again over the new result.
             $walks = @(@('D2', 'Return', 'Return', 'Escape'), @('D3', 'Return', 'Return'), @('D9', 'Escape', 'D4', 'Return'))
@@ -3063,6 +3065,23 @@ exit 0
                 }
             }
             Assert-Eq (Get-AtmGuiNavTop -Nav $gs.Nav).Name 'detail' 'sessao da GUI: termina no detalhe de uma raiz'
+            # V0.2.1 P4a: P, 8 and P again with the real preview (the engine's, not dubbed) over the same sandbox: one call
+            # for the last audit, then the kept rows; Enter on a row of P opens its detail with the Preview line.
+            Assert-True ($null -eq $script:AtmGuiPreviewSource) 'sessao da GUI: o preview e o do motor (sem costura)'
+            $prs = New-Object System.Collections.Generic.List[string]
+            foreach ($k in @('P', 'D8', 'P')) {
+                Assert-Eq (Invoke-AtmGuiNavKey -Nav $gs.Nav -Inventory $gs.Inventory -Key $k -Busy $false -Preview $gs.Preview) 'RENDER' "sessao da GUI: tecla $k"
+                $prs.Add((Invoke-AtmGuiPreview -Session $gs))
+                $null = Get-AtmGuiScreen -Inventory $gs.Inventory -Screen (Get-AtmGuiNavTop -Nav $gs.Nav) -Preview $gs.Preview
+            }
+            Assert-True (($prs.ToArray() -join ',') -ceq 'OK,CACHED,CACHED' -and $gs.PreviewCalls -eq 1 -and $null -eq $gs.PreviewFailureType) "sessao da GUI: um preview, depois o guardado ($($prs.ToArray() -join ','); $($gs.PreviewFailureType))"
+            $pvm = Get-AtmGuiScreen -Inventory $gs.Inventory -Screen (Get-AtmGuiNavTop -Nav $gs.Nav) -Preview $gs.Preview
+            Assert-Eq @($pvm.Rows).Count @($gs.Preview).Count 'sessao da GUI: P mostra uma linha por linha do preview'
+            if (@($pvm.Items).Count -gt 0) {
+                Assert-Eq (Invoke-AtmGuiNavKey -Nav $gs.Nav -Inventory $gs.Inventory -Key 'Return' -Busy $false -Preview $gs.Preview) 'RENDER' 'sessao da GUI: Enter numa linha do preview'
+                $dvm = Get-AtmGuiScreen -Inventory $gs.Inventory -Screen (Get-AtmGuiNavTop -Nav $gs.Nav) -Preview $gs.Preview
+                Assert-True (@($dvm.Pairs | Where-Object { $_.Label -ceq 'Preview' }).Count -eq 1) 'sessao da GUI: o detalhe do preview tem a linha Preview'
+            }
             Assert-Eq $gs.SourceCalls 3 'sessao da GUI: tres auditorias, nenhuma a mais'
         } finally { $script:AtmGuiInventorySource = $savedGuiSource }
         $after = Get-TreeListing $p.ProfilePath
@@ -14428,6 +14447,8 @@ $res.afterGui = (& $wf)
             'report-quarantine'  = @('function Test-AtmPlanted { Show-AtmQuarantineList -List $null }', 'comando fora da lista fechada: Show-AtmQuarantineList')
             # P3: the CLI's path drill-down, which measures children with the native scanner (outside this phase).
             'path-detail'        = @('function Test-AtmPlanted { Show-AtmPathDetail -Path $null }', 'comando fora da lista fechada: Show-AtmPathDetail')
+            # P4a: the clean engine's gate of one candidate (the GUI shows only the preview's rows, never its own gates).
+            'candidate'          = @('function Test-AtmPlanted { Test-AtmCandidate -Partition $null -Inventory $null }', 'comando fora da lista fechada: Test-AtmCandidate')
         }
         foreach ($k in $plants.Keys) {
             $pc = Join-Path $pl ('Gui-' + $k + '.ps1')
@@ -14890,7 +14911,9 @@ Write-Output ('GUI-D7 edition={0} ps={1} clr={2} apartment={3} environment={4} w
                     Assert-Eq (& $key $k) 'RENDER' "${lang}: tecla $k"
                     Assert-True ((& $top).Title -ceq $want[$k] -and $nav.Stack.Count -eq 2) "${lang}: tecla $k abre '$($want[$k])' sobre o dashboard ($((& $top).Title))"
                 }
-                Assert-Eq (& $key 'D8') 'NONE' "${lang}: 8 (bloqueados, preview) nao e tela da GUI nesta fase"
+                # P4a: 8 opens the blocked paths of the preview (its rows: the GUI P4a cases); a key with no screen does nothing.
+                Assert-True ((& $key 'D8') -ceq 'RENDER' -and (& $top).Name -ceq 'gates' -and (& $top).Title -ceq (Get-AtmText 'menu.blockedTitle')) "${lang}: 8 abre os bloqueados (P4a)"
+                Assert-Eq (& $key 'X') 'NONE' "${lang}: tecla sem tela nao faz nada"
                 Assert-True ((& $key 'D1') -ceq 'RENDER' -and $nav.Stack.Count -eq 1) "${lang}: 1 volta ao dashboard"
                 Assert-Eq (& $key 'Return') 'NONE' "${lang}: Enter no dashboard nao faz nada"
                 # The round's walk: 2, Enter on the first user, Enter on the first root, Esc three times, 9, Esc.
@@ -14993,7 +15016,8 @@ Write-Output ('GUI-D7 edition={0} ps={1} clr={2} apartment={3} environment={4} w
         Assert-True ($guiAllowedEngine.Count -eq 21 -and @($p3 | Where-Object { $guiAllowedEngine -ccontains $_ }).Count -eq 4) "lista: os 4 nomes da P3, nenhum outro ($($guiAllowedEngine -join ','))"
         $gt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1')); $mt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\GuiModel.ps1'))
         foreach ($pair in @(@('Gui.ps1', $gt), @('GuiModel.ps1', $mt))) {
-            foreach ($w in @('Timer', 'TextBox', 'GetNewClosure', 'CancelButton', 'tui.isoHint', 'tui.moreDetail', 'Show-AtmPathDetail', 'Invoke-AtmPreview -')) { Assert-True ($pair[1].IndexOf($w, [StringComparison]::OrdinalIgnoreCase) -lt 0) "$($pair[0]) contem '$w'" }
+            # The preview call is P4a's (its static case checks that it is the only one).
+            foreach ($w in @('Timer', 'TextBox', 'GetNewClosure', 'CancelButton', 'tui.isoHint', 'tui.moreDetail', 'Show-AtmPathDetail')) { Assert-True ($pair[1].IndexOf($w, [StringComparison]::OrdinalIgnoreCase) -lt 0) "$($pair[0]) contem '$w'" }
         }
         # The planted call to the CLI's path drill-down, in a copy (the real files never change).
         $pl = Join-Path $sandbox 'gui-planted-p3'
@@ -15005,7 +15029,9 @@ Write-Output ('GUI-D7 edition={0} ps={1} clr={2} apartment={3} environment={4} w
         $pv = & $guiCheck @($gc, $mc)
         Assert-True (@($pv | Where-Object { $_.Contains('comando fora da lista fechada: Show-AtmPathDetail') }).Count -ge 1) "plantado Show-AtmPathDetail: recusado ($($pv -join ' | '))"
         Assert-Eq ((& $guiCheck @((Join-Path $srcDir 'lib\Gui.ps1'), (Join-Path $srcDir 'lib\GuiModel.ps1'))) -join ' | ') '' 'arquivos reais dentro da lista fechada'
-        Assert-Eq (@(Get-AtmGuiNavItemList | ForEach-Object { $_.Key }) -join ',') '1,2,3,4,5,6,7,9' 'telas da GUI: as teclas 1 a 7 e 9 da TUI'
+        # The P3 screens stay; P4a adds 8 and P (its static case checks the whole list).
+        $navKeys = @(Get-AtmGuiNavItemList | ForEach-Object { $_.Key })
+        Assert-True (@(@('1', '2', '3', '4', '5', '6', '7', '9') | Where-Object { $navKeys -ccontains $_ }).Count -eq 8) "telas da GUI: as teclas 1 a 7 e 9 da TUI ($($navKeys -join ','))"
         foreach ($w in @("AccessibleName = Get-AtmText 'gui.screensName'", "AccessibleName = Get-AtmText 'gui.messageName'", "-Name 'Rows' -AccessibleName (Get-AtmText 'gui.rowsName'", "`$rows.AccessibleName = Get-AtmText 'gui.rowsName'", "`$b.AccessibleName = (`$b.Text -replace '&', '')")) { Assert-True ($gt.Contains($w)) "nome acessivel do catalogo: $w" }
         foreach ($lang in @('en-US', 'pt-BR')) {
             $cat = $script:AtmMessages[$lang]
@@ -15127,6 +15153,338 @@ if ($null -eq $res.env) {
             Assert-True ([int]$j.newProcesses -eq 0 -and [int]$j.newSandbox -eq 0 -and [int]$j.newConfig -eq 0 -and [int]$j.newTemp -eq 0) "janela P3 ${lang}: nada deixado (processos $($j.newProcesses), sandbox $($j.newSandbox), configuracao $($j.newConfig), TEMP $($j.newTemp))"
         }
         Assert-True (-not ([IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1'))).Contains('Timer')) 'P3: nenhum timer criado'
+    }
+
+    # ------------------------------------------------------------------ V0.2.1 P4a: the preview in the GUI (ADR-0014)
+    # Dubbed preview rows over an inventory, in the shape of the clean engine's rows (Partition, Gate with Category,
+    # Reasons and Requirements, Runtime). Roots of equal size are BLOCKED (a tie in the TUI's order); the others take the
+    # four categories in turn. Fixed reasons; every second row has no requirement.
+    $guiP4Preview = { param($Inv)
+        $cats = @('ELIGIBLE', 'INVESTIGATE', 'ELIGIBLE_WITH_DECLARED_RISK', 'BLOCKED')
+        $parts = @($Inv.Partitions | Where-Object { $_.Kind -ne 'NotScanned' })
+        $k = 0; $n = 0
+        foreach ($p in $parts) {
+            $n++
+            $same = (@($parts | Where-Object { $_.Bytes -eq $p.Bytes }).Count -gt 1)
+            if ($same) { $cat = 'BLOCKED' } else { $cat = $cats[$k % 4]; $k++ }
+            $req = @()
+            if ($n % 2 -eq 1) { $req = @("REQ-$n-A", "REQ-$n-B") }
+            [pscustomobject]@{ Partition = $p; Gate = [pscustomobject]@{ Category = $cat; Reasons = @("REASON-$cat-$n"); Requirements = $req }; Runtime = $null }
+        }
+    }
+    # The navigation after a key, with the session's preview, and Enter on row $Sel when $Sel is not negative.
+    $guiP4Open = { param($Inv, $Pv, [string]$Key, [int]$Sel)
+        $n = Initialize-AtmGuiNav
+        $r = Invoke-AtmGuiNavKey -Nav $n -Inventory $Inv -Key $Key -Busy $false -Preview $Pv
+        if ($Sel -ge 0) { (Get-AtmGuiNavTop -Nav $n).Sel = $Sel; $r = Invoke-AtmGuiNavKey -Nav $n -Inventory $Inv -Key 'Return' -Busy $false -Preview $Pv }
+        return [pscustomobject]@{ Result = $r; Top = (Get-AtmGuiNavTop -Nav $n) } }
+    Test-Case 'GUI P4a' 'Paridade com a TUI (sem janela), em en-US e pt-BR, sobre os inventarios da P3 com o preview dublado: P (todas as categorias) e 8 (BLOCKED) com os valores, as colunas e a ordem da tela gates da TUI, as quatro categorias (ELIGIBLE_WITH_DECLARED_RISK com o rotulo curto) e um empate; Enter numa linha do preview abre o detalhe com a mesma linha Preview da TUI; o detalhe aberto pelas outras telas continua sem ela; o aviso fixo nas telas do preview' {
+        $fx = & $guiP2Fixtures
+        $fx.Remove('unknown')
+        $fx['multi'] = & $guiP3Multi
+        $mpv = @(& $guiP4Preview $fx.multi)
+        Assert-Eq (@($mpv | ForEach-Object { [string]$_.Gate.Category } | Sort-Object -Unique) -join ',') 'BLOCKED,ELIGIBLE,ELIGIBLE_WITH_DECLARED_RISK,INVESTIGATE' 'multi: as quatro categorias no preview dublado'
+        Assert-True (@($mpv | Where-Object { $_.Gate.Category -ceq 'BLOCKED' } | Group-Object { $_.Partition.Bytes } | Where-Object { $_.Count -ge 2 }).Count -ge 1) 'multi: duas raizes BLOCKED do mesmo tamanho (empate na ordem)'
+        $note = New-Object System.Collections.Generic.List[string]
+        $old = Get-AtmLanguage
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                foreach ($k in @($fx.Keys)) {
+                    $inv = $fx[$k]
+                    $pv = @(& $guiP4Preview $inv)
+                    $cells = New-Object System.Collections.Generic.List[string]
+                    $tuiP = $null
+                    foreach ($scr in @(@('P', $null, 'Preview'), @('D8', 'BLOCKED', (Get-AtmText 'menu.blockedTitle')))) {
+                        $tui = Get-AtmTuiScreenRows -State @{ Inventory = $inv; Preview = $pv } -Screen @{ Name = 'gates'; Filter = @{ Category = $scr[1] } }
+                        if ($scr[0] -ceq 'P') { $tuiP = $tui }
+                        $o = & $guiP4Open $inv $pv $scr[0] -1
+                        $vm = Get-AtmGuiScreen -Inventory $inv -Screen $o.Top -Preview $pv
+                        Assert-True ($o.Result -ceq 'RENDER' -and $o.Top.Name -ceq 'gates' -and $o.Top.Title -ceq $scr[2] -and $vm.Notice -ceq (Get-AtmText 'gui.previewNotice')) "${lang} ${k} $($scr[0]): tela '$($o.Top.Title)' com o aviso fixo"
+                        Assert-Eq (@($vm.Columns) -join '|') (@($tui.Columns | ForEach-Object { $_.Name }) -join '|') "${lang} ${k} $($scr[0]): colunas da TUI"
+                        Assert-Eq (& $guiP3Join $vm.Rows) (& $guiP3Join $tui.Rows) "${lang} ${k} $($scr[0]): linhas do view model = linhas da TUI"
+                        if ($scr[1]) { Assert-True (@($vm.Items | Where-Object { $_.Gate.Category -cne 'BLOCKED' }).Count -eq 0) "${lang} ${k} 8: so BLOCKED" }
+                        $cells.Add(('{0} {1}={2} sim' -f $(if ($scr[0] -ceq 'P') { 'P' } else { '8' }), @($tui.Rows).Count, @($vm.Rows).Count))
+                    }
+                    if ($k -ceq 'multi') {
+                        $pm = (Get-AtmGuiScreen -Inventory $inv -Screen @{ Name = 'gates'; Title = 'Preview'; Filter = @{ Category = $null } } -Preview $pv).Rows
+                        Assert-True (@($pm | Where-Object { $_[0] -ceq (Get-AtmText 'tui.catDeclaredRisk') }).Count -eq 1 -and @($pm | Where-Object { $_[0] -ceq 'ELIGIBLE_WITH_DECLARED_RISK' }).Count -eq 0) "${lang} multi: ELIGIBLE_WITH_DECLARED_RISK com o rotulo curto da TUI"
+                    }
+                    # The detail of every row of P: the same lines as the TUI's detail opened from its preview, Preview line included.
+                    $lines = 0
+                    for ($i = 0; $i -lt @($tuiP.Items).Count; $i++) {
+                        $ti = $tuiP.Items[$i]
+                        $o = & $guiP4Open $inv $pv 'P' $i
+                        Assert-True ($o.Result -ceq 'RENDER' -and $o.Top.Name -ceq 'detail' -and $o.Top.Title -ceq (Get-AtmText 'tui.detailOf' $ti.Partition.Name) -and $o.Top.Filter.Path -ceq $ti.Partition.Path) "${lang} ${k}: Enter na linha $i do preview"
+                        $t = @(& $guiP3TuiText $inv @{ Name = 'detail'; Filter = @{ Partition = $ti.Partition; Gate = $ti.Gate } })
+                        $tt = @($t[0..($t.Count - 4)])
+                        Assert-Eq @($tt | Where-Object { $_.StartsWith('Preview ') }).Count 1 "${lang} ${k}: a TUI escreve a linha Preview no detalhe $i"
+                        $vd = Get-AtmGuiScreen -Inventory $inv -Screen $o.Top -Preview $pv
+                        Assert-Eq (@(& $guiP3DetailText $vd) -join "`n") ($tt -join "`n") "${lang} ${k}: detalhe da linha $i do preview"
+                        Assert-Eq $vd.Notice (Get-AtmText 'gui.previewNotice') "${lang} ${k}: aviso fixo no detalhe do preview"
+                        $lines += $tt.Count
+                    }
+                    $cells.Add(('detalhe ({0} raizes) {1}={1} sim' -f @($tuiP.Items).Count, $lines))
+                    # The detail opened from the roots screen: no Preview line, no notice.
+                    if (@($tuiP.Items).Count -gt 0) {
+                        $o = & $guiP4Open $inv $pv 'D4' 0
+                        $vd = Get-AtmGuiScreen -Inventory $inv -Screen $o.Top -Preview $pv
+                        Assert-True (@($vd.Pairs | Where-Object { $_.Label -ceq 'Preview' }).Count -eq 0 -and $null -eq $vd.Notice) "${lang} ${k}: detalhe aberto pelas raizes sem a linha Preview"
+                    }
+                    if ($lang -ceq 'en-US') { $note.Add(('{0}: {1}' -f $k, ($cells -join '; '))) }
+                }
+            }
+        } finally { Set-AtmLanguage -Requested $old }
+        $script:caseNote = $note -join ' | '
+    }
+    Test-Case 'GUI P4a' 'Quando o preview roda (sem janela): antes do primeiro audit nenhuma chamada; P, 8 e P chamam o preview uma vez, com o inventario e os argumentos da sessao; um audit descarta o resultado e volta ao dashboard com o texto do catalogo, e a proxima abertura chama de novo; uma falha mostra so o tipo da excecao e a proxima abertura tenta de novo; um audit que falha guarda o preview; nada roda durante um audit nem durante o preview; o preview reimportado por CLIXML da as mesmas telas' {
+        $inv = & $guiP3Multi
+        $script:guiP4Inv = $inv
+        $script:guiP4Rows = @(& $guiP4Preview $inv)
+        $script:guiP4Calls = 0; $script:guiP4Starts = 0; $script:guiP4Fail = $false; $script:guiP4InvFail = $false; $script:guiP4Args = $null; $script:guiP4Seen = $null
+        $savedInv = $script:AtmGuiInventorySource; $savedPrev = $script:AtmGuiPreviewSource
+        $old = Get-AtmLanguage
+        try {
+            Set-AtmLanguage -Requested 'en-US'
+            $script:AtmGuiInventorySource = { param($a) $null = $a; if ($script:guiP4InvFail) { throw (New-Object System.IO.IOException 'SENTINEL-AUDIT-TEXT') }; $script:guiP4Inv }
+            $script:AtmGuiPreviewSource = { param($i, $a) $script:guiP4Calls++; $script:guiP4Seen = $i; $script:guiP4Args = $a; if ($script:guiP4Fail) { throw (New-Object System.IO.IOException 'SENTINEL-PREVIEW-TEXT') }; $script:guiP4Rows }
+            $s = Initialize-AtmGuiSession -ConfigDir $cfgDir
+            # As the form does: the key, then the preview when the screen is one of P or 8.
+            $open = { param([string]$K)
+                $r = Invoke-AtmGuiNavKey -Nav $s.Nav -Inventory $s.Inventory -Key $K -Busy ([bool]$s.Busy -or [bool]$s.PreviewBusy) -Preview $s.Preview
+                $p = '-'
+                if ($r -ceq 'RENDER' -and (Get-AtmGuiNavTop -Nav $s.Nav).Name -ceq 'gates') { $p = Invoke-AtmGuiPreview -Session $s -OnStart { $script:guiP4Starts++ } }
+                return $p }
+            $screen = { Get-AtmGuiScreen -Inventory $s.Inventory -Screen (Get-AtmGuiNavTop -Nav $s.Nav) -Preview $s.Preview -PreviewFailure $s.PreviewFailureType }
+            $audit = { $had = ($null -ne $s.Preview -or [bool]$s.PreviewFailureType); $r = Invoke-AtmGuiRefresh -Session $s; Invoke-AtmGuiNavRefreshed -Nav $s.Nav -Inventory $s.Inventory -PreviewDiscarded ($r -ceq 'OK' -and $had) -Preview $s.Preview; return $r }
+            # Before the first audit: no call, the P3 note, no row.
+            Assert-Eq (& $open 'P') 'NO_AUDIT' 'antes do audit: P nao chama o preview'
+            $vm = & $screen
+            Assert-True ($vm.Note -ceq (Get-AtmText 'gui.noAudit') -and @($vm.Rows).Count -eq 0 -and $vm.Notice -ceq (Get-AtmText 'gui.previewNotice')) 'antes do audit: texto de nenhum audit, nenhuma linha, o aviso fixo'
+            Assert-Eq (& $open 'D8') 'NO_AUDIT' 'antes do audit: 8 nao chama o preview'
+            Assert-Eq $script:guiP4Calls 0 'antes do audit: nenhuma chamada'
+            # The first audit: nothing starts by itself (the screen says the preview is not computed for this audit).
+            Assert-Eq (& $audit) 'OK' 'primeiro audit'
+            $vm = & $screen
+            Assert-True ($script:guiP4Calls -eq 0 -and (Get-AtmGuiNavTop -Nav $s.Nav).Name -ceq 'gates' -and $vm.Note -ceq (Get-AtmText 'gui.previewNotRun')) 'o audit nao chama o preview'
+            # P, 8, P: one call, with the session's inventory and arguments; the fixed text is painted only for the call.
+            Assert-Eq (@((& $open 'P'), (& $open 'D8'), (& $open 'P')) -join ',') 'OK,CACHED,CACHED' 'P, 8 e P'
+            Assert-True ($script:guiP4Calls -eq 1 -and $script:guiP4Starts -eq 1 -and $s.PreviewCalls -eq 1) "uma chamada ($($script:guiP4Calls); inicio $($script:guiP4Starts))"
+            Assert-True ([object]::ReferenceEquals($script:guiP4Seen, $s.Inventory) -and $script:guiP4Args.ConfigDir -ceq $s.InventoryArgs.ConfigDir) 'o preview recebe o inventario e os argumentos da sessao'
+            Assert-Eq @((& $screen).Rows).Count @($script:guiP4Rows).Count 'P: uma linha por linha do preview'
+            # Enter on a row, Esc back: the kept rows, no call.
+            Assert-Eq (Invoke-AtmGuiNavKey -Nav $s.Nav -Inventory $s.Inventory -Key 'Return' -Busy $false -Preview $s.Preview) 'RENDER' 'Enter numa linha do preview'
+            Assert-True (@((& $screen).Pairs | Where-Object { $_.Label -ceq 'Preview' }).Count -eq 1) 'detalhe com a linha Preview'
+            Assert-Eq (& $open 'Escape') 'CACHED' 'Esc volta ao preview guardado'
+            # Nothing runs during an audit or during the preview.
+            $s.Busy = $true
+            Assert-True ((Invoke-AtmGuiPreview -Session $s) -ceq 'IGNORED' -and (Invoke-AtmGuiNavKey -Nav $s.Nav -Inventory $s.Inventory -Key 'P' -Busy $true) -ceq 'IGNORED') 'durante um audit: nenhum preview, nenhuma tecla'
+            $s.Busy = $false; $s.PreviewBusy = $true
+            Assert-True ((Invoke-AtmGuiRefresh -Session $s) -ceq 'IGNORED' -and (Invoke-AtmGuiPreview -Session $s) -ceq 'IGNORED') 'durante o preview: nenhum audit, nenhum outro preview'
+            $s.PreviewBusy = $false
+            Assert-Eq $script:guiP4Calls 1 'nenhuma chamada a mais'
+            # An audit on the detail of the preview: the rows are discarded and the window goes back to the dashboard.
+            $null = Invoke-AtmGuiNavKey -Nav $s.Nav -Inventory $s.Inventory -Key 'Return' -Busy $false -Preview $s.Preview
+            Assert-Eq (& $audit) 'OK' 'segundo audit'
+            Assert-True ($null -eq $s.Preview -and $s.Nav.Stack.Count -eq 1 -and $s.Nav.Message -ceq (Get-AtmText 'gui.previewDiscarded') -and $script:guiP4Calls -eq 1) "o audit descarta o preview e volta ao dashboard ($($s.Nav.Stack.Count); $($s.Nav.Message))"
+            Assert-Eq (& $open 'D8') 'OK' 'a proxima abertura chama de novo'
+            Assert-Eq $script:guiP4Calls 2 'duas chamadas, uma por audit'
+            # A failed audit keeps the result and its preview: the screen stays.
+            $script:guiP4InvFail = $true
+            Assert-Eq (& $audit) 'FAILED' 'audit que falha'
+            Assert-True ($null -ne $s.Preview -and (Get-AtmGuiNavTop -Nav $s.Nav).Name -ceq 'gates' -and @((& $screen).Rows).Count -gt 0) 'o audit que falha guarda o preview e a tela'
+            $script:guiP4InvFail = $false
+            # A failure: the type only, never the message; the next opening tries again; nothing repeats by itself.
+            Assert-Eq (& $audit) 'OK' 'terceiro audit'
+            $script:guiP4Fail = $true
+            Assert-Eq (& $open 'P') 'FAILED' 'preview que falha'
+            $vm = & $screen
+            Assert-True ($null -eq $s.Preview -and $s.PreviewFailureType -ceq 'IOException' -and $vm.Note -ceq (Get-AtmText 'gui.previewFailed' 'IOException') -and @($vm.Rows).Count -eq 0) "so o tipo da excecao ($($vm.Note))"
+            Assert-True (-not ([string]$vm.Note).Contains('SENTINEL') -and -not ([string]$s.PreviewFailureType).Contains('SENTINEL')) 'nunca a mensagem da excecao'
+            Assert-Eq $script:guiP4Calls 3 'uma chamada que falhou'
+            Assert-Eq (& $open 'D8') 'FAILED' 'a proxima abertura tenta de novo'
+            $script:guiP4Fail = $false
+            Assert-Eq (& $open 'P') 'OK' 'e a seguinte, que funciona, guarda as linhas'
+            Assert-True ($script:guiP4Calls -eq 5 -and $s.PreviewFailures -eq 2 -and $null -eq $s.PreviewFailureType) "cinco chamadas, cada uma pedida ($($script:guiP4Calls))"
+            # An audit after a failed preview leaves its screen too (the failure belonged to the earlier result).
+            Assert-Eq (& $audit) 'OK' 'quarto audit'
+            $script:guiP4Fail = $true
+            Assert-Eq (& $open 'D8') 'FAILED' 'preview que falha depois do quarto audit'
+            $script:guiP4Fail = $false
+            Assert-Eq (& $audit) 'OK' 'quinto audit'
+            Assert-True ($s.Nav.Stack.Count -eq 1 -and $null -eq $s.PreviewFailureType -and $s.Nav.Message -ceq (Get-AtmText 'gui.previewDiscarded') -and $script:guiP4Calls -eq 6) "o audit descarta a falha e volta ao dashboard ($($script:guiP4Calls))"
+        } finally { $script:AtmGuiInventorySource = $savedInv; $script:AtmGuiPreviewSource = $savedPrev; Set-AtmLanguage -Requested $old }
+        # The real-window child receives the inventory and the preview as CLIXML: the same screens.
+        $cx = Join-Path $sandbox 'gui-p4a-cache.clixml'
+        @{ Inv = $inv; Preview = $script:guiP4Rows } | Export-Clixml -LiteralPath $cx -Depth 12
+        $back = Import-Clixml -LiteralPath $cx
+        foreach ($c in @($null, 'BLOCKED')) {
+            $a = Get-AtmGuiScreen -Inventory $inv -Screen @{ Name = 'gates'; Title = 'g'; Filter = @{ Category = $c } } -Preview $script:guiP4Rows
+            $b = Get-AtmGuiScreen -Inventory $back.Inv -Screen @{ Name = 'gates'; Title = 'g'; Filter = @{ Category = $c } } -Preview @($back.Preview)
+            Assert-Eq (& $guiP3Join $b.Rows) (& $guiP3Join $a.Rows) "reimportado: tela gates ($c) igual"
+        }
+        $o1 = & $guiP4Open $inv $script:guiP4Rows 'P' 0; $o2 = & $guiP4Open $back.Inv @($back.Preview) 'P' 0
+        Assert-Eq (@(& $guiP3DetailText (Get-AtmGuiScreen -Inventory $back.Inv -Screen $o2.Top -Preview @($back.Preview))) -join "`n") (@(& $guiP3DetailText (Get-AtmGuiScreen -Inventory $inv -Screen $o1.Top -Preview $script:guiP4Rows)) -join "`n") 'reimportado: detalhe do preview igual'
+    }
+    Test-Case 'GUI P4a' 'Estatico (P4a): nenhum nome novo na lista fechada; Invoke-AtmPreview num unico lugar de src/lib/Gui*.ps1 (Invoke-AtmGuiPreview); Test-AtmCandidate plantado e recusado; costura do preview com uma unica atribuicao a $null; telas 1 a 9 e P; tecla P no KeyDown; um fechar durante o preview espera a chamada; nenhum timer, caixa de texto editavel, closure nem botao de cancelar; aviso fixo e chaves novas nos dois idiomas' {
+        Assert-True ($guiAllowedEngine.Count -eq 21 -and $guiAllowedEngine -ccontains 'Invoke-AtmPreview') "lista: nenhum nome novo; o preview ja estava nela ($($guiAllowedEngine -join ','))"
+        $gp = Join-Path $srcDir 'lib\Gui.ps1'; $mp = Join-Path $srcDir 'lib\GuiModel.ps1'
+        $gt = [IO.File]::ReadAllText($gp); $mt = [IO.File]::ReadAllText($mp)
+        Assert-Eq ([regex]::Matches($gt + "`n" + $mt, 'Invoke-AtmPreview\b').Count) 1 'Invoke-AtmPreview aparece num unico lugar do texto'
+        $tok = $null; $perr = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($gp, [ref]$tok, [ref]$perr)
+        $calls = @($ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.CommandAst] -and $x.GetCommandName() -ceq 'Invoke-AtmPreview' }, $true))
+        $owner = $null
+        if ($calls.Count -eq 1) { $up = $calls[0].Parent; while ($null -ne $up -and -not ($up -is [System.Management.Automation.Language.FunctionDefinitionAst])) { $up = $up.Parent }; if ($up) { $owner = $up.Name } }
+        Assert-True ($calls.Count -eq 1 -and $owner -ceq 'Invoke-AtmGuiPreview') "uma unica chamada, em Invoke-AtmGuiPreview ($($calls.Count); $owner)"
+        foreach ($pair in @(@('Gui.ps1', $gt), @('GuiModel.ps1', $mt))) {
+            foreach ($w in @('Timer', 'TextBox', 'GetNewClosure', 'CancelButton', 'Test-AtmCandidate')) { Assert-True ($pair[1].IndexOf($w, [StringComparison]::OrdinalIgnoreCase) -lt 0) "$($pair[0]) contem '$w'" }
+        }
+        Assert-True ([regex]::Matches($gt, '\$script:AtmGuiPreviewSource\s*=').Count -eq 1 -and $gt -match '(?m)^\$script:AtmGuiPreviewSource = \$null\r?$') 'costura do preview: uma unica atribuicao, a $null'
+        # The planted gate of one candidate, in a copy (the real files never change).
+        $pl = Join-Path $sandbox 'gui-planted-p4a'
+        [void][IO.Directory]::CreateDirectory($pl)
+        $mc = Join-Path $pl 'GuiModel.ps1'
+        [IO.File]::WriteAllText($mc, $mt + "`r`nfunction Test-AtmPlanted { Test-AtmCandidate -Partition `$null -Inventory `$null }`r`n", (New-Object Text.UTF8Encoding $false))
+        $gc = Join-Path $pl 'Gui.ps1'
+        [IO.File]::WriteAllText($gc, $gt, (New-Object Text.UTF8Encoding $false))
+        $pv = & $guiCheck @($gc, $mc)
+        Assert-True (@($pv | Where-Object { $_.Contains('comando fora da lista fechada: Test-AtmCandidate') }).Count -ge 1) "plantado Test-AtmCandidate: recusado ($($pv -join ' | '))"
+        Assert-Eq ((& $guiCheck @($gp, $mp)) -join ' | ') '' 'arquivos reais dentro da lista fechada'
+        $items = @(Get-AtmGuiNavItemList)
+        Assert-Eq (@($items | ForEach-Object { $_.Key }) -join ',') '1,2,3,4,5,6,7,8,9,P' 'telas da GUI: 1 a 9 e P'
+        $i8 = @($items | Where-Object { $_.Key -ceq '8' })[0]; $iP = @($items | Where-Object { $_.Key -ceq 'P' })[0]
+        Assert-True ($i8.Screen.Name -ceq 'gates' -and $i8.Screen.Filter.Category -ceq 'BLOCKED' -and $iP.Screen.Name -ceq 'gates' -and $null -eq $iP.Screen.Filter.Category -and $iP.Screen.Title -ceq 'Preview') '8 e P: a tela gates da TUI com o filtro de categoria'
+        foreach ($w in @("`$kn -ceq 'P'", "elseif (`$guiSession.PreviewBusy) { `$guiSession.CloseAfterPreview = `$true; `$ev.Cancel = `$true }", "if (`$guiSession.CloseAfterPreview) { `$guiSession.CloseAfterPreview = `$false; `$guiForm.Close() }", "-Name 'PreviewNotice'", "Get-AtmText 'tui.computingPreview'")) { Assert-True ($gt.Contains($w)) "Gui.ps1: $w" }
+        foreach ($lang in @('en-US', 'pt-BR')) {
+            $cat = $script:AtmMessages[$lang]
+            foreach ($key in @('gui.navHintPreview', 'gui.previewNotice', 'gui.previewFailed', 'gui.previewDiscarded', 'gui.previewNotRun', 'tui.computingPreview', 'tui.catDeclaredRisk', 'menu.preview', 'menu.blocked', 'menu.blockedTitle')) { Assert-True ($cat.ContainsKey($key) -and $cat[$key]) "${lang}: $key" }
+            Assert-True ($cat['gui.previewFailed'].Contains('{0}')) "${lang}: a falha do preview mostra so o tipo"
+        }
+    }
+    Test-Case 'GUI P4a' 'Janela real (Windows PowerShell; trava aberta, inventario e preview dublados so num processo filho): dashboard, P, Enter (detalhe com a linha Preview), Esc, 8, Esc, F5, P (o preview chamado de novo, com um pedido de fechar durante a chamada: a janela fecha quando ela termina); titulo, linha conhecida, aviso fixo e contagem de chamadas em cada passo; nenhum processo filho, timer ou arquivo deixado no sandbox, na configuracao ou no TEMP; nos dois idiomas; sem janela possivel: NAO_TESTADO' {
+        if ($PSVersionTable.PSEdition -ne 'Desktop') { $script:caseSkipped = $true; $script:caseNote = 'PowerShell 7: janela real NAO_TESTADO nesta fase (GUI-D7)'; return }
+        $inv = & $guiP3Multi
+        $pv = @(& $guiP4Preview $inv)
+        $cx = Join-Path $sandbox 'gui-p4a-window.clixml'
+        @{ Inv = $inv; Preview = $pv } | Export-Clixml -LiteralPath $cx -Depth 12
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $child = Join-Path $sandbox 'gui-p4a-window-child.ps1'
+        [IO.File]::WriteAllText($child, @'
+param([string]$Src, [string]$Lang, [string]$Sandbox, [string]$Out, [string]$InvFile)
+$ErrorActionPreference = 'Stop'
+foreach ($lib in @('Engine.Audit.ps1', 'Engine.Clean.ps1', 'Engine.Isolate.ps1', 'Engine.Diagnose.ps1', 'Report.ps1', 'Tui.ps1', 'GuiModel.ps1', 'Gui.ps1')) { . (Join-Path $Src ('lib\' + $lib)) }
+Set-AtmLanguage -Requested $Lang
+$res = [ordered]@{ env = (Test-AtmGuiEnvironment) }
+if ($null -eq $res.env) {
+    $names = { param($p, [switch]$Top) $h = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase); foreach ($e in @(Get-ChildItem -LiteralPath $p -Recurse:(-not $Top) -Force -ErrorAction SilentlyContinue)) { [void]$h.Add($e.FullName) }; , $h }
+    $kids = { @(Get-CimInstance -ClassName Win32_Process -Filter ('ParentProcessId = {0}' -f $PID) | ForEach-Object { [int]$_.ProcessId }) }
+    $temp = [IO.Path]::GetTempPath()
+    $b1 = & $names $Sandbox; $b2 = & $names (Join-Path $Src 'config'); $b3 = & $names $temp -Top
+    $k1 = & $kids
+    $data = Import-Clixml -LiteralPath $InvFile
+    $script:guiInv = $data.Inv
+    $script:guiPrev = $data.Preview
+    $script:AtmGuiEnabled = $true
+    # An exception in an event handler ends the child with its message, instead of a modal error dialog.
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.Application]::SetUnhandledExceptionMode([System.Windows.Forms.UnhandledExceptionMode]::ThrowException)
+    $script:guiInvCalls = 0; $script:guiPrevCalls = 0; $script:guiDrDuring = $null
+    $script:AtmGuiInventorySource = { param($a) $script:guiInvCalls++; & $a.ProgressCallback 50 'C:\SENTINEL-PROGRESS\base'; $script:guiInv }
+    # The second call asks the window to close while the preview runs: the window must stay open until the call ends.
+    $script:AtmGuiPreviewSource = { param($i, $a) $null = $i; $null = $a; $script:guiPrevCalls++; if ($script:guiPrevCalls -eq 2) { $script:guiForm.Close(); $script:guiDrDuring = [string]$script:guiForm.DialogResult }; $script:guiPrev }
+    $script:guiSnaps = New-Object System.Collections.Generic.List[object]
+    $script:guiError = $null; $script:guiClosed = $false; $script:guiForm = $null
+    $hook = { param($f)
+        $script:guiForm = $f
+        $m = [System.Windows.Forms.Form].GetMethod('OnKeyDown', [Reflection.BindingFlags]'NonPublic, Instance')
+        $first = { param($lv) if ($lv.Items.Count -eq 0) { '' } else { $it = $lv.Items[0]; (@($it.Text) + @(for ($i = 1; $i -lt $it.SubItems.Count; $i++) { $it.SubItems[$i].Text })) -join "`t" } }
+        $snap = { param([string]$Step)
+            $rows = $f.Controls.Find('Rows', $true)[0]; $sum = $f.Controls.Find('Summary', $true)[0]; $nt = $f.Controls.Find('PreviewNotice', $true)[0]
+            $pl = ''
+            if ($rows.Visible) { foreach ($it in $rows.Items) { if ($it.Text -ceq 'Preview' -and $it.SubItems.Count -gt 1) { $pl = $it.Text + "`t" + $it.SubItems[1].Text } } }
+            [ordered]@{ step = $Step; title = [string]$f.Controls.Find('ScreenTitle', $true)[0].Text; identity = [string]$f.Controls.Find('IdentityLine', $true)[0].Text
+                state = [string]$f.Controls.Find('StateLine', $true)[0].Text; rowsVisible = [bool]$rows.Visible; noticeVisible = [bool]$nt.Visible; notice = [string]$nt.Text
+                first = $(if ($rows.Visible) { & $first $rows } else { & $first $sum }); previewLine = $pl; invCalls = $script:guiInvCalls; prevCalls = $script:guiPrevCalls
+                dialog = [string]$f.DialogResult } }
+        foreach ($st in @('start', 'P', 'Return', 'Escape', 'D8', 'Escape', 'F5', 'P')) {
+            try {
+                if ($st -cne 'start') { $ka = [System.Windows.Forms.KeyEventArgs]::new([System.Windows.Forms.Keys]$st); $null = $m.Invoke($f, [object[]]@($ka)) }
+                $script:guiSnaps.Add((& $snap $st))
+            } catch { $script:guiError = $st + ': ' + $_.Exception.Message; break }
+        }
+        # The close asked during the last preview: the window closed when the call ended; otherwise close it here.
+        $script:guiClosed = ($f.DialogResult -ne [System.Windows.Forms.DialogResult]::None)
+        if (-not $script:guiClosed) { $f.Close() }
+    }
+    $id = { [pscustomobject]@{ Name = 'TEST\gui'; Sid = 'S-1-5-21-1-2-3-9301'; IsAdmin = $false; ElevationTypeRaw = 3; IntegrityRid = 8192; SessionId = 1 } }
+    $o = @(Invoke-AtmGuiCommand -IdentitySource $id -OnShown $hook 6>&1)
+    $res.code = @($o | Where-Object { $_ -is [int] })[-1]
+    # ToArray, not @(): on Windows PowerShell 5.1 the array subexpression over this generic list throws.
+    $res.snaps = $script:guiSnaps.ToArray()
+    $res.error = $script:guiError
+    $res.closed = $script:guiClosed
+    $res.drDuring = $script:guiDrDuring
+    $res.disposed = ($null -ne $script:guiForm -and [bool]$script:guiForm.IsDisposed)
+    $k2 = & $kids
+    $res.newProcesses = @($k2 | Where-Object { $k1 -notcontains $_ }).Count
+    $a1 = & $names $Sandbox; $a2 = & $names (Join-Path $Src 'config'); $a3 = & $names $temp -Top
+    $res.newSandbox = @($a1 | Where-Object { -not $b1.Contains($_) }).Count
+    $res.newConfig = @($a2 | Where-Object { -not $b2.Contains($_) }).Count
+    $res.newTemp = @($a3 | Where-Object { -not $b3.Contains($_) }).Count
+}
+($res | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $Out -Encoding UTF8
+'@, (New-Object Text.UTF8Encoding $true))
+        foreach ($lang in @('en-US', 'pt-BR')) {
+            $out = Join-Path $sandbox ('gui-p4a-window-' + $lang + '.json')
+            $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Lang $lang -Sandbox `"$sandbox`" -Out `"$out`" -InvFile `"$cx`"") -TimeoutSec 180
+            Assert-True ($r.Exit -eq 0 -and (Test-Path -LiteralPath $out -PathType Leaf)) "janela P4a ${lang}: processo filho saida $($r.Exit) $($r.Text)"
+            $j = Get-Content -LiteralPath $out -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($null -ne $j.env) { $script:caseSkipped = $true; $script:caseNote = "runner sem janela possivel ($($j.env)): NAO_TESTADO"; return }
+            Assert-True ($null -eq $j.error -and [int]$j.code -eq 0) "janela P4a ${lang}: sem erro em nenhum passo, saida 0 ($($j.error); $($j.code))"
+            $snaps = @($j.snaps)
+            Assert-Eq (@($snaps | ForEach-Object { $_.step }) -join ',') 'start,P,Return,Escape,D8,Escape,F5,P' "janela P4a ${lang}: todos os passos"
+            # The expected screens, computed over the same inventory and preview in this process and language.
+            $old = Get-AtmLanguage
+            try {
+                Set-AtmLanguage -Requested $lang
+                $pS = Get-AtmGuiScreen -Inventory $inv -Screen @{ Name = 'gates'; Title = 'Preview'; Filter = @{ Category = $null } } -Preview $pv
+                $bS = Get-AtmGuiScreen -Inventory $inv -Screen @{ Name = 'gates'; Title = 'b'; Filter = @{ Category = 'BLOCKED' } } -Preview $pv
+                $o1 = & $guiP4Open $inv $pv 'P' 0
+                $det = Get-AtmGuiScreen -Inventory $inv -Screen $o1.Top -Preview $pv
+                $dash = Get-AtmGuiDashboard -Inventory $inv
+                $t = { param([string]$x) Get-AtmText 'gui.screenTitle' $x }
+                $dLine = [string]$dash.Groups[0].Title + "`t" + [string]$dash.Groups[0].Items[0].Text
+                $pLine = (@($pS.Rows)[0] -join "`t")
+                $pvPair = @($det.Pairs | Where-Object { $_.Label -ceq 'Preview' })[0]
+                $notice = Get-AtmText 'gui.previewNotice'
+                # step, title, rows visible, known line, notice shown, Preview line, audits, previews
+                $want = @(
+                    @('start', (& $t (Get-AtmText 'menu.dashboard')), $false, $dLine, $false, '', 1, 0),
+                    @('P', (& $t 'Preview'), $true, $pLine, $true, '', 1, 1),
+                    @('Return', (& $t $o1.Top.Title), $true, ([string]@($det.Pairs)[0].Label + "`t" + [string]@($det.Pairs)[0].Value), $true, ('Preview' + "`t" + [string]$pvPair.Value), 1, 1),
+                    @('Escape', (& $t 'Preview'), $true, $pLine, $true, '', 1, 1),
+                    @('D8', (& $t (Get-AtmText 'menu.blockedTitle')), $true, (@($bS.Rows)[0] -join "`t"), $true, '', 1, 1),
+                    @('Escape', (& $t (Get-AtmText 'menu.dashboard')), $false, $dLine, $false, '', 1, 1),
+                    @('F5', (& $t (Get-AtmText 'menu.dashboard')), $false, $dLine, $false, '', 2, 1),
+                    @('P', (& $t 'Preview'), $true, $pLine, $true, '', 2, 2)
+                )
+                $idLine = Get-AtmText 'gui.identity' 'TEST\gui'
+                $wantState = $(if ($inv.CoverageComplete) { 'CURRENT' } else { 'PARTIAL' })
+            } finally { Set-AtmLanguage -Requested $old }
+            for ($i = 0; $i -lt $want.Count; $i++) {
+                $s = $snaps[$i]; $w = $want[$i]
+                Assert-True ([string]$s.title -ceq $w[1] -and [bool]$s.rowsVisible -eq $w[2]) "janela P4a ${lang} passo $i ($($w[0])): titulo '$($s.title)' (esperado '$($w[1])'), lista $($s.rowsVisible)"
+                Assert-Eq ([string]$s.first) $w[3] "janela P4a ${lang} passo $i ($($w[0])): linha conhecida"
+                Assert-True ([bool]$s.noticeVisible -eq $w[4] -and (-not $w[4] -or [string]$s.notice -ceq $notice)) "janela P4a ${lang} passo $i ($($w[0])): aviso fixo $($s.noticeVisible) '$($s.notice)'"
+                Assert-Eq ([string]$s.previewLine) $w[5] "janela P4a ${lang} passo $i ($($w[0])): linha Preview"
+                Assert-True ([int]$s.invCalls -eq $w[6] -and [int]$s.prevCalls -eq $w[7]) "janela P4a ${lang} passo $i ($($w[0])): audits $($s.invCalls) (esperado $($w[6])), previews $($s.prevCalls) (esperado $($w[7]))"
+                Assert-True ([string]$s.identity -ceq $idLine -and ([string]$s.state).Contains($wantState)) "janela P4a ${lang} passo ${i}: cabecalho com identidade e estado ($($s.identity) / $($s.state))"
+            }
+            Assert-True ([string]$j.drDuring -ceq 'None' -and [bool]$j.closed -and [string]$snaps[7].dialog -cne 'None' -and [bool]$j.disposed) "janela P4a ${lang}: fechar durante o preview esperou a chamada e fechou depois ($($j.drDuring) -> $($snaps[7].dialog)); formulario liberado"
+            Assert-True ([int]$j.newProcesses -eq 0 -and [int]$j.newSandbox -eq 0 -and [int]$j.newConfig -eq 0 -and [int]$j.newTemp -eq 0) "janela P4a ${lang}: nada deixado (processos $($j.newProcesses), sandbox $($j.newSandbox), configuracao $($j.newConfig), TEMP $($j.newTemp))"
+        }
+        $script:caseNote = 'janela real em en-US e pt-BR: P, Enter com a linha Preview, Esc, 8, Esc, F5, P chamado de novo; fechar durante o preview esperou a chamada'
     }
 
     # ------------------------------------------------------------------ scale

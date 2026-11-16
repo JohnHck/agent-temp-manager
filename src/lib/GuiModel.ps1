@@ -9,7 +9,9 @@
 #  * Loading this file defines functions only (no assembly, no type, no state).
 # Phase P1: the identity header (PRIV-10). Phase P2: the dashboard, the state of the view and the automatic purge
 # notice (GUI-D1). Phase P3: the drill-down by user, project and root, the detail of a root, the coverage and errors
-# screen, and the navigation between them (the TUI's screens, keys 1 to 7 and 9).
+# screen, and the navigation between them (the TUI's screens, keys 1 to 7 and 9). Phase P4a: the screens of the preview
+# (P every category, 8 the blocked paths) over the rows of the clean engine, and the Preview line of a detail opened
+# from them; the categories, reasons and requirements are the engine's, as they come.
 
 function Get-AtmGuiIdentityHeader {
     # The process identity and its elevation state, as `version` shows them, and the language. -Source: test override
@@ -155,8 +157,8 @@ function Get-AtmGuiOpt {
 }
 
 function Get-AtmGuiNavItemList {
-    # The screens of the TUI menu that the GUI shows (keys 1 to 7 and 9), with the TUI's labels and titles. Preview,
-    # diagnose, isolation, cleanup and the quarantine area are not offered here (ADR-0014 section 10, later phases).
+    # The screens of the TUI menu that the GUI shows (keys 1 to 9 and P), with the TUI's labels, titles and filters. The
+    # diagnose comes in phase P4b; isolation, cleanup and the quarantine area are never offered (ADR-0014 section 6).
     return @(
         @{ Key = '1'; Label = (Get-AtmText 'menu.dashboard'); Screen = @{ Name = 'dashboard'; Title = (Get-AtmText 'menu.dashboard') } }
         @{ Key = '2'; Label = (Get-AtmText 'menu.users'); Screen = @{ Name = 'users'; Title = (Get-AtmText 'menu.users') } }
@@ -165,7 +167,9 @@ function Get-AtmGuiNavItemList {
         @{ Key = '5'; Label = 'ACTIVE_EVIDENCE'; Screen = @{ Name = 'roots'; Title = 'ACTIVE_EVIDENCE'; Filter = @{ Class = 'ACTIVE_EVIDENCE' } } }
         @{ Key = '6'; Label = 'RECENT'; Screen = @{ Name = 'roots'; Title = 'RECENT'; Filter = @{ Class = 'RECENT' } } }
         @{ Key = '7'; Label = 'LIVENESS_UNKNOWN'; Screen = @{ Name = 'roots'; Title = 'LIVENESS_UNKNOWN'; Filter = @{ Class = 'LIVENESS_UNKNOWN' } } }
+        @{ Key = '8'; Label = (Get-AtmText 'menu.blocked'); Screen = @{ Name = 'gates'; Title = (Get-AtmText 'menu.blockedTitle'); Filter = @{ Category = 'BLOCKED' } } }
         @{ Key = '9'; Label = (Get-AtmText 'menu.errors'); Screen = @{ Name = 'errors'; Title = (Get-AtmText 'menu.errorsTitle') } }
+        @{ Key = 'P'; Label = (Get-AtmText 'menu.preview'); Screen = @{ Name = 'gates'; Title = 'Preview'; Filter = @{ Category = $null } } }
     )
 }
 
@@ -259,12 +263,42 @@ function Get-AtmGuiRootTable {
     }
 }
 
+function Get-AtmGuiPreviewTable {
+    # Screens `gates` (P: every category; 8: BLOCKED): the TUI's rows over the preview rows of the clean engine, by
+    # category, then by bytes in decreasing order (List.Sort with the comparison of the TUI's Sort-Object, ties
+    # included). Category, reasons and requirements are the engine's, as they come; the declared-risk category gets the
+    # TUI's short label. -Preview: the rows kept in the window's session.
+    param([object[]]$Preview, $Filter)
+    $want = Get-AtmGuiOpt $Filter 'Category'
+    $sel = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $Preview) { if (-not $want -or $r.Gate.Category -eq $want) { $sel.Add($r) } }
+    # Sort-Object compares text with the current culture, ignoring case; then the negated bytes.
+    $cmp = { param($x, $y)
+        $c = [string]::Compare([string]$x.Gate.Category, [string]$y.Gate.Category, $true, [Globalization.CultureInfo]::CurrentCulture)
+        if ($c -ne 0) { return $c }
+        return ([long]$y.Partition.Bytes).CompareTo([long]$x.Partition.Bytes)
+    }
+    $rows = New-Object System.Collections.Generic.List[object]; $items = New-Object System.Collections.Generic.List[object]
+    foreach ($r in @(Get-AtmGuiSorted -Items $sel.ToArray() -Compare $cmp)) {
+        $p = $r.Partition
+        $catText = [string]$r.Gate.Category
+        if ($catText -ceq 'ELIGIBLE_WITH_DECLARED_RISK') { $catText = Get-AtmText 'tui.catDeclaredRisk' }
+        $rows.Add((ConvertTo-AtmGuiRow @($catText, $p.UserName, $(if ($p.Slug) { $p.Slug + '\' + $p.Name } else { $p.Name }), (Format-AtmMB $p.Bytes), ((@($r.Gate.Reasons) + @($r.Gate.Requirements)) -join '; '))))
+        $items.Add([pscustomobject]@{ Kind = 'root'; Partition = $p; Gate = $r.Gate })
+    }
+    return [pscustomobject]@{
+        Columns = @((Get-AtmText 'col.category'), (Get-AtmText 'col.user'), 'Root', 'MB', (Get-AtmText 'col.reasonReq'))
+        Rows = $rows.ToArray(); Items = $items.ToArray()
+    }
+}
+
 function Get-AtmGuiRootDetail {
     # Screen `detail` of the root with this path in the inventory: the TUI's fields, with the same det.* keys, then the
-    # evidence, the ancestor and ambiguous references and the samples of errors and reparse points. Not here: the
-    # preview line (phase P4), the isolation hint and the hint of the CLI's path drill-down (no action in the GUI).
+    # evidence, the ancestor and ambiguous references and the samples of errors and reparse points. -Gate (a detail
+    # opened from the preview): the TUI's Preview line after the fields, with the engine's category, reasons and
+    # requirements. Not here: the isolation hint and the hint of the CLI's path drill-down (no action in the GUI).
     # Found = $false when the root is no longer in the inventory: nothing is shown for it.
-    param($Inventory, [string]$Path)
+    param($Inventory, [string]$Path, $Gate)
     $p = $null
     foreach ($x in @(Get-AtmGuiPartitionList -Inventory $Inventory)) { if ($null -eq $p -and $x.Path -eq $Path) { $p = $x } }
     if ($null -eq $p) { return [pscustomobject]@{ Found = $false; Partition = $null; Pairs = @(); Lines = @() } }
@@ -280,6 +314,7 @@ function Get-AtmGuiRootDetail {
     $pairs = New-Object System.Collections.Generic.List[object]
     # The value as the TUI writes it ('{0,-26}: {1}' formats with the current culture).
     foreach ($r in $raw) { $pairs.Add([pscustomobject]@{ Key = $r[0]; Label = (Get-AtmText $r[0]); Value = ('{0}' -f $r[1]) }) }
+    if ($Gate) { $pairs.Add([pscustomobject]@{ Key = 'preview'; Label = 'Preview'; Value = ('{0} - {1}' -f $Gate.Category, ((@($Gate.Reasons) + @($Gate.Requirements)) -join '; ')) }) }
     $L = New-Object System.Collections.Generic.List[string]
     $L.Add('')
     $L.Add((Get-AtmText 'audit.evidence'))
@@ -351,12 +386,14 @@ function Get-AtmGuiCoverageLineList {
 }
 
 function Get-AtmGuiScreen {
-    # The content of one screen of the navigation stack. Kind: dashboard, table (users, projects, roots), pairs (the
-    # detail) or lines (coverage and errors). Known = $false before the first audit: no row is invented. Gone = $true
-    # when the root of a detail is not in the inventory.
-    param($Inventory, [hashtable]$Screen)
+    # The content of one screen of the navigation stack. Kind: dashboard, table (users, projects, roots, the preview),
+    # pairs (the detail) or lines (coverage and errors). Known = $false before the first audit: no row is invented. Gone
+    # = $true when the root of a detail is not in the inventory. Notice: the fixed line of the preview's screens.
+    # -Preview: the preview rows kept in the session ($null: not computed for this audit); -PreviewFailure: the
+    # exception type of the last failed preview (never its message).
+    param($Inventory, [hashtable]$Screen, $Preview, [string]$PreviewFailure)
     $known = ($null -ne $Inventory)
-    $vm = [ordered]@{ Name = $Screen.Name; Title = $Screen.Title; Kind = 'table'; Known = $known; Gone = $false; Columns = @(); Rows = @(); Items = @(); Pairs = @(); Lines = @(); Note = $(if ($known) { $null } else { Get-AtmText 'gui.noAudit' }) }
+    $vm = [ordered]@{ Name = $Screen.Name; Title = $Screen.Title; Kind = 'table'; Known = $known; Gone = $false; Columns = @(); Rows = @(); Items = @(); Pairs = @(); Lines = @(); Note = $(if ($known) { $null } else { Get-AtmText 'gui.noAudit' }); Notice = $null }
     switch ($Screen.Name) {
         'dashboard' { $vm.Kind = 'dashboard' }
         'users' { $t = Get-AtmGuiUserTable -Inventory $Inventory; $vm.Columns = $t.Columns; $vm.Rows = $t.Rows; $vm.Items = $t.Items }
@@ -365,10 +402,22 @@ function Get-AtmGuiScreen {
         'detail' {
             $vm.Kind = 'pairs'
             $vm.Columns = @((Get-AtmText 'gui.col.field'), (Get-AtmText 'gui.col.value'))
+            $gate = Get-AtmGuiOpt $Screen.Filter 'Gate'
+            if ($gate) { $vm.Notice = Get-AtmText 'gui.previewNotice' }
             if ($known) {
-                $d = Get-AtmGuiRootDetail -Inventory $Inventory -Path ([string]$Screen.Filter.Path)
+                $d = Get-AtmGuiRootDetail -Inventory $Inventory -Path ([string]$Screen.Filter.Path) -Gate $gate
                 $vm.Gone = (-not $d.Found); $vm.Pairs = $d.Pairs; $vm.Lines = $d.Lines
             }
+        }
+        'gates' {
+            # P4a: only the rows the session keeps; nothing is computed here. Before the first audit, the P3 note.
+            $vm.Notice = Get-AtmText 'gui.previewNotice'
+            $rowsIn = @()
+            if ($known -and $null -ne $Preview) { $rowsIn = $Preview }
+            elseif ($known -and $PreviewFailure) { $vm.Note = Get-AtmText 'gui.previewFailed' $PreviewFailure }
+            elseif ($known) { $vm.Note = Get-AtmText 'gui.previewNotRun' }
+            $t = Get-AtmGuiPreviewTable -Preview $rowsIn -Filter $Screen.Filter
+            $vm.Columns = $t.Columns; $vm.Rows = $t.Rows; $vm.Items = $t.Items
         }
         'errors' { $vm.Kind = 'lines'; $vm.Columns = @((Get-AtmText 'gui.col.line')); $vm.Lines = @(Get-AtmGuiCoverageLineList -Inventory $Inventory) }
     }
@@ -389,15 +438,18 @@ function Get-AtmGuiNavTop {
 }
 
 function Invoke-AtmGuiNavKey {
-    # One key or screen button, as the TUI handles it. -Key: '1' to '9' (or D1/NumPad1 to 9), Return/Enter, Escape.
-    # Returns RENDER (the screen changed), CLOSE (Esc on the dashboard), IGNORED (an audit runs: nothing moves) or NONE.
-    #  * 1 to 7 and 9: the screen of that key, over the dashboard (1: the dashboard itself);
-    #  * Enter on a row: user -> the roots of that user; project -> the roots of that project; root -> its detail;
+    # One key or screen button, as the TUI handles it. -Key: '1' to '9' (or D1/NumPad1 to 9), 'P', Return/Enter,
+    # Escape. Returns RENDER (the screen changed), CLOSE (Esc on the dashboard), IGNORED (an audit or the preview runs:
+    # nothing moves) or NONE. -Preview: the preview rows kept in the session (the rows Enter opens on its screens).
+    #  * 1 to 9 and P: the screen of that key, over the dashboard (1: the dashboard itself);
+    #  * Enter on a row: user -> the roots of that user; project -> the roots of that project; root -> its detail (from
+    #    the preview, with its gate: the detail shows the Preview line);
     #  * Esc: one screen back; on the dashboard it closes the window.
-    param([hashtable]$Nav, $Inventory, [string]$Key, [bool]$Busy)
+    param([hashtable]$Nav, $Inventory, [string]$Key, [bool]$Busy, $Preview)
     if ($Busy) { return 'IGNORED' }
     $digit = $null
     if ($Key -cmatch '^(D|NumPad)?([1-9])$') { $digit = $Matches[2] }
+    elseif ($Key -ceq 'P') { $digit = 'P' }
     if ($null -ne $digit) {
         $item = $null
         foreach ($m in @(Get-AtmGuiNavItemList)) { if ($m.Key -ceq $digit) { $item = $m } }
@@ -420,14 +472,18 @@ function Invoke-AtmGuiNavKey {
     }
     if ($Key -ceq 'Return' -or $Key -ceq 'Enter') {
         $top = Get-AtmGuiNavTop -Nav $Nav
-        $vm = Get-AtmGuiScreen -Inventory $Inventory -Screen $top
+        $vm = Get-AtmGuiScreen -Inventory $Inventory -Screen $top -Preview $Preview
         if ($vm.Kind -cne 'table' -or @($vm.Items).Count -eq 0) { return 'NONE' }
         $it = @($vm.Items)[[math]::Max(0, [math]::Min([int]$top.Sel, @($vm.Items).Count - 1))]
         $push = $null
         switch ($it.Kind) {
             'user' { $push = @{ Name = 'roots'; Title = (Get-AtmText 'tui.rootsOf' $it.Profile.UserName); Filter = @{ Sid = $it.Profile.Sid; ProfilePath = $it.Profile.ProfilePath } } }
             'project' { $push = @{ Name = 'roots'; Title = (Get-AtmText 'tui.rootsOfProject' $it.Project $it.UserName); Filter = @{ Sid = $it.Sid; ProfilePath = $it.ProfilePath; Project = $it.Project; Slug = $it.Slug } } }
-            'root' { $push = @{ Name = 'detail'; Title = (Get-AtmText 'tui.detailOf' $it.Partition.Name); Filter = @{ Path = [string]$it.Partition.Path; Name = [string]$it.Partition.Name } } }
+            'root' {
+                $gate = $null
+                if ($it.PSObject.Properties.Name -contains 'Gate') { $gate = $it.Gate }
+                $push = @{ Name = 'detail'; Title = (Get-AtmText 'tui.detailOf' $it.Partition.Name); Filter = @{ Path = [string]$it.Partition.Path; Name = [string]$it.Partition.Name; Gate = $gate } }
+            }
         }
         if ($null -eq $push) { return 'NONE' }
         $push['Sel'] = 0
@@ -441,13 +497,24 @@ function Invoke-AtmGuiNavKey {
 function Invoke-AtmGuiNavRefreshed {
     # After an audit: the current screen is computed again over the new result. A detail whose root is not in it goes
     # back to its list, with a catalog text; nothing is invented. The selected row stays inside the new rows.
-    param([hashtable]$Nav, $Inventory)
+    # -PreviewDiscarded (P4a: a successful audit discards the kept preview): the preview's screens, and a detail opened
+    # from them, are left for the dashboard with a catalog text, because a new preview starts only when P or 8 is opened.
+    # -Preview: the preview rows the session keeps (a failed audit keeps them).
+    param([hashtable]$Nav, $Inventory, [bool]$PreviewDiscarded, $Preview)
+    if ($PreviewDiscarded) {
+        $at = -1
+        for ($i = 0; $i -lt $Nav.Stack.Count; $i++) { if ($at -lt 0 -and $Nav.Stack[$i].Name -ceq 'gates') { $at = $i } }
+        if ($at -ge 1) {
+            while ($Nav.Stack.Count -gt $at) { $Nav.Stack.RemoveAt($Nav.Stack.Count - 1) }
+            $Nav.Message = Get-AtmText 'gui.previewDiscarded'
+        }
+    }
     $top = Get-AtmGuiNavTop -Nav $Nav
     if ($top.Name -ceq 'detail' -and $null -ne $Inventory -and -not (Get-AtmGuiRootDetail -Inventory $Inventory -Path ([string]$top.Filter.Path)).Found) {
         $Nav.Stack.RemoveAt($Nav.Stack.Count - 1)
         $Nav.Message = Get-AtmText 'gui.detailGone' ([string]$top.Filter.Name)
         $top = Get-AtmGuiNavTop -Nav $Nav
     }
-    $n = @((Get-AtmGuiScreen -Inventory $Inventory -Screen $top).Items).Count
+    $n = @((Get-AtmGuiScreen -Inventory $Inventory -Screen $top -Preview $Preview).Items).Count
     if ([int]$top.Sel -ge $n) { $top.Sel = [math]::Max(0, $n - 1) }
 }

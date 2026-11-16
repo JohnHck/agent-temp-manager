@@ -52,7 +52,7 @@ change it; enabling deletion requires a code change in the administrator-owned, 
 released under a specific authorization. The automated suite flips it only in its own process, against its
 isolated sandbox.
 
-## Desktop GUI gate (V0.2.1 phases P1 to P3)
+## Desktop GUI gate (V0.2.1 phases P1 to P4a)
 
 * **The seventh gate:** `$script:AtmGuiEnabled`, `$false` in every shipped copy (maintainer decision D-A,
   [ADR-0014](adr/ADR-0014-desktop-gui-winforms.md)). It is a single assignment in `lib\Gui.ps1`, with no option,
@@ -86,12 +86,24 @@ isolated sandbox.
   * the screens of users, projects, roots (with the TUI's filters), the detail of a root and coverage and errors only
     read the inventory of the last audit. They compute no class, eligibility, gate or coverage: the engine's values
     are shown as they are, through the same catalog keys as the TUI;
-  * no screen offers an action over a root: no clean, isolate, restore, purge, preview, or opening of a folder. The
-    detail leaves out the cleanup preview, the isolation hint and the CLI path drill-down (`Show-AtmPathDetail`, which
-    the static test refuses);
+  * no screen offers an action over a root: no clean, isolate, restore, purge, or opening of a folder. The detail
+    leaves out the isolation hint and the CLI path drill-down (`Show-AtmPathDetail`, which the static test refuses).
+    In P3 the detail also left out the cleanup preview, which P4a adds as a line, below;
   * the closed list grows by four read-only helpers of the engine, named in ADR-0014's P3 record;
   * moving between screens never starts an audit; only Refresh or `F5` does. A detail whose root is gone after an
     audit goes back to the list, with a catalog text.
+* **P4a, the preview of the cleanup (keys `P` and `8`):**
+  * the GUI only shows the categories the cleanup engine gives (`BLOCKED`, `INVESTIGATE`, `ELIGIBLE`,
+    `ELIGIBLE_WITH_DECLARED_RISK`) with its reasons and requirements. It computes no category, gate or eligibility,
+    and offers no action: no button over a root or a category, no clean, isolate or purge;
+  * the preview comes from one call to `Invoke-AtmPreview`, already in the closed list, with the session's inventory
+    and the launcher's own arguments. The call sits in one function of `lib\Gui.ps1`, and the static test checks it
+    appears in one place only. The closed list gains no name; the static test refuses a planted call to an engine
+    helper outside it (`Test-AtmCandidate`);
+  * it runs only when `P` or `8` is first opened after an audit, never by itself; the result is kept until the next
+    audit, which discards it. A failure shows only the exception type, never the engine's message;
+  * both screens show a fixed notice that the preview is an evaluation only and that the window deletes and isolates
+    nothing.
 
 ## Clean gates (all must pass, re-run immediately before each deletion)
 

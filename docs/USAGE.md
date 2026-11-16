@@ -737,7 +737,7 @@ Order of a run:
    a non-interactive session) or `GUI_WINFORMS_UNAVAILABLE`. It is never relaunched in another shell;
 4. Windows Forms is loaded, and the window opens.
 
-What the window shows in this version (phases P1 to P3):
+What the window shows in this version (phases P1 to P4a):
 
 * **A header:**
   * the process identity and its elevation state (elevated administrator, token elevation type, integrity level);
@@ -768,7 +768,9 @@ What the window shows in this version (phases P1 to P3):
   | `3` | projects: grouped as in the TUI, by size, with the user and the newest write |
   | `4` | roots: class, agent, user, project, root, MB, files, newest write and number of flags |
   | `5`, `6`, `7` | the roots of `ACTIVE_EVIDENCE`, `RECENT` and `LIVENESS_UNKNOWN` |
+  | `8` | the blocked paths: the roots the preview of the cleanup puts in `BLOCKED` (phase P4a) |
   | `9` | coverage and errors: the coverage and the processes, references, incomplete profiles, temporary directories, discovery notes, partitions with issues and the limits |
+  | `P` | the preview: every root with its category (phase P4a) |
 
   Each screen also has a button, with its digit as the access key. `Enter` on a row opens it: a user or a project shows
   its roots, and a root shows its detail (the TUI's fields, then the evidence, the references and the samples of errors
@@ -777,6 +779,21 @@ What the window shows in this version (phases P1 to P3):
 
   After an audit, the current screen is computed again. If the root of an open detail is not in the new audit, the
   window goes back to the list and says so. Before the first audit has finished, the screens show no rows.
+* **The preview of the cleanup (phase P4a),** keys `P` and `8`, with the same rows, order and text as the TUI's
+  screens `P` and `8`: category, user, root, MB, and the reasons and requirements. The category is written out
+  (`BLOCKED`, `INVESTIGATE`, `ELIGIBLE`, and the short label of `ELIGIBLE_WITH_DECLARED_RISK`), never by color alone.
+  * Both screens show a fixed notice: the preview is an evaluation only; the window deletes and isolates nothing, and
+    the cleanup stays in the CLI, behind its own gate.
+  * `Enter` on a row opens the detail of that root, with one more line, `Preview`: the category, then the reasons and
+    requirements. A detail opened from the other screens has no `Preview` line.
+  * The preview is computed by the cleanup engine, once per audit, the first time `P` or `8` is opened after it. While
+    it runs, the window shows a fixed text, with no percentage, and the screen keys, the buttons and Refresh do
+    nothing. Closing the window during the preview closes it when the preview ends.
+  * The result is kept until the next audit. A new audit discards it: if a preview screen is open, the window goes
+    back to the dashboard and says so, and the next `P` or `8` computes it again. A failed audit keeps it.
+  * A failed preview shows only the exception type, and changes nothing. The next `P` or `8` tries again; nothing
+    repeats by itself.
+  * Before the first audit has finished, `P` and `8` show the same text as the other screens, and compute nothing.
 
 **Audits.** The window runs one audit when it opens, as the TUI does. After that, an audit runs only when you ask for
 it, with **Refresh** or `F5`. Nothing repeats by itself, and no live monitoring exists yet.
@@ -789,8 +806,9 @@ it, with **Refresh** or `F5`. Nothing repeats by itself, and no live monitoring 
 * The tab order is fixed, and every control has an accessible name.
 
 **What it does not do:**
-* any action over a root: clean, isolate, restore, purge or open its folder;
-* the preview of the cleanup, and the path drill-down of `agent-temp audit -Path`;
+* any action over a root or a category: clean, isolate, restore, purge or open its folder. The preview only shows
+  the categories; it offers no button to act on them;
+* the path drill-down of `agent-temp audit -Path`, and the isolation hint of the TUI's detail;
 * list the quarantine;
 * run the diagnose;
 * copy to the clipboard;

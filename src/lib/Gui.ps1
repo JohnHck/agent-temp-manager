@@ -14,6 +14,9 @@
 # Phase P3: the TUI's screens 1 to 7 and 9 (users, projects, roots, roots by class, coverage and errors), Enter on a row
 # (the roots of a user or project, the detail of a root) and Esc one screen back. They only read the inventory of the
 # last audit, and no screen offers an action over a root.
+# Phase P4a: the preview screens (P every category, 8 the blocked paths) and the Preview line of a detail opened from
+# them. The clean engine computes the preview once, when P or 8 is first opened after an audit; the session keeps it
+# until the next audit. It is an evaluation only: no category is a button, and nothing is cleaned or isolated.
 
 # Release gate of the desktop GUI (D-A). Closed in every distributed copy: `agent-temp gui` opens no window and loads no
 # WinForms assembly. Tests open it only in their own process memory.
@@ -26,11 +29,13 @@ $script:AtmGuiExitEnvironment = 8
 # Test seams (suite only; $null = the real source). Apartment: returns the thread's apartment state as text. Desktop:
 # returns whether an interactive desktop is available. Assembly loader: loads the assemblies or throws. Inventory
 # source: called with the inventory arguments (a hashtable that carries the ProgressCallback); returns an inventory or
+# throws. Preview source (P4a): called with the session's inventory and inventory arguments; returns the preview rows or
 # throws.
 $script:AtmGuiApartmentSource = $null
 $script:AtmGuiDesktopSource = $null
 $script:AtmGuiAssemblyLoader = $null
 $script:AtmGuiInventorySource = $null
+$script:AtmGuiPreviewSource = $null
 
 function Test-AtmGuiEnvironment {
     # $null when a window can be shown here, otherwise the reason code. Loads nothing and changes nothing.
@@ -72,6 +77,41 @@ function Initialize-AtmGuiSession {
         Refreshes = 0; Failures = 0; Cancelled = 0; Ignored = 0; SourceCalls = 0
         AutoPurgeNotice = @(Get-AtmGuiAutoPurgeNotice -ConfigDir $ia['ConfigDir'])
         Nav = (Initialize-AtmGuiNav)
+        # P4a: the preview rows of the current audit ($null: not computed), the exception type of a failed preview, and
+        # a close requested while the preview runs.
+        Preview = $null; PreviewFailureType = $null; PreviewBusy = $false; CloseAfterPreview = $false; PreviewCalls = 0; PreviewFailures = 0
+    }
+}
+
+function Invoke-AtmGuiPreview {
+    # The preview of the clean engine over the session's inventory, as the TUI computes it: once, when P or 8 is first
+    # opened after an audit; the session keeps the rows until the next successful audit discards them. One blocking
+    # call on the calling (UI) thread, with no progress (the limit ADR-0014 section 5 declares). -OnStart runs just
+    # before the call, only when the call happens (the form disables its controls and shows a fixed text). Returns:
+    #  OK        the rows are kept;
+    #  CACHED    the rows of this audit are kept already: no call;
+    #  NO_AUDIT  no audit has finished: no call;
+    #  IGNORED   an audit or a preview runs: no call;
+    #  FAILED    nothing is kept but the exception type (never its message); the next opening tries again.
+    param([hashtable]$Session, [scriptblock]$OnStart)
+    if ($Session.Busy -or $Session.PreviewBusy) { return 'IGNORED' }
+    if ($null -eq $Session.Inventory) { return 'NO_AUDIT' }
+    if ($null -ne $Session.Preview) { return 'CACHED' }
+    $Session.PreviewBusy = $true
+    try {
+        if ($null -ne $OnStart) { & $OnStart }
+        $Session.PreviewCalls++
+        $rows = @(if ($null -ne $script:AtmGuiPreviewSource) { & $script:AtmGuiPreviewSource $Session.Inventory $Session.InventoryArgs } else { Invoke-AtmPreview -Inventory $Session.Inventory -InventoryArgs $Session.InventoryArgs })
+        $Session.Preview = $rows
+        $Session.PreviewFailureType = $null
+        return 'OK'
+    } catch {
+        $Session.Preview = $null
+        $Session.PreviewFailureType = $_.Exception.GetType().Name
+        $Session.PreviewFailures++
+        return 'FAILED'
+    } finally {
+        $Session.PreviewBusy = $false
     }
 }
 
@@ -83,7 +123,7 @@ function Invoke-AtmGuiRefresh {
     #  CANCELLED  a close request, honoured at the next callback; the earlier result stays;
     #  FAILED     the earlier result stays, and only the exception type is kept (never its message).
     param([hashtable]$Session, [scriptblock]$Pump)
-    if ($Session.Busy) { $Session.Ignored++; return 'IGNORED' }
+    if ($Session.Busy -or $Session.PreviewBusy) { $Session.Ignored++; return 'IGNORED' }
     $Session.Busy = $true
     $Session.CancelRequested = $false
     $Session.Percent = 0
@@ -107,6 +147,9 @@ function Invoke-AtmGuiRefresh {
         $inv = $(if ($null -ne $script:AtmGuiInventorySource) { & $script:AtmGuiInventorySource $a } else { Invoke-AtmInventory @a })
         if ($Session.CancelRequested) { $Session.Cancelled++; return 'CANCELLED' }
         $Session.Inventory = $inv
+        # P4a: the kept preview belonged to the earlier result (a failed or cancelled audit keeps both).
+        $Session.Preview = $null
+        $Session.PreviewFailureType = $null
         $Session.FailureType = $null
         $Session.RefreshedUtc = [datetime]::UtcNow
         $Session.Refreshes++
@@ -198,7 +241,7 @@ function Show-AtmGuiScreen {
     param($Form, [hashtable]$Session)
     $nav = $Session.Nav
     $top = Get-AtmGuiNavTop -Nav $nav
-    $vm = Get-AtmGuiScreen -Inventory $Session.Inventory -Screen $top
+    $vm = Get-AtmGuiScreen -Inventory $Session.Inventory -Screen $top -Preview $Session.Preview -PreviewFailure $Session.PreviewFailureType
     $isDash = ($vm.Kind -ceq 'dashboard')
     foreach ($n in @('Summary', 'ClassesTitle', 'Classes', 'OrphanInfo', 'AuditTime')) { $Form.Controls.Find($n, $true)[0].Visible = $isDash }
     $title = $Form.Controls.Find('ScreenTitle', $true)[0]
@@ -208,6 +251,10 @@ function Show-AtmGuiScreen {
     $msg = $Form.Controls.Find('Message', $true)[0]
     $msg.Text = $msgText
     $msg.AccessibleName = $(if ($msgText) { $msgText } else { Get-AtmText 'gui.messageName' })
+    # P4a: the fixed line of the preview's screens (an evaluation only; no cleanup or isolation here).
+    $notice = $Form.Controls.Find('PreviewNotice', $true)[0]
+    $notice.Visible = [bool]$vm.Notice
+    if ($vm.Notice) { $notice.Text = [string]$vm.Notice; $notice.AccessibleName = $notice.Text }
     $rows = $Form.Controls.Find('Rows', $true)[0]
     $rows.BeginUpdate()
     $rows.Items.Clear()
@@ -297,6 +344,7 @@ function Start-AtmGui {
         # P3: the screens, each with a visible button (access key: its digit) and the TUI's key; the screen's title and
         # the message of the last move.
         $layout.Controls.Add((New-AtmGuiLabel -Text (Get-AtmText 'gui.navHint') -TabIndex ($tab++) -Name 'NavHint'))
+        $layout.Controls.Add((New-AtmGuiLabel -Text (Get-AtmText 'gui.navHintPreview') -TabIndex ($tab++) -Name 'NavHintPreview'))
         $guiScreens = New-Object -TypeName System.Windows.Forms.FlowLayoutPanel
         $guiScreens.Name = 'Screens'
         $guiScreens.AccessibleName = Get-AtmText 'gui.screensName'
@@ -322,6 +370,10 @@ function Start-AtmGui {
         $guiMessage = New-AtmGuiLabel -Text '' -TabIndex ($tab++) -Name 'Message'
         $guiMessage.AccessibleName = Get-AtmText 'gui.messageName'
         $layout.Controls.Add($guiMessage)
+        # P4a: the fixed line of the preview's screens, shown only there.
+        $guiNotice = New-AtmGuiLabel -Text (Get-AtmText 'gui.previewNotice') -TabIndex ($tab++) -Name 'PreviewNotice'
+        $guiNotice.Visible = $false
+        $layout.Controls.Add($guiNotice)
         $layout.Controls.Add((New-AtmGuiListView -Name 'Summary' -AccessibleName (Get-AtmText 'gui.summaryName') -Columns @(@((Get-AtmText 'gui.col.group'), 200), @((Get-AtmText 'gui.col.measure'), 340)) -Width 560 -Height 250 -TabIndex ($tab++)))
         $layout.Controls.Add((New-AtmGuiLabel -Text (Get-AtmText 'dash.classes') -TabIndex ($tab++) -Name 'ClassesTitle'))
         $layout.Controls.Add((New-AtmGuiListView -Name 'Classes' -AccessibleName (Get-AtmText 'gui.classesName') -Columns @(@((Get-AtmText 'gui.col.class'), 220), @((Get-AtmText 'gui.col.roots'), 120), @((Get-AtmText 'gui.col.mb'), 160)) -Width 560 -Height 120 -TabIndex ($tab++)))
@@ -365,30 +417,53 @@ function Start-AtmGui {
         $guiDoRefresh = {
             # A request while an audit runs is dropped (counted), never queued: F5 reaches the form even with the button
             # disabled.
-            if ($guiSession.Busy) { $null = Invoke-AtmGuiRefresh -Session $guiSession; return }
+            if ($guiSession.Busy -or $guiSession.PreviewBusy) { $null = Invoke-AtmGuiRefresh -Session $guiSession; return }
             $guiRefresh.Enabled = $false
             $guiScreens.Enabled = $false
             $guiProgress.Text = Get-AtmText 'gui.progress' 0
-            try { $null = Invoke-AtmGuiRefresh -Session $guiSession -Pump $guiPump }
+            $rr = $null
+            $hadPreview = ($null -ne $guiSession.Preview -or [bool]$guiSession.PreviewFailureType)
+            try { $rr = Invoke-AtmGuiRefresh -Session $guiSession -Pump $guiPump }
             finally {
                 $guiProgress.Text = ''
                 $guiRefresh.Enabled = $true
                 $guiScreens.Enabled = $true
                 # P3: the current screen is computed again over the new result (a detail whose root is gone goes back).
-                Invoke-AtmGuiNavRefreshed -Nav $guiSession.Nav -Inventory $guiSession.Inventory
+                # P4a: a successful audit discards a kept (or failed) preview; its screens go back to the dashboard.
+                Invoke-AtmGuiNavRefreshed -Nav $guiSession.Nav -Inventory $guiSession.Inventory -PreviewDiscarded ($rr -ceq 'OK' -and $hadPreview) -Preview $guiSession.Preview
                 $guiSummary.State = (Show-AtmGuiView -Form $guiForm -Session $guiSession).Code
             }
             # A close requested during the audit: the audit is cancelled, then the window closes.
             if ($guiSession.CloseAfterRefresh) { $guiSession.CloseAfterRefresh = $false; $guiForm.Close() }
         }
         # P3: a key or screen button moves through the screens (ignored while an audit runs); Esc on the dashboard closes.
+        # P4a: while the preview runs, the screens and Refresh are disabled and the progress label shows a fixed text (no
+        # percentage: the call is a single block). Painted before the call starts.
+        $guiPreviewStart = {
+            $guiRefresh.Enabled = $false
+            $guiScreens.Enabled = $false
+            $guiProgress.Text = Get-AtmText 'tui.computingPreview'
+            $guiForm.Refresh()
+        }
         $guiNavKey = {
             param([string]$Key)
-            $r = Invoke-AtmGuiNavKey -Nav $guiSession.Nav -Inventory $guiSession.Inventory -Key $Key -Busy ([bool]$guiSession.Busy)
+            $r = Invoke-AtmGuiNavKey -Nav $guiSession.Nav -Inventory $guiSession.Inventory -Key $Key -Busy ([bool]$guiSession.Busy -or [bool]$guiSession.PreviewBusy) -Preview $guiSession.Preview
             if ($r -ceq 'CLOSE') { $guiForm.Close() }
             elseif ($r -ceq 'RENDER') {
+                # P4a: opening P or 8 asks for the preview; the session's function decides whether the engine is called
+                # (once per audit; never before an audit).
+                if ((Get-AtmGuiNavTop -Nav $guiSession.Nav).Name -ceq 'gates') {
+                    try { $null = Invoke-AtmGuiPreview -Session $guiSession -OnStart $guiPreviewStart }
+                    finally {
+                        $guiProgress.Text = ''
+                        $guiRefresh.Enabled = $true
+                        $guiScreens.Enabled = $true
+                    }
+                }
                 $null = Show-AtmGuiScreen -Form $guiForm -Session $guiSession
                 if ($guiRows.Visible) { $null = $guiRows.Focus() }
+                # A close requested while the preview ran: the window closes now that the call has ended.
+                if ($guiSession.CloseAfterPreview) { $guiSession.CloseAfterPreview = $false; $guiForm.Close() }
             }
         }
         $guiRefresh.add_Click({ & $guiDoRefresh })
@@ -402,13 +477,19 @@ function Start-AtmGui {
                 if ($ev.Alt -or $ev.Control) { return }
                 $kn = [string]$ev.KeyCode
                 # Keys.Return and Keys.Enter are one value; its name can be either.
-                if ($kn -cmatch '^(D|NumPad)[1-9]$' -or $kn -ceq 'Return' -or $kn -ceq 'Enter' -or $kn -ceq 'Escape') {
+                if ($kn -cmatch '^(D|NumPad)[1-9]$' -or $kn -ceq 'P' -or $kn -ceq 'Return' -or $kn -ceq 'Enter' -or $kn -ceq 'Escape') {
                     $ev.Handled = $true
                     $ev.SuppressKeyPress = $true
                     & $guiNavKey $kn
                 }
             })
-        $form.add_FormClosing({ param($src, $ev) if ($guiSession.Busy) { $guiSession.CancelRequested = $true; $guiSession.CloseAfterRefresh = $true; $ev.Cancel = $true } })
+        $form.add_FormClosing({
+                param($src, $ev)
+                $null = $src
+                if ($guiSession.Busy) { $guiSession.CancelRequested = $true; $guiSession.CloseAfterRefresh = $true; $ev.Cancel = $true }
+                # P4a: the preview cannot be cancelled inside its call; the window closes when it ends.
+                elseif ($guiSession.PreviewBusy) { $guiSession.CloseAfterPreview = $true; $ev.Cancel = $true }
+            })
         $form.add_Shown({
                 $guiSummary.Shown = $true
                 # The first audit: opening the window is the request (as the TUI does when it starts).

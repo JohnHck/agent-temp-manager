@@ -3,7 +3,8 @@
 Status: ACCEPTED for the technology and the architecture (maintainer decisions D-B and D-A, 2026-11-16).
 GUI-D1 to GUI-D6 are ACCEPTED (decided by the maintainer as recommended, 2026-11-16); GUI-D7 to GUI-D11 are ACCEPTED
 (technical decisions accepted by the auditor as recommended, 2026-11-16). Implemented, with the gate closed in every
-copy: P1 (the skeleton), P2 (the dashboard) and P3 (the drill-down). P4 to P6 are not implemented.
+copy: P1 (the skeleton), P2 (the dashboard), P3 (the drill-down) and P4a (the preview). P4b to P6 are not
+implemented.
 Date: 2026-11-16
 Phase: V0.2.1, phases P1 to P6 (section 10)
 
@@ -444,3 +445,41 @@ What P3 implements, with the gate closed in every copy:
   The planted violations gain a call to `Show-AtmPathDetail`, the CLI path drill-down.
 * **Catalog:** new `gui.*` keys only, in en-US and pt-BR (the navigation hint, the screen buttons and title, the
   message, the rows' name, the detail that is gone, the note before an audit and three column headings).
+
+## Implementation record: P4a (V021-P4a, 2026-11-16)
+
+Phase P4 of section 10 was split by the auditor into two rounds: **P4a**, the preview of the cleanup, and **P4b**, the
+diagnose area. P4b is not implemented. What P4a implements, with the gate closed in every copy:
+
+* **View model** in `GuiModel.ps1` (`Get-AtmGuiPreviewTable`), testable without a window, with the rows of the TUI's
+  `gates` screen: category, user, root (`slug\name`), MB, and the reasons and requirements joined by `; `. It filters
+  by category (`8` keeps `BLOCKED`, `P` keeps all) and sorts as the TUI does: by category, then by bytes descending,
+  through `List[object].Sort` with a comparison equal to the TUI's sort keys, so ties come out in the TUI's order.
+  `ELIGIBLE_WITH_DECLARED_RISK` is written with the TUI's short label (`tui.catDeclaredRisk`). The view model computes
+  no category, gate or eligibility: every row comes from the result of `Invoke-AtmPreview`.
+* **Detail.** `Enter` on a preview row opens the root's detail with one more line, `Preview`: the raw category, then the
+  reasons and requirements, as the TUI's detail writes it. A detail opened from any other screen has no such line.
+* **When the preview runs** (`Invoke-AtmGuiPreview` in `Gui.ps1`, the only place that calls `Invoke-AtmPreview`):
+  * only when `P` or `8` is opened and no result is kept for the current audit: one call, on the UI thread, with the
+    session's inventory and the launcher's own inventory arguments. Before the first audit it makes no call, and the
+    screens show P3's text for that;
+  * the result is kept in the window's session until the next audit. A successful audit discards it; if a preview
+    screen (or a detail opened from one) is open, the window goes back to the dashboard with a catalog text, so that no
+    stale category stays on screen and no preview runs without an explicit opening. A failed audit keeps the result
+    and the screen;
+  * while it runs, the screen keys, the screen buttons and Refresh are disabled, and the window shows a fixed catalog
+    text (`tui.computingPreview`, the TUI's own), with no percentage. The engine offers no progress callback, so the
+    limit of section 5 applies as declared: a single blocking call can delay repainting until it returns;
+  * a close request during the call is deferred: `FormClosing` cancels it and records it, and the window closes once
+    the call ends. The close button stays enabled;
+  * a failure shows only the exception type, never its message; nothing is changed, and the next opening of `P` or
+    `8` calls again. Nothing repeats by itself;
+  * a test seam, `$script:AtmGuiPreviewSource`, is a single `$null` assignment, as the inventory seam.
+* **Window:** a fixed notice on both preview screens (`gui.previewNotice`): the preview is an evaluation only, and the
+  window deletes and isolates nothing. Buttons for `8` and `P` with their access keys; the form's key handler takes
+  `P` as it takes the digits. Only `Label`, `ListView` and `Button` controls, no timer, no editable text field, and no
+  action over a root or a category.
+* **Closed list:** unchanged, 21 names; `Invoke-AtmPreview` was already in it. The static test checks it appears in
+  one place only. The planted violations gain a call to `Test-AtmCandidate`, an engine helper outside the list.
+* **Catalog:** new `gui.*` keys only, in en-US and pt-BR: the navigation hint, the notice, the failure, the discarded
+  result and the note before the preview is computed.
