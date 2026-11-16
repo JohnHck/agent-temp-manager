@@ -1,21 +1,24 @@
 # Roadmap
 
-This is the canonical roadmap of Agent Temp Manager. Versions are delivered in order; each one has to meet its
-acceptance criteria before the next one starts. A version may be split into smaller releases, but its safety limits
-never move.
+This is the canonical roadmap of Agent Temp Manager. Versions land on `main` in order, each one **dark**: everything
+in it that changes the system sits behind a release gate of its own, `$false` in every copy, and its acceptance
+criteria are proven in CI. Each gate is opened later, only by an explicit decision of the maintainer, and publishing
+stays the maintainer's decision, release by release. So a version can start before an earlier one has opened its
+gates, as 0.3.x did. A version may be split into smaller releases, but its safety limits never move: they hold with
+its gates closed or open, and no gate opens without the maintainer's decision.
 
 **Design rule for every version: safety over reclaimed space. When in doubt, preserve.**
 
-| Version | Theme | Changes the system? |
-|---|---|---|
-| [V0.1](#v01--audit-preview-tui-and-internationalization) | Audit, preview, TUI, internationalization | No (real deletion disabled) |
-| [V0.2](#v02--windows-runtime-diagnostics) | Windows Runtime Diagnostics, including Git worktrees | No (read-only) |
-| [V0.2.1](#v021--desktop-gui-and-live-monitoring) | Desktop GUI and live monitoring (while the window is open) | No (read-only presentation) |
-| [V0.3](#v03--selective-real-cleanup) | Selective real cleanup | Yes: deletes approved temporary paths only |
-| [0.3.x](#03x--isolation-and-quarantine-of-the-own-profile) | Isolation and quarantine of the own profile (ADR-0013; after 0.3.0 is published) | Yes: moves approved temporary paths into a quarantine and back; purge deletes behind the purge gate of its own (J-ISO-1 (C)) |
-| [V0.4](#v04--assisted-recovery) | Assisted recovery of services and environments; Recovery Mode for another user's profile (ADR-0013) | Yes: reversible operations, each authorized individually |
-| [V0.5](#v05--preventive-monitoring) | Persistent preventive monitoring, alerts, growth trends | No (observes and alerts) |
-| [V1.0](#v10--stabilization-and-multi-agent-support) | Stabilization and extensible multi-agent support | Same limits as V0.3 and V0.4 |
+| Version | Theme | Changes the system? | Status |
+|---|---|---|---|
+| [V0.1](#v01--audit-preview-tui-and-internationalization) | Audit, preview, TUI, internationalization | No (real deletion disabled) | Complete (0.1.0) |
+| [V0.2](#v02--windows-runtime-diagnostics) | Windows Runtime Diagnostics, including Git worktrees | No (read-only) | Published (0.2.0); three diagnostics gates closed |
+| [V0.2.1](#v021--desktop-gui-and-live-monitoring) | Desktop GUI and live monitoring (while the window is open) | No (read-only presentation) | Not started |
+| [V0.3](#v03--selective-real-cleanup) | Selective real cleanup | Yes: deletes approved temporary paths only | Published (0.3.0); deletion gate closed |
+| [0.3.x](#03x--isolation-and-quarantine-of-the-own-profile) | Isolation and quarantine of the own profile (ADR-0013; after 0.3.0 is published) | Yes: moves approved temporary paths into a quarantine and back; purge deletes behind the purge gate of its own (J-ISO-1 (C)) | On `main`, isolation and purge gates closed; not published |
+| [V0.4](#v04--assisted-recovery) | Assisted recovery of services and environments; Recovery Mode for another user's profile (ADR-0013) | Yes: reversible operations, each authorized individually | Not started |
+| [V0.5](#v05--preventive-monitoring) | Persistent preventive monitoring, alerts, growth trends | No (observes and alerts) | Not started |
+| [V1.0](#v10--stabilization-and-multi-agent-support) | Stabilization and extensible multi-agent support | Same limits as V0.3 and V0.4 | Not started |
 
 ## Principles that apply to every version
 
@@ -73,11 +76,14 @@ coverage blocks; TUI and reports never call deletion APIs; installer integrity a
 
 ## V0.2 — Windows Runtime Diagnostics
 
-**Status: in progress.** The `diagnose` command (identity, coverage, the V0.1 inventory) and the agent runtime
-(Claude Code processes and sessions found through evidence, their verified trees and resource totals) are in place in
-development builds; services, virtualization, Git worktrees, dependencies, the TUI view and the Claude Desktop
-scenario are not yet. Plan, phases and acceptance criteria per phase:
-[release/V0.2-PLAN.md](release/V0.2-PLAN.md); architecture decisions: [adr/](adr/README.md).
+**Status: published as 0.2.0 (GitHub Release `v0.2.0`).** The `diagnose` command and TUI area D shipped read-only:
+agent processes and sessions from evidence, resource totals, provider-declared services, the Hyper-V platform and
+VMs, the dependency graph, temporary partitions with runtime evidence and profile discovery, plus the runtime-only
+Claude Desktop provider. Three parts shipped behind gates closed in every copy: Git worktree diagnostics, open-file
+diagnostics and the `diagnose` JSON export. Process working directories (D-1) were deferred. Details:
+[CHANGELOG](../CHANGELOG.md) (0.2.0) and [release/V0.2.0-RELEASE-NOTES.md](release/V0.2.0-RELEASE-NOTES.md). Plan,
+phases and acceptance criteria per phase: [release/V0.2-PLAN.md](release/V0.2-PLAN.md); architecture decisions:
+[adr/](adr/README.md).
 
 **Objectives.** Explain *why* space and resources are in use and *what is still running*, so that a later cleanup
 can be based on evidence instead of assumptions. V0.2 is strictly read-only.
@@ -150,6 +156,8 @@ writes anything (no fetch, no prune, no index refresh that changes files).
 ---
 
 ## V0.2.1 — Desktop GUI and live monitoring
+
+**Status: not started.** It lands on `main` under the order rule above: dark, with its acceptance proven in CI.
 
 **Objectives.** Offer the V0.1 audit and preview and the V0.2 diagnostics in a native Windows desktop window, for
 users who do not work in a terminal, and refresh them live while the window is open. V0.2.1 is a new presentation
@@ -258,8 +266,12 @@ anything outside an agent's temporary area; no ACL changes, no service or proces
 
 ## 0.3.x — Isolation and quarantine of the own profile
 
-**Status: placement decided by the maintainer (ISO-D1, 2026-11-01); design in
-[ADR-0013](adr/ADR-0013-isolation-quarantine-recovery-mode.md) (PARTIALLY ACCEPTED); nothing implemented.** A release
+**Status: implemented on `main`, not published.** Placement decided by the maintainer (ISO-D1, 2026-11-01); design
+in [ADR-0013](adr/ADR-0013-isolation-quarantine-recovery-mode.md) (PARTIALLY ACCEPTED). Phases P1 to P6b, ISO-FIX-VOL
+and ISO-PLANCHECK-REASONS are on `main`, behind two release gates closed in every copy: `AtmIsolationEnabled`
+(`isolate` only plans) and `AtmQuarantinePurgeEnabled` (`quarantine purge` only plans). The code on `main` reports the
+next patch version of the 0.3 line, which is not published ([CHANGELOG](../CHANGELOG.md), section Unreleased). The
+operator pilot stopped at a documented step; the limitation was accepted. A release
 after 0.3.0 that depends on it. It is not part of 0.3.0. Work for 0.3.x lands on `main`; the `v0.3.0` tag goes on the
 audited head of `release/0.3.x`, not on `main` ([release/V0.3-RC.md](release/V0.3-RC.md)). Origin: the
 [2026-11-01 incident](incidents/2026-11-01-profile-login-temp-isolation.md), observed operational evidence, not a
@@ -325,6 +337,8 @@ changes, nothing outside an agent's temporary area.
 
 ## V0.4 — Assisted recovery
 
+**Status: not started.** It lands on `main` under the order rule above: dark, with its acceptance proven in CI.
+
 **Objectives.** Help recover services and agent environments that are stuck or broken, through reversible steps that
 the user authorizes one at a time.
 
@@ -384,6 +398,8 @@ and a log. These points need an explicit amendment of V0.4's limits before it is
 
 ## V0.5 — Preventive monitoring
 
+**Status: not started.** It lands on `main` under the order rule above: dark, with its acceptance proven in CI.
+
 **Objectives.** Notice problems before they cost space or stability: growth of temporary data, leftover worktrees,
 long-running agent virtual machines. Unlike the live monitoring of V0.2.1, which only runs while the window is open,
 V0.5 monitoring is **persistent**: it keeps collecting after the GUI or terminal is closed and across sign-ins and
@@ -413,6 +429,8 @@ installation and removal in a sandbox.
 ---
 
 ## V1.0 — Stabilization and multi-agent support
+
+**Status: not started.** It lands on `main` under the order rule above: dark, with its acceptance proven in CI.
 
 **Objectives.** A stable, documented tool that supports several AI agents through the provider contract.
 
