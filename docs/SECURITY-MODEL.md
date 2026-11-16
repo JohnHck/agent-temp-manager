@@ -52,6 +52,25 @@ change it; enabling deletion requires a code change in the administrator-owned, 
 released under a specific authorization. The automated suite flips it only in its own process, against its
 isolated sandbox.
 
+## Desktop GUI gate (V0.2.1 phase P1)
+
+* **The seventh gate:** `$script:AtmGuiEnabled`, `$false` in every shipped copy (maintainer decision D-A,
+  [ADR-0014](adr/ADR-0014-desktop-gui-winforms.md)). It is a single assignment in `lib\Gui.ps1`, with no option,
+  environment variable or configuration file.
+  * The build refuses an archive without it, and without both GUI files.
+  * The suite and the install e2e check all seven gates.
+  * `version` shows it.
+* **Closed** (every copy), `agent-temp gui` prints `GUI_GATE_CLOSED` and exits with code `7`. It opens no window, and no
+  Windows Forms assembly is loaded: the suite checks this in a new process, after the libraries are loaded and after
+  `gui`.
+* **Presentation only, not a gate over the engines.** The GUI decides nothing. `lib\Gui.ps1` and `lib\GuiModel.ps1` may
+  call only the engine and catalog functions of ADR-0014's closed list. A static suite test fails on any other command,
+  on the deletion, move, write, process, task and clipboard APIs named in ADR-0014 section 3, and on the gate variables of
+  the other features. Loading the two files defines functions and constants only.
+* **Past the gate** (tests only, in their own process): an STA thread and an interactive desktop are required (exit
+  code `8` otherwise). The command is never relaunched in another shell. The P1 window shows the identity and the
+  elevation state (PRIV-10), changes nothing and leaves no process, timer or file behind.
+
 ## Clean gates (all must pass, re-run immediately before each deletion)
 
 1. Allowlist syntax: absolute local path, no wildcards, no `.`/`..`, no ADS, no 8.3 short names, no trailing

@@ -300,3 +300,47 @@ Kind: **product** decisions go to the maintainer; **technical** ones are the aud
 * The V0.2.1 acceptance criteria of the ROADMAP: the same engines, no deletion, recovery or write API, PRIV-1 and
   PRIV-10, stale data labelled, nothing left after close. Each one is mapped to a named suite or e2e case in the phase
   that implements it.
+
+## Implementation record: P1 (V021-P1, 2026-11-16)
+
+What P1 implements, with the gate closed in every copy:
+
+* `src/lib/Gui.ps1` and `src/lib/GuiModel.ps1`. Loading them defines functions and constants only:
+  * no assembly is loaded at load time, no type is declared, and there is no `using`;
+  * the single assignment `$script:AtmGuiEnabled = $false` is in `Gui.ps1`;
+  * three test seams (apartment, desktop, assembly loader) are `$null` in every copy.
+* `agent-temp gui` runs in this order:
+  1. the launcher's integrity check;
+  2. the gate: closed gives `GUI_GATE_CLOSED`, exit code `7`, no window and no Windows Forms (GUI-D8);
+  3. the STA thread and the interactive desktop (`[Environment]::UserInteractive` and a session other than 0), else
+     exit code `8` with `GUI_NOT_STA` or `GUI_NO_INTERACTIVE_DESKTOP`;
+  4. `Add-Type` of System.Windows.Forms and System.Drawing in `Import-AtmGuiAssemblies` only, else `8` with
+     `GUI_WINFORMS_UNAVAILABLE`;
+  5. the minimal modal window: the title, the identity, the elevation state (PRIV-10) and a read-only notice, with a
+     Close button that `Esc` also triggers. It is disposed on close.
+
+  The native helper is initialized only past the gate. Nothing is relaunched.
+* The seventh gate is checked by:
+  * the build (its gate list, and the archive must contain both files);
+  * the installer's file list and the manifest;
+  * the install e2e (step `shipped-gui-gate`, and the installed gates table has seven rows);
+  * the suite;
+  * `version`, in both languages.
+* The closed list that the static suite test applies to `src/lib/Gui*.ps1`:
+  * the files' own functions;
+  * the engine and catalog functions `Invoke-AtmInventory`, `Invoke-AtmPreview`, `Invoke-AtmDiagnose`,
+    `ConvertTo-AtmDiagnoseJson`, `Get-AtmIdentityState`, `Get-AtmCurrentIdentity`, `Get-AtmText`, `Get-AtmLanguage`
+    and `Set-AtmLanguage`;
+  * the cmdlets `Write-Host`, `New-Object` and `Add-Type`. `Add-Type` is allowed only inside
+    `Import-AtmGuiAssemblies`.
+
+  The test also fails on:
+  * the deletion, move, write, process, task and clipboard APIs of section 3;
+  * the gate variables of the other features;
+  * a load-time statement other than a function definition or a constant assignment.
+
+  Eleven planted violations in temporary copies are each detected. Two notes on the list:
+  * `Get-AtmIdentityState` is an identity collector. The TUI and report layering test keeps forbidding it there; the
+    GUI may call it for the header, as `version` does.
+  * `Get-AtmAutoPurgeNoticeLines` is left out of the list until GUI-D1 is decided.
+* GUI-D7 measurement: pending; the CI result is recorded below in a follow-up commit of the same branch.

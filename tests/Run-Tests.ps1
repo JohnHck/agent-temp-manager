@@ -29,6 +29,8 @@ $srcDir = Join-Path (Split-Path -Parent $testsDir) 'src'
 . (Join-Path $srcDir 'lib\Engine.Diagnose.ps1')
 . (Join-Path $srcDir 'lib\Report.ps1')
 . (Join-Path $srcDir 'lib\Tui.ps1')
+. (Join-Path $srcDir 'lib\GuiModel.ps1')
+. (Join-Path $srcDir 'lib\Gui.ps1')
 . (Join-Path (Split-Path -Parent $testsDir) 'install\InstallCommon.ps1')
 Initialize-AtmNative -LibDir (Join-Path $srcDir 'lib')
 $cfgDir = Join-Path $srcDir 'config'
@@ -14190,6 +14192,298 @@ try {
             $txt = [IO.File]::ReadAllText((Join-Path $lib $f))
             foreach ($pat in @('Get-AtmIdentityRaw', 'Get-AtmIdentityState', 'Get-AtmProviderRuntimeHints', 'Get-AtmInventoryCoverage', 'AtmToken]', 'Get-AtmProcessRaw', 'Get-AtmProcessCollection', 'Resolve-AtmProcessReference', 'Get-AtmProcessParentLink', 'Get-AtmProcessTree', 'Compare-AtmProcessCollections', 'Get-AtmSelfProcessKeys', 'Measure-AtmProcessCpu', 'Invoke-AtmProcessCpuSampling', 'Get-AtmProcessTreeResources', 'Invoke-AtmGitCommand', 'Resolve-AtmGitExecutable', 'Invoke-AtmBoundedProcess', 'AtmJobRunner')) { Assert-True (-not $txt.Contains($pat)) "$f chama coletor diretamente: $pat" }
         }
+    }
+
+    # ------------------------------------------------------------------ V0.2.1 P1: desktop GUI skeleton (ADR-0014)
+    # The closed list of ADR-0014 section 3, as the static test applies it to src/lib/Gui*.ps1: every command must be a
+    # function of those files, one of the allowed engine and catalog functions, or one of the allowed cmdlets.
+    $guiAllowedEngine = @('Invoke-AtmInventory', 'Invoke-AtmPreview', 'Invoke-AtmDiagnose', 'ConvertTo-AtmDiagnoseJson', 'Get-AtmIdentityState', 'Get-AtmCurrentIdentity', 'Get-AtmText', 'Get-AtmLanguage', 'Set-AtmLanguage')
+    $guiAllowedCmdlets = @('Write-Host', 'New-Object', 'Add-Type')
+    # Forbidden names (ADR-0014 section 3), searched in the text, case-insensitive, comments included.
+    $guiForbidden = @('Invoke-AtmClean', 'Invoke-AtmIsolate', 'Invoke-AtmRestore', 'Invoke-AtmPurge', 'Invoke-AtmAutoPurgeSchedule', 'Invoke-AtmAutoPurgeUnschedule', 'Invoke-AtmDiscardAuthorization',
+        'AtmDeleter', 'AtmLockProbe', 'DeleteTree', 'Remove-Item', 'Move-Item', '::Delete(', '.Delete(', '::Move(', 'Set-Content', 'Add-Content', 'Out-File', 'New-Item', 'Set-ItemProperty', 'Set-Acl',
+        '::WriteAll', '::AppendAll', '::Create(', '::OpenWrite(', 'CreateSubKey', 'SetValue', 'Start-Process', 'Stop-Process', 'Start-Service', 'Stop-Service', 'Set-Service', 'Restart-Service',
+        'Suspend-Service', 'ScheduledTask', 'schtasks', 'Invoke-CimMethod', 'Invoke-WmiMethod', 'Set-CimInstance', 'Remove-CimInstance', 'Clipboard', 'Invoke-Expression', 'sc.exe', 'net stop', 'net start',
+        'rd /s', 'rmdir', 'del ')
+    $guiOtherGates = @('AtmRealDeletionEnabled', 'AtmWorktreeDiagnosticsEnabled', 'AtmHandleDiagnosticsEnabled', 'AtmDiagnoseExportEnabled', 'AtmIsolationEnabled', 'AtmQuarantinePurgeEnabled')
+    # Returns the violations of the given files (empty: inside the closed list). Reads and parses only.
+    $guiCheck = {
+        param([string[]]$Files)
+        $bad = New-Object System.Collections.Generic.List[string]
+        $parsed = New-Object System.Collections.Generic.List[object]
+        $own = New-Object System.Collections.Generic.List[string]
+        foreach ($f in $Files) {
+            $tok = $null; $perr = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($f, [ref]$tok, [ref]$perr)
+            $n = Split-Path -Leaf $f
+            if (@($perr).Count -gt 0) { $bad.Add("${n}: erro de sintaxe") }
+            $parsed.Add(@($n, $ast, [IO.File]::ReadAllText($f)))
+            foreach ($fd in $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) { $own.Add($fd.Name) }
+        }
+        foreach ($p in $parsed) {
+            $n = $p[0]; $ast = $p[1]; $txt = $p[2]
+            # Load time: function definitions and constant assignments to script variables only.
+            if ($null -ne $ast.ParamBlock -or $null -ne $ast.BeginBlock -or $null -ne $ast.ProcessBlock -or @($ast.UsingStatements).Count -gt 0) { $bad.Add("${n}: param, begin, process ou using no topo") }
+            foreach ($st in @($ast.EndBlock.Statements)) {
+                if ($st -is [System.Management.Automation.Language.FunctionDefinitionAst]) { continue }
+                $ok = ($st -is [System.Management.Automation.Language.AssignmentStatementAst]) -and ($st.Left.Extent.Text -cmatch '^\$script:Atm\w+$') -and ($st.Right.Extent.Text -cmatch '^(\$null|\$false|\$true|\d+)$')
+                if (-not $ok) { $bad.Add("${n}: instrucao executada ao carregar: " + ($st.Extent.Text -split "`r?`n")[0]) }
+            }
+            if (@($ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.TypeDefinitionAst] }, $true)).Count -gt 0) { $bad.Add("${n}: declara classe ou tipo") }
+            foreach ($c in $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+                $cn = $c.GetCommandName()
+                # & $scriptblock (the test seams and the test hook) has no command name.
+                if ($null -eq $cn) { continue }
+                if ($own -contains $cn -or $guiAllowedEngine -contains $cn -or $guiAllowedCmdlets -contains $cn) {
+                    if ($cn -eq 'Add-Type') {
+                        $fp = $c.Parent
+                        while ($null -ne $fp -and -not ($fp -is [System.Management.Automation.Language.FunctionDefinitionAst])) { $fp = $fp.Parent }
+                        if ($null -eq $fp -or $fp.Name -cne 'Import-AtmGuiAssemblies') { $bad.Add("${n}: Add-Type fora de Import-AtmGuiAssemblies") }
+                    }
+                    continue
+                }
+                $bad.Add("${n}: comando fora da lista fechada: $cn")
+            }
+            foreach ($w in $guiForbidden) { if ($txt.IndexOf($w, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $bad.Add("${n}: nome proibido: $w") } }
+            foreach ($g in $guiOtherGates) { if ($txt.Contains($g)) { $bad.Add("${n}: trava de outra funcionalidade: $g") } }
+            if ($txt -match '(?i)\b(Start|Stop|Save|Suspend|Resume|Restart|Checkpoint|Remove|Set|New)-VM\b') { $bad.Add("${n}: cmdlet de VM") }
+        }
+        return , $bad.ToArray()
+    }
+    Test-Case 'GUI P1' 'Setima trava (AtmGuiEnabled): uma unica atribuicao a $false em Gui.ps1, fechada neste processo, nenhum outro arquivo a altera; as sete travas fechadas; build, instalador, e2e, manifesto, lancador e version a conferem nos dois idiomas' {
+        $seven = @(@('lib\Engine.Clean.ps1', 'AtmRealDeletionEnabled'), @('lib\Engine.Diagnose.ps1', 'AtmWorktreeDiagnosticsEnabled'), @('lib\Engine.Diagnose.ps1', 'AtmHandleDiagnosticsEnabled'), @('lib\Report.ps1', 'AtmDiagnoseExportEnabled'),
+            @('lib\Engine.Isolate.ps1', 'AtmIsolationEnabled'), @('lib\Engine.Isolate.ps1', 'AtmQuarantinePurgeEnabled'), @('lib\Gui.ps1', 'AtmGuiEnabled'))
+        foreach ($g in $seven) {
+            $t = [IO.File]::ReadAllText((Join-Path $srcDir $g[0]))
+            Assert-True ([regex]::Matches($t, '\$script:' + $g[1] + '\s*=').Count -eq 1 -and $t -match ('(?m)^\$script:' + $g[1] + ' = \$false\r?$')) "$($g[1]): uma unica atribuicao, a `$false ($($g[0]))"
+        }
+        Assert-Eq $script:AtmGuiEnabled $false 'trava da GUI fechada neste processo'
+        foreach ($f in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Name -ne 'Gui.ps1' })) {
+            Assert-True (-not ([regex]::IsMatch([IO.File]::ReadAllText($f.FullName), 'AtmGuiEnabled\s*='))) "$($f.Name) nao pode alterar a trava da GUI"
+        }
+        $gt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1'))
+        foreach ($s in @('AtmGuiApartmentSource', 'AtmGuiDesktopSource', 'AtmGuiAssemblyLoader')) {
+            Assert-True ([regex]::Matches($gt, '\$script:' + $s + '\s*=').Count -eq 1 -and $gt -match ('(?m)^\$script:' + $s + ' = \$null\r?$')) "costura ${s}: uma unica atribuicao, a `$null"
+        }
+        Assert-True ($script:AtmGuiExitGateClosed -eq 7 -and $script:AtmGuiExitEnvironment -eq 8) 'codigos de saida 7 e 8 (GUI-D8)'
+        $root = Split-Path -Parent $testsDir
+        $br = [IO.File]::ReadAllText((Join-Path $root 'tools\Build-Release.ps1'))
+        Assert-True ($br.Contains("@(`$guiTxt, 'AtmGuiEnabled')") -and $br.Contains("& `$read 'src/lib/Gui.ps1'") -and $br.Contains("& `$read 'src/lib/GuiModel.ps1'")) 'build confere a setima trava e exige os dois arquivos no pacote'
+        $e2e = [IO.File]::ReadAllText((Join-Path $root 'tests\e2e\Invoke-InstallE2E.ps1'))
+        Assert-True ($e2e.Contains("AtmGuiEnabled = 'lib\Gui.ps1'") -and $e2e.Contains("'seven installed gates `$false'") -and $e2e.Contains("Step 'shipped-gui-gate'")) 'e2e da instalacao: sete travas e o passo da GUI'
+        $launcher = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        Assert-True ($launcher.Contains("'lib\Tui.ps1', 'lib\GuiModel.ps1', 'lib\Gui.ps1')") -and $launcher.Contains(". (Join-Path `$here 'lib\GuiModel.ps1')") -and $launcher.Contains(". (Join-Path `$here 'lib\Gui.ps1')")) 'lancador: os dois arquivos na lista da verificacao de integridade e carregados'
+        foreach ($rel in @('lib\GuiModel.ps1', 'lib\Gui.ps1')) { Assert-True ($script:AtmRequiredFiles -contains $rel) "instalador exige $rel" }
+        $mfDir = Join-Path $sandbox 'gui-p1-manifest'
+        [void][IO.Directory]::CreateDirectory($mfDir)
+        Copy-AtmTree -From $srcDir -To $mfDir
+        Write-AtmManifest -Root $mfDir -Version (Get-AtmSourceVersion -SourceDir $mfDir)
+        $paths = @(([IO.File]::ReadAllText((Join-Path $mfDir 'manifest.json')) | ConvertFrom-Json).files | ForEach-Object { [string]$_.path })
+        foreach ($rel in @('lib\GuiModel.ps1', 'lib\Gui.ps1')) { Assert-True ($paths -contains $rel) "manifesto lista $rel" }
+        $cmd = Join-Path $srcDir 'bin\agent-temp.cmd'
+        $o = (& cmd.exe /c "`"$cmd`" version -Lang en-US" 2>&1) -join "`n"
+        Assert-True ($LASTEXITCODE -eq 0 -and $o -match 'desktop GUI: DISABLED in this release') "version en-US: saida $LASTEXITCODE"
+        $o = (& cmd.exe /c "`"$cmd`" version -Lang pt-BR" 2>&1) -join "`n"
+        Assert-True ($LASTEXITCODE -eq 0 -and $o -match 'GUI de desktop: DESABILITADA') "version pt-BR: saida $LASTEXITCODE"
+    }
+    Test-Case 'GUI P1' 'agent-temp gui com a trava fechada: GUI_GATE_CLOSED e saida 7 nos dois idiomas, sem janela; num processo novo deste shell, nenhum System.Windows.Forms carregado depois de carregar as bibliotecas (version) nem depois do gui' {
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $direct = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$(Join-Path $srcDir 'agent-temp.ps1')`" gui -Lang en-US") -TimeoutSec 300
+        Assert-True ($direct.Exit -eq 7 -and $direct.Text.Contains('GUI_GATE_CLOSED') -and $direct.Text.Contains('No window was opened.')) "processo direto: saida $($direct.Exit) $($direct.Text)"
+        $child = Join-Path $sandbox 'gui-gate-child.ps1'; $out = Join-Path $sandbox 'gui-gate-child.json'
+        [IO.File]::WriteAllText($child, @'
+param([string]$Src, [string]$Out)
+$ErrorActionPreference = 'Stop'
+$wf = { @([AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq 'System.Windows.Forms' }).Count }
+$res = [ordered]@{ before = (& $wf) }
+$launcher = Join-Path $Src 'agent-temp.ps1'
+$t = (& $launcher version -Lang en-US *>&1 | Out-String)
+$res.versionExit = $LASTEXITCODE
+$res.versionGui = [bool]($t -match 'desktop GUI: DISABLED')
+$res.afterVersion = (& $wf)
+foreach ($l in @('en-US', 'pt-BR')) {
+    $t = (& $launcher gui -Lang $l *>&1 | Out-String)
+    $res['exit_' + $l] = $LASTEXITCODE
+    $res['text_' + $l] = $t.Trim()
+}
+$res.afterGui = (& $wf)
+($res | ConvertTo-Json) | Set-Content -LiteralPath $Out -Encoding UTF8
+'@, (New-Object Text.UTF8Encoding $true))
+        $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Out `"$out`"") -TimeoutSec 300
+        Assert-True ($r.Exit -eq 0 -and (Test-Path -LiteralPath $out -PathType Leaf)) "processo filho: saida $($r.Exit) $($r.Text)"
+        $j = Get-Content -LiteralPath $out -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([int]$j.before -ne 0) { $script:caseSkipped = $true; $script:caseNote = 'System.Windows.Forms ja carregado ao iniciar o shell: ausencia nao observavel'; return }
+        Assert-True ([int]$j.versionExit -eq 0 -and [bool]$j.versionGui) "version mostra a GUI desabilitada (saida $($j.versionExit))"
+        Assert-Eq ([int]$j.afterVersion) 0 'carregar as bibliotecas (version) nao carrega o System.Windows.Forms'
+        Assert-True ([int]$j.'exit_en-US' -eq 7 -and ([string]$j.'text_en-US').Contains('GUI_GATE_CLOSED') -and ([string]$j.'text_en-US').Contains('No window was opened.')) "gui en-US: saida $($j.'exit_en-US')"
+        Assert-True ([int]$j.'exit_pt-BR' -eq 7 -and ([string]$j.'text_pt-BR').Contains('GUI_GATE_CLOSED') -and ([string]$j.'text_pt-BR').Contains('Nenhuma janela foi aberta.')) "gui pt-BR: saida $($j.'exit_pt-BR')"
+        Assert-Eq ([int]$j.afterGui) 0 'gui com a trava fechada nao carrega o System.Windows.Forms'
+    }
+    Test-Case 'GUI P1' 'Ambiente sem janela, simulado com a trava aberta so neste processo: sem STA, sem area de trabalho interativa ou sem WinForms -> saida 8 com o codigo certo, o WinForms so e pedido depois das verificacoes, sem texto de excecao; trava fechada -> 7 sem verificar o ambiente' {
+        $prev = @($script:AtmGuiEnabled, $script:AtmGuiApartmentSource, $script:AtmGuiDesktopSource, $script:AtmGuiAssemblyLoader)
+        $calls = @{ Loader = 0; Apartment = 0 }
+        $run = {
+            $all = @(Invoke-AtmGuiCommand 6>&1)
+            [pscustomobject]@{ Code = @($all | Where-Object { $_ -is [int] })[-1]; Text = (@($all | Where-Object { $_ -isnot [int] } | ForEach-Object { "$_" }) -join ' ') }
+        }
+        try {
+            $script:AtmGuiAssemblyLoader = { $calls.Loader++; throw (New-Object IO.FileNotFoundException 'simulado-sem-winforms') }.GetNewClosure()
+            $script:AtmGuiApartmentSource = { $calls.Apartment++; 'MTA' }.GetNewClosure()
+            $script:AtmGuiDesktopSource = { $true }
+            $script:AtmGuiEnabled = $false
+            $r = & $run
+            Assert-True ($r.Code -eq 7 -and $r.Text.Contains('GUI_GATE_CLOSED') -and $calls.Apartment -eq 0 -and $calls.Loader -eq 0) "trava fechada: saida $($r.Code), ambiente nao verificado"
+            $script:AtmGuiEnabled = $true
+            Assert-Eq (Test-AtmGuiEnvironment) 'GUI_NOT_STA' 'sem STA'
+            $r = & $run
+            Assert-True ($r.Code -eq 8 -and $r.Text.Contains('GUI_NOT_STA') -and $calls.Loader -eq 0) "sem STA: saida $($r.Code) $($r.Text)"
+            $script:AtmGuiApartmentSource = { 'STA' }
+            $script:AtmGuiDesktopSource = { $false }
+            Assert-Eq (Test-AtmGuiEnvironment) 'GUI_NO_INTERACTIVE_DESKTOP' 'sem area de trabalho interativa'
+            $r = & $run
+            Assert-True ($r.Code -eq 8 -and $r.Text.Contains('GUI_NO_INTERACTIVE_DESKTOP') -and $calls.Loader -eq 0) "sem area de trabalho: saida $($r.Code) $($r.Text)"
+            $script:AtmGuiDesktopSource = { $true }
+            Assert-True ($null -eq (Test-AtmGuiEnvironment)) 'STA e area de trabalho: ambiente aceito'
+            $r = & $run
+            Assert-True ($r.Code -eq 8 -and $r.Text.Contains('GUI_WINFORMS_UNAVAILABLE') -and $calls.Loader -eq 1 -and -not $r.Text.Contains('simulado-sem-winforms')) "sem WinForms: saida $($r.Code) $($r.Text)"
+        } finally {
+            $script:AtmGuiEnabled = $prev[0]; $script:AtmGuiApartmentSource = $prev[1]; $script:AtmGuiDesktopSource = $prev[2]; $script:AtmGuiAssemblyLoader = $prev[3]
+        }
+        Assert-True ($script:AtmGuiEnabled -eq $false -and $null -eq $script:AtmGuiApartmentSource -and $null -eq $script:AtmGuiDesktopSource -and $null -eq $script:AtmGuiAssemblyLoader) 'trava e costuras restauradas'
+    }
+    Test-Case 'GUI P1' 'View model de identidade (sem janela): identidade completa, elevada e ilegivel, com os codigos do motor; nada inventado' {
+        $h = Get-AtmGuiIdentityHeader -Source { [pscustomobject]@{ Name = 'TEST\gui'; Sid = 'S-1-5-21-1-2-3-9301'; IsAdmin = $true; ElevationTypeRaw = 2; IntegrityRid = 12288; SessionId = 1 } }
+        Assert-True ($h.Name -ceq 'TEST\gui' -and $h.Elevated -ceq 'YES' -and $h.ElevationType -ceq 'FULL' -and $h.IntegrityLevel -ceq 'HIGH') 'identidade elevada completa'
+        Assert-True ($h.IdentityLine.Contains('TEST\gui') -and $h.ElevationLine.Contains('FULL') -and $h.ElevationLine.Contains('HIGH') -and $h.Title -ceq "Agent Temp Manager $script:AtmVersion") 'linhas do cabecalho'
+        $s = Get-AtmGuiIdentityHeader -Source { [pscustomobject]@{ Name = 'TEST\gui'; Sid = 'S-1-5-21-1-2-3-9301'; IsAdmin = $false; ElevationTypeRaw = 3; IntegrityRid = 8192; SessionId = 1 } }
+        Assert-True ($s.Elevated -ceq 'NO' -and $s.ElevationType -ceq 'LIMITED' -and $s.IntegrityLevel -ceq 'MEDIUM') 'identidade sem elevacao'
+        $u = Get-AtmGuiIdentityHeader -Source { throw 'ilegivel' }
+        Assert-True ($null -eq $u.Name -and $u.Elevated -ceq 'UNKNOWN' -and $u.ElevationType -ceq 'UNKNOWN' -and $u.IntegrityLevel -ceq 'UNKNOWN') 'identidade ilegivel: desconhecida, nunca inventada'
+        Assert-True ($u.IdentityLine.Contains((Get-AtmText 'gui.identityUnknown')) -and -not $u.IdentityLine.Contains('ilegivel')) 'texto de identidade desconhecida, sem o texto da excecao'
+    }
+    Test-Case 'GUI P1' 'Lista fechada (ADR-0014 secao 3) sobre src/lib/Gui*.ps1: so comandos permitidos, nenhum nome proibido nem trava de outra funcionalidade; ao carregar so funcoes e constantes (sem Add-Type, using nem classe); camadas da ADR-0009 estendidas aos dois arquivos; o verificador pega cada nome proibido plantado numa copia, sem alterar o arquivo real' {
+        $lib = Join-Path $srcDir 'lib'
+        $gui = @(Get-ChildItem -LiteralPath $lib -File -Filter 'Gui*.ps1' | Sort-Object Name | ForEach-Object { $_.FullName })
+        Assert-Eq (@($gui | ForEach-Object { Split-Path -Leaf $_ }) -join ',') 'Gui.ps1,GuiModel.ps1' 'arquivos da GUI'
+        $hashBefore = @($gui | ForEach-Object { (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash }) -join ','
+        $v = & $guiCheck $gui
+        Assert-Eq ($v -join ' | ') '' 'arquivos reais dentro da lista fechada'
+        # ADR-0009 layering, extended to the two files without relaxing it: the deletion list of the presentation files,
+        # no console input, and the collectors the presentation never calls directly. Get-AtmIdentityState is the one the
+        # view model reads, as version does (ADR-0014 section 3, the round's identity view model).
+        foreach ($f in $gui) {
+            $txt = [IO.File]::ReadAllText($f); $n = Split-Path -Leaf $f
+            foreach ($pat in @('AtmDeleter', 'DeleteTree', 'Remove-Item', '::Delete(', '.Delete(', 'rd /s', 'rmdir', 'del ', 'Read-Host', 'Write-Progress')) { Assert-True (-not $txt.Contains($pat)) "$n contem '$pat'" }
+            foreach ($pat in @('Get-AtmIdentityRaw', 'Get-AtmProviderRuntimeHints', 'Get-AtmInventoryCoverage', 'AtmToken]', 'Get-AtmProcessRaw', 'Get-AtmProcessCollection', 'Resolve-AtmProcessReference', 'Get-AtmProcessParentLink', 'Get-AtmProcessTree', 'Compare-AtmProcessCollections', 'Get-AtmSelfProcessKeys', 'Measure-AtmProcessCpu', 'Invoke-AtmProcessCpuSampling', 'Get-AtmProcessTreeResources', 'Invoke-AtmGitCommand', 'Resolve-AtmGitExecutable', 'Invoke-AtmBoundedProcess', 'AtmJobRunner')) {
+                Assert-True (-not $txt.Contains($pat)) "$n chama coletor diretamente: $pat"
+            }
+        }
+        Assert-True (-not ([IO.File]::ReadAllText((Join-Path $lib 'Gui.ps1'))).Contains('Timer')) 'P1: nenhum timer'
+        # Negative: each forbidden thing planted in a copy (in the sandbox) is caught; the real files never change.
+        $pl = Join-Path $sandbox 'gui-planted'
+        [void][IO.Directory]::CreateDirectory($pl)
+        $guiText = [IO.File]::ReadAllText($gui[0])
+        $modelCopy = Join-Path $pl 'GuiModel.ps1'
+        [IO.File]::Copy($gui[1], $modelCopy, $true)
+        $plants = [ordered]@{
+            'engine-clean'       = @('function Test-AtmPlanted { Invoke-AtmClean -Entries @() }', 'comando fora da lista fechada: Invoke-AtmClean')
+            'engine-unlisted'    = @('function Test-AtmPlanted { Invoke-AtmPreviewPlanted }', 'comando fora da lista fechada: Invoke-AtmPreviewPlanted')
+            'other-gate'         = @('function Test-AtmPlanted { if ($script:AtmIsolationEnabled) { 1 } }', 'trava de outra funcionalidade: AtmIsolationEnabled')
+            'delete-api'         = @("function Test-AtmPlanted { Remove-Item -LiteralPath 'x' }", 'nome proibido: Remove-Item')
+            'move-api'           = @("function Test-AtmPlanted { [IO.Directory]::Move('a', 'b') }", 'nome proibido: ::Move(')
+            'file-write'         = @("function Test-AtmPlanted { [IO.File]::WriteAllText('a', 'b') }", 'nome proibido: ::WriteAll')
+            'clipboard'          = @("function Test-AtmPlanted { [System.Windows.Forms.Clipboard]::SetText('x') }", 'nome proibido: Clipboard')
+            'process'            = @('function Test-AtmPlanted { Start-Process notepad.exe }', 'comando fora da lista fechada: Start-Process')
+            'load-time-add-type' = @('Add-Type -AssemblyName System.Windows.Forms', 'instrucao executada ao carregar')
+            'class'              = @('class AtmPlantedThing { [string]$Name }', 'declara classe ou tipo')
+            'using'              = @('using namespace System.Windows.Forms', 'param, begin, process ou using no topo')
+        }
+        foreach ($k in $plants.Keys) {
+            $pc = Join-Path $pl ('Gui-' + $k + '.ps1')
+            $content = $(if ($k -eq 'using') { $plants[$k][0] + "`r`n" + $guiText } else { $guiText + "`r`n" + $plants[$k][0] + "`r`n" })
+            [IO.File]::WriteAllText($pc, $content, (New-Object Text.UTF8Encoding $false))
+            $pv = @(& $guiCheck @($pc, $modelCopy))
+            Assert-True (@($pv | Where-Object { $_.Contains($plants[$k][1]) }).Count -ge 1) "plantado ${k}: detectado ($($pv -join ' | '))"
+        }
+        Assert-Eq (@($gui | ForEach-Object { (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash }) -join ',') $hashBefore 'arquivos reais inalterados'
+        $script:caseNote = 'permitidos: ' + (($guiAllowedEngine + $guiAllowedCmdlets) -join ', ') + ' e as funcoes dos proprios arquivos'
+    }
+    Test-Case 'GUI P1' 'Janela real minima (Windows PowerShell; trava aberta so num processo filho): abre e fecha nos dois idiomas com titulo, identidade e elevacao; nenhum processo filho, timer ou arquivo deixado no sandbox, na configuracao ou no TEMP; sem janela possivel: NAO_TESTADO' {
+        if ($PSVersionTable.PSEdition -ne 'Desktop') { $script:caseSkipped = $true; $script:caseNote = 'PowerShell 7: janela real NAO_TESTADO nesta fase (GUI-D7; a medicao fica no caso seguinte)'; return }
+        Assert-True (-not ([IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1'))).Contains('Timer')) 'P1: nenhum timer criado'
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $child = Join-Path $sandbox 'gui-window-child.ps1'
+        [IO.File]::WriteAllText($child, @'
+param([string]$Src, [string]$Lang, [string]$Sandbox, [string]$Out)
+$ErrorActionPreference = 'Stop'
+foreach ($lib in @('Engine.Audit.ps1', 'Engine.Clean.ps1', 'Engine.Isolate.ps1', 'Engine.Diagnose.ps1', 'Report.ps1', 'Tui.ps1', 'GuiModel.ps1', 'Gui.ps1')) { . (Join-Path $Src ('lib\' + $lib)) }
+Set-AtmLanguage -Requested $Lang
+$res = [ordered]@{ env = (Test-AtmGuiEnvironment) }
+if ($null -eq $res.env) {
+    $names = { param($p, [switch]$Top) $h = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase); foreach ($e in @(Get-ChildItem -LiteralPath $p -Recurse:(-not $Top) -Force -ErrorAction SilentlyContinue)) { [void]$h.Add($e.FullName) }; , $h }
+    $kids = { @(Get-CimInstance -ClassName Win32_Process -Filter ('ParentProcessId = {0}' -f $PID) | ForEach-Object { [int]$_.ProcessId }) }
+    $temp = [IO.Path]::GetTempPath()
+    $b1 = & $names $Sandbox; $b2 = & $names (Join-Path $Src 'config'); $b3 = & $names $temp -Top
+    $k1 = & $kids
+    $script:AtmGuiEnabled = $true
+    $shown = @{ Title = $null; Texts = @(); Form = $null }
+    $hook = { param($f) $shown.Title = [string]$f.Text; $shown.Texts = @($f.Controls[0].Controls | ForEach-Object { [string]$_.Text }); $shown.Form = $f; $f.Close() }.GetNewClosure()
+    $id = { [pscustomobject]@{ Name = 'TEST\gui'; Sid = 'S-1-5-21-1-2-3-9301'; IsAdmin = $false; ElevationTypeRaw = 3; IntegrityRid = 8192; SessionId = 1 } }
+    $o = @(Invoke-AtmGuiCommand -IdentitySource $id -OnShown $hook 6>&1)
+    $res.code = @($o | Where-Object { $_ -is [int] })[-1]
+    $res.title = $shown.Title
+    $res.texts = $shown.Texts
+    $res.disposed = ($null -ne $shown.Form -and [bool]$shown.Form.IsDisposed)
+    $k2 = & $kids
+    $res.newProcesses = @($k2 | Where-Object { $k1 -notcontains $_ }).Count
+    $a1 = & $names $Sandbox; $a2 = & $names (Join-Path $Src 'config'); $a3 = & $names $temp -Top
+    $res.newSandbox = @($a1 | Where-Object { -not $b1.Contains($_) }).Count
+    $res.newConfig = @($a2 | Where-Object { -not $b2.Contains($_) }).Count
+    $res.newTemp = @($a3 | Where-Object { -not $b3.Contains($_) }).Count
+}
+($res | ConvertTo-Json -Depth 3) | Set-Content -LiteralPath $Out -Encoding UTF8
+'@, (New-Object Text.UTF8Encoding $true))
+        foreach ($lang in @('en-US', 'pt-BR')) {
+            $out = Join-Path $sandbox ('gui-window-' + $lang + '.json')
+            $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Lang $lang -Sandbox `"$sandbox`" -Out `"$out`"") -TimeoutSec 180
+            Assert-True ($r.Exit -eq 0 -and (Test-Path -LiteralPath $out -PathType Leaf)) "janela ${lang}: processo filho saida $($r.Exit) $($r.Text)"
+            $j = Get-Content -LiteralPath $out -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($null -ne $j.env) { $script:caseSkipped = $true; $script:caseNote = "runner sem janela possivel ($($j.env)): NAO_TESTADO"; return }
+            Assert-Eq ([int]$j.code) 0 "janela ${lang}: saida"
+            Assert-Eq ([string]$j.title) "Agent Temp Manager $script:AtmVersion" "janela ${lang}: titulo"
+            $texts = @($j.texts | ForEach-Object { [string]$_ })
+            $idLine = $(if ($lang -eq 'en-US') { 'Identity: TEST\gui' } else { 'Identidade: TEST\gui' })
+            $elevStart = $(if ($lang -eq 'en-US') { 'Elevated administrator: no.' } else { 'Administrador elevado:' })
+            Assert-True ($texts -contains $idLine) "janela ${lang}: identidade ($($texts -join ' / '))"
+            Assert-True (@($texts | Where-Object { $_.StartsWith($elevStart) -and $_.Contains('LIMITED') -and $_.Contains('MEDIUM') }).Count -eq 1) "janela ${lang}: estado de elevacao ($($texts -join ' / '))"
+            Assert-True ([bool]$j.disposed) "janela ${lang}: formulario liberado"
+            Assert-Eq ([int]$j.newProcesses) 0 "janela ${lang}: nenhum processo filho deixado"
+            Assert-Eq ([int]$j.newSandbox) 0 "janela ${lang}: nenhum arquivo novo no sandbox"
+            Assert-Eq ([int]$j.newConfig) 0 "janela ${lang}: nenhum arquivo novo na configuracao"
+            Assert-Eq ([int]$j.newTemp) 0 "janela ${lang}: nenhum arquivo novo no TEMP"
+        }
+        $script:caseNote = 'janela real aberta e fechada em en-US e pt-BR; P1 sem timer'
+    }
+    Test-Case 'GUI P1' 'GUI-D7: medicao num processo novo deste shell (-File, como o lancador): estado da thread, area de trabalho e carga do System.Windows.Forms; no Windows PowerShell exige STA e a carga, no PowerShell 7 so registra' {
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $child = Join-Path $sandbox 'gui-measure-child.ps1'
+        [IO.File]::WriteAllText($child, @'
+param([string]$Src)
+$apt = [string][Threading.Thread]::CurrentThread.GetApartmentState()
+. (Join-Path $Src 'lib\Gui.ps1')
+$envr = Test-AtmGuiEnvironment
+if ($null -eq $envr) { $envr = 'OK' }
+$wf = 'LOADED'
+try { Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop } catch { $wf = 'FAILED_' + $_.Exception.GetType().Name }
+$asm = @([AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq 'System.Windows.Forms' })
+$ver = $(if ($asm.Count -gt 0) { $asm[0].GetName().Version.ToString() } else { '-' })
+Write-Output ('GUI-D7 edition={0} ps={1} clr={2} apartment={3} environment={4} winforms={5} assembly={6}' -f $PSVersionTable.PSEdition, $PSVersionTable.PSVersion, [Environment]::Version, $apt, $envr, $wf, $ver)
+'@, (New-Object Text.UTF8Encoding $true))
+        $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`"") -TimeoutSec 180
+        $line = [regex]::Match([string]$r.Text, 'GUI-D7 .*?assembly=\S+').Value
+        Assert-True ($r.Exit -eq 0 -and $line) "medicao: saida $($r.Exit) $($r.Text)"
+        if ($PSVersionTable.PSEdition -eq 'Desktop') { Assert-True ($line.Contains('apartment=STA') -and $line.Contains('winforms=LOADED')) "Windows PowerShell: STA e WinForms ($line)" }
+        $script:caseNote = $line
     }
 
     # ------------------------------------------------------------------ scale

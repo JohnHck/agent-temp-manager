@@ -404,6 +404,26 @@ The quarantine is a folder of the sandbox (the `AtmIsolationQuarantineRoot` seam
     action, run as registered once the installation is gone, exits non-zero with nothing created (fail closed); the
     harness then removes it.
 
+## Desktop GUI in the suite (V0.2.1 phase P1)
+
+The suite area `GUI P1` covers the skeleton of `agent-temp gui`
+([ADR-0014](adr/ADR-0014-desktop-gui-winforms.md)). None of its cases opens a window in a shipped copy: the gate stays
+closed in every file, and the cases that go past it open it only in their own process memory.
+
+| Case | What it checks |
+|---|---|
+| Seventh gate | all seven gates are a single `$false` assignment in `src/lib`; the GUI gate is closed in the suite's process and assigned nowhere else; exit codes 7 and 8; the build's gate list, the install e2e table and the installer's file list name it; the manifest lists both GUI files; the launcher's `version` shows the gate disabled in en-US and pt-BR |
+| Gate closed | `agent-temp gui` exits with code 7 and the bilingual `GUI_GATE_CLOSED` message; a new process that loads the libraries and runs `version` and `gui` has no Windows Forms assembly loaded before or after |
+| Simulated environment | through test seams, in the suite's process: the closed gate returns 7 before any environment check; a multithreaded apartment (`GUI_NOT_STA`), no interactive desktop (`GUI_NO_INTERACTIVE_DESKTOP`) and a failing assembly load (`GUI_WINFORMS_UNAVAILABLE`, no exception text) each return 8 |
+| Identity header | elevated, non-elevated and unreadable identities give the right title, identity and elevation lines (PRIV-10), with no exception text |
+| Closed list | a static check of `src/lib/Gui*.ps1`: load-time statements are function definitions and constant assignments only; no class, `using` or load-time assembly; every command is one of the files' own functions or the allowed engine and catalog functions; no deletion, move, write, process, task or clipboard API (ADR-0014 section 3) and no other feature's gate. Eleven planted violations in temporary copies are each detected; the real files are unchanged |
+| Real window | Windows PowerShell only, in a job-object process with a timeout: the window opens with the synthetic identity, shows the title, identity and elevation lines in en-US and pt-BR, closes, and is disposed; no child process and no new file is left behind. `NAO_TESTADO` on PowerShell 7 and when no window can be shown |
+| GUI-D7 measurement | prints the edition, the thread's apartment, the environment check and whether Windows Forms loads. On Windows PowerShell it requires STA and a loaded assembly; on PowerShell 7 it only records the result (ADR-0014, P1 record) |
+
+The install e2e adds the step `shipped-gui-gate`: the installed `lib\Gui.ps1` has the single `$false` assignment, both
+GUI files are in the manifest, `version` shows the gate disabled, and `agent-temp gui` exits with code 7 in en-US and
+pt-BR. The installed gates table has seven rows.
+
 ## Real isolation on disposable VMs (0.3.x ISO-P5a and P5b)
 
 The same `install e2e` jobs (every OS and installer shell of the matrix) also run the **real** isolation, restore and

@@ -719,6 +719,28 @@ agent-temp quarantine unschedule-autopurge
   users' tasks are only counted. Without the installation a task fails closed: its action, the entry point, no longer
   exists, so it does nothing. Run `unschedule-autopurge` before uninstalling, or remove the task in Task Scheduler.
 
+## Desktop GUI (V0.2.1, unreleased; disabled in every copy)
+
+`agent-temp gui` is the entry point of the desktop window that V0.2.1 adds
+([ADR-0014](adr/ADR-0014-desktop-gui-winforms.md)). It ships behind a release gate of its own, `$script:AtmGuiEnabled`,
+which is `$false` in every copy. With the gate closed, the command prints
+`GUI_GATE_CLOSED: the desktop GUI is disabled in this release. No window was opened.` and exits with code `7`. It opens
+no window and loads no Windows Forms assembly. `agent-temp version` shows the gate (`desktop GUI: DISABLED in this
+release`).
+
+Order of a run:
+
+1. the launcher's integrity check, as for every command;
+2. the release gate (`7` when it is closed);
+3. the environment: the PowerShell thread must be single-threaded (STA) and an interactive desktop must exist. Otherwise
+   the command exits with code `8` and the reason: `GUI_NOT_STA`, `GUI_NO_INTERACTIVE_DESKTOP` (a service, session 0 or
+   a non-interactive session) or `GUI_WINFORMS_UNAVAILABLE`. It is never relaunched in another shell;
+4. Windows Forms is loaded, and the window opens.
+
+Phase P1 has a minimal window only: the title, the process identity and its elevation state (elevated administrator,
+token elevation type, integrity level), a read-only notice and a Close button (`Esc` closes it too). It is read-only.
+Closing it leaves no process, timer or file behind. The installed command always runs in Windows PowerShell 5.1.
+
 ## Verify (installed copy)
 
 `agent-temp verify` checks every file the installation's `manifest.json` lists (SHA-256) before any product code is
@@ -753,7 +775,7 @@ confirmed (nothing scheduled or removed), or, only with
 deletion enabled (not in any published copy), stopped before completing (Clean log, above); `authorize`: nothing recorded ·
 `4` no manifest (source checkout, `verify` only) · `5` integrity mismatch (a listed file missing, altered or
 unreadable, a missing or unreadable `providers` directory, an unlisted library or provider, an unreadable or
-invalid manifest, or an installed copy without one; nothing is loaded) · `6` TUI, `authorize`, `quarantine schedule-autopurge` or `unschedule-autopurge`, or `clean` with real deletion enabled (not in any published copy) needs an interactive console · `10` unexpected error,
+invalid manifest, or an installed copy without one; nothing is loaded) · `6` TUI, `authorize`, `quarantine schedule-autopurge` or `unschedule-autopurge`, or `clean` with real deletion enabled (not in any published copy) needs an interactive console · `7` `gui`: the desktop GUI gate is closed (`GUI_GATE_CLOSED`, every copy; no window) · `8` `gui`: no window can be shown here (`GUI_NOT_STA`, `GUI_NO_INTERACTIVE_DESKTOP`, `GUI_WINFORMS_UNAVAILABLE`) · `10` unexpected error,
 or a `diagnose` export refused or not written (nothing deleted because of it).
 
 ## Project names

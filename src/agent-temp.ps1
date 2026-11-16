@@ -39,7 +39,7 @@ $here = $PSScriptRoot
 # Source checkouts (neither file) load as-is. Hashes are computed with .NET and messages are printed in both
 # languages, because no code (not even the message catalog) is loaded before the check passes. A file or directory
 # that cannot be read is a problem too, reported by its relative name only (no exception text, no absolute path).
-$loadedLibs = @('lib\Engine.Audit.ps1', 'lib\I18n.ps1', 'lib\Engine.Clean.ps1', 'lib\Engine.Isolate.ps1', 'lib\Engine.Diagnose.ps1', 'lib\Report.ps1', 'lib\Tui.ps1')
+$loadedLibs = @('lib\Engine.Audit.ps1', 'lib\I18n.ps1', 'lib\Engine.Clean.ps1', 'lib\Engine.Isolate.ps1', 'lib\Engine.Diagnose.ps1', 'lib\Report.ps1', 'lib\Tui.ps1', 'lib\GuiModel.ps1', 'lib\Gui.ps1')
 $providersDir = Join-Path $here 'providers'
 
 function Get-AtmLauncherSha256 {
@@ -215,6 +215,10 @@ foreach ($providerFile in $providerFiles) { . $providerFile.FullName }
 . (Join-Path $here 'lib\Engine.Diagnose.ps1')
 . (Join-Path $here 'lib\Report.ps1')
 . (Join-Path $here 'lib\Tui.ps1')
+# V0.2.1 (ADR-0014): the desktop GUI. Loading these two files defines functions and constants only; WinForms is loaded
+# by `gui` alone, past its release gate (closed in every copy) and its environment checks.
+. (Join-Path $here 'lib\GuiModel.ps1')
+. (Join-Path $here 'lib\Gui.ps1')
 
 # Markers used to exclude this invocation's own launcher chain from process-reference evidence.
 $selfMarkers = @((Join-Path $here 'agent-temp.ps1'), (Join-Path $here 'bin\agent-temp.cmd'))
@@ -224,7 +228,7 @@ $cliInvArgs['NoProgress'] = [bool]$NoProgress
 $cliInvArgs['ProgressCallback'] = { param($pct, $msg) $act = Get-AtmText 'cli.progressActivity'; if ($pct -ge 100) { Write-Progress -Activity $act -Completed } else { Write-Progress -Activity $act -Status $msg -PercentComplete $pct } }
 
 function Show-Help {
-    foreach ($k in @('help.title', 'help.blank', 'help.tui', 'help.audit', 'help.preview', 'help.diagnose', 'help.clean', 'help.clean2', 'help.isolate', 'help.isolate2', 'help.quarantine', 'help.quarantine2', 'help.quarantine3', 'help.authorize', 'help.verify', 'help.version', 'help.help', 'help.blank',
+    foreach ($k in @('help.title', 'help.blank', 'help.tui', 'help.audit', 'help.preview', 'help.diagnose', 'help.clean', 'help.clean2', 'help.isolate', 'help.isolate2', 'help.quarantine', 'help.quarantine2', 'help.quarantine3', 'help.authorize', 'help.verify', 'help.version', 'help.gui', 'help.help', 'help.blank',
             'help.drill', 'help.export', 'help.diagOpts', 'help.cleanOpts', 'help.cleanOpts2', 'help.cleanOpts3', 'help.cleanOpts4', 'help.tuiOpts', 'help.lang', 'help.blank', 'help.examples')) { Write-Host (Get-AtmText $k) }
     Write-Host '  agent-temp'
     Write-Host '  agent-temp audit'
@@ -238,6 +242,13 @@ function Show-Help {
 
 try {
     switch ($Command.ToLowerInvariant()) {
+        'gui' {
+            # V0.2.1 (ADR-0014): presentation only. With the release gate closed (every copy): GUI_GATE_CLOSED, exit 7,
+            # no window and no WinForms assembly. Past it: an STA thread and an interactive desktop, or exit 8 with the
+            # reason; never relaunched in another shell (GUI-D7).
+            if ($script:AtmGuiEnabled) { Initialize-AtmNative -LibDir (Join-Path $here 'lib') }
+            exit (Invoke-AtmGuiCommand)
+        }
         'tui' {
             if (-not (Test-AtmTuiInteractive)) {
                 Write-Host (Get-AtmText 'cli.tuiNeedsConsole') -ForegroundColor Yellow
@@ -466,6 +477,7 @@ try {
             Write-Host (Get-AtmText 'cli.realDeletion' $(if ($script:AtmRealDeletionEnabled) { Get-AtmText 'cli.enabled' } else { Get-AtmText 'cli.disabledV01' }))
             Write-Host (Get-AtmText 'cli.isolation' $(if ($script:AtmIsolationEnabled) { Get-AtmText 'cli.enabled' } else { Get-AtmText 'cli.isolationDisabled' }))
             Write-Host (Get-AtmText 'cli.purge' $(if ($script:AtmQuarantinePurgeEnabled) { Get-AtmText 'cli.enabled' } else { Get-AtmText 'cli.purgeDisabled' }))
+            Write-Host (Get-AtmText 'cli.gui' $(if ($script:AtmGuiEnabled) { Get-AtmText 'cli.enabled' } else { Get-AtmText 'cli.guiDisabled' }))
             # The effective quarantine policy (contract section 11.2), with its warnings (an invalid file counts as off).
             foreach ($pl in (Get-AtmQuarantinePolicyLines -Policy (Get-AtmQuarantinePolicy -ConfigDir $invArgs.ConfigDir))) { Write-Host $pl.Text -ForegroundColor $pl.Color }
             # The user's scheduled task of the automatic purge, read only (P6b).

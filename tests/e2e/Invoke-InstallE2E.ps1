@@ -393,6 +393,22 @@ Step 'shipped-purge-gate' {
     Assert ((Test-Path -LiteralPath $q) -eq $qBefore) 'purge criou a quarentena'
     'installed purge gate = $false; version shows it disabled and the default policy; purge plan-only, exit 3'
 }
+Step 'shipped-gui-gate' {
+    # V0.2.1 P1 (ADR-0014, D-A): the seventh gate, the desktop GUI's, is a single assignment to $false in the installed
+    # copy; both GUI files are installed and listed in the manifest; version shows the gate disabled; gui from a new
+    # process (machine PATH) refuses with GUI_GATE_CLOSED and exit 7 in both languages, and opens no window.
+    $guiTxt = [IO.File]::ReadAllText((Join-Path $installDir 'lib\Gui.ps1'))
+    Assert ([regex]::Matches($guiTxt, '\$script:AtmGuiEnabled\s*=').Count -eq 1 -and $guiTxt -match '(?m)^\$script:AtmGuiEnabled = \$false\r?$') 'trava da GUI instalada nao e uma unica atribuicao a $false'
+    $m = [IO.File]::ReadAllText((Join-Path $installDir 'manifest.json')) | ConvertFrom-Json
+    foreach ($f in @('lib\Gui.ps1', 'lib\GuiModel.ps1')) { Assert ([IO.File]::Exists((Join-Path $installDir $f)) -and @($m.files | Where-Object { [string]$_.path -ceq $f }).Count -eq 1) "$f ausente ou fora do manifesto" }
+    $r = Invoke-Agent 'version -Lang en-US' 'version-gui'
+    Assert ($r.Code -eq 0 -and $r.Text -match 'desktop GUI: DISABLED') "version: exit $($r.Code)"
+    $r = Invoke-Agent 'gui -Lang en-US' 'gui-gate-en'
+    Assert ($r.Code -eq 7 -and $r.Text.Contains('GUI_GATE_CLOSED') -and $r.Text.Contains('No window was opened.')) "gui en-US: exit $($r.Code)"
+    $r = Invoke-Agent 'gui -Lang pt-BR' 'gui-gate-pt'
+    Assert ($r.Code -eq 7 -and $r.Text.Contains('GUI_GATE_CLOSED') -and $r.Text.Contains('Nenhuma janela foi aberta.')) "gui pt-BR: exit $($r.Code)"
+    'installed GUI gate = $false; both GUI files installed and listed; version shows it disabled; gui refused with GUI_GATE_CLOSED, exit 7, in en-US and pt-BR'
+}
 Step 'installed-autopurge-entry-point' {
     # 0.3.x isolation, phase P6a: the entry point of the automatic purge is installed and listed in the manifest. Run by
     # hand from a new process with no policy installed it does nothing (exit 0, one status line, no log folder); any
@@ -1028,12 +1044,12 @@ $v011Url = 'https://github.com/JohnHck/agent-temp-manager/releases/download/v0.1
 $v011Dir = Join-Path $env:ProgramFiles 'AgentTempManager-v011'
 $script:v011Pkg = $null
 $installedGates = {
-    $files = @{ AtmRealDeletionEnabled = 'lib\Engine.Clean.ps1'; AtmWorktreeDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmHandleDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmDiagnoseExportEnabled = 'lib\Report.ps1'; AtmIsolationEnabled = 'lib\Engine.Isolate.ps1'; AtmQuarantinePurgeEnabled = 'lib\Engine.Isolate.ps1' }
+    $files = @{ AtmRealDeletionEnabled = 'lib\Engine.Clean.ps1'; AtmWorktreeDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmHandleDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmDiagnoseExportEnabled = 'lib\Report.ps1'; AtmIsolationEnabled = 'lib\Engine.Isolate.ps1'; AtmQuarantinePurgeEnabled = 'lib\Engine.Isolate.ps1'; AtmGuiEnabled = 'lib\Gui.ps1' }
     foreach ($g in $files.Keys) {
         $t = [IO.File]::ReadAllText((Join-Path $installDir $files[$g]))
         Assert ([regex]::Matches($t, ('\$script:' + $g + '\s*=')).Count -eq 1 -and $t -match ('\$script:' + $g + ' = \$false')) "trava instalada $g nao e uma unica atribuicao a `$false"
     }
-    'six installed gates $false'
+    'seven installed gates $false'
 }
 Step 'xversion-0.1.1-package' {
     [void][IO.Directory]::CreateDirectory($v011Dir)
