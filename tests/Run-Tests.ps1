@@ -15598,7 +15598,9 @@ if ($null -eq $res.env) {
     $guiP4bParity = { param($View, [bool]$Stale)
         $err = $(if ($Stale) { 'EXCEPTION_IOEXCEPTION' } else { $null })
         $d = New-AtmGuiDiagState -View $View; $d.Stale = $Stale; $d.Error = $err
-        $st = @{ Diag = @{ View = $View; Index = (New-AtmTuiDiagIndex -View $View); Stale = $Stale; Error = $err }; Width = 4000; Height = 400; G = (Get-AtmTuiGlyphs $true); Inventory = $null; Message = $null; Stack = New-Object System.Collections.Generic.List[object] }
+        # Height 60: the frame is read only for the lines above the table, the header and the empty text (the rows come
+        # from the TUI's Row function), and a taller frame costs far more to draw (the ARM64 runner's time limit).
+        $st = @{ Diag = @{ View = $View; Index = (New-AtmTuiDiagIndex -View $View); Stale = $Stale; Error = $err }; Width = 4000; Height = 60; G = (Get-AtmTuiGlyphs $true); Inventory = $null; Message = $null; Stack = New-Object System.Collections.Generic.List[object] }
         $out = New-Object System.Collections.Generic.List[object]
         foreach ($scr in (& $guiP4bScreens $d)) {
             $vm = Get-AtmGuiScreen -Inventory $null -Screen $scr -Diag $d
@@ -15635,6 +15637,7 @@ if ($null -eq $res.env) {
         }
         return , $out.ToArray() }
 
+    $script:guiP4bParityTable = @()
     Test-Case 'GUI P4b' 'Paridade com a TUI (sem janela), em en-US e pt-BR, sobre as vistas dubladas (completa, cobertura parcial, parcial desatualizada, coletor ausente, UNKNOWN com GRAPH_REASON, aresta AMBIGUOUS, mais de 40 arestas num no, as quatro travas da V0.2 fechadas): cada tela da area, linha por linha e na mesma ordem, igual a da TUI (Get-AtmTuiDiagList na largura 4000 com as linhas acima da tabela, e Get-AtmTuiDiagText), menos as linhas das travas, a unica diferenca permitida' {
         $views = & $guiP4bViews
         # Each view has the feature it is named for.
@@ -15684,10 +15687,16 @@ if ($null -eq $res.env) {
                 Assert-True ($hit.Count -eq 1 -and [regex]::Matches([string]@($hit[0])[3], 'TEST_GRAPH_REASON').Count -eq 1) "${lang}: UNKNOWN com o GRAPH_REASON uma vez ($($hit.Count))"
             }
         } finally { Set-AtmLanguage -Requested $old }
-        Write-Host '   paridade: idioma | vista | tela (telas) | linhas TUI | linhas GUI | linhas de trava | igual'
-        foreach ($t in $table) { Write-Host ('   paridade: ' + $t) }
+        # Test-Case discards the host stream of its body (6>$null): the table is printed after the case, below.
+        $script:guiP4bParityTable = $table.ToArray()
         Assert-True ($bad.Count -eq 0) ('diferencas: ' + ($bad.ToArray() -join ' ; '))
         $script:caseNote = "$nScreens telas comparadas em 8 vistas e 2 idiomas, todas iguais (menos as linhas das travas)"
+    }
+    # The parity table in the CI log, one line per language, view and screen (outside the case: its host stream is
+    # discarded). Empty when the case stopped before the comparison.
+    if (@($script:guiP4bParityTable).Count -gt 0) {
+        Write-Host '   paridade: idioma | vista | tela (telas) | linhas TUI | linhas GUI | linhas de trava | igual'
+        foreach ($t in @($script:guiP4bParityTable)) { Write-Host ('   paridade: ' + $t) }
     }
     Test-Case 'GUI P4b' 'Travas da V0.2 (sem janela), nos dois idiomas: cada um dos quatro codigos aparece numa linha de desabilitado nesta versao, com o texto do catalogo (reason.<codigo>, ou a chave nova da GUI), no resumo e na categoria afetada; worktrees: as linhas do worktree e do git; a lista dessa categoria nunca mostra common.none, nem quando a cobertura e conclusiva' {
         $views = & $guiP4bViews
