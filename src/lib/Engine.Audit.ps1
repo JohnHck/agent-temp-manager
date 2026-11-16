@@ -657,7 +657,25 @@ function Add-AtmFlag { param($Partition, [string]$Flag) if (-not $Partition.Flag
 # is not fixed) is a policy that elevation does not lift. Any other state, known or not, is a base not audited.
 $script:AtmAuditedBaseStates = @('OK', 'NOT_FOUND', 'NOT_DIRECTORY')
 $script:AtmInaccessibleBaseStates = @('INACCESSIBLE', 'ENUMERATION_FAILED', 'INVALID')
-$script:AtmPolicyRefusedBaseStates = @('REPARSE_IN_PATH', 'UNSUPPORTED_DRIVE')
+# OWNER_NOT_PROFILE (F05-OWNER-ATTRIBUTION): the base folder belongs to another account, a refusal that elevation does
+# not lift either. OWNER_UNREADABLE is not here: elevation may let the owner be read.
+$script:AtmPolicyRefusedBaseStates = @('REPARSE_IN_PATH', 'UNSUPPORTED_DRIVE', 'OWNER_NOT_PROFILE')
+
+# F05-OWNER-ATTRIBUTION: the owner (a SID) of a base folder, or $null when it cannot be read. Test seam, single
+# assignment: the suite replaces the source with a scriptblock (param([string]$Path)) that returns an owner SID or
+# $null; $null here reads the real owner of the folder. Nothing is changed: only the owner is read.
+$script:AtmBaseOwnerSource = $null
+
+function Get-AtmBaseOwnerSid {
+    param([string]$Path)
+    $o = $null
+    try {
+        if ($null -ne $script:AtmBaseOwnerSource) { $o = & $script:AtmBaseOwnerSource $Path }
+        else { $o = (Get-Acl -LiteralPath $Path -ErrorAction Stop).GetOwner([Security.Principal.SecurityIdentifier]).Value }
+    } catch { return $null }
+    if ([string]::IsNullOrEmpty([string]$o)) { return $null }
+    return [string]$o
+}
 
 function Get-AtmBaseIndex { param($Bases) $i = @{}; foreach ($b in $Bases) { if ($null -ne $b -and $b.Path) { $i[([string]$b.Path).ToLowerInvariant()] = $b } }; return $i }
 
@@ -667,15 +685,17 @@ function Get-AtmResolvedBaseStates {
       (DUPLICATE_SAME_PROFILE, SHARED_WITH_<sid>) is never proof that the base was audited, it carries the state of its
       canonical base (CANONICAL_BASE_UNKNOWN when there is none); an own entry carries the state of its base after the
       enumeration (OK can become ENUMERATION_FAILED). -BaseIndex: Get-AtmBaseIndex over Inventory.Bases.
+      OWNER_NOT_PROFILE (F05-OWNER-ATTRIBUTION) is an alias too: with the owning profile holding the base it carries that
+      base's state; with no profile holding it, it stays OWNER_NOT_PROFILE (not audited, never an absence).
     #>
     param($Entries, [hashtable]$BaseIndex = @{})
     foreach ($e in $Entries) {
         if ($null -eq $e) { continue }
         $s = [string]$e.Status
-        $alias = ($s -ceq 'DUPLICATE_SAME_PROFILE' -or $s.StartsWith('SHARED_WITH_', [StringComparison]::Ordinal))
+        $alias = ($s -ceq 'DUPLICATE_SAME_PROFILE' -or $s -ceq 'OWNER_NOT_PROFILE' -or $s.StartsWith('SHARED_WITH_', [StringComparison]::Ordinal))
         $k = $(if ($e.BasePath) { ([string]$e.BasePath).ToLowerInvariant() } else { $null })
         $canon = $(if ($k -and $BaseIndex.ContainsKey($k)) { $BaseIndex[$k] } else { $null })
-        $r = $(if ($null -ne $canon) { [string]$canon.Status } elseif ($alias) { 'CANONICAL_BASE_UNKNOWN' } else { $s })
+        $r = $(if ($null -ne $canon) { [string]$canon.Status } elseif ($s -ceq 'OWNER_NOT_PROFILE') { $s } elseif ($alias) { 'CANONICAL_BASE_UNKNOWN' } else { $s })
         [pscustomobject]@{ Status = $s; Resolved = $r; Alias = $alias }
     }
 }
@@ -751,6 +771,12 @@ function Invoke-AtmInventory {
     $bases = New-Object System.Collections.Generic.List[object]
     $baseByPath = @{}
     $profileStatus = @{}
+    # F05-OWNER-ATTRIBUTION: a base read (OK, a directory) outside %WINDIR%\Temp is given only to the profile that owns
+    # its folder, whatever the enumeration order. The owner is read once per base path (one answer per run); a path held
+    # after that check is in $ownerHeld. A profile that names a folder another account owns gets OWNER_NOT_PROFILE (its
+    # SID waits in $ownerPending, so the owner's later claim still marks the base shared with it); an owner that cannot
+    # be read gives OWNER_UNREADABLE and nobody gets the base. Codes and counts only: $ownerGaps (inventory OwnerGaps).
+    $ownerByKey = @{}; $ownerHeld = @{}; $ownerPending = @{}; $ownerGaps = @{}
     foreach ($pr in $profiles) {
         $st = New-Object System.Collections.Generic.List[object]
         foreach ($prov in $providerList) {
@@ -765,8 +791,12 @@ function Invoke-AtmInventory {
                 $key = $basePath.ToLowerInvariant()
                 if ($baseByPath.ContainsKey($key)) {
                     $existing = $baseByPath[$key]
-                    if ($existing.Sid -ne $pr.Sid -or $existing.Profile.ProfilePath -ne $pr.ProfilePath) { $existing.Shared = $true; $existing.SharedWith += $pr.Sid }
-                    $st.Add([pscustomobject]@{ Provider = $prov.Id; BasePath = $basePath; Source = $tc.Source; Status = $(if ($existing.Sid -eq $pr.Sid -and $existing.Profile.ProfilePath -eq $pr.ProfilePath) { 'DUPLICATE_SAME_PROFILE' } else { 'SHARED_WITH_' + $existing.Sid }); At = $null })
+                    $same = ($existing.Sid -eq $pr.Sid -and $existing.Profile.ProfilePath -eq $pr.ProfilePath)
+                    if (-not $same) { $existing.Shared = $true; $existing.SharedWith += $pr.Sid }
+                    # Held after the owner check, the base's owner is its holder's SID: another SID is not the owner.
+                    $es = $(if ($same) { 'DUPLICATE_SAME_PROFILE' } elseif ($ownerHeld.ContainsKey($key) -and $existing.Sid -ne $pr.Sid) { 'OWNER_NOT_PROFILE' } else { 'SHARED_WITH_' + $existing.Sid })
+                    if ($es -ceq 'OWNER_NOT_PROFILE') { $ownerGaps['BASE_OWNER_NOT_PROFILE'] = 1 + [int]$ownerGaps['BASE_OWNER_NOT_PROFILE'] }
+                    $st.Add([pscustomobject]@{ Provider = $prov.Id; BasePath = $basePath; Source = $tc.Source; Status = $es; At = $null })
                     continue
                 }
                 $chain = Test-AtmPathChain $basePath
@@ -774,13 +804,28 @@ function Invoke-AtmInventory {
                 if ($status -eq 'OK') {
                     try { if (([IO.File]::GetAttributes($basePath) -band [IO.FileAttributes]::Directory) -eq 0) { $status = 'NOT_DIRECTORY' } } catch { $status = 'INACCESSIBLE' }
                 }
+                $winTemp = $basePath.StartsWith((Join-AtmPath $env:SystemRoot 'Temp') + '\', [StringComparison]::OrdinalIgnoreCase)
+                if ($status -eq 'OK' -and -not $winTemp) {
+                    if (-not $ownerByKey.ContainsKey($key)) { $ownerByKey[$key] = Get-AtmBaseOwnerSid -Path $basePath }
+                    $owner = $ownerByKey[$key]
+                    $refused = $(if ($null -eq $owner) { 'OWNER_UNREADABLE' } elseif (-not [string]::Equals([string]$owner, [string]$pr.Sid, [StringComparison]::OrdinalIgnoreCase)) { 'OWNER_NOT_PROFILE' } else { $null })
+                    if ($refused) {
+                        $ownerGaps['BASE_' + $refused] = 1 + [int]$ownerGaps['BASE_' + $refused]
+                        if ($refused -ceq 'OWNER_NOT_PROFILE') { if (-not $ownerPending.ContainsKey($key)) { $ownerPending[$key] = @() }; $ownerPending[$key] += [string]$pr.Sid }
+                        $st.Add([pscustomobject]@{ Provider = $prov.Id; BasePath = $basePath; Source = $tc.Source; Status = $refused; At = $null })
+                        continue
+                    }
+                    $ownerHeld[$key] = $true
+                }
                 $b = [pscustomobject]@{
                     Sid = $pr.Sid; Profile = $pr; Provider = $prov; TempPath = $tempNorm; Path = $basePath; Source = $tc.Source; Status = $status; At = $chain.At
                     Shared = $false; SharedWith = @(); Slugs = @{}; Partitions = New-Object System.Collections.Generic.List[object]
                     EnumerationError = $null; StructureRecognized = $true
                 }
                 # %WINDIR%\Temp is writable by every user: never a single-owner base.
-                if ($basePath.StartsWith((Join-AtmPath $env:SystemRoot 'Temp') + '\', [StringComparison]::OrdinalIgnoreCase)) { $b.Shared = $true; $b.SharedWith += 'WINDOWS_TEMP' }
+                if ($winTemp) { $b.Shared = $true; $b.SharedWith += 'WINDOWS_TEMP' }
+                # Profiles that named it before its owner did: shared with them, as if they had come after.
+                if ($ownerPending.ContainsKey($key)) { $b.Shared = $true; $b.SharedWith += $ownerPending[$key] }
                 $baseByPath[$key] = $b
                 $bases.Add($b)
                 $st.Add([pscustomobject]@{ Provider = $prov.Id; BasePath = $basePath; Source = $tc.Source; Status = $status; At = $chain.At })
@@ -788,6 +833,8 @@ function Invoke-AtmInventory {
         }
         $profileStatus[$pr.Sid + '|' + $pr.ProfilePath] = $st.ToArray()
     }
+    $ownerGapKeys = [string[]]@($ownerGaps.Keys); [Array]::Sort($ownerGapKeys, [StringComparer]::Ordinal)
+    $ownerGapList = @(foreach ($gk in $ownerGapKeys) { [pscustomobject]@{ Code = $gk; Count = [int]$ownerGaps[$gk] } })
 
     # Phase 3: filesystem inventory, one pass per partition root
     $partitions = New-Object System.Collections.Generic.List[object]
@@ -952,6 +999,9 @@ function Invoke-AtmInventory {
         OnlyRootPath         = $OnlyRootPath
         DiscoveryNotes       = @($script:AtmDiscoveryNotes)
         DiscoveryStatus      = $discoveryStatus
+        # F05-OWNER-ATTRIBUTION: bases not given to a profile because of their owner (BASE_OWNER_NOT_PROFILE,
+        # BASE_OWNER_UNREADABLE), codes and counts only, sorted. Not a discovery gap: profile-discovery never reads it.
+        OwnerGaps            = $ownerGapList
     }
 }
 

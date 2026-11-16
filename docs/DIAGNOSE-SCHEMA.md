@@ -296,18 +296,33 @@ gap, a profile being in every list that applies (no reason is hidden):
 * `PROFILES_INACCESSIBLE`: a base of the profile was inaccessible, invalid or not enumerated, or a session registry
   could not be read;
 * `PROFILES_NOT_AUDITED`: a base of the profile was not audited: refused for safety (`REPARSE_IN_PATH`,
-  `UNSUPPORTED_DRIVE`), in a state not known, or an alias (`DUPLICATE_SAME_PROFILE`, `SHARED_WITH_<sid>`) whose
-  canonical base, read with its final state, was not audited. An alias is never proof that a base was audited; an alias
-  of a base that was read is audited. Read (`OK`) and confirmed absent (`NOT_FOUND`, `NOT_DIRECTORY`) are the only
-  states without a gap, the same table as `PATH_REFERENCE_BASES_INCOMPLETE`;
+  `UNSUPPORTED_DRIVE`), in a state not known, or an alias (`DUPLICATE_SAME_PROFILE`, `SHARED_WITH_<sid>`,
+  `OWNER_NOT_PROFILE`) whose canonical base, read with its final state, was not audited. An alias is never proof that a
+  base was audited; an alias of a base that was read is audited. Read (`OK`) and confirmed absent (`NOT_FOUND`,
+  `NOT_DIRECTORY`) are the only states without a gap, the same table as `PATH_REFERENCE_BASES_INCOMPLETE`;
 * `TEMP_LOCATION_UNVERIFIED`: the profile environment could not be read, so only the default location was checked
   (a profile already inaccessible is not listed here).
 
 `observed` is the number of profiles with none of these gaps and `expected` the number of profiles; a profile in
 several lists is counted once (identity: SID and profile path), and the V0.1 count of profiles with incomplete coverage
 is the same union. `elevationWouldHelp` is `NO` with no reason, and also when the only reason is `PROFILES_NOT_AUDITED`
-and every such base was refused for safety (elevation does not lift that refusal); `UNKNOWN` when a base not audited is
+and every such base was refused for safety or because of its owner (`REPARSE_IN_PATH`, `UNSUPPORTED_DRIVE`,
+`OWNER_NOT_PROFILE`: elevation does not lift that refusal); `UNKNOWN` when a base not audited is
 in any other state; with `PROFILES_INACCESSIBLE` or `TEMP_LOCATION_UNVERIFIED`, `YES` (`UNKNOWN` for an elevated
 administrator). In the V0.1 profile list (`profiles[].status`) a profile with an audited base and a base not audited
 is `AUDITADO_PARCIAL`; with no audited base, `NAO_AUDITADO_REPARSE`, `NAO_AUDITADO_UNIDADE`, or `INACESSIVEL` for a
-state not known (no existing code is more precise, and it is never `SEM_TEMP_CLAUDE`).
+state not known or an owner state below (no existing code is more precise, and it is never `SEM_TEMP_CLAUDE`).
+
+Owner states (F05-OWNER-ATTRIBUTION, 0.3.x). A base that was read (`OK`, a directory) outside `%WINDIR%\Temp` is
+given only to the profile that owns its folder, whatever the enumeration order; `%WINDIR%\Temp` stays always shared
+and its owner is not read.
+* `OWNER_NOT_PROFILE`: the folder belongs to another account (another profile, SYSTEM, Administrators or any other),
+  so the base is not given to this profile. If the owning profile also names it, the entry is an alias of that
+  profile's base, and that base is marked shared with this profile (its partitions are `SHARED_TEMP`). Otherwise the
+  base is not audited, a refusal that elevation does not lift.
+* `OWNER_UNREADABLE`: the owner could not be read; the base is given to nobody (fail closed) and is not audited;
+  elevation may help.
+
+Neither state carries the owner's SID. The inventory counts them by code (`BASE_OWNER_NOT_PROFILE`,
+`BASE_OWNER_UNREADABLE`) apart from the discovery gaps: the profile itself was discovered, so `profile-discovery` does
+not read them, and nothing is added to the export.

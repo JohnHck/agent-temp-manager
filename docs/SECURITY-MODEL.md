@@ -65,6 +65,17 @@ isolated sandbox.
    users require elevation + explicit switch.
    * **OWNER RIGHTS** grants rights only to the current owner, and this gate requires that owner to be the profile SID,
      so it adds no other writer.
+   * **Limitation F-05, fixed by the owner rule (F05-OWNER-ATTRIBUTION, 0.3.x).** Bases used to be deduplicated by path,
+     the first profile to name one keeping it: if user A's TEMP pointed at user B's folder and A was read first, the
+     base and its partitions were attributed to A in audit, preview, diagnose and the dashboard (cleanup stayed blocked:
+     the base was shared and this gate requires the profile SID as owner). Now the inventory reads the owner of a base
+     that was read, outside `%WINDIR%\Temp`, before attributing it: only the profile whose SID owns the folder gets it,
+     in any order. Another profile naming it gets `OWNER_NOT_PROFILE`, and the base is still marked shared with it
+     (`SHARED_TEMP`, cleanup blocked as before). A folder owned by an account with no profile holding it (SYSTEM,
+     Administrators) is attributed to nobody and reported as not audited. An owner that cannot be read gives
+     `OWNER_UNREADABLE`, and the base is attributed to nobody (fail closed). Only the owner is read; no ACL is changed.
+     Attribution only: this gate, the B1 exception, RECENT and eligibility are unchanged, and no partition becomes
+     eligible that was not before.
    * **The list is the clean engine's own** (`AtmTrustedWriterSids`, `Engine.Clean.ps1`). The diagnose engine's Git
      location rule keeps a stricter list of its own, without OWNER RIGHTS (`AtmGitTrustedWriterSids`).
    * **Fixed in FIX-TRUSTED-SIDS:** until then, the diagnose engine reassigned the same name and was loaded after clean,

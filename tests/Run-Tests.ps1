@@ -294,6 +294,19 @@ function New-TestProfile {
 
 function Get-Base { param([Alias('Profile')]$ProfileInfo) return (Join-Path $ProfileInfo.TempCandidates[0].TempPath 'claude') }
 
+function Set-TestBaseOwner {
+    # F05-OWNER-ATTRIBUTION: dubs the owner the inventory reads for the listed base folders (path -> SID; $null: owner
+    # unreadable); every other folder keeps its real owner. No ACL is read for them or changed. The caller restores the
+    # real source ($script:AtmBaseOwnerSource = $null) in a finally block.
+    param([hashtable]$Map)
+    $m = @{}
+    foreach ($k in $Map.Keys) { $m[(Get-AtmNormalizedPath ([string]$k)).ToLowerInvariant()] = $Map[$k] }
+    $script:AtmBaseOwnerSource = { param([string]$Path)
+        $k = $Path.ToLowerInvariant()
+        if ($m.ContainsKey($k)) { return $m[$k] }
+        return (Get-Acl -LiteralPath $Path -ErrorAction Stop).GetOwner([Security.Principal.SecurityIdentifier]).Value }.GetNewClosure()
+}
+
 function New-TestRoot {
     param([Alias('Profile')]$ProfileInfo, [string]$Slug = 'C--work-proj', [string]$Uuid = ([guid]::NewGuid().ToString()), [hashtable]$Files = @{ 'a.txt' = 100; 'sub\b.bin' = 2048 })
     $p = Join-Path (Join-Path (Get-Base $ProfileInfo) $Slug) $Uuid
@@ -1024,7 +1037,10 @@ foreach ($k in @('__ua__', '__dnf__', '__io__')) {
         $p = New-TestProfile 'owner' -Sid 'S-1-5-21-1-2-3-4444'
         $r = New-TestRoot -ProfileInfo $p
         $ident = [pscustomobject]@{ Sid = 'S-1-5-21-1-2-3-4444'; Name = 'TEST\owner'; IsAdmin = $false }
-        $i = Inv -Profiles @($p) -Identity $ident
+        # F05-OWNER-ATTRIBUTION: the base is attributed only to its owner, so the inventory reads its owner as the profile
+        # (dubbed); gate 4 still reads the real owner of the root, its scope and the base.
+        Set-TestBaseOwner @{ (Get-Base $p) = $p.Sid }
+        try { $i = Inv -Profiles @($p) -Identity $ident } finally { $script:AtmBaseOwnerSource = $null }
         $g = Test-AtmCandidate -Partition (Find-Part $i $r) -Inventory $i
         Assert-True (($g.Reasons -join ' ') -match 'OWNER_DIVERGENTE') ($g.Reasons -join ';')
     }
@@ -2319,13 +2335,15 @@ exit 0
             @{ Tag = 'sem transcricao'; Path = $rn; Profiles = @($pn); Want = 'AUTH_ASSOCIATION_UNKNOWN'; Presented = 1 },
             @{ Tag = 'ambigua'; Path = $ra1; Profiles = @($pa); Want = 'AUTH_ASSOCIATION_AMBIGUOUS'; Presented = 1 })
         $i = 0
-        foreach ($k in $cases) {
+        # F05-OWNER-ATTRIBUTION: the other account's base is attributed to it only as its owner (dubbed, no ACL change).
+        Set-TestBaseOwner @{ (Get-Base $po) = $po.Sid }
+        try { foreach ($k in $cases) {
             $i++
             $file = Join-Path $dir ("id-$i.jsonl")
             $op = New-TestAuthOperator
             $res = Invoke-AtmDiscardAuthorization -Path $k.Path -InventoryArgs (Get-InvArgs -Profiles $k.Profiles) -RecordFile $file -Presenter $op.Presenter -Reader $op.Reader
             Assert-True (-not $res.Accepted -and $res.Refused -ceq $k.Want -and $op.Prompts.Count -eq 0 -and $op.Presented -eq $k.Presented -and -not (Test-Path -LiteralPath $file)) "$($k.Tag): $($res.Refused) (apresentado $($op.Presented), perguntas $($op.Prompts.Count))"
-        }
+        } } finally { $script:AtmBaseOwnerSource = $null }
     }
     Test-Case 'Autorizacao de descarte (AUT-1)' 'Alteracao entre a apresentacao e o registro: arquivo novo na raiz durante as perguntas -> AUTH_PLAN_CHANGED com as diferencas; escrita que mantem as estatisticas nao e detectada (limite registrado)' {
         $dir = New-TestCleanLogDir 'auth-chg'
@@ -2872,7 +2890,10 @@ exit 0
         }
         $po = New-TestProfile 'b1acct' -Sid 'S-1-5-21-9-9-9-1001'; $ro = New-TestRoot -ProfileInfo $po
         $xo = New-TestB1Context 'b1acctx' 1; $xo.IA['ProfilesOverride'] = @($po); $xoIa = $xo.IA
-        $rowo = Get-TestPreviewRow (Invoke-AtmPreview -Inventory (Invoke-AtmInventory @xoIa) -InventoryArgs $xo.IA) $ro
+        # F05-OWNER-ATTRIBUTION: the other account's base is attributed to it only as its owner (dubbed, no ACL change).
+        Set-TestBaseOwner @{ (Get-Base $po) = $po.Sid }
+        try { $rowo = Get-TestPreviewRow (Invoke-AtmPreview -Inventory (Invoke-AtmInventory @xoIa) -InventoryArgs $xo.IA) $ro } finally { $script:AtmBaseOwnerSource = $null }
+        Assert-True ($null -ne $rowo) 'outra conta: raiz inventariada'
         Assert-True ($rowo.Gate.Category -cne 'ELIGIBLE_WITH_DECLARED_RISK' -and $null -eq $rowo.Gate.B1Risk) "outra conta: fora da excecao ($($rowo.Gate.Category))"
     }
     Test-Case 'Excecao restrita de B1' 'Processo nao inspecionavel novo depois da confirmacao: recusa na conferencia do plano e na revalidacao; process-snapshot PARTIAL na revalidacao: recusa; zero chamadas ao deleter' {
@@ -3548,7 +3569,9 @@ exit 0
         $r2 = New-TestRoot -ProfileInfo $p2
         $ia = Get-InvArgs -Profiles @($p, $p2)
         $paths = @($scope, $base, $r2, $odd, $r, $r, 'relativo\x', (Join-Path $sandbox 'nao-inventariado'))
-        $res = Invoke-AtmIsolate -Entries @($paths | ForEach-Object { [pscustomobject]@{ Source = 't'; Path = $_; Fingerprint = $null } }) -PlanPresenter (New-IsoPlanRecorder).Presenter -InventoryArgs $ia
+        # F05-OWNER-ATTRIBUTION: the other profile's base is attributed to it only as its owner (dubbed, no ACL change).
+        Set-TestBaseOwner @{ (Get-Base $p2) = $p2.Sid }
+        try { $res = Invoke-AtmIsolate -Entries @($paths | ForEach-Object { [pscustomobject]@{ Source = 't'; Path = $_; Fingerprint = $null } }) -PlanPresenter (New-IsoPlanRecorder).Presenter -InventoryArgs $ia } finally { $script:AtmBaseOwnerSource = $null }
         Assert-True ((Get-IsoRejectedReason $res $scope) -match '^ISOLAMENTO_ESCOPO_NAO_LIBERADO_0_3X') "escopo ($(Get-IsoRejectedReason $res $scope))"
         Assert-True ((Get-IsoRejectedReason $res $base) -match '^ISOLAMENTO_BASE_NAO_LIBERADA_0_3X') "base ($(Get-IsoRejectedReason $res $base))"
         Assert-True ((Get-IsoRejectedReason $res $r2) -match 'ALVO_FORA_DO_PROPRIO_PERFIL') "outro perfil ($(Get-IsoRejectedReason $res $r2))"
@@ -6245,7 +6268,11 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
         $cleanupActions.Add([scriptblock]::Create("icacls '$bb' /remove:d '*$($me.Sid)' | Out-Null"))
         $pc = New-TestProfile 'multiC'; [IO.Directory]::Delete((Get-Base $pc)); $pc.EnvStatus = 'NOT_LOADED'; $pc.Loaded = $false; $pc.EnvKnown = $false
         $pd = New-TestProfile 'multiD' -NoConfig; [IO.Directory]::Delete((Get-Base $pd))
-        $i = Inv -Profiles @($pa, $pb, $pc, $pd)
+        # F05-OWNER-ATTRIBUTION: B's base is attributed to B only as its owner (dubbed, no ACL change), so B stays the
+        # profile whose base cannot be listed.
+        Set-TestBaseOwner @{ (Get-Base $pb) = $pb.Sid }
+        try { $i = Inv -Profiles @($pa, $pb, $pc, $pd) } finally { $script:AtmBaseOwnerSource = $null }
+        Assert-True (@($i.Bases | Where-Object { $_.Sid -eq $pb.Sid -and $_.Status -ne 'OK' }).Count -eq 1) 'B: base atribuida a B e nao lida'
         Assert-Eq (Get-AtmProfileStatusLabel -Inventory $i -ProfileInfo $pa) 'AUDITADO' 'A auditado'
         Assert-Eq (Get-AtmProfileStatusLabel -Inventory $i -ProfileInfo $pb) 'INACESSIVEL' 'B inacessivel'
         Assert-Eq (Get-AtmProfileStatusLabel -Inventory $i -ProfileInfo $pc) 'TEMP_NAO_VERIFICAVEL' 'C: ausencia no local padrao nao prova nada'
@@ -10159,6 +10186,88 @@ try {
         Assert-True (-not $d.CoverageComplete) 'cobertura incompleta'
         $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p) -Procs $procs) -IdentitySource $diagIdAdmin
         Assert-Eq (@($d.Coverage | Where-Object { $_.Collector -eq 'processes' })[0].ElevationWouldHelp) 'NO' 'administrador elevado: processos protegidos continuam invisiveis'
+    }
+    Test-Case 'Cobertura' 'F05-OWNER-ATTRIBUTION: base lida atribuida so ao perfil dono da pasta, nas duas ordens; dono Administradores e dono ilegivel nao atribuidos; Windows\Temp, caso normal e DUPLICATE_SAME_PROFILE inalterados; nenhuma particao fica elegivel' {
+        # Owners: the real one (the sandbox owner, which every default test profile uses) or dubbed for one base folder
+        # (Set-TestBaseOwner); no account is created and no ACL is changed.
+        $f05Cov = { param($I) @(Get-AtmInventoryCoverage -Inventory $I -Identity ([pscustomobject]@{ IsElevatedAdministrator = $false }) -StartedUtc ([datetime]::UtcNow) -ElapsedMs 0 -OverDeadline $false | Where-Object { $_.Collector -ceq 'temp-profiles' })[0] }
+        $f05St = { param($I, $P) (@($I.ProfileBaseStatus[$P.Sid + '|' + $P.ProfilePath] | ForEach-Object { [string]$_.Status }) -join ',') }
+        $f05Gaps = { param($I) (@($I.OwnerGaps | ForEach-Object { $_.Code + ':' + $_.Count }) -join ',') }
+        $f05Elig = { param($I) @(@($I.Partitions | Where-Object { $_.Kind -ne 'NotScanned' }) | Where-Object { [string](Test-AtmCandidate -Partition $_ -Inventory $I).Category -like 'ELIGIBLE*' }).Count }
+
+        # 1. A names B's folder (owned by B), in both orders: B keeps the base, A gets OWNER_NOT_PROFILE, the base is shared.
+        $pB = New-TestProfile 'f05-b'; $rB = New-TestRoot -ProfileInfo $pB
+        $pA = New-TestProfile 'f05-a' -Sid 'S-1-5-21-1-2-3-7105'; $pA.TempCandidates = @($pB.TempCandidates[0])
+        $sig = @()
+        foreach ($ord in @(@($pA, $pB), @($pB, $pA))) {
+            $i = Inv -Profiles $ord
+            $tag = $(if ($ord[0] -eq $pA) { 'A antes' } else { 'B antes' })
+            $bs = @($i.Bases | Where-Object { [string]::Equals($_.Path, (Get-Base $pB), [StringComparison]::OrdinalIgnoreCase) })
+            $part = Find-Part $i $rB
+            Assert-Eq (& $f05St $i $pA) 'OWNER_NOT_PROFILE' "1 ${tag}: estado de A"
+            Assert-Eq (& $f05St $i $pB) 'OK' "1 ${tag}: estado de B"
+            Assert-Eq (& $f05Gaps $i) 'BASE_OWNER_NOT_PROFILE:1' "1 ${tag}: lacuna"
+            Assert-True ($bs.Count -eq 1 -and $bs[0].Sid -eq $pB.Sid -and $bs[0].Shared -and @($bs[0].SharedWith) -contains $pA.Sid) "1 ${tag}: base de B, compartilhada com A"
+            Assert-True ($null -ne $part -and $part.Sid -eq $pB.Sid -and $part.Flags -contains 'SHARED_TEMP' -and @($i.Partitions | Where-Object { $_.Sid -eq $pA.Sid }).Count -eq 0) "1 ${tag}: particao de B com SHARED_TEMP, nenhuma de A"
+            Assert-Eq (@($i.Profiles | ForEach-Object { Get-AtmProfileStatusLabel -Inventory $i -ProfileInfo $_ }) -join '/') 'AUDITADO/AUDITADO' "1 ${tag}: rotulos (A pelo alias da base de B)"
+            Assert-True ([string](Test-AtmCandidate -Partition $part -Inventory $i).Category -ceq 'BLOCKED' -and (& $f05Elig $i) -eq 0) "1 ${tag}: limpeza bloqueada, nenhuma particao elegivel"
+            Assert-True (@($i.DiscoveryStatus.Gaps | Where-Object { [string]$_.Code -like 'BASE_OWNER*' }).Count -eq 0) "1 ${tag}: nao e lacuna de descoberta"
+            $sig += ('{0}|{1}|{2}|{3}|{4}' -f (& $f05St $i $pA), (& $f05St $i $pB), (& $f05Gaps $i), $bs[0].Sid, (@($bs[0].SharedWith) -join ';'))
+        }
+        Assert-Eq $sig[0] $sig[1] '1: mesmo resultado nas duas ordens'
+
+        # 2. A base owned by Administrators (dubbed) in a profile's TEMP: not attributed, a policy refusal, never an absence.
+        $p2 = New-TestProfile 'f05-adm' -Sid 'S-1-5-21-1-2-3-7106'; $r2 = New-TestRoot -ProfileInfo $p2
+        Set-TestBaseOwner @{ (Get-Base $p2) = 'S-1-5-32-544' }
+        try { $i2 = Inv -Profiles @($p2) } finally { $script:AtmBaseOwnerSource = $null }
+        $c2 = & $f05Cov $i2
+        Assert-Eq (& $f05St $i2 $p2) 'OWNER_NOT_PROFILE' '2: estado'
+        Assert-Eq (& $f05Gaps $i2) 'BASE_OWNER_NOT_PROFILE:1' '2: lacuna'
+        Assert-True (@($i2.Bases).Count -eq 0 -and $null -eq (Find-Part $i2 $r2) -and (& $f05Elig $i2) -eq 0) '2: base nao atribuida, nenhuma particao'
+        Assert-Eq (Get-AtmProfileStatusLabel -Inventory $i2 -ProfileInfo $p2) 'INACESSIVEL' '2: rotulo (nunca SEM_TEMP_CLAUDE)'
+        Assert-True (-not $i2.CoverageComplete -and @($i2.NotAuditedProfiles) -contains $p2 -and $c2.Status -ceq 'PARTIAL' -and (@($c2.Reasons) -join ',') -ceq 'PROFILES_NOT_AUDITED' -and $c2.ElevationWouldHelp -ceq 'NO') "2: nao auditado, recusa de politica ($($c2.Status):$(@($c2.Reasons) -join ',') help=$($c2.ElevationWouldHelp))"
+
+        # 3. An owner that cannot be read (dubbed): not attributed (fail closed); elevation may help.
+        $p3 = New-TestProfile 'f05-unr'; $r3 = New-TestRoot -ProfileInfo $p3
+        Set-TestBaseOwner @{ (Get-Base $p3) = $null }
+        try { $i3 = Inv -Profiles @($p3) } finally { $script:AtmBaseOwnerSource = $null }
+        $c3 = & $f05Cov $i3
+        Assert-Eq (& $f05St $i3 $p3) 'OWNER_UNREADABLE' '3: estado'
+        Assert-Eq (& $f05Gaps $i3) 'BASE_OWNER_UNREADABLE:1' '3: lacuna'
+        Assert-True (@($i3.Bases).Count -eq 0 -and $null -eq (Find-Part $i3 $r3) -and (& $f05Elig $i3) -eq 0) '3: base nao atribuida, nenhuma particao'
+        Assert-Eq (Get-AtmProfileStatusLabel -Inventory $i3 -ProfileInfo $p3) 'INACESSIVEL' '3: rotulo (nunca SEM_TEMP_CLAUDE)'
+        Assert-True (-not $i3.CoverageComplete -and $c3.Status -ceq 'PARTIAL' -and $c3.ElevationWouldHelp -ceq 'UNKNOWN') "3: nao auditado, elevacao pode ajudar ($($c3.Status) help=$($c3.ElevationWouldHelp))"
+
+        # 3b. Without any profile holding the base, the alias stays OWNER_NOT_PROFILE: A alone on B's folder.
+        $i3b = Inv -Profiles @($pA)
+        Assert-True ((& $f05St $i3b $pA) -ceq 'OWNER_NOT_PROFILE' -and (@(Get-AtmNotAuditedBaseStates -Entries $i3b.ProfileBaseStatus[$pA.Sid + '|' + $pA.ProfilePath] -BaseIndex (Get-AtmBaseIndex -Bases $i3b.Bases)) -join ',') -ceq 'OWNER_NOT_PROFILE' -and (Get-AtmProfileStatusLabel -Inventory $i3b -ProfileInfo $pA) -ceq 'INACESSIVEL') '3b: sem o dono declarando: nao auditado com OWNER_NOT_PROFILE, nunca SEM_TEMP_CLAUDE'
+
+        # 4. %WINDIR%\Temp: unchanged (always shared), its owner never read.
+        $p4 = New-TestProfile 'f05-win'; $p4.TempCandidates = @([pscustomobject]@{ TempPath = (Join-Path $env:SystemRoot 'Temp'); Source = 'test' })
+        $f05Calls = New-Object System.Collections.Generic.List[string]
+        $script:AtmBaseOwnerSource = { param([string]$Path) $f05Calls.Add($Path); return $null }.GetNewClosure()
+        try { $i4 = Inv -Profiles @($p4) } finally { $script:AtmBaseOwnerSource = $null }
+        Assert-True (@($i4.Bases).Count -eq 1 -and @($i4.Bases)[0].Shared -and @(@($i4.Bases)[0].SharedWith) -contains 'WINDOWS_TEMP' -and (& $f05St $i4 $p4) -notlike 'OWNER_*' -and $f05Calls.Count -eq 0 -and @($i4.OwnerGaps).Count -eq 0) "4: Windows\Temp compartilhada, dono nao lido ($(& $f05St $i4 $p4), leituras $($f05Calls.Count))"
+
+        # 5. Normal case (the owner is the profile, the real owner): as before, with DUPLICATE_SAME_PROFILE; same
+        # eligibility as a control profile with one candidate.
+        $p5 = New-TestProfile 'f05-norm'; $r5 = New-TestRoot -ProfileInfo $p5; $p5.TempCandidates = @($p5.TempCandidates[0], $p5.TempCandidates[0])
+        $p5c = New-TestProfile 'f05-ctl'; $r5c = New-TestRoot -ProfileInfo $p5c
+        $i5 = Inv -Profiles @($p5); $i5c = Inv -Profiles @($p5c)
+        Assert-Eq (& $f05St $i5 $p5) 'OK,DUPLICATE_SAME_PROFILE' '5: estados'
+        Assert-True (@($i5.OwnerGaps).Count -eq 0 -and -not @($i5.Bases)[0].Shared -and (Get-AtmProfileStatusLabel -Inventory $i5 -ProfileInfo $p5) -ceq 'AUDITADO' -and $i5.CoverageComplete) '5: base atribuida, nao compartilhada, perfil auditado'
+        Assert-Eq ([string](Test-AtmCandidate -Partition (Find-Part $i5 $r5) -Inventory $i5).Category) ([string](Test-AtmCandidate -Partition (Find-Part $i5c $r5c) -Inventory $i5c).Category) '5: elegibilidade igual a do controle'
+
+        # 6. The same SID under two profile paths: the owner is the profile's SID, so the second path is SHARED_WITH as before.
+        $p6a = New-TestProfile 'f05-same-a'; $null = New-TestRoot -ProfileInfo $p6a
+        $p6b = New-TestProfile 'f05-same-b'; $p6b.TempCandidates = @($p6a.TempCandidates[0])
+        $i6 = Inv -Profiles @($p6a, $p6b)
+        Assert-True ((& $f05St $i6 $p6b) -ceq ('SHARED_WITH_' + $p6a.Sid) -and @($i6.OwnerGaps).Count -eq 0 -and @($i6.Bases)[0].Shared -and (& $f05Elig $i6) -eq 0) "6: mesmo SID: SHARED_WITH como antes ($(& $f05St $i6 $p6b))"
+
+        # Static: the owner source is a seam with a single assignment ($null, the real owner) and the engine only reads it.
+        $aud = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Audit.ps1'))
+        Assert-True ([regex]::Matches($aud, '\$script:AtmBaseOwnerSource\s*=').Count -eq 1 -and $aud.Contains('$script:AtmBaseOwnerSource = $null') -and -not ($aud -match '(?i)Set-Acl|SetOwner|SetAccessControl')) 'costura do dono: uma unica atribuicao ($null); nenhuma escrita de ACL no motor da auditoria'
+        Assert-True ($script:AtmPolicyRefusedBaseStates -ccontains 'OWNER_NOT_PROFILE' -and $script:AtmPolicyRefusedBaseStates -cnotcontains 'OWNER_UNREADABLE' -and $script:AtmDiscoveryGapCodes -cnotcontains 'BASE_OWNER_NOT_PROFILE' -and $script:AtmDiscoveryGapCodes -cnotcontains 'BASE_OWNER_UNREADABLE') 'tabelas: OWNER_NOT_PROFILE e recusa de politica; os codigos de dono nao sao lacunas de descoberta'
     }
     Test-Case 'Cobertura' 'INV: base nao auditada (REPARSE_IN_PATH, UNSUPPORTED_DRIVE, estado desconhecido, alias pela base canonica) nunca da CoverageComplete, temp-profiles COMPLETE nem perfil AUDITADO; inacessivel e TEMP nao verificado juntos sem dupla contagem; ausencia confirmada e base vazia mantidas; relatorio, JSON V0.1, diagnose e TUI' {
         # REPARSE_IN_PATH is real (a sandbox junction); UNSUPPORTED_DRIVE and a state no check produces are injected for

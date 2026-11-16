@@ -53,6 +53,13 @@ agent-temp audit -ExportJson D:\reports\audit.json   # optional, explicit, outsi
 Sections: general summary (exclusive partitions), per user/SID, per project, per direct root,
 LIVENESS_UNKNOWN older than 72 h, errors/ambiguities/coverage, final summary.
 
+**Base owner (F05-OWNER-ATTRIBUTION, 0.3.x).** A `<TEMP>\claude` base that was read is listed under a user only when
+that user owns its folder, whatever the order in which profiles are read; `%WINDIR%\Temp` is always shared, as before.
+In the TEMP folders table a user whose TEMP names a folder of another account shows `OWNER_NOT_PROFILE` (if the owner's
+profile has the base too, the base is listed under the owner and its partitions are `SHARED_TEMP`); an owner that
+cannot be read shows `OWNER_UNREADABLE`, and the base is listed under nobody. Either way the coverage says what was
+not audited; nothing becomes cleanable.
+
 **Export safety (V0.2 FINAL-A).** The audit export keeps its rules (a new file outside the audited directories, no
 reparse point in its folders) and is now created with the folder and its ancestors pinned, relative to the folder, with
 access limited to its owner, SYSTEM and Administrators; a folder swapped during the export, or a `subst` drive letter, is
