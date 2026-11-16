@@ -294,7 +294,8 @@ The quarantine is a folder of the sandbox (the `AtmIsolationQuarantineRoot` seam
   it only around each call, after checking that the quarantine is the sandbox's, and restores it. The real deleter runs
   only on payloads in the sandbox's quarantine. A policy file is written only in a config folder of the sandbox, never
   in the source's.
-  * the six gates: one assignment to `$false` each; the purge gate checked by the build, the e2e and `version`;
+  * the six gates of the engine and the report (the GUI's seventh gate has its own case, under the desktop GUI below):
+    one assignment to `$false` each; the purge gate checked by the build, the e2e and `version`;
   * the gates are independent in both directions:
     * with the isolation gate open (and the deletion gate, which the suite opens), `purge` still stops at
       `EXPURGO_REAL_DESABILITADO` without asking;
