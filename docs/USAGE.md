@@ -737,7 +737,7 @@ Order of a run:
    a non-interactive session) or `GUI_WINFORMS_UNAVAILABLE`. It is never relaunched in another shell;
 4. Windows Forms is loaded, and the window opens.
 
-What the window shows in this version (phases P1 and P2):
+What the window shows in this version (phases P1 to P3):
 
 * **A header:**
   * the process identity and its elevation state (elevated administrator, token elevation type, integrity level);
@@ -759,6 +759,24 @@ What the window shows in this version (phases P1 and P2):
   * the audit time.
 
   The numbers are the TUI's, from the same engine.
+* **The TUI's other read-only screens (phase P3),** each with the same rows, order and text as the TUI:
+
+  | Key | Screen |
+  |---|---|
+  | `1` | the dashboard |
+  | `2` | users: name, SID, profile state, roots, files, MB and the count of each class (`A/R/U/O`) |
+  | `3` | projects: grouped as in the TUI, by size, with the user and the newest write |
+  | `4` | roots: class, agent, user, project, root, MB, files, newest write and number of flags |
+  | `5`, `6`, `7` | the roots of `ACTIVE_EVIDENCE`, `RECENT` and `LIVENESS_UNKNOWN` |
+  | `9` | coverage and errors: the coverage and the processes, references, incomplete profiles, temporary directories, discovery notes, partitions with issues and the limits |
+
+  Each screen also has a button, with its digit as the access key. `Enter` on a row opens it: a user or a project shows
+  its roots, and a root shows its detail (the TUI's fields, then the evidence, the references and the samples of errors
+  and reparse points). `Esc` goes back one screen, and closes the window only on the dashboard. The header and the
+  automatic purge notice stay on every screen.
+
+  After an audit, the current screen is computed again. If the root of an open detail is not in the new audit, the
+  window goes back to the list and says so. Before the first audit has finished, the screens show no rows.
 
 **Audits.** The window runs one audit when it opens, as the TUI does. After that, an audit runs only when you ask for
 it, with **Refresh** or `F5`. Nothing repeats by itself, and no live monitoring exists yet.
@@ -767,10 +785,12 @@ it, with **Refresh** or `F5`. Nothing repeats by itself, and no live monitoring 
   * the refresh controls are disabled;
   * a second request is ignored, not queued.
 * Closing the window during an audit cancels it, and the window closes.
-* `Esc` closes the window. The tab order is fixed, and every control has an accessible name.
+* `F5` audits again from any screen. While an audit runs, the screen keys and buttons do nothing.
+* The tab order is fixed, and every control has an accessible name.
 
 **What it does not do:**
-* clean, isolate, restore or purge;
+* any action over a root: clean, isolate, restore, purge or open its folder;
+* the preview of the cleanup, and the path drill-down of `agent-temp audit -Path`;
 * list the quarantine;
 * run the diagnose;
 * copy to the clipboard;

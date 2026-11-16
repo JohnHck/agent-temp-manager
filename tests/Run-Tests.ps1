@@ -3032,7 +3032,7 @@ exit 0
     }
 
     # ------------------------------------------------------------------ read-only guarantee
-    Test-Case 'Somente leitura' 'audit + preview e uma sessao da GUI (V0.2.1 P2, sem janela) com tres auditorias dubladas nao alteram nada no sandbox' {
+    Test-Case 'Somente leitura' 'audit + preview e uma sessao da GUI (V0.2.1 P2 e P3, sem janela) com tres auditorias dubladas e navegacao pelas telas novas entre elas nao alteram nada no sandbox' {
         $p = New-TestProfile 'ro'
         1..3 | ForEach-Object { $null = New-TestRoot -ProfileInfo $p }
         # NTFS updates directory timestamps lazily after recent creations: wait until the tree is stable.
@@ -3049,11 +3049,20 @@ exit 0
         try {
             $script:AtmGuiInventorySource = { param($a) $m = @{} + $script:guiRoArgs; $m['ProgressCallback'] = $a['ProgressCallback']; $m['NoProgress'] = $false; Invoke-AtmInventory @m }
             $gs = Initialize-AtmGuiSession -ConfigDir $cfgDir
+            # V0.2.1 P3: between the audits the session moves through the new screens (users, projects, roots, the detail,
+            # coverage and errors), each computed again over the new result.
+            $walks = @(@('D2', 'Return', 'Return', 'Escape'), @('D3', 'Return', 'Return'), @('D9', 'Escape', 'D4', 'Return'))
             foreach ($n in 1..3) {
                 Assert-Eq (Invoke-AtmGuiRefresh -Session $gs -Pump { }) 'OK' "sessao da GUI: auditoria $n"
                 $null = Get-AtmGuiDashboard -Inventory $gs.Inventory
                 $null = Get-AtmGuiViewState -Inventory $gs.Inventory -RefreshedUtc $gs.RefreshedUtc
+                Invoke-AtmGuiNavRefreshed -Nav $gs.Nav -Inventory $gs.Inventory
+                foreach ($k in $walks[$n - 1]) {
+                    Assert-Eq (Invoke-AtmGuiNavKey -Nav $gs.Nav -Inventory $gs.Inventory -Key $k -Busy $false) 'RENDER' "sessao da GUI: tecla $k depois da auditoria $n"
+                    $null = Get-AtmGuiScreen -Inventory $gs.Inventory -Screen (Get-AtmGuiNavTop -Nav $gs.Nav)
+                }
             }
+            Assert-Eq (Get-AtmGuiNavTop -Nav $gs.Nav).Name 'detail' 'sessao da GUI: termina no detalhe de uma raiz'
             Assert-Eq $gs.SourceCalls 3 'sessao da GUI: tres auditorias, nenhuma a mais'
         } finally { $script:AtmGuiInventorySource = $savedGuiSource }
         $after = Get-TreeListing $p.ProfilePath
@@ -14212,8 +14221,10 @@ try {
     # The closed list of ADR-0014 section 3, as the static test applies it to src/lib/Gui*.ps1: every command must be a
     # function of those files, one of the allowed engine and catalog functions, or one of the allowed cmdlets.
     # P2 (V021-P2) adds exactly eight names: the automatic purge notice (GUI-D1) and the read helpers of the TUI dashboard.
+    # P3 (V021-P3) adds exactly four: the yes/no text of the detail and three reads over the inventory (coverage screen).
     $guiAllowedEngine = @('Invoke-AtmInventory', 'Invoke-AtmPreview', 'Invoke-AtmDiagnose', 'ConvertTo-AtmDiagnoseJson', 'Get-AtmIdentityState', 'Get-AtmCurrentIdentity', 'Get-AtmText', 'Get-AtmLanguage', 'Set-AtmLanguage',
-        'Get-AtmAutoPurgeNoticeLines', 'Get-AtmSum', 'Format-AtmMB', 'Format-AtmGB', 'Format-AtmTime', 'Get-AtmProfileStatusLabel', 'Get-AtmStatusText', 'Get-AtmIncompleteProfileCount')
+        'Get-AtmAutoPurgeNoticeLines', 'Get-AtmSum', 'Format-AtmMB', 'Format-AtmGB', 'Format-AtmTime', 'Get-AtmProfileStatusLabel', 'Get-AtmStatusText', 'Get-AtmIncompleteProfileCount',
+        'Get-AtmYesNo', 'Get-AtmInventoryProfileList', 'Get-AtmBaseIndex', 'Get-AtmNotAuditedBaseStates')
     $guiAllowedCmdlets = @('Write-Host', 'New-Object', 'Add-Type')
     # Forbidden names (ADR-0014 section 3), searched in the text, case-insensitive, comments included.
     $guiForbidden = @('Invoke-AtmClean', 'Invoke-AtmIsolate', 'Invoke-AtmRestore', 'Invoke-AtmPurge', 'Invoke-AtmAutoPurgeSchedule', 'Invoke-AtmAutoPurgeUnschedule', 'Invoke-AtmDiscardAuthorization',
@@ -14415,6 +14426,8 @@ $res.afterGui = (& $wf)
             'using'              = @('using namespace System.Windows.Forms', 'param, begin, process ou using no topo')
             # P2: a quarantine function of the report, outside the closed list (GUI-D1: the notice only, no list).
             'report-quarantine'  = @('function Test-AtmPlanted { Show-AtmQuarantineList -List $null }', 'comando fora da lista fechada: Show-AtmQuarantineList')
+            # P3: the CLI's path drill-down, which measures children with the native scanner (outside this phase).
+            'path-detail'        = @('function Test-AtmPlanted { Show-AtmPathDetail -Path $null }', 'comando fora da lista fechada: Show-AtmPathDetail')
         }
         foreach ($k in $plants.Keys) {
             $pc = Join-Path $pl ('Gui-' + $k + '.ps1')
@@ -14724,7 +14737,7 @@ Write-Output ('GUI-D7 edition={0} ps={1} clr={2} apartment={3} environment={4} w
     }
     Test-Case 'GUI P2' 'Estatico (P2): lista fechada com exatamente os oito nomes novos; costura da fonte do inventario com uma unica atribuicao a $null; nenhum timer, nenhuma caixa de texto editavel, nenhum closure; so Label, ListView e botoes; argumentos do inventario iguais aos do lancador; chaves de estado nos dois idiomas' {
         $p2 = @('Get-AtmAutoPurgeNoticeLines', 'Get-AtmSum', 'Format-AtmMB', 'Format-AtmGB', 'Format-AtmTime', 'Get-AtmProfileStatusLabel', 'Get-AtmStatusText', 'Get-AtmIncompleteProfileCount')
-        Assert-True ($guiAllowedEngine.Count -eq 17 -and @($p2 | Where-Object { $guiAllowedEngine -ccontains $_ }).Count -eq 8) "lista: os 9 nomes da P1 e os 8 da P2, nenhum outro ($($guiAllowedEngine -join ','))"
+        Assert-True ($guiAllowedEngine.Count -eq 21 -and @($p2 | Where-Object { $guiAllowedEngine -ccontains $_ }).Count -eq 8) "lista: os 9 nomes da P1, os 8 da P2 e os 4 da P3, nenhum outro ($($guiAllowedEngine -join ','))"
         Assert-Eq ($guiAllowedCmdlets -join ',') 'Write-Host,New-Object,Add-Type' 'cmdlets permitidos inalterados'
         $gt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1')); $mt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\GuiModel.ps1'))
         Assert-True ([regex]::Matches($gt, '\$script:AtmGuiInventorySource\s*=').Count -eq 1 -and $gt -match '(?m)^\$script:AtmGuiInventorySource = \$null\r?$') 'costura da fonte do inventario: uma unica atribuicao, a $null'
@@ -14748,6 +14761,370 @@ Write-Output ('GUI-D7 edition={0} ps={1} clr={2} apartment={3} environment={4} w
                 Assert-True ($cat.ContainsKey($key) -and $cat[$key].Contains(($code -split '_')[0])) "${lang}: $key com a palavra de estado"
             }
         }
+    }
+
+    # ------------------------------------------------------------------ V0.2.1 P3: drill-down, detail, coverage (ADR-0014)
+    # The fourth dubbed inventory of the P3 parity: two users (two profiles), two projects of the first user (one
+    # identified by a session's working directory, one known only by its slug), the four classes (a process names one
+    # root, one root is recent, one has a recent transcript) and two roots of the same size (a tie in the TUI's order).
+    $guiP3Multi = {
+        $pa = New-TestProfile 'guima'; $pb = New-TestProfile 'guimb'
+        $a1 = New-TestRoot -ProfileInfo $pa -Slug 'D--src-gamma' -Files @{ 'a.txt' = 5000 }
+        $a2 = New-TestRoot -ProfileInfo $pa -Slug 'D--src-gamma' -Files @{ 'a.txt' = 300 }
+        [IO.File]::SetLastWriteTimeUtc((Join-Path $a2 'a.txt'), $nowFuture.AddHours(-1))
+        [IO.File]::WriteAllText((Join-Path $pa.ProfilePath '.claude\sessions\61.json'), ('{"pid":61,"sessionId":"' + (Split-Path $a1 -Leaf) + '","cwd":"D:\\src\\gamma"}'))
+        $a3 = New-TestRoot -ProfileInfo $pa -Slug 'C--work-proj' -Files @{ 'a.txt' = 1200 }
+        $b1 = New-TestRoot -ProfileInfo $pb -Slug 'C--t' -Files @{ 'a.txt' = 800 }
+        $tdir = Join-Path $pb.ProfilePath '.claude\projects\C--t'
+        [void][IO.Directory]::CreateDirectory($tdir)
+        $tf = Join-Path $tdir ((Split-Path $b1 -Leaf) + '.jsonl')
+        [IO.File]::WriteAllText($tf, '{}')
+        [IO.File]::SetLastWriteTimeUtc($tf, $nowFuture.AddHours(-2))
+        $null = New-TestRoot -ProfileInfo $pb -Slug 'C--work-proj' -Files @{ 'a.txt' = 700 }
+        $null = New-TestRoot -ProfileInfo $pb -Slug 'C--work-proj' -Files @{ 'a.txt' = 700 }
+        $procs = New-Procs -Extra @([pscustomobject]@{ ProcessId = 611; Name = 'node.exe'; ParentProcessId = 1; CommandLine = ('node.exe "' + $a3 + '\a.txt"'); CreationDate = (Get-Date) })
+        return (Inv -Profiles @($pa, $pb) -Procs $procs)
+    }
+    # Rows as one text (cells by tab, rows by line), to compare a TUI screen with a view model screen in one assertion.
+    $guiP3Join = { param($Rows) (@(foreach ($r in @($Rows)) { (@(foreach ($c in @($r)) { [string]$c }) -join "`t") }) -join "`n") }
+    # The TUI's text screens without wrapping (a width no line reaches).
+    $guiP3TuiText = { param($Inv, [hashtable]$Screen) @(Get-AtmTuiTextLines -State @{ Inventory = $Inv } -Screen $Screen -Width 100000 | ForEach-Object { [string]$_.Text }) }
+    # The detail of a view model screen as the TUI writes it: '{0,-26}: {1}' per field, then the lines.
+    $guiP3DetailText = { param($Vm) @(@($Vm.Pairs | ForEach-Object { '{0,-26}: {1}' -f $_.Label, $_.Value }) + @($Vm.Lines)) }
+    # The screen of the navigation after a key and Enter on row $Sel (as a person opens a row).
+    $guiP3Open = { param($Inv, [string]$Digit, [int]$Sel)
+        $n = Initialize-AtmGuiNav
+        $null = Invoke-AtmGuiNavKey -Nav $n -Inventory $Inv -Key $Digit -Busy $false
+        (Get-AtmGuiNavTop -Nav $n).Sel = $Sel
+        $r = Invoke-AtmGuiNavKey -Nav $n -Inventory $Inv -Key 'Return' -Busy $false
+        return [pscustomobject]@{ Result = $r; Top = (Get-AtmGuiNavTop -Nav $n) } }
+    Test-Case 'GUI P3' 'Paridade com a TUI (sem janela), em en-US e pt-BR, sobre os inventarios completo, parcial e negado da P2 e um com dois usuarios, dois projetos (um identificado, um so com slug), as quatro classes e um empate: usuarios, projetos e raizes com e sem cada filtro da TUI, o detalhe de cada raiz (sem o preview, a dica de isolamento e a do detalhamento do CLI) e cobertura e erros, linha por linha e na mesma ordem' {
+        $fx = & $guiP2Fixtures
+        $fx.Remove('unknown')
+        $fx['multi'] = & $guiP3Multi
+        $mp = @($fx.multi.Partitions | Where-Object { $_.Kind -ne 'NotScanned' })
+        Assert-Eq @($fx.multi.Profiles).Count 2 'multi: dois usuarios'
+        foreach ($c in @('ACTIVE_EVIDENCE', 'RECENT', 'LIVENESS_UNKNOWN', 'ORPHAN_SUSPECTED')) { Assert-True (@($mp | Where-Object { $_.Class -ceq $c }).Count -ge 1) "multi: classe $c ($(@($mp | ForEach-Object { $_.Class }) -join ','))" }
+        Assert-True (@($mp | Where-Object { $_.ProjectIdentified -and $_.Slug }).Count -ge 1 -and @($mp | Where-Object { -not $_.ProjectIdentified }).Count -ge 1) 'multi: um projeto identificado e um so com slug'
+        Assert-True (@($mp | Group-Object Bytes | Where-Object { $_.Count -ge 2 }).Count -ge 1) 'multi: duas raizes do mesmo tamanho (empate na ordem)'
+        $note = New-Object System.Collections.Generic.List[string]
+        $old = Get-AtmLanguage
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                foreach ($k in @($fx.Keys)) {
+                    $inv = $fx[$k]
+                    $cells = New-Object System.Collections.Generic.List[string]
+                    $cmp = { param([string]$Tag, $TuiRows, $VmRows)
+                        $t = & $guiP3Join $TuiRows; $v = & $guiP3Join $VmRows
+                        Assert-Eq $v $t "${lang} ${k} ${Tag}: linhas do view model = linhas da TUI"
+                        return @($TuiRows).Count }
+                    $tu = Get-AtmTuiScreenRows -State @{ Inventory = $inv } -Screen @{ Name = 'users'; Filter = $null }
+                    $tp = Get-AtmTuiScreenRows -State @{ Inventory = $inv } -Screen @{ Name = 'projects'; Filter = $null }
+                    $tr = Get-AtmTuiScreenRows -State @{ Inventory = $inv } -Screen @{ Name = 'roots'; Filter = $null }
+                    $nu = & $cmp 'usuarios' $tu.Rows (Get-AtmGuiScreen -Inventory $inv -Screen @{ Name = 'users'; Title = 'u'; Filter = $null }).Rows
+                    $np = & $cmp 'projetos' $tp.Rows (Get-AtmGuiScreen -Inventory $inv -Screen @{ Name = 'projects'; Title = 'p'; Filter = $null }).Rows
+                    $nr = & $cmp 'raizes' $tr.Rows (Get-AtmGuiScreen -Inventory $inv -Screen @{ Name = 'roots'; Title = 'r'; Filter = $null }).Rows
+                    $cells.Add("usuarios $nu=$nu sim"); $cells.Add("projetos $np=$np sim"); $cells.Add("raizes $nr=$nr sim")
+                    # Each filter as the TUI builds it from the row opened with Enter (Start-AtmTui), against the screen the
+                    # GUI's navigation opens from the same row.
+                    $lines = 0
+                    for ($i = 0; $i -lt @($tu.Items).Count; $i++) {
+                        $it = $tu.Items[$i]
+                        $o = & $guiP3Open $inv 'D2' $i
+                        Assert-True ($o.Result -ceq 'RENDER' -and $o.Top.Name -ceq 'roots' -and $o.Top.Title -ceq (Get-AtmText 'tui.rootsOf' $it.Profile.UserName)) "${lang} ${k}: Enter no usuario $i"
+                        $lines += & $cmp "raizes do usuario $i" (Get-AtmTuiScreenRows -State @{ Inventory = $inv } -Screen @{ Name = 'roots'; Filter = @{ Sid = $it.Profile.Sid; ProfilePath = $it.Profile.ProfilePath } }).Rows (Get-AtmGuiScreen -Inventory $inv -Screen $o.Top).Rows
+                    }
+                    $cells.Add(('raizes por usuario ({0} filtros) {1}={1} sim' -f @($tu.Items).Count, $lines))
+                    $lines = 0
+                    for ($i = 0; $i -lt @($tp.Items).Count; $i++) {
+                        $it = $tp.Items[$i]
+                        $o = & $guiP3Open $inv 'D3' $i
+                        Assert-True ($o.Result -ceq 'RENDER' -and $o.Top.Title -ceq (Get-AtmText 'tui.rootsOfProject' $it.Project $it.UserName)) "${lang} ${k}: Enter no projeto $i"
+                        $lines += & $cmp "raizes do projeto $i" (Get-AtmTuiScreenRows -State @{ Inventory = $inv } -Screen @{ Name = 'roots'; Filter = @{ Sid = $it.Sid; ProfilePath = $it.ProfilePath; Project = $it.Project; Slug = $it.Slug } }).Rows (Get-AtmGuiScreen -Inventory $inv -Screen $o.Top).Rows
+                    }
+                    $cells.Add(('raizes por projeto ({0} filtros) {1}={1} sim' -f @($tp.Items).Count, $lines))
+                    $lines = 0
+                    foreach ($pair in @(@('D5', 'ACTIVE_EVIDENCE'), @('D6', 'RECENT'), @('D7', 'LIVENESS_UNKNOWN'))) {
+                        $n = Initialize-AtmGuiNav
+                        $null = Invoke-AtmGuiNavKey -Nav $n -Inventory $inv -Key $pair[0] -Busy $false
+                        $lines += & $cmp "raizes $($pair[1])" (Get-AtmTuiScreenRows -State @{ Inventory = $inv } -Screen @{ Name = 'roots'; Filter = @{ Class = $pair[1] } }).Rows (Get-AtmGuiScreen -Inventory $inv -Screen (Get-AtmGuiNavTop -Nav $n)).Rows
+                    }
+                    $cells.Add("raizes por classe (3 filtros) $lines=$lines sim")
+                    # The detail of every root, opened from the unfiltered list (same row, same root: the order is equal).
+                    $lines = 0
+                    for ($i = 0; $i -lt @($tr.Items).Count; $i++) {
+                        $part = $tr.Items[$i].Partition
+                        $o = & $guiP3Open $inv 'D4' $i
+                        Assert-True ($o.Top.Name -ceq 'detail' -and $o.Top.Title -ceq (Get-AtmText 'tui.detailOf' $part.Name) -and $o.Top.Filter.Path -ceq $part.Path) "${lang} ${k}: Enter na raiz $i"
+                        $t = @(& $guiP3TuiText $inv @{ Name = 'detail'; Filter = @{ Partition = $part; Gate = $null } })
+                        Assert-True ($t.Count -ge 4 -and $t[$t.Count - 2] -ceq (Get-AtmText 'tui.isoHint') -and $t[$t.Count - 1] -ceq (Get-AtmText 'tui.moreDetail')) "${lang} ${k}: a TUI termina o detalhe com as duas dicas"
+                        $tt = @($t[0..($t.Count - 4)])
+                        $vt = @(& $guiP3DetailText (Get-AtmGuiScreen -Inventory $inv -Screen $o.Top))
+                        Assert-Eq ($vt -join "`n") ($tt -join "`n") "${lang} ${k}: detalhe da raiz $i"
+                        $lines += $tt.Count
+                    }
+                    $cells.Add(('detalhe ({0} raizes) {1}={1} sim' -f @($tr.Items).Count, $lines))
+                    $te = @(& $guiP3TuiText $inv @{ Name = 'errors'; Filter = $null })
+                    $ve = @((Get-AtmGuiScreen -Inventory $inv -Screen @{ Name = 'errors'; Title = 'e'; Filter = $null }).Lines)
+                    Assert-Eq ($ve -join "`n") ($te -join "`n") "${lang} ${k}: cobertura e erros"
+                    $cells.Add(('cobertura e erros {0}={1} sim' -f $te.Count, $ve.Count))
+                    if ($lang -ceq 'en-US') { $note.Add(('{0}: {1}' -f $k, ($cells -join '; '))) }
+                }
+            }
+        } finally { Set-AtmLanguage -Requested $old }
+        $script:caseNote = $note -join ' | '
+    }
+    Test-Case 'GUI P3' 'Navegacao (sem janela), nos dois idiomas: 1 a 7 e 9 com os titulos da TUI; Enter num usuario, num projeto e numa raiz; Esc volta uma tela e no dashboard fecha; a linha escolhida volta com o Esc; durante um audit nada se move; teclas sem tela e Enter fora de uma lista nao fazem nada; o inventario reimportado como o filho da janela real o recebe da as mesmas telas' {
+        $inv = & $guiP3Multi
+        $old = Get-AtmLanguage
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                $nav = Initialize-AtmGuiNav
+                $key = { param([string]$K, [bool]$Busy = $false) Invoke-AtmGuiNavKey -Nav $nav -Inventory $inv -Key $K -Busy $Busy }
+                $top = { Get-AtmGuiNavTop -Nav $nav }
+                Assert-True ((& $top).Name -ceq 'dashboard' -and $nav.Stack.Count -eq 1) "${lang}: comeca no dashboard"
+                $want = [ordered]@{ D2 = (Get-AtmText 'menu.users'); D3 = (Get-AtmText 'menu.projects'); D4 = 'Roots'; D5 = 'ACTIVE_EVIDENCE'; D6 = 'RECENT'; D7 = 'LIVENESS_UNKNOWN'; D9 = (Get-AtmText 'menu.errorsTitle'); NumPad2 = (Get-AtmText 'menu.users'); '3' = (Get-AtmText 'menu.projects') }
+                foreach ($k in @($want.Keys)) {
+                    Assert-Eq (& $key $k) 'RENDER' "${lang}: tecla $k"
+                    Assert-True ((& $top).Title -ceq $want[$k] -and $nav.Stack.Count -eq 2) "${lang}: tecla $k abre '$($want[$k])' sobre o dashboard ($((& $top).Title))"
+                }
+                Assert-Eq (& $key 'D8') 'NONE' "${lang}: 8 (bloqueados, preview) nao e tela da GUI nesta fase"
+                Assert-True ((& $key 'D1') -ceq 'RENDER' -and $nav.Stack.Count -eq 1) "${lang}: 1 volta ao dashboard"
+                Assert-Eq (& $key 'Return') 'NONE' "${lang}: Enter no dashboard nao faz nada"
+                # The round's walk: 2, Enter on the first user, Enter on the first root, Esc three times, 9, Esc.
+                $users = Get-AtmGuiScreen -Inventory $inv -Screen @{ Name = 'users'; Title = 'u'; Filter = $null }
+                $null = & $key 'D2'
+                Assert-Eq (& $key 'Return') 'RENDER' "${lang}: Enter no primeiro usuario"
+                Assert-Eq (& $top).Title (Get-AtmText 'tui.rootsOf' $users.Items[0].Profile.UserName) "${lang}: raizes do primeiro usuario"
+                $first = (Get-AtmGuiScreen -Inventory $inv -Screen (& $top)).Items[0].Partition
+                Assert-Eq (& $key 'Return') 'RENDER' "${lang}: Enter na primeira raiz"
+                Assert-True ((& $top).Name -ceq 'detail' -and (& $top).Title -ceq (Get-AtmText 'tui.detailOf' $first.Name) -and $nav.Stack.Count -eq 4) "${lang}: detalhe da primeira raiz"
+                Assert-Eq (& $key 'Return') 'NONE' "${lang}: Enter no detalhe nao faz nada"
+                foreach ($expect in @('roots', 'users', 'dashboard')) { Assert-True ((& $key 'Escape') -ceq 'RENDER' -and (& $top).Name -ceq $expect) "${lang}: Esc volta para $expect" }
+                Assert-True ((& $key 'D9') -ceq 'RENDER' -and (& $top).Name -ceq 'errors' -and (& $key 'Return') -ceq 'NONE') "${lang}: 9 abre cobertura e erros; Enter ali nao faz nada"
+                Assert-True ((& $key 'Escape') -ceq 'RENDER' -and (& $top).Name -ceq 'dashboard') "${lang}: Esc volta ao dashboard"
+                # A project, and the selected row kept when Esc comes back to its list.
+                $null = & $key 'D3'
+                $pv = Get-AtmGuiScreen -Inventory $inv -Screen (& $top)
+                (& $top).Sel = @($pv.Items).Count - 1
+                $lastProject = @($pv.Items)[@($pv.Items).Count - 1]
+                Assert-True ((& $key 'Return') -ceq 'RENDER' -and (& $top).Title -ceq (Get-AtmText 'tui.rootsOfProject' $lastProject.Project $lastProject.UserName)) "${lang}: Enter no ultimo projeto"
+                Assert-True ((& $key 'Escape') -ceq 'RENDER' -and (& $top).Sel -eq (@($pv.Items).Count - 1)) "${lang}: a linha escolhida volta com o Esc"
+                $depth = $nav.Stack.Count
+                foreach ($k in @('D4', 'Return', 'Escape')) { Assert-Eq (& $key $k $true) 'IGNORED' "${lang}: durante um audit a tecla $k e ignorada" }
+                Assert-True ($nav.Stack.Count -eq $depth -and (& $top).Name -ceq 'projects') "${lang}: nada se moveu durante o audit"
+                $null = & $key 'Escape'
+                Assert-True ((& $key 'Escape') -ceq 'CLOSE' -and $nav.Stack.Count -eq 1) "${lang}: Esc no dashboard fecha a janela"
+            }
+        } finally { Set-AtmLanguage -Requested $old }
+        # The real-window child receives the inventory as Clixml: every screen of the reimported copy is the same.
+        $cx = Join-Path $sandbox 'gui-p3-nav.clixml'
+        $inv | Export-Clixml -LiteralPath $cx -Depth 12
+        $back = Import-Clixml -LiteralPath $cx
+        foreach ($s in @(@{ Name = 'users'; Title = 'u'; Filter = $null }, @{ Name = 'projects'; Title = 'p'; Filter = $null }, @{ Name = 'roots'; Title = 'r'; Filter = $null }, @{ Name = 'errors'; Title = 'e'; Filter = $null })) {
+            $a = Get-AtmGuiScreen -Inventory $inv -Screen $s; $b = Get-AtmGuiScreen -Inventory $back -Screen $s
+            Assert-Eq ((& $guiP3Join $b.Rows) + "`n" + (@($b.Lines) -join "`n")) ((& $guiP3Join $a.Rows) + "`n" + (@($a.Lines) -join "`n")) "reimportado: tela $($s.Name) igual"
+        }
+        $o1 = & $guiP3Open $inv 'D4' 0; $o2 = & $guiP3Open $back 'D4' 0
+        Assert-Eq (@(& $guiP3DetailText (Get-AtmGuiScreen -Inventory $back -Screen $o2.Top)) -join "`n") (@(& $guiP3DetailText (Get-AtmGuiScreen -Inventory $inv -Screen $o1.Top)) -join "`n") 'reimportado: detalhe igual'
+    }
+    Test-Case 'GUI P3' 'Detalhe que sumiu depois de um audit: volta para a lista com o texto do catalogo, nada inventado; um detalhe que continua fica; a lista de um usuario que sumiu fica vazia; antes do primeiro audit nenhuma linha e inventada' {
+        $inv = & $guiP3Multi
+        $saved = $script:AtmGuiInventorySource
+        $old = Get-AtmLanguage
+        try {
+            Set-AtmLanguage -Requested 'en-US'
+            foreach ($d in @('D2', 'D3', 'D4', 'D9')) {
+                $n = Initialize-AtmGuiNav
+                Assert-Eq (Invoke-AtmGuiNavKey -Nav $n -Inventory $null -Key $d -Busy $false) 'RENDER' "sem audit: tecla $d"
+                $vm = Get-AtmGuiScreen -Inventory $null -Screen (Get-AtmGuiNavTop -Nav $n)
+                Assert-True (-not $vm.Known -and @($vm.Rows).Count -eq 0 -and @($vm.Lines).Count -eq 0 -and $vm.Note -ceq (Get-AtmText 'gui.noAudit')) "sem audit, tecla ${d}: nenhuma linha inventada"
+                Assert-Eq (Invoke-AtmGuiNavKey -Nav $n -Inventory $null -Key 'Return' -Busy $false) 'NONE' "sem audit, tecla ${d}: Enter sem linha"
+            }
+            $s = Initialize-AtmGuiSession -ConfigDir $cfgDir
+            $script:guiP3Inv = $inv
+            $script:AtmGuiInventorySource = { param($a) $null = $a; $script:guiP3Inv }
+            Assert-Eq (Invoke-AtmGuiRefresh -Session $s) 'OK' 'primeiro audit'
+            Invoke-AtmGuiNavRefreshed -Nav $s.Nav -Inventory $s.Inventory
+            $null = Invoke-AtmGuiNavKey -Nav $s.Nav -Inventory $s.Inventory -Key 'D4' -Busy $false
+            $null = Invoke-AtmGuiNavKey -Nav $s.Nav -Inventory $s.Inventory -Key 'Return' -Busy $false
+            $top = Get-AtmGuiNavTop -Nav $s.Nav
+            Assert-Eq $top.Name 'detail' 'detalhe aberto'
+            $gonePath = $top.Filter.Path; $goneName = $top.Filter.Name
+            # The next audit no longer has that root (dubbed: a copy of the inventory without it; nothing changes on disk).
+            $inv2 = $inv.PSObject.Copy()
+            $inv2.Partitions = @($inv.Partitions | Where-Object { $_.Path -ne $gonePath })
+            $script:guiP3Inv = $inv2
+            Assert-Eq (Invoke-AtmGuiRefresh -Session $s) 'OK' 'segundo audit'
+            Invoke-AtmGuiNavRefreshed -Nav $s.Nav -Inventory $s.Inventory
+            $top = Get-AtmGuiNavTop -Nav $s.Nav
+            Assert-True ($top.Name -ceq 'roots' -and $s.Nav.Stack.Count -eq 2 -and $s.Nav.Message -ceq (Get-AtmText 'gui.detailGone' $goneName)) "de volta a lista, com o texto do catalogo ($($top.Name); $($s.Nav.Message))"
+            $vm = Get-AtmGuiScreen -Inventory $s.Inventory -Screen $top
+            Assert-True (@($vm.Items | Where-Object { $_.Partition.Path -eq $gonePath }).Count -eq 0 -and @($vm.Rows).Count -eq (@($inv.Partitions | Where-Object { $_.Kind -ne 'NotScanned' }).Count - 1)) 'a lista nova, sem a raiz que sumiu'
+            $gd = Get-AtmGuiScreen -Inventory $s.Inventory -Screen @{ Name = 'detail'; Title = 'd'; Filter = @{ Path = $gonePath; Name = $goneName } }
+            Assert-True ($gd.Gone -and @($gd.Pairs).Count -eq 0 -and @($gd.Lines).Count -eq 0) 'detalhe de uma raiz ausente: nenhum campo inventado'
+            # A detail whose root is still there stays, and the message of the last move is cleared by the next one.
+            $null = Invoke-AtmGuiNavKey -Nav $s.Nav -Inventory $s.Inventory -Key 'Return' -Busy $false
+            Assert-True ((Get-AtmGuiNavTop -Nav $s.Nav).Name -ceq 'detail' -and $null -eq $s.Nav.Message) 'outro detalhe aberto; mensagem limpa'
+            Assert-Eq (Invoke-AtmGuiRefresh -Session $s) 'OK' 'terceiro audit'
+            Invoke-AtmGuiNavRefreshed -Nav $s.Nav -Inventory $s.Inventory
+            Assert-True ((Get-AtmGuiNavTop -Nav $s.Nav).Name -ceq 'detail' -and $null -eq $s.Nav.Message) 'o detalhe que continua fica'
+            # The roots of the second user, then an audit without that user: the list is empty, nothing is invented.
+            $null = Invoke-AtmGuiNavKey -Nav $s.Nav -Inventory $s.Inventory -Key 'D2' -Busy $false
+            (Get-AtmGuiNavTop -Nav $s.Nav).Sel = 1
+            $null = Invoke-AtmGuiNavKey -Nav $s.Nav -Inventory $s.Inventory -Key 'Return' -Busy $false
+            $who = (Get-AtmGuiNavTop -Nav $s.Nav).Filter
+            $inv3 = $inv.PSObject.Copy()
+            $inv3.Profiles = @($inv.Profiles | Where-Object { -not ($_.Sid -eq $who.Sid -and $_.ProfilePath -eq $who.ProfilePath) })
+            $inv3.Partitions = @($inv.Partitions | Where-Object { -not ($_.Sid -eq $who.Sid -and $_.ProfilePath -eq $who.ProfilePath) })
+            $script:guiP3Inv = $inv3
+            Assert-Eq (Invoke-AtmGuiRefresh -Session $s) 'OK' 'quarto audit'
+            Invoke-AtmGuiNavRefreshed -Nav $s.Nav -Inventory $s.Inventory
+            $vm = Get-AtmGuiScreen -Inventory $s.Inventory -Screen (Get-AtmGuiNavTop -Nav $s.Nav)
+            Assert-True ($vm.Known -and @($vm.Rows).Count -eq 0 -and (Get-AtmGuiNavTop -Nav $s.Nav).Sel -eq 0) 'usuario que sumiu: lista vazia, nada inventado'
+            Assert-Eq (Invoke-AtmGuiNavKey -Nav $s.Nav -Inventory $s.Inventory -Key 'Return' -Busy $false) 'NONE' 'Enter numa lista vazia nao faz nada'
+            Assert-Eq $s.SourceCalls 4 'quatro audits, cada um pedido'
+        } finally { $script:AtmGuiInventorySource = $saved; Set-AtmLanguage -Requested $old }
+    }
+    Test-Case 'GUI P3' 'Estatico (P3): lista fechada com exatamente os quatro nomes novos; Show-AtmPathDetail plantado e recusado; nenhum timer, caixa de texto editavel, closure nem botao de cancelar (Esc volta uma tela); nenhuma dica de isolamento nem do detalhamento do CLI; telas 1 a 7 e 9; nome acessivel do catalogo nos controles novos; chaves novas nos dois idiomas' {
+        $p3 = @('Get-AtmYesNo', 'Get-AtmInventoryProfileList', 'Get-AtmBaseIndex', 'Get-AtmNotAuditedBaseStates')
+        Assert-True ($guiAllowedEngine.Count -eq 21 -and @($p3 | Where-Object { $guiAllowedEngine -ccontains $_ }).Count -eq 4) "lista: os 4 nomes da P3, nenhum outro ($($guiAllowedEngine -join ','))"
+        $gt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1')); $mt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\GuiModel.ps1'))
+        foreach ($pair in @(@('Gui.ps1', $gt), @('GuiModel.ps1', $mt))) {
+            foreach ($w in @('Timer', 'TextBox', 'GetNewClosure', 'CancelButton', 'tui.isoHint', 'tui.moreDetail', 'Show-AtmPathDetail', 'Invoke-AtmPreview -')) { Assert-True ($pair[1].IndexOf($w, [StringComparison]::OrdinalIgnoreCase) -lt 0) "$($pair[0]) contem '$w'" }
+        }
+        # The planted call to the CLI's path drill-down, in a copy (the real files never change).
+        $pl = Join-Path $sandbox 'gui-planted-p3'
+        [void][IO.Directory]::CreateDirectory($pl)
+        $mc = Join-Path $pl 'GuiModel.ps1'
+        [IO.File]::WriteAllText($mc, $mt + "`r`nfunction Test-AtmPlanted { Show-AtmPathDetail -Path `$null }`r`n", (New-Object Text.UTF8Encoding $false))
+        $gc = Join-Path $pl 'Gui.ps1'
+        [IO.File]::WriteAllText($gc, $gt, (New-Object Text.UTF8Encoding $false))
+        $pv = & $guiCheck @($gc, $mc)
+        Assert-True (@($pv | Where-Object { $_.Contains('comando fora da lista fechada: Show-AtmPathDetail') }).Count -ge 1) "plantado Show-AtmPathDetail: recusado ($($pv -join ' | '))"
+        Assert-Eq ((& $guiCheck @((Join-Path $srcDir 'lib\Gui.ps1'), (Join-Path $srcDir 'lib\GuiModel.ps1'))) -join ' | ') '' 'arquivos reais dentro da lista fechada'
+        Assert-Eq (@(Get-AtmGuiNavItemList | ForEach-Object { $_.Key }) -join ',') '1,2,3,4,5,6,7,9' 'telas da GUI: as teclas 1 a 7 e 9 da TUI'
+        foreach ($w in @("AccessibleName = Get-AtmText 'gui.screensName'", "AccessibleName = Get-AtmText 'gui.messageName'", "-Name 'Rows' -AccessibleName (Get-AtmText 'gui.rowsName'", "`$rows.AccessibleName = Get-AtmText 'gui.rowsName'", "`$b.AccessibleName = (`$b.Text -replace '&', '')")) { Assert-True ($gt.Contains($w)) "nome acessivel do catalogo: $w" }
+        foreach ($lang in @('en-US', 'pt-BR')) {
+            $cat = $script:AtmMessages[$lang]
+            foreach ($key in @('gui.navHint', 'gui.screensName', 'gui.screenButton', 'gui.screenTitle', 'gui.messageName', 'gui.rowsName', 'gui.detailGone', 'gui.noAudit', 'gui.col.field', 'gui.col.value', 'gui.col.line')) { Assert-True ($cat.ContainsKey($key) -and $cat[$key]) "${lang}: $key" }
+        }
+    }
+    Test-Case 'GUI P3' 'Janela real (Windows PowerShell; trava aberta e inventario dublado so num processo filho): dashboard, 2, Enter no primeiro usuario, Enter na primeira raiz, Esc tres vezes, 9, Esc, o botao da tela 3, Esc e Esc no dashboard fecha; titulo e uma linha conhecida de cada tela; cabecalho em toda tela; nenhum processo filho, timer ou arquivo deixado no sandbox, na configuracao ou no TEMP; nos dois idiomas; sem janela possivel: NAO_TESTADO' {
+        if ($PSVersionTable.PSEdition -ne 'Desktop') { $script:caseSkipped = $true; $script:caseNote = 'PowerShell 7: janela real NAO_TESTADO nesta fase (GUI-D7)'; return }
+        $inv = & $guiP3Multi
+        $cx = Join-Path $sandbox 'gui-p3-window.clixml'
+        $inv | Export-Clixml -LiteralPath $cx -Depth 12
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $child = Join-Path $sandbox 'gui-p3-window-child.ps1'
+        [IO.File]::WriteAllText($child, @'
+param([string]$Src, [string]$Lang, [string]$Sandbox, [string]$Out, [string]$InvFile)
+$ErrorActionPreference = 'Stop'
+foreach ($lib in @('Engine.Audit.ps1', 'Engine.Clean.ps1', 'Engine.Isolate.ps1', 'Engine.Diagnose.ps1', 'Report.ps1', 'Tui.ps1', 'GuiModel.ps1', 'Gui.ps1')) { . (Join-Path $Src ('lib\' + $lib)) }
+Set-AtmLanguage -Requested $Lang
+$res = [ordered]@{ env = (Test-AtmGuiEnvironment) }
+if ($null -eq $res.env) {
+    $names = { param($p, [switch]$Top) $h = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase); foreach ($e in @(Get-ChildItem -LiteralPath $p -Recurse:(-not $Top) -Force -ErrorAction SilentlyContinue)) { [void]$h.Add($e.FullName) }; , $h }
+    $kids = { @(Get-CimInstance -ClassName Win32_Process -Filter ('ParentProcessId = {0}' -f $PID) | ForEach-Object { [int]$_.ProcessId }) }
+    $temp = [IO.Path]::GetTempPath()
+    $b1 = & $names $Sandbox; $b2 = & $names (Join-Path $Src 'config'); $b3 = & $names $temp -Top
+    $k1 = & $kids
+    $script:guiInv = Import-Clixml -LiteralPath $InvFile
+    $script:AtmGuiEnabled = $true
+    # An exception in an event handler ends the child with its message, instead of a modal error dialog.
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.Application]::SetUnhandledExceptionMode([System.Windows.Forms.UnhandledExceptionMode]::ThrowException)
+    $script:AtmGuiInventorySource = { param($a) & $a.ProgressCallback 50 'C:\SENTINEL-PROGRESS\base'; $script:guiInv }
+    $script:guiSnaps = New-Object System.Collections.Generic.List[object]
+    $script:guiError = $null; $script:guiEscClosed = $false; $script:guiForm = $null
+    $hook = { param($f)
+        $script:guiForm = $f
+        $m = [System.Windows.Forms.Form].GetMethod('OnKeyDown', [Reflection.BindingFlags]'NonPublic, Instance')
+        $first = { param($lv) if ($lv.Items.Count -eq 0) { '' } else { $it = $lv.Items[0]; (@($it.Text) + @(for ($i = 1; $i -lt $it.SubItems.Count; $i++) { $it.SubItems[$i].Text })) -join "`t" } }
+        $snap = { param([string]$Step)
+            $rows = $f.Controls.Find('Rows', $true)[0]; $sum = $f.Controls.Find('Summary', $true)[0]
+            [ordered]@{ step = $Step; title = [string]$f.Controls.Find('ScreenTitle', $true)[0].Text; identity = [string]$f.Controls.Find('IdentityLine', $true)[0].Text
+                state = [string]$f.Controls.Find('StateLine', $true)[0].Text; rowsVisible = [bool]$rows.Visible; summaryVisible = [bool]$sum.Visible
+                rowsName = [string]$rows.AccessibleName; count = $(if ($rows.Visible) { $rows.Items.Count } else { $sum.Items.Count }); first = $(if ($rows.Visible) { & $first $rows } else { & $first $sum }) } }
+        foreach ($st in @('start', 'D2', 'Return', 'Return', 'Escape', 'Escape', 'Escape', 'D9', 'Escape', 'button3', 'Escape', 'Escape')) {
+            try {
+                if ($st -ceq 'button3') { $f.Controls.Find('Screen3', $true)[0].PerformClick() }
+                elseif ($st -cne 'start') { $ka = [System.Windows.Forms.KeyEventArgs]::new([System.Windows.Forms.Keys]$st); $null = $m.Invoke($f, [object[]]@($ka)) }
+                $script:guiSnaps.Add((& $snap $st))
+            } catch { $script:guiError = $st + ': ' + $_.Exception.Message; break }
+        }
+        # The last Esc, on the dashboard, asked the window to close; otherwise close it here (never left open).
+        $script:guiEscClosed = ($f.DialogResult -ne [System.Windows.Forms.DialogResult]::None)
+        if (-not $script:guiEscClosed) { $f.Close() }
+    }
+    $id = { [pscustomobject]@{ Name = 'TEST\gui'; Sid = 'S-1-5-21-1-2-3-9301'; IsAdmin = $false; ElevationTypeRaw = 3; IntegrityRid = 8192; SessionId = 1 } }
+    $o = @(Invoke-AtmGuiCommand -IdentitySource $id -OnShown $hook 6>&1)
+    $res.code = @($o | Where-Object { $_ -is [int] })[-1]
+    $res.snaps = @($script:guiSnaps)
+    $res.error = $script:guiError
+    $res.escClosed = $script:guiEscClosed
+    $res.disposed = ($null -ne $script:guiForm -and [bool]$script:guiForm.IsDisposed)
+    $k2 = & $kids
+    $res.newProcesses = @($k2 | Where-Object { $k1 -notcontains $_ }).Count
+    $a1 = & $names $Sandbox; $a2 = & $names (Join-Path $Src 'config'); $a3 = & $names $temp -Top
+    $res.newSandbox = @($a1 | Where-Object { -not $b1.Contains($_) }).Count
+    $res.newConfig = @($a2 | Where-Object { -not $b2.Contains($_) }).Count
+    $res.newTemp = @($a3 | Where-Object { -not $b3.Contains($_) }).Count
+}
+($res | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $Out -Encoding UTF8
+'@, (New-Object Text.UTF8Encoding $true))
+        foreach ($lang in @('en-US', 'pt-BR')) {
+            $out = Join-Path $sandbox ('gui-p3-window-' + $lang + '.json')
+            $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Lang $lang -Sandbox `"$sandbox`" -Out `"$out`" -InvFile `"$cx`"") -TimeoutSec 180
+            Assert-True ($r.Exit -eq 0 -and (Test-Path -LiteralPath $out -PathType Leaf)) "janela P3 ${lang}: processo filho saida $($r.Exit) $($r.Text)"
+            $j = Get-Content -LiteralPath $out -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($null -ne $j.env) { $script:caseSkipped = $true; $script:caseNote = "runner sem janela possivel ($($j.env)): NAO_TESTADO"; return }
+            Assert-True ($null -eq $j.error -and [int]$j.code -eq 0) "janela P3 ${lang}: sem erro em nenhum passo, saida 0 ($($j.error); $($j.code))"
+            $snaps = @($j.snaps)
+            Assert-Eq (@($snaps | ForEach-Object { $_.step }) -join ',') 'start,D2,Return,Return,Escape,Escape,Escape,D9,Escape,button3,Escape,Escape' "janela P3 ${lang}: todos os passos"
+            # The expected screens, computed over the same inventory in this process and language.
+            $old = Get-AtmLanguage
+            try {
+                Set-AtmLanguage -Requested $lang
+                $users = Get-AtmGuiScreen -Inventory $inv -Screen @{ Name = 'users'; Title = 'u'; Filter = $null }
+                $o1 = & $guiP3Open $inv 'D2' 0
+                $ur = Get-AtmGuiScreen -Inventory $inv -Screen $o1.Top
+                $nav = Initialize-AtmGuiNav
+                foreach ($k in @('D2', 'Return', 'Return')) { $null = Invoke-AtmGuiNavKey -Nav $nav -Inventory $inv -Key $k -Busy $false }
+                $det = Get-AtmGuiScreen -Inventory $inv -Screen (Get-AtmGuiNavTop -Nav $nav)
+                $err = Get-AtmGuiScreen -Inventory $inv -Screen @{ Name = 'errors'; Title = 'e'; Filter = $null }
+                $prj = Get-AtmGuiScreen -Inventory $inv -Screen @{ Name = 'projects'; Title = 'p'; Filter = $null }
+                $dash = Get-AtmGuiDashboard -Inventory $inv
+                $t = { param([string]$x) Get-AtmText 'gui.screenTitle' $x }
+                $want = @(
+                    @('start', (& $t (Get-AtmText 'menu.dashboard')), $false, ([string]$dash.Groups[0].Title + "`t" + [string]$dash.Groups[0].Items[0].Text)),
+                    @('D2', (& $t (Get-AtmText 'menu.users')), $true, (@($users.Rows)[0] -join "`t")),
+                    @('Return', (& $t $o1.Top.Title), $true, (@($ur.Rows)[0] -join "`t")),
+                    @('Return', (& $t $det.Title), $true, ([string]@($det.Pairs)[0].Label + "`t" + [string]@($det.Pairs)[0].Value)),
+                    @('Escape', (& $t $o1.Top.Title), $true, (@($ur.Rows)[0] -join "`t")),
+                    @('Escape', (& $t (Get-AtmText 'menu.users')), $true, (@($users.Rows)[0] -join "`t")),
+                    @('Escape', (& $t (Get-AtmText 'menu.dashboard')), $false, ([string]$dash.Groups[0].Title + "`t" + [string]$dash.Groups[0].Items[0].Text)),
+                    @('D9', (& $t (Get-AtmText 'menu.errorsTitle')), $true, [string]@($err.Lines)[0]),
+                    @('Escape', (& $t (Get-AtmText 'menu.dashboard')), $false, ([string]$dash.Groups[0].Title + "`t" + [string]$dash.Groups[0].Items[0].Text)),
+                    @('button3', (& $t (Get-AtmText 'menu.projects')), $true, (@($prj.Rows)[0] -join "`t")),
+                    @('Escape', (& $t (Get-AtmText 'menu.dashboard')), $false, ([string]$dash.Groups[0].Title + "`t" + [string]$dash.Groups[0].Items[0].Text))
+                )
+                $idLine = Get-AtmText 'gui.identity' 'TEST\gui'
+                $wantState = $(if ($inv.CoverageComplete) { 'CURRENT' } else { 'PARTIAL' })
+            } finally { Set-AtmLanguage -Requested $old }
+            for ($i = 0; $i -lt $want.Count; $i++) {
+                $s = $snaps[$i]; $w = $want[$i]
+                Assert-True ([string]$s.title -ceq $w[1] -and [bool]$s.rowsVisible -eq $w[2] -and [bool]$s.summaryVisible -eq (-not $w[2])) "janela P3 ${lang} passo $i ($($w[0])): titulo '$($s.title)' (esperado '$($w[1])'), lista $($s.rowsVisible)"
+                Assert-Eq ([string]$s.first) $w[3] "janela P3 ${lang} passo $i ($($w[0])): linha conhecida"
+                Assert-True ([string]$s.identity -ceq $idLine -and ([string]$s.state).Contains($wantState)) "janela P3 ${lang} passo ${i}: cabecalho com identidade e estado ($($s.identity) / $($s.state))"
+                if ($w[2]) { Assert-True ([string]$s.rowsName).Contains(($w[1] -replace '^[^:]*:\s*', '')) "janela P3 ${lang} passo ${i}: nome acessivel da lista com a tela ($($s.rowsName))" }
+            }
+            Assert-True ([bool]$j.escClosed -and [bool]$j.disposed) "janela P3 ${lang}: Esc no dashboard fechou a janela; formulario liberado"
+            Assert-True ([int]$j.newProcesses -eq 0 -and [int]$j.newSandbox -eq 0 -and [int]$j.newConfig -eq 0 -and [int]$j.newTemp -eq 0) "janela P3 ${lang}: nada deixado (processos $($j.newProcesses), sandbox $($j.newSandbox), configuracao $($j.newConfig), TEMP $($j.newTemp))"
+        }
+        Assert-True (-not ([IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1'))).Contains('Timer')) 'P3: nenhum timer criado'
     }
 
     # ------------------------------------------------------------------ scale

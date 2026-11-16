@@ -3,7 +3,7 @@
 Status: ACCEPTED for the technology and the architecture (maintainer decisions D-B and D-A, 2026-11-16).
 GUI-D1 to GUI-D6 are ACCEPTED (decided by the maintainer as recommended, 2026-11-16); GUI-D7 to GUI-D11 are ACCEPTED
 (technical decisions accepted by the auditor as recommended, 2026-11-16). Implemented, with the gate closed in every
-copy: P1 (the skeleton) and P2 (the dashboard). P3 to P6 are not implemented.
+copy: P1 (the skeleton), P2 (the dashboard) and P3 (the drill-down). P4 to P6 are not implemented.
 Date: 2026-11-16
 Phase: V0.2.1, phases P1 to P6 (section 10)
 
@@ -406,3 +406,41 @@ What P2 implements, with the gate closed in every copy:
   * the purge subsection of the security model now points to the current list of gates;
   * `Gui.ps1` joins the existing presentation exceptions of the static analysis (`Write-Host`, and the in-memory
     constructors and loops for ShouldProcess).
+
+## Implementation record: P3 (V021-P3, 2026-11-16)
+
+What P3 implements, with the gate closed in every copy:
+
+* **View models** in `GuiModel.ps1`, testable without a window, with the same rows, order and text as the TUI. They
+  compute no class, eligibility, gate or coverage; they only arrange the engine's values through the TUI's catalog keys:
+  * users (`Get-AtmGuiUserTable`), projects (`Get-AtmGuiProjectTable`, grouped as the TUI groups them) and roots
+    (`Get-AtmGuiRootTable`, with the TUI's filters: by user, by project and by class);
+  * the detail of a root (`Get-AtmGuiRootDetail`): the TUI's field lines, then the evidence, the ancestors, the
+    ambiguous references and the samples of errors and reparse points. It leaves out the cleanup preview, the
+    isolation hint and the hint to the CLI path drill-down: the GUI offers neither action;
+  * coverage and errors (`Get-AtmGuiCoverageLineList`): the lines of the TUI's errors screen;
+  * `Get-AtmGuiScreen` returns one of these for the current screen, or no rows with a catalog note before the first
+    audit.
+* **Order.** Sorting goes through `System.Collections.Generic.List[object].Sort` with a comparison equal to the TUI's
+  sort keys. It is unstable in the same way as `Sort-Object` (neither is stable on Windows PowerShell 5.1 nor on
+  PowerShell 7 without `-Stable`), so ties come out in the same order as in the TUI; the multi fixture has one.
+  Grouping by project keeps the first-seen order and compares keys without case, as `Group-Object` does.
+* **Navigation** in the view model (`Initialize-AtmGuiNav`, `Invoke-AtmGuiNavKey`, `Invoke-AtmGuiNavRefreshed`), a
+  stack of screens:
+  * `1` dashboard, `2` users, `3` projects, `4` roots, `5`, `6` and `7` the roots of `ACTIVE_EVIDENCE`, `RECENT` and
+    `LIVENESS_UNKNOWN`, `9` coverage and errors. A digit starts again from the dashboard. Each screen also has a button
+    with the digit as its access key;
+  * `Enter` (or a double click) on a user or a project opens its roots, and on a root its detail;
+  * `Esc` goes back one screen, with the earlier row selected again, and closes the window only on the dashboard. This
+    changes P2, where `Esc` closed the window: the form no longer has a cancel button; the close button still closes;
+  * keys do nothing while an audit runs;
+  * `F5` and Refresh audit again from any screen and then compute the current screen again. If the root of an open
+    detail is not in the new audit, the window goes back to the list and says so with a catalog text.
+* **Window** (`Gui.ps1`): the header and the automatic purge notice stay on every screen; the screen title, a message
+  label and one read-only `ListView` for the rows. Only `Label`, `ListView` and `Button` controls, a fixed tab order,
+  an `AccessibleName` from the catalog on each new control, the class written out, no timer and no action on roots.
+* **Closed list:** the allowed names gain exactly `Get-AtmYesNo`, `Get-AtmInventoryProfileList`, `Get-AtmBaseIndex`
+  and `Get-AtmNotAuditedBaseStates`, 21 in all. The allowed cmdlets stay `Write-Host`, `New-Object` and `Add-Type`.
+  The planted violations gain a call to `Show-AtmPathDetail`, the CLI path drill-down.
+* **Catalog:** new `gui.*` keys only, in en-US and pt-BR (the navigation hint, the screen buttons and title, the
+  message, the rows' name, the detail that is gone, the note before an audit and three column headings).

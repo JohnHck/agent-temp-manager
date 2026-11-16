@@ -405,9 +405,9 @@ The quarantine is a folder of the sandbox (the `AtmIsolationQuarantineRoot` seam
     action, run as registered once the installation is gone, exits non-zero with nothing created (fail closed); the
     harness then removes it.
 
-## Desktop GUI in the suite (V0.2.1 phases P1 and P2)
+## Desktop GUI in the suite (V0.2.1 phases P1 to P3)
 
-The suite areas `GUI P1` and `GUI P2` cover `agent-temp gui` ([ADR-0014](adr/ADR-0014-desktop-gui-winforms.md)). None
+The suite areas `GUI P1`, `GUI P2` and `GUI P3` cover `agent-temp gui` ([ADR-0014](adr/ADR-0014-desktop-gui-winforms.md)). None
 of their cases opens a window in a shipped copy: the gate stays closed in every file, and the cases that go past it open
 it only in their own process memory.
 
@@ -438,8 +438,21 @@ it only in their own process memory.
 | Static (P2) | the closed list has exactly the eight new names; the inventory seam is a single `$null` assignment; no timer, no editable text field, no closure; only labels, lists and buttons on one form, the lists without editing; the inventory arguments equal the launcher's, and the launcher is unchanged; the state keys exist in both languages |
 | Real window | Windows PowerShell only, in a job-object process with a timeout, with the inventory source dubbed. The window opens and runs the first audit. It shows the title, the identity, the elevation, the language, `CURRENT` and the dashboard numbers, and `F5` refreshes it once. An `F5` during the audit is ignored. A close request during the next audit cancels it, and the window closes with code 0. The progress label only ever shows the percentage text. Runs in en-US and pt-BR; no child process and no new file is left behind. `NAO_TESTADO` on PowerShell 7 and when no window can be shown |
 
+`GUI P3`, the drill-down. It adds a multi inventory to the P2 ones: two users, four projects (one identified by a
+session file, the others by slug only), the four classes, and two roots of the same size, so that the order of ties
+is tested.
+
+| Case | What it checks |
+|---|---|
+| Parity with the TUI | no window, en-US and pt-BR, the complete, partial, denied and multi inventories: users, projects, roots, the roots of each user and of each project, the roots of each class, the detail of every root and the coverage and errors screen. Each screen's lines equal the ones the TUI writes for the same screen, cell by cell, in the same order. The case note carries the table: screen, TUI lines, view-model lines, equal |
+| Navigation | the round's walk with no window: dashboard, `2`, `Enter`, `Enter`, `Esc` three times, `9`, `Esc`; every digit key; `Esc` on the dashboard closes; the selected row comes back with `Esc`; keys are ignored during an audit; an inventory read back from a CLIXML export gives the same screens |
+| Detail that is gone | after a new audit without the root of the open detail, the window goes back to the list with the catalog text, in en-US and pt-BR; a detail whose root stays is kept; the roots of a user who is gone are an empty list; before the first audit no line is invented |
+| Static (P3) | the closed list has exactly the four new names; a planted call to the CLI path drill-down is detected; no timer, no editable text field, no closure; the controls are only labels, lists and buttons; each screen has a button with an accessible name from the catalog; the new keys exist in both languages |
+| Real window (P3) | Windows PowerShell only, in a job-object process with a timeout, with the inventory dubbed. The walk dashboard, `2`, `Enter`, `Enter`, `Esc` three times, `9`, `Esc`, the projects button, `Esc`, and `Esc` on the dashboard, which closes the window. Each step checks the screen title, a known line of the screen, the identity and the state. Runs in en-US and pt-BR; no child process and no new file is left behind. `NAO_TESTADO` on PowerShell 7 and when no window can be shown |
+
 The read-only case (sandbox identical in names, sizes, times and attributes) also runs a GUI session, with no window,
-that audits the sandbox three times through the real engine.
+that audits the sandbox three times through the real engine and walks the new screens between the audits: users, a
+user's roots and a detail; projects, a project's roots and a detail; coverage and errors, then roots and a detail.
 
 The install e2e adds the step `shipped-gui-gate`: the installed `lib\Gui.ps1` has the single `$false` assignment, both
 GUI files are in the manifest, `version` shows the gate disabled, and `agent-temp gui` exits with code 7 in en-US and

@@ -11,6 +11,9 @@
 # Phase P1: a minimal window with the title, the identity and the elevation state (PRIV-10).
 # Phase P2: the dashboard. One audit when the window opens, then only on an explicit request (the Refresh button or
 # F5), on the UI thread (GUI-D9); nothing repeats by itself (live monitoring is P5).
+# Phase P3: the TUI's screens 1 to 7 and 9 (users, projects, roots, roots by class, coverage and errors), Enter on a row
+# (the roots of a user or project, the detail of a root) and Esc one screen back. They only read the inventory of the
+# last audit, and no screen offers an action over a root.
 
 # Release gate of the desktop GUI (D-A). Closed in every distributed copy: `agent-temp gui` opens no window and loads no
 # WinForms assembly. Tests open it only in their own process memory.
@@ -68,6 +71,7 @@ function Initialize-AtmGuiSession {
         Busy = $false; CancelRequested = $false; CloseAfterRefresh = $false; Percent = -1
         Refreshes = 0; Failures = 0; Cancelled = 0; Ignored = 0; SourceCalls = 0
         AutoPurgeNotice = @(Get-AtmGuiAutoPurgeNotice -ConfigDir $ia['ConfigDir'])
+        Nav = (Initialize-AtmGuiNav)
     }
 }
 
@@ -183,12 +187,73 @@ function Show-AtmGuiView {
     $time = $Form.Controls.Find('AuditTime', $true)[0]
     $time.Text = $dash.AuditTime
     $time.AccessibleName = $dash.AuditTime
+    $null = Show-AtmGuiScreen -Form $Form -Session $Session
     return $state
 }
 
+function Show-AtmGuiScreen {
+    # Puts the current screen of the navigation on the form: the dashboard's controls, or the screen's read-only list
+    # (the rows of a table; the field and value pairs of a detail, then its lines; the lines of coverage and errors). The
+    # class is written in its column: nothing is told by color alone. Returns the screen.
+    param($Form, [hashtable]$Session)
+    $nav = $Session.Nav
+    $top = Get-AtmGuiNavTop -Nav $nav
+    $vm = Get-AtmGuiScreen -Inventory $Session.Inventory -Screen $top
+    $isDash = ($vm.Kind -ceq 'dashboard')
+    foreach ($n in @('Summary', 'ClassesTitle', 'Classes', 'OrphanInfo', 'AuditTime')) { $Form.Controls.Find($n, $true)[0].Visible = $isDash }
+    $title = $Form.Controls.Find('ScreenTitle', $true)[0]
+    $title.Text = Get-AtmText 'gui.screenTitle' $vm.Title
+    $title.AccessibleName = $title.Text
+    $msgText = $(if ($nav.Message) { [string]$nav.Message } elseif ($vm.Note) { [string]$vm.Note } else { '' })
+    $msg = $Form.Controls.Find('Message', $true)[0]
+    $msg.Text = $msgText
+    $msg.AccessibleName = $(if ($msgText) { $msgText } else { Get-AtmText 'gui.messageName' })
+    $rows = $Form.Controls.Find('Rows', $true)[0]
+    $rows.BeginUpdate()
+    $rows.Items.Clear()
+    $rows.Columns.Clear()
+    if (-not $isDash) {
+        $cols = @($vm.Columns)
+        $widths = $(if ($vm.Kind -ceq 'pairs') { @(260, 640) } elseif ($vm.Kind -ceq 'lines') { @(900) } else { @() })
+        for ($i = 0; $i -lt $cols.Count; $i++) { $null = $rows.Columns.Add([string]$cols[$i], $(if ($i -lt $widths.Count) { [int]$widths[$i] } else { 150 })) }
+        if ($vm.Kind -ceq 'table') {
+            foreach ($r in @($vm.Rows)) {
+                $cells = @($r)
+                $row = New-Object -TypeName System.Windows.Forms.ListViewItem -ArgumentList ([string]$cells[0])
+                for ($i = 1; $i -lt $cells.Count; $i++) { $null = $row.SubItems.Add([string]$cells[$i]) }
+                $null = $rows.Items.Add($row)
+            }
+        } elseif ($vm.Kind -ceq 'pairs') {
+            foreach ($pr in @($vm.Pairs)) {
+                $row = New-Object -TypeName System.Windows.Forms.ListViewItem -ArgumentList ([string]$pr.Label)
+                $null = $row.SubItems.Add([string]$pr.Value)
+                $null = $rows.Items.Add($row)
+            }
+            # The lines after the fields (evidence, references, samples) in the value column, whole.
+            foreach ($ln in @($vm.Lines)) {
+                $row = New-Object -TypeName System.Windows.Forms.ListViewItem -ArgumentList ''
+                $null = $row.SubItems.Add([string]$ln)
+                $null = $rows.Items.Add($row)
+            }
+        } else {
+            foreach ($ln in @($vm.Lines)) { $null = $rows.Items.Add((New-Object -TypeName System.Windows.Forms.ListViewItem -ArgumentList ([string]$ln))) }
+        }
+    }
+    $rows.EndUpdate()
+    $rows.AccessibleName = Get-AtmText 'gui.rowsName' $vm.Title
+    $rows.Visible = (-not $isDash)
+    if ($vm.Kind -ceq 'table' -and $rows.Items.Count -gt 0) {
+        $sel = [math]::Max(0, [math]::Min([int]$top.Sel, $rows.Items.Count - 1))
+        $rows.Items[$sel].Selected = $true
+        $rows.Items[$sel].Focused = $true
+        $rows.EnsureVisible($sel)
+    }
+    return $vm
+}
+
 function Start-AtmGui {
-    # The window: modal and read-only, closed by its button, Esc or the window's close box. It audits once when shown,
-    # then again only on Refresh or F5. Returns what was shown and released. -IdentitySource: test override of the
+    # The window: modal and read-only, closed by its button, the window's close box or Esc on the dashboard. It audits
+    # once when shown, then again only on Refresh or F5. Returns what was shown and released. -IdentitySource: test override of the
     # identity read. -OnShown: test hook, called with the form after the first audit (the real-window case of the suite
     # refreshes and closes it there).
     param([scriptblock]$IdentitySource, [scriptblock]$OnShown)
@@ -229,11 +294,43 @@ function Start-AtmGui {
         $guiProgress = New-AtmGuiLabel -Text '' -TabIndex ($tab++) -Name 'Progress'
         $guiProgress.AccessibleName = Get-AtmText 'gui.progressName'
         $layout.Controls.Add($guiProgress)
+        # P3: the screens, each with a visible button (access key: its digit) and the TUI's key; the screen's title and
+        # the message of the last move.
+        $layout.Controls.Add((New-AtmGuiLabel -Text (Get-AtmText 'gui.navHint') -TabIndex ($tab++) -Name 'NavHint'))
+        $guiScreens = New-Object -TypeName System.Windows.Forms.FlowLayoutPanel
+        $guiScreens.Name = 'Screens'
+        $guiScreens.AccessibleName = Get-AtmText 'gui.screensName'
+        $guiScreens.FlowDirection = [System.Windows.Forms.FlowDirection]::LeftToRight
+        $guiScreens.AutoSize = $true
+        $guiScreens.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
+        $guiScreens.MaximumSize = New-Object -TypeName System.Drawing.Size -ArgumentList 920, 0
+        $guiScreens.TabIndex = ($tab++)
+        $btab = 0
+        foreach ($m in @(Get-AtmGuiNavItemList)) {
+            $b = New-Object -TypeName System.Windows.Forms.Button
+            $b.Name = 'Screen' + $m.Key
+            $b.Text = Get-AtmText 'gui.screenButton' $m.Key $m.Label
+            $b.AccessibleName = ($b.Text -replace '&', '')
+            $b.Tag = [string]$m.Key
+            $b.AutoSize = $true
+            $b.TabIndex = ($btab++)
+            $b.add_Click({ param($src, $ev) $null = $ev; & $guiNavKey ([string]$src.Tag) })
+            $guiScreens.Controls.Add($b)
+        }
+        $layout.Controls.Add($guiScreens)
+        $layout.Controls.Add((New-AtmGuiLabel -Text '' -TabIndex ($tab++) -Name 'ScreenTitle'))
+        $guiMessage = New-AtmGuiLabel -Text '' -TabIndex ($tab++) -Name 'Message'
+        $guiMessage.AccessibleName = Get-AtmText 'gui.messageName'
+        $layout.Controls.Add($guiMessage)
         $layout.Controls.Add((New-AtmGuiListView -Name 'Summary' -AccessibleName (Get-AtmText 'gui.summaryName') -Columns @(@((Get-AtmText 'gui.col.group'), 200), @((Get-AtmText 'gui.col.measure'), 340)) -Width 560 -Height 250 -TabIndex ($tab++)))
         $layout.Controls.Add((New-AtmGuiLabel -Text (Get-AtmText 'dash.classes') -TabIndex ($tab++) -Name 'ClassesTitle'))
         $layout.Controls.Add((New-AtmGuiListView -Name 'Classes' -AccessibleName (Get-AtmText 'gui.classesName') -Columns @(@((Get-AtmText 'gui.col.class'), 220), @((Get-AtmText 'gui.col.roots'), 120), @((Get-AtmText 'gui.col.mb'), 160)) -Width 560 -Height 120 -TabIndex ($tab++)))
         $layout.Controls.Add((New-AtmGuiLabel -Text (Get-AtmText 'dash.orphanInfo') -TabIndex ($tab++) -Name 'OrphanInfo'))
         $layout.Controls.Add((New-AtmGuiLabel -Text '-' -TabIndex ($tab++) -Name 'AuditTime'))
+        # The read-only list of every other screen (its columns change with the screen).
+        $guiRows = New-AtmGuiListView -Name 'Rows' -AccessibleName (Get-AtmText 'gui.rowsName' (Get-AtmText 'menu.dashboard')) -Columns @() -Width 920 -Height 360 -TabIndex ($tab++)
+        $guiRows.Visible = $false
+        $layout.Controls.Add($guiRows)
         $buttons = New-Object -TypeName System.Windows.Forms.FlowLayoutPanel
         $buttons.FlowDirection = [System.Windows.Forms.FlowDirection]::LeftToRight
         $buttons.AutoSize = $true
@@ -253,13 +350,13 @@ function Start-AtmGui {
         $close.AutoSize = $true
         $close.TabIndex = 1
         $close.Margin = New-Object -TypeName System.Windows.Forms.Padding -ArgumentList 8
-        # A dialog button: a click or Esc closes the modal window, with no handler of its own.
+        # A dialog button: a click closes the modal window, with no handler of its own. Esc is not tied to it (P3): Esc
+        # goes one screen back, and closes the window only on the dashboard.
         $close.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
         $buttons.Controls.Add($guiRefresh)
         $buttons.Controls.Add($close)
         $layout.Controls.Add($buttons)
         $form.Controls.Add($layout)
-        $form.CancelButton = $close
         # The progress shows a percentage and a fixed text only; the window handles its messages at each callback.
         $guiPump = {
             $guiProgress.Text = Get-AtmText 'gui.progress' $guiSession.Percent
@@ -270,18 +367,47 @@ function Start-AtmGui {
             # disabled.
             if ($guiSession.Busy) { $null = Invoke-AtmGuiRefresh -Session $guiSession; return }
             $guiRefresh.Enabled = $false
+            $guiScreens.Enabled = $false
             $guiProgress.Text = Get-AtmText 'gui.progress' 0
             try { $null = Invoke-AtmGuiRefresh -Session $guiSession -Pump $guiPump }
             finally {
                 $guiProgress.Text = ''
                 $guiRefresh.Enabled = $true
+                $guiScreens.Enabled = $true
+                # P3: the current screen is computed again over the new result (a detail whose root is gone goes back).
+                Invoke-AtmGuiNavRefreshed -Nav $guiSession.Nav -Inventory $guiSession.Inventory
                 $guiSummary.State = (Show-AtmGuiView -Form $guiForm -Session $guiSession).Code
             }
             # A close requested during the audit: the audit is cancelled, then the window closes.
             if ($guiSession.CloseAfterRefresh) { $guiSession.CloseAfterRefresh = $false; $guiForm.Close() }
         }
+        # P3: a key or screen button moves through the screens (ignored while an audit runs); Esc on the dashboard closes.
+        $guiNavKey = {
+            param([string]$Key)
+            $r = Invoke-AtmGuiNavKey -Nav $guiSession.Nav -Inventory $guiSession.Inventory -Key $Key -Busy ([bool]$guiSession.Busy)
+            if ($r -ceq 'CLOSE') { $guiForm.Close() }
+            elseif ($r -ceq 'RENDER') {
+                $null = Show-AtmGuiScreen -Form $guiForm -Session $guiSession
+                if ($guiRows.Visible) { $null = $guiRows.Focus() }
+            }
+        }
         $guiRefresh.add_Click({ & $guiDoRefresh })
-        $form.add_KeyDown({ param($src, $ev) if ($ev.KeyCode -eq [System.Windows.Forms.Keys]::F5) { $ev.Handled = $true; & $guiDoRefresh } })
+        $guiRows.add_SelectedIndexChanged({ if ($guiRows.SelectedIndices.Count -gt 0) { (Get-AtmGuiNavTop -Nav $guiSession.Nav).Sel = [int]$guiRows.SelectedIndices[0] } })
+        $guiRows.add_ItemActivate({ & $guiNavKey 'Return' })
+        $form.add_KeyDown({
+                param($src, $ev)
+                $null = $src
+                if ($ev.KeyCode -eq [System.Windows.Forms.Keys]::F5) { $ev.Handled = $true; & $guiDoRefresh; return }
+                # With Alt the digit is the button's access key; with Ctrl it is not a screen key.
+                if ($ev.Alt -or $ev.Control) { return }
+                $kn = [string]$ev.KeyCode
+                # Keys.Return and Keys.Enter are one value; its name can be either.
+                if ($kn -cmatch '^(D|NumPad)[1-9]$' -or $kn -ceq 'Return' -or $kn -ceq 'Enter' -or $kn -ceq 'Escape') {
+                    $ev.Handled = $true
+                    $ev.SuppressKeyPress = $true
+                    & $guiNavKey $kn
+                }
+            })
         $form.add_FormClosing({ param($src, $ev) if ($guiSession.Busy) { $guiSession.CancelRequested = $true; $guiSession.CloseAfterRefresh = $true; $ev.Cancel = $true } })
         $form.add_Shown({
                 $guiSummary.Shown = $true
