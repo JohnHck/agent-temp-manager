@@ -815,7 +815,7 @@ What the window shows in this version (phases P1 to P4b):
     and also the diagnostics export and running Git when a result names them. These lines are the one addition to
     the TUI's text, so that a disabled collector is never read as an empty result: a category with such a line says
     "not observed" instead of "none".
-  * A failed run shows only the exception type. A result already shown stays, marked as outdated; nothing repeats
+  * A failed run shows only the exception code. A result already shown stays, marked as outdated; nothing repeats
     by itself.
   * The digits `1` to `9` and `P` work inside the area too, and leave it for that screen (the TUI ignores them
     there).
