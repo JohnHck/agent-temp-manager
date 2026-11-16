@@ -12,7 +12,7 @@
         }
         @{
             Rule          = 'PSAvoidUsingWriteHost'
-            Files         = @('src/agent-temp.ps1', 'src/lib/Report.ps1', 'src/lib/Tui.ps1',
+            Files         = @('src/agent-temp.ps1', 'src/lib/Report.ps1', 'src/lib/Tui.ps1', 'src/lib/Gui.ps1',
                               'install/Install-AgentTempManager.ps1', 'install/Uninstall-AgentTempManager.ps1', 'install/Restore-AgentTempManagerPrevious.ps1',
                               'tools/Build-Release.ps1', 'tools/Invoke-AtmStaticAnalysis.ps1', 'tools/clean-env/New-CleanEnvSandbox.ps1',
                               'tests/Run-Tests.ps1', 'tests/Get-TempSnapshot.ps1', 'tests/e2e/Invoke-InstallE2E.ps1')
@@ -61,9 +61,9 @@
         }
         @{
             Rule          = 'PSUseShouldProcessForStateChangingFunctions'
-            Files         = @('src/lib/Engine.Audit.ps1', 'src/lib/Report.ps1', 'src/lib/Tui.ps1', 'src/lib/I18n.ps1')
-            Match         = "'(New-AtmPartition|Set-AtmClassification|New-AtmRow|New-AtmSeg|Start-AtmTui|Set-AtmLanguage)'"
-            Justification = 'In-memory constructors, in-process state (language, classification) and the TUI loop: nothing on the system changes.'
+            Files         = @('src/lib/Engine.Audit.ps1', 'src/lib/Report.ps1', 'src/lib/Tui.ps1', 'src/lib/I18n.ps1', 'src/lib/Gui.ps1')
+            Match         = "'(New-AtmPartition|Set-AtmClassification|New-AtmRow|New-AtmSeg|Start-AtmTui|Set-AtmLanguage|New-AtmGuiLabel|New-AtmGuiListView|Start-AtmGui)'"
+            Justification = 'In-memory constructors, in-process state (language, classification) and the TUI and GUI loops: nothing on the system changes.'
         }
         @{
             Rule          = 'PSUseShouldProcessForStateChangingFunctions'

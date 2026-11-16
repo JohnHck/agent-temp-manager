@@ -1,7 +1,9 @@
 # ADR-0014: Desktop GUI and live monitoring in WinForms (V0.2.1)
 
 Status: ACCEPTED for the technology and the architecture (maintainer decisions D-B and D-A, 2026-11-16).
-GUI-D1 to GUI-D11 are PROPOSED. Nothing is implemented.
+GUI-D1 to GUI-D6 are ACCEPTED (decided by the maintainer as recommended, 2026-11-16); GUI-D7 to GUI-D11 are ACCEPTED
+(technical decisions accepted by the auditor as recommended, 2026-11-16). Implemented, with the gate closed in every
+copy: P1 (the skeleton) and P2 (the dashboard). P3 to P6 are not implemented.
 Date: 2026-11-16
 Phase: V0.2.1, phases P1 to P6 (section 10)
 
@@ -62,7 +64,7 @@ Phase: V0.2.1, phases P1 to P6 (section 10)
 
   Loading them never loads WinForms.
 * **The installer and the release manifest** list the two new files. The build's file list gains them.
-* **No `bin\` script and no shortcut** in V0.2.1, unless GUI-D6 decides otherwise.
+* **No `bin\` script and no shortcut** in V0.2.1 (GUI-D6): `agent-temp gui` is the only entry point.
 
 ### 3. Layers and the closed list
 
@@ -76,7 +78,7 @@ Phase: V0.2.1, phases P1 to P6 (section 10)
     named here so the test can allow it alone from that file);
   * `Invoke-AtmDiagnose`, and `ConvertTo-AtmDiagnoseJson` for the schema view (as in the TUI, P5-A);
   * `Get-AtmIdentityState` and `Get-AtmCurrentIdentity`;
-  * `Get-AtmAutoPurgeNoticeLines`, if GUI-D1 keeps the notice;
+  * `Get-AtmAutoPurgeNoticeLines`, for the automatic purge notice (GUI-D1);
   * `Get-AtmText`, `Get-AtmLanguage` and `Set-AtmLanguage`, plus the pure formatting helpers that P1 names in the
     test.
 * **Forbidden, by name.** A static test fails if `src/lib/Gui*.ps1` mentions any of these:
@@ -89,7 +91,7 @@ Phase: V0.2.1, phases P1 to P6 (section 10)
     `Set-Acl`, `[IO.File]::Write*`, `[IO.File]::Create`, `CreateSubKey`, `SetValue`;
   * process, service, task and VM control: `Start-Process`, `Stop-Process`, the service cmdlets,
     `Register-ScheduledTask` and the other scheduled-task cmdlets, `Invoke-CimMethod`, `Invoke-WmiMethod`, `*-VM`;
-  * the clipboard (`Clipboard`, `Set-Clipboard`), until GUI-D4 is decided;
+  * the clipboard (`Clipboard`, `Set-Clipboard`): no copy in V0.2.1 (GUI-D4);
   * the release-gate variables of the other features (they are read only by the engines and `version`).
 * **The existing tests stay as they are.** The TUI keeps its clean and isolate hand-over; the layering tests of
   ADR-0009 are extended to the new files, never relaxed.
@@ -114,7 +116,7 @@ Phase: V0.2.1, phases P1 to P6 (section 10)
 
 * **Only while the window is open.** No service, task, scheduled job, background process or history.
 * **One timer**, a `System.Windows.Forms.Timer` owned by the form. It refreshes the audit (inventory and preview). The
-  diagnose refreshes on an explicit action only, unless GUI-D3 decides otherwise.
+  diagnose refreshes on an explicit action only (GUI-D3).
 * **Bounds** (numbers in GUI-D10):
   * a minimum and a maximum interval;
   * **no overlap:** a tick while a refresh runs is skipped, never queued;
@@ -152,7 +154,8 @@ Phase: V0.2.1, phases P1 to P6 (section 10)
   * coverage and errors;
   * the V0.2 diagnose, rendered from the schema view as in the TUI.
 * **Not in the GUI:** clean, isolate, restore, purge, discard authorization, quarantine management and the
-  auto-purge task commands. Whether the GUI shows a read-only quarantine list or the auto-purge notice is GUI-D1.
+  auto-purge task commands. The GUI shows the auto-purge notice on every screen while the policy has it on, and no
+  quarantine list (GUI-D1).
 * **A header on every screen:** the process identity, whether the token is an elevated administrator, the token
   elevation type (PRIV-10, as `version` shows), the language, and the view's state (section 5).
 * **Features behind a V0.2 gate show as "disabled in this version", never as "nothing found":**
@@ -195,8 +198,8 @@ Phase: V0.2.1, phases P1 to P6 (section 10)
   * A failure shows the exception type, never its message.
 * **No export, no file and no clipboard** without an explicit action. V0.2.1 has no export control: the audit export
   and `diagnose -ExportJson` stay in the CLI, behind their own rules and the closed export gate.
-* **Copying** is GUI-D4. If it is ever allowed, it follows the export rules (ADR-0010, the sanitizer and the privacy
-  scanner).
+* **Copying:** none in V0.2.1 (GUI-D4). If it is ever allowed, it follows the export rules (ADR-0010, the sanitizer and
+  the privacy scanner).
 * **Display surfaces:** read-only `ListView` and `Label` controls, not editable text boxes, so nothing is selectable
   and copied by accident.
 * Examples, fixtures and screenshots in the repository are synthetic.
@@ -250,12 +253,12 @@ Kind: **product** decisions go to the maintainer; **technical** ones are the aud
 
 | Id | Kind | Decision | Alternatives | Recommendation |
 |---|---|---|---|---|
-| GUI-D1 | product | Quarantine and automatic purge in the GUI | (a) a read-only quarantine list (as the TUI's `Z`, no inspect, restore or purge) plus the automatic purge notice; (b) the notice only; (c) neither | (b): the notice says that something deletes automatically, so it belongs on every screen while it is on, as in the TUI. The quarantine list is a 0.3.x feature whose gates are closed in every copy; it can come in a later version |
-| GUI-D2 | product | Live monitoring when the window opens, and its default interval | (a) off, turned on by a control in the window; (b) on, at the default interval | (a), with a default interval of 60 seconds once turned on: the first refresh is the one the person asked for, and nothing runs repeatedly unless they choose it |
-| GUI-D3 | product | Does live monitoring also refresh the diagnose? | (a) no: the timer refreshes the audit, and the diagnose runs only on an explicit action, as in the TUI; (b) yes, at its own longer interval | (a): the diagnose reads processes, services and handles and costs much more; the TUI also runs it only on request |
-| GUI-D4 | product | Copy to the clipboard | (a) none in V0.2.1; (b) an explicit copy per detail, through the export rules | (a): no new way for data to leave the window. The CLI already gives the same text, and the export rules stay in one place |
-| GUI-D5 | product | The GUI in an elevated process | (a) it runs, as the TUI does, with the elevation shown in the header and other profiles under the same rules as the TUI; (b) it refuses an elevated process | (a): the GUI shows what the TUI shows. PRIV-1 is met because nothing needs elevation, and refusing would be a new rule that the TUI does not have |
-| GUI-D6 | product | How the GUI is started | (a) `agent-temp gui` only, with the console staying open behind the window; (b) also a `bin\` script; (c) also a Start-menu shortcut created by the installer | (a) for V0.2.1. (c) changes the installer and the machine's Start menu, and (b) adds a launcher that needs the same integrity path; both can follow later |
+| GUI-D1 | product | Quarantine and automatic purge in the GUI | (a) a read-only quarantine list (as the TUI's `Z`, no inspect, restore or purge) plus the automatic purge notice; (b) the notice only; (c) neither | **ACCEPTED** (2026-11-16, decided by the maintainer as recommended): (b). The notice says that something deletes automatically, so it belongs on every screen while it is on, as in the TUI. The quarantine list is a 0.3.x feature whose gates are closed in every copy; it can come in a later version |
+| GUI-D2 | product | Live monitoring when the window opens, and its default interval | (a) off, turned on by a control in the window; (b) on, at the default interval | **ACCEPTED** (2026-11-16, decided by the maintainer as recommended): (a), with a default interval of 60 seconds once turned on: the first refresh is the one the person asked for, and nothing runs repeatedly unless they choose it |
+| GUI-D3 | product | Does live monitoring also refresh the diagnose? | (a) no: the timer refreshes the audit, and the diagnose runs only on an explicit action, as in the TUI; (b) yes, at its own longer interval | **ACCEPTED** (2026-11-16, decided by the maintainer as recommended): (a). The diagnose reads processes, services and handles and costs much more; the TUI also runs it only on request |
+| GUI-D4 | product | Copy to the clipboard | (a) none in V0.2.1; (b) an explicit copy per detail, through the export rules | **ACCEPTED** (2026-11-16, decided by the maintainer as recommended): (a). No new way for data to leave the window. The CLI already gives the same text, and the export rules stay in one place |
+| GUI-D5 | product | The GUI in an elevated process | (a) it runs, as the TUI does, with the elevation shown in the header and other profiles under the same rules as the TUI; (b) it refuses an elevated process | **ACCEPTED** (2026-11-16, decided by the maintainer as recommended): (a). The GUI shows what the TUI shows. PRIV-1 is met because nothing needs elevation, and refusing would be a new rule that the TUI does not have |
+| GUI-D6 | product | How the GUI is started | (a) `agent-temp gui` only, with the console staying open behind the window; (b) also a `bin\` script; (c) also a Start-menu shortcut created by the installer | **ACCEPTED** (2026-11-16, decided by the maintainer as recommended): (a) for V0.2.1. (c) changes the installer and the machine's Start menu, and (b) adds a launcher that needs the same integrity path; both can follow later |
 | GUI-D7 | technical | PowerShell 7 | (a) open when STA and WinForms loads, refuse with a code otherwise, never relaunch; (b) refuse on `pwsh` always; (c) relaunch in Windows PowerShell | (a). The installed product always runs Windows PowerShell 5.1, so this covers source checkouts and the suite. The real-window cases stay `NOT_TESTED` on `pwsh` until P1 measures it. (c) starts a process outside the integrity check |
 | GUI-D8 | technical | Exit codes and reason codes | New codes after the current set (0, 1, 2, 3, 4, 5, 6, 10) | `7` with `GUI_GATE_CLOSED` for the closed gate; `8` for an environment that cannot show the window: `GUI_NOT_STA`, `GUI_WINFORMS_UNAVAILABLE`, `GUI_NO_INTERACTIVE_DESKTOP`. `6` stays "a console is required" |
 | GUI-D9 | technical | Where the refresh runs | (a) on the UI thread, pumped through the inventory's `ProgressCallback`, with cancel on close; (b) in a second runspace given the libraries' already-verified content; rejected: a runspace that loads the libraries from disk again | (a): one thread, nothing to leave behind, no second copy of the code. The inventory gets no engine deadline in V0.2.1: the GUI measures it and marks the view stale (section 5) |
@@ -357,3 +360,49 @@ What P1 implements, with the gate closed in every copy:
   case ran on both Windows PowerShell jobs, where the window opened and closed in en-US and pt-BR. That case stays
   `NOT_TESTED` on `pwsh` in P1, as GUI-D7 sets out; whether to run it on `pwsh` is decided in a later phase. The
   installed product always runs Windows PowerShell 5.1.
+
+## Implementation record: P2 (V021-P2, 2026-11-16)
+
+What P2 implements, with the gate closed in every copy:
+
+* **GUI-D1 to GUI-D6 recorded as decided** (see the status line and the open decisions table). Only D1, D3 and D4 shape
+  P2: the notice without a quarantine list, no diagnose here, and no clipboard.
+* **View models** in `GuiModel.ps1`, plain objects that are testable without a window:
+  * `Get-AtmGuiDashboard`: the four groups of the TUI dashboard (profiles; files, directories and partitions; space;
+    errors and coverage), the count and MB of each class and the audit time. They are counted and formatted with the
+    helpers the TUI uses, through the same catalog keys. With no audit yet, every value is the word `UNKNOWN`, never
+    zero;
+  * `Get-AtmGuiViewState`: `UNKNOWN` before any audit has finished (a first failed audit stays `UNKNOWN`, with the
+    exception type); `STALE` when the last audit failed (the earlier result stays, with the type only); `PARTIAL` when
+    the engine's coverage is incomplete; otherwise `CURRENT` with the UTC time. There is no `STALE` by slowness or age:
+    that needs the interval of P5;
+  * `Get-AtmGuiAutoPurgeNotice`: the lines of `Get-AtmAutoPurgeNoticeLines` (GUI-D1), read once when the window
+    opens;
+  * the identity header gains the language.
+* **Window** (`Gui.ps1`):
+  * the header (identity, elevation, language, the view's state) and the notice under it;
+  * the dashboard in read-only `ListView` controls, plus labels and two buttons. There is no editable text field;
+  * system colors only, and the class is always written out;
+  * a fixed tab order, `F5` to refresh, `Esc` to close, and an `AccessibleName` from the catalog on every control.
+* **Audits (GUI-D9, without the timer):**
+  * one audit when the window opens, as the TUI does when it starts. After that, only Refresh or `F5`;
+  * they run on the UI thread, in `Invoke-AtmGuiRefresh`. Each inventory progress callback pumps the window's messages
+    and shows the percentage with a fixed catalog text, never the engine's message;
+  * the refresh controls are disabled while an audit runs, and a second request is ignored, never queued. The guard is
+    in the function, because `F5` reaches the form through `KeyPreview` even while the button is disabled;
+  * a close request sets a flag that the next callback honours by ending the audit. The cancellation is recognised by
+    that flag, never by an exception's text, and then the window closes with exit code 0.
+* **The inventory arguments.** The launcher was outside this round's paths, so `Get-AtmGuiInventoryArgs` builds the
+  launcher's own inventory arguments from the GUI file's location: the self markers `agent-temp.ps1` and
+  `bin\agent-temp.cmd`, and the `config` folder next to `lib`. A suite case checks that they equal the values derived
+  from the source tree and that the launcher still builds them the same way.
+* **Test seam:** `$script:AtmGuiInventorySource = $null`, a single assignment like the P1 seams.
+* **Closed list:** the allowed names gain exactly `Get-AtmAutoPurgeNoticeLines`, `Get-AtmSum`, `Format-AtmMB`,
+  `Format-AtmGB`, `Format-AtmTime`, `Get-AtmProfileStatusLabel`, `Get-AtmStatusText` and
+  `Get-AtmIncompleteProfileCount`. The allowed cmdlets stay `Write-Host`, `New-Object` and `Add-Type`. The planted
+  violations gain a call to a quarantine function of the report.
+* **P1 leftovers:**
+  * the real isolation harness's table of installed gates has seven rows;
+  * the purge subsection of the security model now points to the current list of gates;
+  * `Gui.ps1` joins the existing presentation exceptions of the static analysis (`Write-Host`, and the in-memory
+    constructors and loops for ShouldProcess).

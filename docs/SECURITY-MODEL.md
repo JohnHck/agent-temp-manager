@@ -52,11 +52,14 @@ change it; enabling deletion requires a code change in the administrator-owned, 
 released under a specific authorization. The automated suite flips it only in its own process, against its
 isolated sandbox.
 
-## Desktop GUI gate (V0.2.1 phase P1)
+## Desktop GUI gate (V0.2.1 phases P1 and P2)
 
 * **The seventh gate:** `$script:AtmGuiEnabled`, `$false` in every shipped copy (maintainer decision D-A,
   [ADR-0014](adr/ADR-0014-desktop-gui-winforms.md)). It is a single assignment in `lib\Gui.ps1`, with no option,
-  environment variable or configuration file.
+  environment variable or configuration file. The current list of release gates, each a single `$false` assignment:
+  `AtmRealDeletionEnabled` (`Engine.Clean.ps1`), `AtmWorktreeDiagnosticsEnabled` and `AtmHandleDiagnosticsEnabled`
+  (`Engine.Diagnose.ps1`), `AtmDiagnoseExportEnabled` (`Report.ps1`), `AtmIsolationEnabled` and
+  `AtmQuarantinePurgeEnabled` (`Engine.Isolate.ps1`), and `AtmGuiEnabled` (`Gui.ps1`).
   * The build refuses an archive without it, and without both GUI files.
   * The suite and the install e2e check all seven gates.
   * `version` shows it.
@@ -68,8 +71,17 @@ isolated sandbox.
   on the deletion, move, write, process, task and clipboard APIs named in ADR-0014 section 3, and on the gate variables of
   the other features. Loading the two files defines functions and constants only.
 * **Past the gate** (tests only, in their own process): an STA thread and an interactive desktop are required (exit
-  code `8` otherwise). The command is never relaunched in another shell. The P1 window shows the identity and the
+  code `8` otherwise). The command is never relaunched in another shell. The window shows the identity and the
   elevation state (PRIV-10), changes nothing and leaves no process, timer or file behind.
+* **P2, the dashboard:**
+  * one audit when the window opens, then again only by an explicit request (Refresh or `F5`); nothing repeats by
+    itself;
+  * the audit runs through `Invoke-AtmInventory`, with the launcher's own arguments. Its progress shows only a
+    percentage and a fixed text, never the engine's message, which names temporary bases;
+  * a failed audit keeps the earlier result, marked `STALE`, with the exception type only;
+  * the numbers are shown in read-only lists and labels, with no editable text field and no clipboard (GUI-D4);
+  * the automatic purge notice is shown while the policy has it on (GUI-D1). The GUI lists no quarantine and offers
+    no action.
 
 ## Clean gates (all must pass, re-run immediately before each deletion)
 
@@ -702,9 +714,10 @@ owner, never enables privileges and never terminates processes.
 ### Purge gate and flow (0.3.x phase P4)
 
 * **Purge gate:** `$script:AtmQuarantinePurgeEnabled`, `$false` in every shipped copy. It is a single assignment in
-  `Engine.Isolate.ps1`, with no option, environment variable or configuration file. It is the sixth gate:
+  `Engine.Isolate.ps1`, with no option, environment variable or configuration file. It is one of the release gates
+  (the current list is under "Desktop GUI gate" above):
   * the build refuses an archive without it;
-  * the suite and the install e2e check all six gates;
+  * the suite and the install e2e check every gate of that list;
   * `version` shows it.
 
   The gates are independent. The purge reads only its own gate, and isolation, restore and clean never read it. Opening

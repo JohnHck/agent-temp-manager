@@ -3032,7 +3032,7 @@ exit 0
     }
 
     # ------------------------------------------------------------------ read-only guarantee
-    Test-Case 'Somente leitura' 'audit + preview nao alteram nada no sandbox' {
+    Test-Case 'Somente leitura' 'audit + preview e uma sessao da GUI (V0.2.1 P2, sem janela) com tres auditorias dubladas nao alteram nada no sandbox' {
         $p = New-TestProfile 'ro'
         1..3 | ForEach-Object { $null = New-TestRoot -ProfileInfo $p }
         # NTFS updates directory timestamps lazily after recent creations: wait until the tree is stable.
@@ -3042,6 +3042,20 @@ exit 0
         Show-AtmAudit -Inventory $i
         $rows = Invoke-AtmPreview -Inventory $i
         Show-AtmPreview -Inventory $i -Rows $rows
+        # V0.2.1 P2: a GUI session (the refresh logic of the window, no window) audits the same sandbox three times
+        # through the real engine, with the dubbed profile, and shows its dashboard and state each time.
+        $script:guiRoArgs = Get-InvArgs -Profiles @($p)
+        $savedGuiSource = $script:AtmGuiInventorySource
+        try {
+            $script:AtmGuiInventorySource = { param($a) $m = @{} + $script:guiRoArgs; $m['ProgressCallback'] = $a['ProgressCallback']; $m['NoProgress'] = $false; Invoke-AtmInventory @m }
+            $gs = Initialize-AtmGuiSession -ConfigDir $cfgDir
+            foreach ($n in 1..3) {
+                Assert-Eq (Invoke-AtmGuiRefresh -Session $gs -Pump { }) 'OK' "sessao da GUI: auditoria $n"
+                $null = Get-AtmGuiDashboard -Inventory $gs.Inventory
+                $null = Get-AtmGuiViewState -Inventory $gs.Inventory -RefreshedUtc $gs.RefreshedUtc
+            }
+            Assert-Eq $gs.SourceCalls 3 'sessao da GUI: tres auditorias, nenhuma a mais'
+        } finally { $script:AtmGuiInventorySource = $savedGuiSource }
         $after = Get-TreeListing $p.ProfilePath
         $diff = @(Compare-Object ($before -split "`n") ($after -split "`n") | ForEach-Object { $_.SideIndicator + ' ' + ($_.InputObject -replace '^.*\\(Users\d+)', '$1') })
         Assert-Eq $diff.Count 0 ('listagem identica (nomes, tamanhos, mtime, atributos): ' + ($diff -join ' ; '))
@@ -14197,7 +14211,9 @@ try {
     # ------------------------------------------------------------------ V0.2.1 P1: desktop GUI skeleton (ADR-0014)
     # The closed list of ADR-0014 section 3, as the static test applies it to src/lib/Gui*.ps1: every command must be a
     # function of those files, one of the allowed engine and catalog functions, or one of the allowed cmdlets.
-    $guiAllowedEngine = @('Invoke-AtmInventory', 'Invoke-AtmPreview', 'Invoke-AtmDiagnose', 'ConvertTo-AtmDiagnoseJson', 'Get-AtmIdentityState', 'Get-AtmCurrentIdentity', 'Get-AtmText', 'Get-AtmLanguage', 'Set-AtmLanguage')
+    # P2 (V021-P2) adds exactly eight names: the automatic purge notice (GUI-D1) and the read helpers of the TUI dashboard.
+    $guiAllowedEngine = @('Invoke-AtmInventory', 'Invoke-AtmPreview', 'Invoke-AtmDiagnose', 'ConvertTo-AtmDiagnoseJson', 'Get-AtmIdentityState', 'Get-AtmCurrentIdentity', 'Get-AtmText', 'Get-AtmLanguage', 'Set-AtmLanguage',
+        'Get-AtmAutoPurgeNoticeLines', 'Get-AtmSum', 'Format-AtmMB', 'Format-AtmGB', 'Format-AtmTime', 'Get-AtmProfileStatusLabel', 'Get-AtmStatusText', 'Get-AtmIncompleteProfileCount')
     $guiAllowedCmdlets = @('Write-Host', 'New-Object', 'Add-Type')
     # Forbidden names (ADR-0014 section 3), searched in the text, case-insensitive, comments included.
     $guiForbidden = @('Invoke-AtmClean', 'Invoke-AtmIsolate', 'Invoke-AtmRestore', 'Invoke-AtmPurge', 'Invoke-AtmAutoPurgeSchedule', 'Invoke-AtmAutoPurgeUnschedule', 'Invoke-AtmDiscardAuthorization',
@@ -14262,7 +14278,7 @@ try {
             Assert-True (-not ([regex]::IsMatch([IO.File]::ReadAllText($f.FullName), 'AtmGuiEnabled\s*='))) "$($f.Name) nao pode alterar a trava da GUI"
         }
         $gt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1'))
-        foreach ($s in @('AtmGuiApartmentSource', 'AtmGuiDesktopSource', 'AtmGuiAssemblyLoader')) {
+        foreach ($s in @('AtmGuiApartmentSource', 'AtmGuiDesktopSource', 'AtmGuiAssemblyLoader', 'AtmGuiInventorySource')) {
             Assert-True ([regex]::Matches($gt, '\$script:' + $s + '\s*=').Count -eq 1 -and $gt -match ('(?m)^\$script:' + $s + ' = \$null\r?$')) "costura ${s}: uma unica atribuicao, a `$null"
         }
         Assert-True ($script:AtmGuiExitGateClosed -eq 7 -and $script:AtmGuiExitEnvironment -eq 8) 'codigos de saida 7 e 8 (GUI-D8)'
@@ -14397,6 +14413,8 @@ $res.afterGui = (& $wf)
             'load-time-add-type' = @('Add-Type -AssemblyName System.Windows.Forms', 'instrucao executada ao carregar')
             'class'              = @('class AtmPlantedThing { [string]$Name }', 'declara classe ou tipo')
             'using'              = @('using namespace System.Windows.Forms', 'param, begin, process ou using no topo')
+            # P2: a quarantine function of the report, outside the closed list (GUI-D1: the notice only, no list).
+            'report-quarantine'  = @('function Test-AtmPlanted { Show-AtmQuarantineList -List $null }', 'comando fora da lista fechada: Show-AtmQuarantineList')
         }
         foreach ($k in $plants.Keys) {
             $pc = Join-Path $pl ('Gui-' + $k + '.ps1')
@@ -14409,9 +14427,9 @@ $res.afterGui = (& $wf)
         Assert-Eq (@($gui | ForEach-Object { (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash }) -join ',') $hashBefore 'arquivos reais inalterados'
         $script:caseNote = 'permitidos: ' + (($guiAllowedEngine + $guiAllowedCmdlets) -join ', ') + ' e as funcoes dos proprios arquivos'
     }
-    Test-Case 'GUI P1' 'Janela real minima (Windows PowerShell; trava aberta so num processo filho): abre e fecha nos dois idiomas com titulo, identidade e elevacao; nenhum processo filho, timer ou arquivo deixado no sandbox, na configuracao ou no TEMP; sem janela possivel: NAO_TESTADO' {
-        if ($PSVersionTable.PSEdition -ne 'Desktop') { $script:caseSkipped = $true; $script:caseNote = 'PowerShell 7: janela real NAO_TESTADO nesta fase (GUI-D7; a medicao fica no caso seguinte)'; return }
-        Assert-True (-not ([IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1'))).Contains('Timer')) 'P1: nenhum timer criado'
+    Test-Case 'GUI P2' 'Janela real (Windows PowerShell; trava aberta e fonte do inventario dublada so num processo filho): abre com o audit, mostra os numeros do dashboard e CURRENT, atualiza uma vez por F5 (um F5 durante o audit e ignorado), um pedido de fechar durante o audit o cancela e a janela fecha com 0; titulo, identidade, elevacao e idioma; nos dois idiomas; nenhum processo filho, timer ou arquivo deixado no sandbox, na configuracao ou no TEMP; sem janela possivel: NAO_TESTADO' {
+        if ($PSVersionTable.PSEdition -ne 'Desktop') { $script:caseSkipped = $true; $script:caseNote = 'PowerShell 7: janela real NAO_TESTADO nesta fase (GUI-D7)'; return }
+        Assert-True (-not ([IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1'))).Contains('Timer')) 'P2: nenhum timer criado'
         $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
         $child = Join-Path $sandbox 'gui-window-child.ps1'
         [IO.File]::WriteAllText($child, @'
@@ -14427,14 +14445,48 @@ if ($null -eq $res.env) {
     $b1 = & $names $Sandbox; $b2 = & $names (Join-Path $Src 'config'); $b3 = & $names $temp -Top
     $k1 = & $kids
     $script:AtmGuiEnabled = $true
-    $shown = @{ Title = $null; Texts = @(); Form = $null }
-    $hook = { param($f) $shown.Title = [string]$f.Text; $shown.Texts = @($f.Controls[0].Controls | ForEach-Object { [string]$_.Text }); $shown.Form = $f; $f.Close() }.GetNewClosure()
+    # The dubbed inventory source: audit N has 10*N files. Audit 2 receives an F5 while it runs (ignored, never queued);
+    # audit 3 receives a close request between two progress callbacks (cancelled at the next one).
+    $script:guiCalls = 0; $script:guiForm = $null; $script:guiKey = $null; $script:guiEnd3 = $false; $script:guiProgress = @()
+    $mini = { param([int]$Files) [pscustomobject]@{ Profiles = @(); Partitions = @([pscustomobject]@{ Kind = 'Root'; Class = 'ORPHAN_SUSPECTED'; Bytes = [long]2097152; Files = $Files; Dirs = 2; AllocatedBytesEstimate = [long]2101248; ErrorCount = 0; MeasurementComplete = $true }); InaccessibleProfiles = @(); UnverifiedTempProfiles = @(); NotAuditedProfiles = @(); CoverageComplete = $true; StartedUtc = [datetime]::UtcNow; FinishedUtc = [datetime]::UtcNow } }
+    $f5 = { $script:guiKey.Invoke($script:guiForm, @((New-Object System.Windows.Forms.KeyEventArgs ([System.Windows.Forms.Keys]::F5)))) }
+    $script:AtmGuiInventorySource = {
+        param($a)
+        $script:guiCalls++
+        $n = $script:guiCalls
+        & $a.ProgressCallback 50 'C:\SENTINEL-PROGRESS\base'
+        if ($null -ne $script:guiForm) { $script:guiProgress += [string]$script:guiForm.Controls.Find('Progress', $true)[0].Text }
+        if ($n -eq 2) { & $f5 }
+        if ($n -eq 3) { $script:guiForm.Close(); & $a.ProgressCallback 60 'x'; $script:guiEnd3 = $true }
+        & $mini (10 * $n)
+    }
+    $read = { param($f)
+        [ordered]@{
+            texts   = @(foreach ($nm in @('IdentityLine', 'ElevationLine', 'LanguageLine', 'StateLine', 'ReadOnlyLine', 'AuditTime')) { [string]$f.Controls.Find($nm, $true)[0].Text })
+            summary = @(foreach ($it in $f.Controls.Find('Summary', $true)[0].Items) { [string]$it.SubItems[1].Text })
+            classes = @(foreach ($it in $f.Controls.Find('Classes', $true)[0].Items) { ([string]$it.Text) + '=' + [string]$it.SubItems[1].Text })
+            refresh = [bool]$f.Controls.Find('Refresh', $true)[0].Enabled
+            listsReadOnly = (@(foreach ($nm in @('Summary', 'Classes')) { $lv = $f.Controls.Find($nm, $true)[0]; (-not $lv.LabelEdit) -and (-not $lv.CheckBoxes) -and [bool]$lv.AccessibleName }) -notcontains $false)
+        } }
+    $hook = { param($f)
+        $script:guiForm = $f
+        $script:guiKey = [System.Windows.Forms.Form].GetMethod('OnKeyDown', [Reflection.BindingFlags]'NonPublic, Instance')
+        $script:guiTitle = [string]$f.Text
+        $script:guiFirst = & $read $f
+        & $f5
+        $script:guiSecond = & $read $f
+        & $f5
+    }
     $id = { [pscustomobject]@{ Name = 'TEST\gui'; Sid = 'S-1-5-21-1-2-3-9301'; IsAdmin = $false; ElevationTypeRaw = 3; IntegrityRid = 8192; SessionId = 1 } }
     $o = @(Invoke-AtmGuiCommand -IdentitySource $id -OnShown $hook 6>&1)
     $res.code = @($o | Where-Object { $_ -is [int] })[-1]
-    $res.title = $shown.Title
-    $res.texts = $shown.Texts
-    $res.disposed = ($null -ne $shown.Form -and [bool]$shown.Form.IsDisposed)
+    $res.title = $script:guiTitle
+    $res.first = $script:guiFirst
+    $res.second = $script:guiSecond
+    $res.calls = $script:guiCalls
+    $res.end3 = $script:guiEnd3
+    $res.progress = @($script:guiProgress)
+    $res.disposed = ($null -ne $script:guiForm -and [bool]$script:guiForm.IsDisposed)
     $k2 = & $kids
     $res.newProcesses = @($k2 | Where-Object { $k1 -notcontains $_ }).Count
     $a1 = & $names $Sandbox; $a2 = & $names (Join-Path $Src 'config'); $a3 = & $names $temp -Top
@@ -14442,7 +14494,7 @@ if ($null -eq $res.env) {
     $res.newConfig = @($a2 | Where-Object { -not $b2.Contains($_) }).Count
     $res.newTemp = @($a3 | Where-Object { -not $b3.Contains($_) }).Count
 }
-($res | ConvertTo-Json -Depth 3) | Set-Content -LiteralPath $Out -Encoding UTF8
+($res | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $Out -Encoding UTF8
 '@, (New-Object Text.UTF8Encoding $true))
         foreach ($lang in @('en-US', 'pt-BR')) {
             $out = Join-Path $sandbox ('gui-window-' + $lang + '.json')
@@ -14452,18 +14504,31 @@ if ($null -eq $res.env) {
             if ($null -ne $j.env) { $script:caseSkipped = $true; $script:caseNote = "runner sem janela possivel ($($j.env)): NAO_TESTADO"; return }
             Assert-Eq ([int]$j.code) 0 "janela ${lang}: saida"
             Assert-Eq ([string]$j.title) "Agent Temp Manager $script:AtmVersion" "janela ${lang}: titulo"
-            $texts = @($j.texts | ForEach-Object { [string]$_ })
+            $texts = @($j.first.texts | ForEach-Object { [string]$_ })
             $idLine = $(if ($lang -eq 'en-US') { 'Identity: TEST\gui' } else { 'Identidade: TEST\gui' })
             $elevStart = $(if ($lang -eq 'en-US') { 'Elevated administrator: no.' } else { 'Administrador elevado:' })
             Assert-True ($texts -contains $idLine) "janela ${lang}: identidade ($($texts -join ' / '))"
             Assert-True (@($texts | Where-Object { $_.StartsWith($elevStart) -and $_.Contains('LIMITED') -and $_.Contains('MEDIUM') }).Count -eq 1) "janela ${lang}: estado de elevacao ($($texts -join ' / '))"
+            Assert-True ($texts[2].EndsWith($lang) -and $texts[3].Contains('CURRENT') -and $texts[3].Contains(' UTC')) "janela ${lang}: idioma e estado CURRENT ($($texts[2]) / $($texts[3]))"
+            # The dashboard numbers of audit 1 (10 files), then of audit 2 after F5 (20 files); the class is written.
+            $old = Get-AtmLanguage
+            try {
+                Set-AtmLanguage -Requested $lang
+                $s1 = @($j.first.summary | ForEach-Object { [string]$_ }); $s2 = @($j.second.summary | ForEach-Object { [string]$_ })
+                Assert-True ($s1.Count -eq 12 -and $s1 -contains (Get-AtmText 'dash.files' 10) -and $s1 -contains (Get-AtmText 'dash.partitions' 1) -and $s1 -contains (Get-AtmText 'dash.mbLogical' 2) -and $s1 -contains (Get-AtmText 'dash.coverage' (Get-AtmText 'common.complete'))) "janela ${lang}: numeros do dashboard ($($s1 -join ' / '))"
+                Assert-True ($s2 -contains (Get-AtmText 'dash.files' 20) -and $s2 -notcontains (Get-AtmText 'dash.files' 10)) "janela ${lang}: F5 atualizou uma vez ($($s2 -join ' / '))"
+                Assert-Eq (@($j.first.classes) -join ',') 'ACTIVE_EVIDENCE=0,RECENT=0,LIVENESS_UNKNOWN=0,ORPHAN_SUSPECTED=1' "janela ${lang}: classes escritas"
+                Assert-True (@($j.progress | Where-Object { [string]$_ -cne (Get-AtmText 'gui.progress' 50) }).Count -eq 0 -and @($j.progress).Count -ge 2) "janela ${lang}: progresso so com a porcentagem e o texto fixo ($(@($j.progress) -join ' / '))"
+            } finally { Set-AtmLanguage -Requested $old }
+            Assert-True ([bool]$j.first.refresh -and [bool]$j.first.listsReadOnly) "janela ${lang}: Atualizar habilitado fora do audit; listas somente leitura com nome acessivel"
+            Assert-True ([int]$j.calls -eq 3 -and -not [bool]$j.end3) "janela ${lang}: tres audits (o F5 durante o audit 2 ignorado, nunca enfileirado); o audit 3 cancelado no callback seguinte ao pedido de fechar (chamadas $($j.calls), fim do 3: $($j.end3))"
             Assert-True ([bool]$j.disposed) "janela ${lang}: formulario liberado"
             Assert-Eq ([int]$j.newProcesses) 0 "janela ${lang}: nenhum processo filho deixado"
             Assert-Eq ([int]$j.newSandbox) 0 "janela ${lang}: nenhum arquivo novo no sandbox"
             Assert-Eq ([int]$j.newConfig) 0 "janela ${lang}: nenhum arquivo novo na configuracao"
             Assert-Eq ([int]$j.newTemp) 0 "janela ${lang}: nenhum arquivo novo no TEMP"
         }
-        $script:caseNote = 'janela real aberta e fechada em en-US e pt-BR; P1 sem timer'
+        $script:caseNote = 'janela real em en-US e pt-BR: audit ao abrir, F5 uma vez, F5 durante o audit ignorado, fechar durante o audit cancelado; sem timer'
     }
     Test-Case 'GUI P1' 'GUI-D7: medicao num processo novo deste shell (-File, como o lancador): estado da thread, area de trabalho e carga do System.Windows.Forms; no Windows PowerShell exige STA e a carga, no PowerShell 7 so registra' {
         $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
@@ -14485,6 +14550,199 @@ Write-Output ('GUI-D7 edition={0} ps={1} clr={2} apartment={3} environment={4} w
         Assert-True ($r.Exit -eq 0 -and $line) "medicao: saida $($r.Exit) $($r.Text)"
         if ($PSVersionTable.PSEdition -eq 'Desktop') { Assert-True ($line.Contains('apartment=STA') -and $line.Contains('winforms=LOADED')) "Windows PowerShell: STA e WinForms ($line)" }
         $script:caseNote = $line
+    }
+
+    # ------------------------------------------------------------------ V0.2.1 P2: dashboard of the desktop GUI (ADR-0014)
+    # The four dubbed inventories of the P2 cases: complete (a RECENT root and an ORPHAN_SUSPECTED one), partial (an
+    # uninspectable process), denied (a second profile whose base is owned by Administrators, dubbed: no ACL change) and
+    # unknown (before the first audit).
+    $guiP2Fixtures = {
+        $pc = New-TestProfile 'guic'; $rc1 = New-TestRoot -ProfileInfo $pc; $null = New-TestRoot -ProfileInfo $pc
+        [IO.File]::SetLastWriteTimeUtc((Join-Path $rc1 'a.txt'), $nowFuture.AddHours(-1))
+        $complete = Inv -Profiles @($pc)
+        $pp = New-TestProfile 'guip'; $null = New-TestRoot -ProfileInfo $pp
+        $partial = Inv -Profiles @($pp) -Procs (New-Procs -Extra @([pscustomobject]@{ ProcessId = 901; Name = 'svc.exe'; ParentProcessId = 1; CommandLine = $null; CreationDate = (Get-Date) }))
+        $pa = New-TestProfile 'guida'; $null = New-TestRoot -ProfileInfo $pa
+        $pb = New-TestProfile 'guidb' -Sid 'S-1-5-21-1-2-3-7108'; $null = New-TestRoot -ProfileInfo $pb
+        Set-TestBaseOwner @{ (Get-Base $pb) = 'S-1-5-32-544' }
+        try { $denied = Inv -Profiles @($pa, $pb) } finally { $script:AtmBaseOwnerSource = $null }
+        return [ordered]@{ complete = $complete; partial = $partial; denied = $denied; unknown = $null }
+    }
+    # A small inventory with exact numbers, for the refresh cases (no profile, so no profile status is read).
+    $guiMiniInv = { param([int]$Files = 3) [pscustomobject]@{ Profiles = @(); Partitions = @([pscustomobject]@{ Kind = 'Root'; Class = 'ORPHAN_SUSPECTED'; Bytes = [long]2048; Files = $Files; Dirs = 1; AllocatedBytesEstimate = [long]4096; ErrorCount = 0; MeasurementComplete = $true }); InaccessibleProfiles = @(); UnverifiedTempProfiles = @(); NotAuditedProfiles = @(); CoverageComplete = $true; StartedUtc = [datetime]::UtcNow; FinishedUtc = [datetime]::UtcNow } }
+    $guiItem = { param($Dash, [string]$Id) @(foreach ($g in $Dash.Groups) { foreach ($it in $g.Items) { if ($it.Id -ceq $Id) { $it } } })[0] }
+    Test-Case 'GUI P2' 'View models do dashboard (sem janela), em en-US e pt-BR, sobre inventarios dublados: completo, parcial (processo nao inspecionavel), negado (base de outro dono, dublado) e desconhecido; contagens e palavras de estado; UNKNOWN nunca vira zero' {
+        $fx = & $guiP2Fixtures
+        $want = @{ complete = 'CURRENT'; partial = 'PARTIAL'; denied = 'PARTIAL'; unknown = 'UNKNOWN' }
+        $old = Get-AtmLanguage
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                $at = [datetime]::UtcNow
+                foreach ($k in @($fx.Keys)) {
+                    $inv = $fx[$k]
+                    $d = Get-AtmGuiDashboard -Inventory $inv
+                    $s = Get-AtmGuiViewState -Inventory $inv -RefreshedUtc $(if ($null -ne $inv) { $at } else { $null })
+                    Assert-Eq $s.Code $want[$k] "${lang} ${k}: estado da vista"
+                    Assert-True ($s.Text.Contains($want[$k])) "${lang} ${k}: a palavra de estado esta no texto ($($s.Text))"
+                    $items = @(foreach ($g in $d.Groups) { $g.Items })
+                    Assert-Eq (@($d.Groups | ForEach-Object { $_.Id }) -join ',') 'profiles,filesDirs,space,errorsCoverage' "${lang} ${k}: os quatro grupos da TUI"
+                    Assert-Eq $items.Count 12 "${lang} ${k}: tres itens por grupo"
+                    Assert-Eq (@($d.Classes | ForEach-Object { $_.Class }) -join ',') 'ACTIVE_EVIDENCE,RECENT,LIVENESS_UNKNOWN,ORPHAN_SUSPECTED' "${lang} ${k}: as classes na ordem da TUI, escritas"
+                    if ($null -eq $inv) {
+                        Assert-True (-not $d.Known -and @($items | Where-Object { [string]$_.Value -cne 'UNKNOWN' }).Count -eq 0 -and @($d.Classes | Where-Object { [string]$_.Roots -cne 'UNKNOWN' -or [string]$_.MB -cne 'UNKNOWN' }).Count -eq 0) "${lang} unknown: todo valor e UNKNOWN"
+                        $all = (@($items | ForEach-Object { $_.Text }) + @($d.AuditTime)) -join ' / '
+                        Assert-True ($all -notmatch '\d') "${lang} unknown: nenhum numero, nenhum zero ($all)"
+                        Assert-True ($s.Text -notmatch '\d') "${lang} unknown: sem hora ($($s.Text))"
+                    } else {
+                        Assert-True ($d.Known -and $s.Text.Contains($at.ToString('yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture))) "${lang} ${k}: hora UTC do audit no estado"
+                    }
+                }
+                $c = Get-AtmGuiDashboard -Inventory $fx.complete
+                Assert-True ((& $guiItem $c 'discovered').Value -eq 1 -and (& $guiItem $c 'audited').Value -eq 1 -and (& $guiItem $c 'incomplete').Value -eq 0 -and (& $guiItem $c 'partitions').Value -ge 2) "${lang} completo: 1 descoberto, 1 auditado, 0 incompleto, particoes"
+                Assert-True (@($c.Classes | Where-Object { $_.Class -ceq 'RECENT' })[0].Roots -eq 1 -and @($c.Classes | Where-Object { $_.Class -ceq 'ORPHAN_SUSPECTED' })[0].Roots -eq 1) "${lang} completo: uma RECENT e uma ORPHAN_SUSPECTED"
+                Assert-Eq (& $guiItem $c 'coverage').Text (Get-AtmText 'dash.coverage' (Get-AtmText 'common.complete')) "${lang} completo: cobertura"
+                $p = Get-AtmGuiDashboard -Inventory $fx.partial
+                Assert-Eq (& $guiItem $p 'coverage').Text (Get-AtmText 'dash.coverage' (Get-AtmText 'common.incomplete')) "${lang} parcial: cobertura incompleta, a do motor"
+                $n = Get-AtmGuiDashboard -Inventory $fx.denied
+                Assert-True ((& $guiItem $n 'discovered').Value -eq 2 -and (& $guiItem $n 'audited').Value -eq 1 -and (& $guiItem $n 'incomplete').Value -eq 1) "${lang} negado: 2 descobertos, 1 auditado, 1 com cobertura incompleta"
+            }
+        } finally { Set-AtmLanguage -Requested $old }
+    }
+    Test-Case 'GUI P2' 'Paridade com a TUI: sobre os mesmos inventarios dublados, cada numero dos quatro grupos e de cada classe do view model e o de Get-AtmTuiDashboardLines (completo, parcial, negado); desconhecido: a TUI nao desenha dashboard antes de um audit, o view model mostra UNKNOWN' {
+        $fx = & $guiP2Fixtures
+        $note = New-Object System.Collections.Generic.List[string]
+        $old = Get-AtmLanguage
+        try {
+            Set-AtmLanguage -Requested 'en-US'
+            foreach ($k in @('complete', 'partial', 'denied')) {
+                $inv = $fx[$k]
+                $tui = (@(Get-AtmTuiDashboardLines -State @{ Inventory = $inv; G = (Get-AtmTuiGlyphs); Width = 200 }) | ForEach-Object { (@($_) | ForEach-Object { $_.Text }) -join '' }) -join "`n"
+                $d = Get-AtmGuiDashboard -Inventory $inv
+                $cells = New-Object System.Collections.Generic.List[string]
+                foreach ($g in $d.Groups) {
+                    foreach ($it in $g.Items) {
+                        # The number as each side writes it, through the same catalog key; a label can repeat a word of
+                        # another card, so the TUI value must be among the matches.
+                        $pat = [regex]::Escape((Get-AtmText ('dash.' + $it.Id) '@@N@@')).Replace('@@N@@', '(\S+)')
+                        $vm = [regex]::Match([string]$it.Text, '^' + $pat + '$')
+                        $tv = @([regex]::Matches($tui, $pat) | ForEach-Object { $_.Groups[1].Value })
+                        Assert-True ($vm.Success -and ($tv -ccontains $vm.Groups[1].Value)) "${k} $($it.Id): TUI [$($tv -join ',')] = view model '$($vm.Groups[1].Value)'"
+                        $cells.Add(('{0} {1}={2}' -f $it.Id, $(if ($tv -ccontains $vm.Groups[1].Value) { $vm.Groups[1].Value } else { $tv -join ',' }), $vm.Groups[1].Value))
+                    }
+                }
+                foreach ($c in $d.Classes) {
+                    $cm = [regex]::Match($tui, [regex]::Escape($c.Class) + '\s[^\n]*?\s(\d+) roots\s+(\S+) MB')
+                    Assert-True ($cm.Success -and $cm.Groups[1].Value -ceq ('{0}' -f $c.Roots) -and $cm.Groups[2].Value -ceq ('{0}' -f $c.MB)) "${k} $($c.Class): TUI $($cm.Groups[1].Value) roots $($cm.Groups[2].Value) MB = view model $($c.Roots) / $($c.MB)"
+                    $cells.Add(('{0} {1}/{2}={3}/{4}' -f $c.Class, $cm.Groups[1].Value, $cm.Groups[2].Value, $c.Roots, $c.MB))
+                }
+                Assert-True ($tui.Contains($d.AuditTime)) "${k}: a hora do audit e a da TUI"
+                $note.Add(('{0}: {1}' -f $k, ($cells -join ', ')))
+            }
+            $u = Get-AtmGuiDashboard -Inventory $null
+            Assert-True (@(foreach ($g in $u.Groups) { foreach ($it in $g.Items) { if ([string]$it.Value -cne 'UNKNOWN') { $it } } }).Count -eq 0) 'desconhecido: todo item UNKNOWN'
+            $note.Add('unknown: TUI sem dashboard antes de um audit; view model UNKNOWN nos 12 itens e nas 4 classes')
+        } finally { Set-AtmLanguage -Requested $old }
+        $script:caseNote = $note -join ' | '
+    }
+    Test-Case 'GUI P2' 'Falha do audit: o primeiro falho fica UNKNOWN (nunca zero) com o tipo; depois de um audit bom, uma falha mantem o resultado anterior, a vista vira STALE com so o tipo da excecao (nunca o texto); o progresso guarda so a porcentagem, nunca a mensagem do motor; nada repetido sozinho' {
+        $p = New-TestProfile 'guifail'; $null = New-TestRoot -ProfileInfo $p
+        $script:guiFailArgs = Get-InvArgs -Profiles @($p)
+        $saved = $script:AtmGuiInventorySource
+        $script:guiPct = New-Object System.Collections.Generic.List[string]
+        $oldLang = Get-AtmLanguage
+        try {
+            Set-AtmLanguage -Requested 'en-US'
+            $s = Initialize-AtmGuiSession -ConfigDir $cfgDir
+            $script:AtmGuiInventorySource = { param($a) & $a.ProgressCallback 5 'C:\SENTINEL-PROGRESS\base'; throw (New-Object System.IO.IOException 'SENTINEL-FAILURE-TEXT') }
+            Assert-Eq (Invoke-AtmGuiRefresh -Session $s -Pump { $script:guiPct.Add([string]$s.Percent) }) 'FAILED' 'primeiro audit: FAILED'
+            $v = Get-AtmGuiViewState -Inventory $s.Inventory -FailureType $s.FailureType -RefreshedUtc $s.RefreshedUtc
+            Assert-True ($null -eq $s.Inventory -and $s.FailureType -ceq 'IOException' -and $v.Code -ceq 'UNKNOWN' -and $v.Text.Contains('IOException') -and -not $v.Text.Contains('SENTINEL')) "primeiro audit falho: UNKNOWN com o tipo, sem o texto ($($v.Text))"
+            Assert-True (@(foreach ($g in (Get-AtmGuiDashboard -Inventory $s.Inventory).Groups) { foreach ($it in $g.Items) { if ([string]$it.Value -cne 'UNKNOWN') { $it } } }).Count -eq 0) 'primeiro audit falho: nenhum numero inventado'
+            # A good audit through the real engine, whose progress messages name the temporary bases.
+            $script:AtmGuiInventorySource = { param($a) $m = @{} + $script:guiFailArgs; $m['ProgressCallback'] = $a['ProgressCallback']; $m['NoProgress'] = $false; Invoke-AtmInventory @m }
+            Assert-Eq (Invoke-AtmGuiRefresh -Session $s -Pump { $script:guiPct.Add([string]$s.Percent) }) 'OK' 'audit bom'
+            $good = $s.Inventory; $goodAt = $s.RefreshedUtc
+            Assert-True ($null -ne $good -and $null -eq $s.FailureType -and (Get-AtmGuiViewState -Inventory $good -RefreshedUtc $goodAt).Code -ceq 'CURRENT') 'audit bom: CURRENT'
+            $script:AtmGuiInventorySource = { param($a) & $a.ProgressCallback 40 'C:\SENTINEL-PROGRESS\base'; throw (New-Object System.IO.IOException 'SENTINEL-FAILURE-TEXT') }
+            Assert-Eq (Invoke-AtmGuiRefresh -Session $s -Pump { $script:guiPct.Add([string]$s.Percent) }) 'FAILED' 'falha depois do audit bom'
+            $v = Get-AtmGuiViewState -Inventory $s.Inventory -FailureType $s.FailureType -RefreshedUtc $s.RefreshedUtc
+            Assert-True ([object]::ReferenceEquals($good, $s.Inventory) -and $s.RefreshedUtc -eq $goodAt -and $v.Code -ceq 'STALE') 'o resultado anterior fica, marcado STALE'
+            Assert-True ($v.Text.Contains('IOException') -and -not $v.Text.Contains('SENTINEL') -and $v.Text.Contains(([datetime]$goodAt).ToString('yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture))) "STALE: o tipo e a hora do resultado mostrado, nunca o texto da excecao ($($v.Text))"
+            Assert-True (@($script:guiPct | Where-Object { $_ -notmatch '^\d{1,3}$' }).Count -eq 0 -and $script:guiPct.Count -ge 3) "progresso: so porcentagens ($($script:guiPct -join ','))"
+            $flat = (@(foreach ($key in @($s.Keys)) { if (@('Inventory', 'InventoryArgs') -notcontains $key) { [string]$s[$key] } }) + @((Get-AtmGuiDashboard -Inventory $s.Inventory).Groups | ForEach-Object { $_.Items } | ForEach-Object { $_.Text })) -join ' '
+            Assert-True (-not $flat.Contains('SENTINEL') -and -not $flat.Contains($p.ProfilePath)) 'nenhuma mensagem de progresso nem texto de excecao guardado ou mostrado'
+            Assert-True ($s.SourceCalls -eq 3 -and $s.Refreshes -eq 1 -and $s.Failures -eq 2 -and -not $s.Busy) "tres pedidos, tres audits, nada repetido sozinho (chamadas $($s.SourceCalls))"
+        } finally { $script:AtmGuiInventorySource = $saved; Set-AtmLanguage -Requested $oldLang }
+    }
+    Test-Case 'GUI P2' 'Aviso do expurgo automatico (GUI-D1), nos dois idiomas: aparece com autoPurge = true na politica dublada; some com a politica desligada ou ausente; lido uma vez ao abrir; a origem nunca recebe politica' {
+        $mk = { param([string]$Name, [string]$Policy)
+            $d = Join-Path $sandbox ('gui-cfg-' + $Name)
+            [void][IO.Directory]::CreateDirectory($d)
+            foreach ($f in @(Get-ChildItem -LiteralPath $cfgDir -File)) { [IO.File]::Copy($f.FullName, (Join-Path $d $f.Name), $true) }
+            if ($Policy) { [IO.File]::WriteAllText((Join-Path $d 'quarantine.policy.json'), $Policy, (New-Object Text.UTF8Encoding($false))) }
+            $d }
+        $on = & $mk 'ap-on' '{"schema":"atm.quarantine-policy/1","autoPurge":true}'
+        $off = & $mk 'ap-off' '{"schema":"atm.quarantine-policy/1","autoPurge":false}'
+        $old = Get-AtmLanguage
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                $w = Get-AtmText 'q.policyWarn.AUTOPURGE_ON'
+                $sOn = Initialize-AtmGuiSession -ConfigDir $on
+                Assert-Eq (@($sOn.AutoPurgeNotice) -join '|') $w "${lang}: aviso com autoPurge = true"
+                Assert-Eq (@(Get-AtmGuiAutoPurgeNotice -ConfigDir $on) -join '|') (@(Get-AtmAutoPurgeNoticeLines -ConfigDir $on) -join '|') "${lang}: as mesmas linhas da TUI"
+                foreach ($c in @($off, $cfgDir)) { Assert-Eq @((Initialize-AtmGuiSession -ConfigDir $c).AutoPurgeNotice).Count 0 "${lang}: sem aviso ($c)" }
+            }
+        } finally { Set-AtmLanguage -Requested $old }
+        $gt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1'))
+        Assert-True ($gt.Contains("AutoPurgeNotice = @(Get-AtmGuiAutoPurgeNotice -ConfigDir `$ia['ConfigDir'])") -and @([regex]::Matches($gt, 'Get-AtmGuiAutoPurgeNotice')).Count -eq 1) 'lido uma vez, ao criar a sessao da janela'
+        Assert-True (-not [IO.File]::Exists((Join-Path $cfgDir 'quarantine.policy.json'))) 'a suite nunca escreve politica na origem'
+    }
+    Test-Case 'GUI P2' 'Atualizacao durante um audit e ignorada (nunca enfileirada); pedido de fechar durante o audit o cancela no callback seguinte, com o resultado anterior mantido; depois disso um novo audit funciona' {
+        $saved = $script:AtmGuiInventorySource
+        try {
+            $s = Initialize-AtmGuiSession -ConfigDir $cfgDir
+            $script:guiInner = New-Object System.Collections.Generic.List[string]
+            $script:AtmGuiInventorySource = { param($a) & $a.ProgressCallback 10 'x'; & $a.ProgressCallback 50 'y'; & $guiMiniInv 7 }
+            Assert-Eq (Invoke-AtmGuiRefresh -Session $s -Pump { $script:guiInner.Add((Invoke-AtmGuiRefresh -Session $s)) }) 'OK' 'audit com dois pedidos no meio'
+            Assert-True (($script:guiInner -join ',') -ceq 'IGNORED,IGNORED' -and $s.Ignored -eq 2 -and $s.SourceCalls -eq 1 -and $s.Refreshes -eq 1) "os dois pedidos ignorados, nenhum enfileirado ($($script:guiInner -join ','); chamadas $($s.SourceCalls))"
+            $kept = $s.Inventory
+            $script:guiReached = 'none'
+            $script:AtmGuiInventorySource = { param($a) & $a.ProgressCallback 10 'x'; $s.CancelRequested = $true; $script:guiReached = 'between'; & $a.ProgressCallback 50 'y'; $script:guiReached = 'after'; & $guiMiniInv 9 }
+            Assert-Eq (Invoke-AtmGuiRefresh -Session $s) 'CANCELLED' 'fechar durante o audit'
+            Assert-True ($script:guiReached -ceq 'between' -and [object]::ReferenceEquals($kept, $s.Inventory) -and $s.Cancelled -eq 1 -and $null -eq $s.FailureType -and -not $s.Busy) "cancelado no callback seguinte; resultado anterior mantido, sem falha ($script:guiReached)"
+            $script:AtmGuiInventorySource = { param($a) & $a.ProgressCallback 10 'x'; & $guiMiniInv 11 }
+            Assert-Eq (Invoke-AtmGuiRefresh -Session $s) 'OK' 'novo audit depois do cancelamento'
+            Assert-Eq (& $guiItem (Get-AtmGuiDashboard -Inventory $s.Inventory) 'files').Value 11 'o resultado novo'
+        } finally { $script:AtmGuiInventorySource = $saved }
+    }
+    Test-Case 'GUI P2' 'Estatico (P2): lista fechada com exatamente os oito nomes novos; costura da fonte do inventario com uma unica atribuicao a $null; nenhum timer, nenhuma caixa de texto editavel, nenhum closure; so Label, ListView e botoes; argumentos do inventario iguais aos do lancador; chaves de estado nos dois idiomas' {
+        $p2 = @('Get-AtmAutoPurgeNoticeLines', 'Get-AtmSum', 'Format-AtmMB', 'Format-AtmGB', 'Format-AtmTime', 'Get-AtmProfileStatusLabel', 'Get-AtmStatusText', 'Get-AtmIncompleteProfileCount')
+        Assert-True ($guiAllowedEngine.Count -eq 17 -and @($p2 | Where-Object { $guiAllowedEngine -ccontains $_ }).Count -eq 8) "lista: os 9 nomes da P1 e os 8 da P2, nenhum outro ($($guiAllowedEngine -join ','))"
+        Assert-Eq ($guiAllowedCmdlets -join ',') 'Write-Host,New-Object,Add-Type' 'cmdlets permitidos inalterados'
+        $gt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1')); $mt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\GuiModel.ps1'))
+        Assert-True ([regex]::Matches($gt, '\$script:AtmGuiInventorySource\s*=').Count -eq 1 -and $gt -match '(?m)^\$script:AtmGuiInventorySource = \$null\r?$') 'costura da fonte do inventario: uma unica atribuicao, a $null'
+        foreach ($pair in @(@('Gui.ps1', $gt), @('GuiModel.ps1', $mt))) {
+            foreach ($w in @('Timer', 'TextBox', 'GetNewClosure')) { Assert-True ($pair[1].IndexOf($w, [StringComparison]::OrdinalIgnoreCase) -lt 0) "$($pair[0]) contem '$w'" }
+        }
+        Assert-True ($mt.IndexOf('System.Windows.Forms', [StringComparison]::OrdinalIgnoreCase) -lt 0) 'view models sem tipo do WinForms'
+        $types = @([regex]::Matches($gt, 'New-Object -TypeName System\.Windows\.Forms\.(\w+)') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+        Assert-Eq ($types -join ',') 'Button,FlowLayoutPanel,Form,Label,ListView,ListViewItem,Padding' 'controles: so Label, ListView e botoes, num formulario'
+        Assert-True ($gt.Contains('$v.LabelEdit = $false') -and $gt.Contains('$v.CheckBoxes = $false') -and $gt.Contains('$form.KeyPreview = $true')) 'listas sem edicao nem caixas de marcar; F5 chega ao formulario'
+        $ia = Get-AtmGuiInventoryArgs
+        $full = { param($x) [IO.Path]::GetFullPath([string]$x) }
+        Assert-Eq (@($ia.SelfMarkers | ForEach-Object { & $full $_ }) -join '|') (@((& $full (Join-Path $srcDir 'agent-temp.ps1')), (& $full (Join-Path $srcDir 'bin\agent-temp.cmd'))) -join '|') 'marcadores proprios iguais aos do lancador'
+        Assert-Eq (& $full $ia.ConfigDir) (& $full (Join-Path $srcDir 'config')) 'configuracao igual a do lancador'
+        $launcher = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        Assert-True ($launcher.Contains("`$selfMarkers = @((Join-Path `$here 'agent-temp.ps1'), (Join-Path `$here 'bin\agent-temp.cmd'))") -and $launcher.Contains("`$invArgs = @{ SelfMarkers = `$selfMarkers; ConfigDir = (Join-Path `$here 'config') }")) 'o lancador monta os mesmos argumentos (inalterado)'
+        foreach ($lang in @('en-US', 'pt-BR')) {
+            $cat = $script:AtmMessages[$lang]
+            foreach ($code in @('UNKNOWN', 'UNKNOWN_FAILED', 'CURRENT', 'PARTIAL', 'STALE')) {
+                $key = 'gui.state.' + $code
+                Assert-True ($cat.ContainsKey($key) -and $cat[$key].Contains(($code -split '_')[0])) "${lang}: $key com a palavra de estado"
+            }
+        }
     }
 
     # ------------------------------------------------------------------ scale

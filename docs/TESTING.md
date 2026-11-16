@@ -78,8 +78,8 @@ SHA-256 published in that release's `SHA256SUMS.txt`, pinned in the script. The 
 
 1. install the published version and check `version` and `verify`;
 2. update to the package under test (`-Update`) and check `version` and `verify`, the older copy kept as `.previous`,
-   and the six installed gates `$false` (deletion, worktree diagnostics, handle diagnostics, diagnose export and, since
-   0.3.x, isolation (phase P2) and purge (phase P4)); the `shipped-purge-gate` step also checks that no policy file is
+   and the seven installed gates `$false` (deletion, worktree diagnostics, handle diagnostics, diagnose export and, since
+   0.3.x, isolation (phase P2) and purge (phase P4), and since V0.2.1 P1 the desktop GUI); the `shipped-purge-gate` step also checks that no policy file is
    installed, that `version` shows the purge gate disabled and the default policy, and that `quarantine purge` of an
    entry that does not exist only plans (exit code `3`, no quarantine created);
 3. roll back and check the published version again;
@@ -404,11 +404,13 @@ The quarantine is a folder of the sandbox (the `AtmIsolationQuarantineRoot` seam
     action, run as registered once the installation is gone, exits non-zero with nothing created (fail closed); the
     harness then removes it.
 
-## Desktop GUI in the suite (V0.2.1 phase P1)
+## Desktop GUI in the suite (V0.2.1 phases P1 and P2)
 
-The suite area `GUI P1` covers the skeleton of `agent-temp gui`
-([ADR-0014](adr/ADR-0014-desktop-gui-winforms.md)). None of its cases opens a window in a shipped copy: the gate stays
-closed in every file, and the cases that go past it open it only in their own process memory.
+The suite areas `GUI P1` and `GUI P2` cover `agent-temp gui` ([ADR-0014](adr/ADR-0014-desktop-gui-winforms.md)). None
+of their cases opens a window in a shipped copy: the gate stays closed in every file, and the cases that go past it open
+it only in their own process memory.
+
+`GUI P1`, the skeleton:
 
 | Case | What it checks |
 |---|---|
@@ -416,13 +418,31 @@ closed in every file, and the cases that go past it open it only in their own pr
 | Gate closed | `agent-temp gui` exits with code 7 and the bilingual `GUI_GATE_CLOSED` message; a new process that loads the libraries and runs `version` and `gui` has no Windows Forms assembly loaded before or after |
 | Simulated environment | through test seams, in the suite's process: the closed gate returns 7 before any environment check; a multithreaded apartment (`GUI_NOT_STA`), no interactive desktop (`GUI_NO_INTERACTIVE_DESKTOP`) and a failing assembly load (`GUI_WINFORMS_UNAVAILABLE`, no exception text) each return 8 |
 | Identity header | elevated, non-elevated and unreadable identities give the right title, identity and elevation lines (PRIV-10), with no exception text |
-| Closed list | a static check of `src/lib/Gui*.ps1`: load-time statements are function definitions and constant assignments only; no class, `using` or load-time assembly; every command is one of the files' own functions or the allowed engine and catalog functions; no deletion, move, write, process, task or clipboard API (ADR-0014 section 3) and no other feature's gate. Eleven planted violations in temporary copies are each detected; the real files are unchanged |
-| Real window | Windows PowerShell only, in a job-object process with a timeout: the window opens with the synthetic identity, shows the title, identity and elevation lines in en-US and pt-BR, closes, and is disposed; no child process and no new file is left behind. `NAO_TESTADO` on PowerShell 7 and when no window can be shown |
+| Closed list | a static check of `src/lib/Gui*.ps1`: load-time statements are function definitions and constant assignments only; no class, `using` or load-time assembly; every command is one of the files' own functions or the allowed engine and catalog functions (P2 added exactly eight); no deletion, move, write, process, task or clipboard API (ADR-0014 section 3) and no other feature's gate. Twelve planted violations in temporary copies are each detected (P2 added a quarantine function of the report); the real files are unchanged |
 | GUI-D7 measurement | prints the edition, the thread's apartment, the environment check and whether Windows Forms loads. On Windows PowerShell it requires STA and a loaded assembly; on PowerShell 7 it only records the result (ADR-0014, P1 record) |
+
+`GUI P2`, the dashboard. The dubbed inventories are:
+* complete: a RECENT root and an ORPHAN_SUSPECTED one;
+* partial: an uninspectable process;
+* denied: a second profile whose base is owned by Administrators, dubbed through the owner seam, with no ACL change;
+* unknown: before the first audit.
+
+| Case | What it checks |
+|---|---|
+| View models | no window, en-US and pt-BR, the four inventories: the four groups of the TUI and the classes in its order; the counts; the state words (`CURRENT` with the UTC time, `PARTIAL`, `UNKNOWN`); before an audit every value is the word `UNKNOWN`, and no number appears |
+| Parity with the TUI | over the same inventories, each number of the four groups and of each class equals the one `Get-AtmTuiDashboardLines` writes, through the same catalog keys and helpers; the audit time too. The case note carries the table. Unknown: the TUI draws no dashboard before an audit |
+| Audit failure | a first failed audit stays `UNKNOWN` with the exception type and no invented number; after a good audit (through the real engine), a failure keeps the earlier result, marked `STALE` with the type and the time of the result shown, never the exception text; the progress keeps only percentages, never the engine's messages; three requests, three audits |
+| Automatic purge notice | GUI-D1, en-US and pt-BR: the TUI's line with `autoPurge: true` in a dubbed policy; nothing with the policy off or absent; read once, when the window's session is created; the source never gets a policy |
+| Refresh during an audit, close during an audit | two requests while an audit runs are ignored, never queued; a close request between two progress callbacks cancels the audit at the next one, and the earlier result stays; a new audit then works |
+| Static (P2) | the closed list has exactly the eight new names; the inventory seam is a single `$null` assignment; no timer, no editable text field, no closure; only labels, lists and buttons on one form, the lists without editing; the inventory arguments equal the launcher's, and the launcher is unchanged; the state keys exist in both languages |
+| Real window | Windows PowerShell only, in a job-object process with a timeout, with the inventory source dubbed. The window opens and runs the first audit. It shows the title, the identity, the elevation, the language, `CURRENT` and the dashboard numbers, and `F5` refreshes it once. An `F5` during the audit is ignored. A close request during the next audit cancels it, and the window closes with code 0. The progress label only ever shows the percentage text. Runs in en-US and pt-BR; no child process and no new file is left behind. `NAO_TESTADO` on PowerShell 7 and when no window can be shown |
+
+The read-only case (sandbox identical in names, sizes, times and attributes) also runs a GUI session, with no window,
+that audits the sandbox three times through the real engine.
 
 The install e2e adds the step `shipped-gui-gate`: the installed `lib\Gui.ps1` has the single `$false` assignment, both
 GUI files are in the manifest, `version` shows the gate disabled, and `agent-temp gui` exits with code 7 in en-US and
-pt-BR. The installed gates table has seven rows.
+pt-BR. The installed gates table has seven rows, in the install e2e and in the real isolation harness.
 
 ## Real isolation on disposable VMs (0.3.x ISO-P5a and P5b)
 
@@ -435,7 +455,7 @@ the V2 one; what differs:
 * **Gates.** It loads the *installed* engine into its own process and opens the isolation gate and the purge gate there
   only, in memory. The deletion gate of clean stays closed in it (the purge reads only its own gate); only the child
   that contends for the lock as clean (P5b) opens that gate, in its own memory, and always answers a wrong final phrase,
-  so it never deletes. The six installed gates and the SHA-256 of every installed file are checked before and after,
+  so it never deletes. The seven installed gates and the SHA-256 of every installed file are checked before and after,
   with `agent-temp verify`.
 * **Real parts.** The real mover, the real deleter of the purge, the T1 logs (`atm.isolatelog/1`, `atm.purgelog/1`) in
   real files, the manifests, the real B8 lock name, the real revalidation, and the **real quarantine of each account**

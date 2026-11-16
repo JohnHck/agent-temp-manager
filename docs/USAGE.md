@@ -737,9 +737,50 @@ Order of a run:
    a non-interactive session) or `GUI_WINFORMS_UNAVAILABLE`. It is never relaunched in another shell;
 4. Windows Forms is loaded, and the window opens.
 
-Phase P1 has a minimal window only: the title, the process identity and its elevation state (elevated administrator,
-token elevation type, integrity level), a read-only notice and a Close button (`Esc` closes it too). It is read-only.
-Closing it leaves no process, timer or file behind. The installed command always runs in Windows PowerShell 5.1.
+What the window shows in this version (phases P1 and P2):
+
+* **A header:**
+  * the process identity and its elevation state (elevated administrator, token elevation type, integrity level);
+  * the language;
+  * the state of the view, as a word, never by color alone:
+    * `UNKNOWN` before an audit has finished;
+    * `CURRENT` with the UTC time of the audit;
+    * `PARTIAL` when the engine's coverage is incomplete;
+    * `STALE` when the last audit failed. The earlier result stays on screen, with the exception type only.
+* **The automatic purge notice,** under the header, while the policy of this copy has `autoPurge: true`. It is the
+  same text the TUI and the reports show.
+* **The dashboard of the TUI** (menu `1`), in read-only lists:
+  * profiles: discovered, audited, with incomplete coverage;
+  * files, directories and partitions;
+  * space: MB logical, GB logical, MB on disk (estimated);
+  * read errors, incomplete measurements and coverage;
+  * the count and MB of each class (`ACTIVE_EVIDENCE`, `RECENT`, `LIVENESS_UNKNOWN`, `ORPHAN_SUSPECTED`), with the
+    class written out;
+  * the audit time.
+
+  The numbers are the TUI's, from the same engine.
+
+**Audits.** The window runs one audit when it opens, as the TUI does. After that, an audit runs only when you ask for
+it, with **Refresh** or `F5`. Nothing repeats by itself, and no live monitoring exists yet.
+* While an audit runs:
+  * the window shows only a percentage;
+  * the refresh controls are disabled;
+  * a second request is ignored, not queued.
+* Closing the window during an audit cancels it, and the window closes.
+* `Esc` closes the window. The tab order is fixed, and every control has an accessible name.
+
+**What it does not do:**
+* clean, isolate, restore or purge;
+* list the quarantine;
+* run the diagnose;
+* copy to the clipboard;
+* export;
+* remember its size or position;
+* write any file;
+* start any process.
+
+Closing it leaves no process, timer or file behind. The installed command always runs in Windows PowerShell 5.1, and
+there is no other entry point (no `bin\` script, no shortcut).
 
 ## Verify (installed copy)
 
