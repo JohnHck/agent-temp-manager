@@ -15062,7 +15062,9 @@ if ($null -eq $res.env) {
     $id = { [pscustomobject]@{ Name = 'TEST\gui'; Sid = 'S-1-5-21-1-2-3-9301'; IsAdmin = $false; ElevationTypeRaw = 3; IntegrityRid = 8192; SessionId = 1 } }
     $o = @(Invoke-AtmGuiCommand -IdentitySource $id -OnShown $hook 6>&1)
     $res.code = @($o | Where-Object { $_ -is [int] })[-1]
-    $res.snaps = @($script:guiSnaps)
+    # ToArray, not @(): on Windows PowerShell 5.1 the array subexpression over this generic list throws "Argument types do
+    # not match" in the child.
+    $res.snaps = $script:guiSnaps.ToArray()
     $res.error = $script:guiError
     $res.escClosed = $script:guiEscClosed
     $res.disposed = ($null -ne $script:guiForm -and [bool]$script:guiForm.IsDisposed)
