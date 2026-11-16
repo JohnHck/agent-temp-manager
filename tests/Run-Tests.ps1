@@ -3032,7 +3032,7 @@ exit 0
     }
 
     # ------------------------------------------------------------------ read-only guarantee
-    Test-Case 'Somente leitura' 'audit + preview e uma sessao da GUI (V0.2.1 P2 e P3, sem janela) com tres auditorias dubladas e navegacao pelas telas novas entre elas nao alteram nada no sandbox' {
+    Test-Case 'Somente leitura' 'audit + preview e uma sessao da GUI (V0.2.1 P2 a P4b, sem janela) com tres auditorias dubladas, navegacao pelas telas entre elas, o preview real (P e 8) e o diagnose real (D e cada tela da area) nao alteram nada no sandbox' {
         $p = New-TestProfile 'ro'
         1..3 | ForEach-Object { $null = New-TestRoot -ProfileInfo $p }
         # NTFS updates directory timestamps lazily after recent creations: wait until the tree is stable.
@@ -3082,6 +3082,35 @@ exit 0
                 $dvm = Get-AtmGuiScreen -Inventory $gs.Inventory -Screen (Get-AtmGuiNavTop -Nav $gs.Nav) -Preview $gs.Preview
                 Assert-True (@($dvm.Pairs | Where-Object { $_.Label -ceq 'Preview' }).Count -eq 1) 'sessao da GUI: o detalhe do preview tem a linha Preview'
             }
+            # V0.2.1 P4b: D twice with the real diagnose (the engine's, not dubbed) over the same sandbox and the session's
+            # arguments: one call, then the kept result; the lines of the V0.2 gates (worktrees, open files) are there;
+            # then every screen of the area, Enter on the first row of each list, and back.
+            Assert-True ($null -eq $script:AtmGuiDiagnoseSource) 'sessao da GUI: o diagnose e o do motor (sem costura)'
+            $drs = New-Object System.Collections.Generic.List[string]
+            foreach ($k in @('D', 'D')) {
+                Assert-Eq (Invoke-AtmGuiNavKey -Nav $gs.Nav -Inventory $gs.Inventory -Key $k -Busy $false -Diag $gs.Diag) 'DIAG_OPEN' "sessao da GUI: tecla $k"
+                $dr = Invoke-AtmGuiDiagnose -Session $gs -Pump { }
+                $drs.Add($dr)
+                Invoke-AtmGuiNavDiag -Nav $gs.Nav -Diag $gs.Diag -Result $dr
+            }
+            Assert-True (($drs.ToArray() -join ',') -ceq 'OK,CACHED' -and $gs.DiagCalls -eq 1 -and $null -eq $gs.Diag.Error -and (Get-AtmGuiNavTop -Nav $gs.Nav).Name -ceq 'diag') "sessao da GUI: um diagnose, depois o guardado ($($drs.ToArray() -join ','); $($gs.Diag.Error))"
+            $gcodes = @(@($gs.Diag.Gates) | ForEach-Object { $_.Code + '|' + $_.Collector })
+            Assert-True ($gcodes -ccontains 'WORKTREE_DIAGNOSTICS_GATE_CLOSED|worktree-discovery' -and $gcodes -ccontains 'HANDLE_SECURITY_GATE_CLOSED|handles') "sessao da GUI: as linhas das travas de worktrees e de arquivos abertos ($($gcodes -join ','))"
+            $nScreens = 1
+            for ($ci = 0; $ci -lt 9; $ci++) {
+                (Get-AtmGuiNavTop -Nav $gs.Nav).Sel = $ci
+                Assert-Eq (Invoke-AtmGuiNavKey -Nav $gs.Nav -Inventory $gs.Inventory -Key 'Return' -Busy $false -Diag $gs.Diag) 'RENDER' "sessao da GUI: Enter na categoria $ci da area"
+                $dvm = Get-AtmGuiScreen -Inventory $gs.Inventory -Screen (Get-AtmGuiNavTop -Nav $gs.Nav) -Diag $gs.Diag
+                $nScreens++
+                if ($dvm.Kind -ceq 'table' -and @($dvm.Items).Count -gt 0) {
+                    Assert-Eq (Invoke-AtmGuiNavKey -Nav $gs.Nav -Inventory $gs.Inventory -Key 'Return' -Busy $false -Diag $gs.Diag) 'RENDER' "sessao da GUI: Enter na primeira linha da categoria $ci"
+                    $null = Get-AtmGuiScreen -Inventory $gs.Inventory -Screen (Get-AtmGuiNavTop -Nav $gs.Nav) -Diag $gs.Diag
+                    $nScreens++
+                    $null = Invoke-AtmGuiNavKey -Nav $gs.Nav -Inventory $gs.Inventory -Key 'Escape' -Busy $false -Diag $gs.Diag
+                }
+                $null = Invoke-AtmGuiNavKey -Nav $gs.Nav -Inventory $gs.Inventory -Key 'Escape' -Busy $false -Diag $gs.Diag
+            }
+            Assert-True ((Get-AtmGuiNavTop -Nav $gs.Nav).Name -ceq 'diag' -and $gs.DiagCalls -eq 1) "sessao da GUI: de volta a area, nenhum diagnose a mais ($nScreens telas)"
             Assert-Eq $gs.SourceCalls 3 'sessao da GUI: tres auditorias, nenhuma a mais'
         } finally { $script:AtmGuiInventorySource = $savedGuiSource }
         $after = Get-TreeListing $p.ProfilePath
@@ -14241,10 +14270,13 @@ try {
     # function of those files, one of the allowed engine and catalog functions, or one of the allowed cmdlets.
     # P2 (V021-P2) adds exactly eight names: the automatic purge notice (GUI-D1) and the read helpers of the TUI dashboard.
     # P3 (V021-P3) adds exactly four: the yes/no text of the detail and three reads over the inventory (coverage screen).
+    # P4b (V021-P4b) adds exactly two: the catalog text of a code and the exception code of a failed diagnose; and one
+    # cmdlet, ConvertFrom-Json, only in Invoke-AtmGuiDiagnose (the schema view of the result, the TUI's path).
     $guiAllowedEngine = @('Invoke-AtmInventory', 'Invoke-AtmPreview', 'Invoke-AtmDiagnose', 'ConvertTo-AtmDiagnoseJson', 'Get-AtmIdentityState', 'Get-AtmCurrentIdentity', 'Get-AtmText', 'Get-AtmLanguage', 'Set-AtmLanguage',
         'Get-AtmAutoPurgeNoticeLines', 'Get-AtmSum', 'Format-AtmMB', 'Format-AtmGB', 'Format-AtmTime', 'Get-AtmProfileStatusLabel', 'Get-AtmStatusText', 'Get-AtmIncompleteProfileCount',
-        'Get-AtmYesNo', 'Get-AtmInventoryProfileList', 'Get-AtmBaseIndex', 'Get-AtmNotAuditedBaseStates')
-    $guiAllowedCmdlets = @('Write-Host', 'New-Object', 'Add-Type')
+        'Get-AtmYesNo', 'Get-AtmInventoryProfileList', 'Get-AtmBaseIndex', 'Get-AtmNotAuditedBaseStates',
+        'Get-AtmCodeText', 'ConvertTo-AtmExceptionCode')
+    $guiAllowedCmdlets = @('Write-Host', 'New-Object', 'Add-Type', 'ConvertFrom-Json')
     # Forbidden names (ADR-0014 section 3), searched in the text, case-insensitive, comments included.
     $guiForbidden = @('Invoke-AtmClean', 'Invoke-AtmIsolate', 'Invoke-AtmRestore', 'Invoke-AtmPurge', 'Invoke-AtmAutoPurgeSchedule', 'Invoke-AtmAutoPurgeUnschedule', 'Invoke-AtmDiscardAuthorization',
         'AtmDeleter', 'AtmLockProbe', 'DeleteTree', 'Remove-Item', 'Move-Item', '::Delete(', '.Delete(', '::Move(', 'Set-Content', 'Add-Content', 'Out-File', 'New-Item', 'Set-ItemProperty', 'Set-Acl',
@@ -14281,14 +14313,21 @@ try {
                 # & $scriptblock (the test seams and the test hook) has no command name.
                 if ($null -eq $cn) { continue }
                 if ($own -contains $cn -or $guiAllowedEngine -contains $cn -or $guiAllowedCmdlets -contains $cn) {
-                    if ($cn -eq 'Add-Type') {
+                    # Two allowed cmdlets have a single function each: the assemblies, and (P4b) the schema view of a
+                    # diagnose result.
+                    $only = $(if ($cn -eq 'Add-Type') { 'Import-AtmGuiAssemblies' } elseif ($cn -eq 'ConvertFrom-Json') { 'Invoke-AtmGuiDiagnose' } else { $null })
+                    if ($null -ne $only) {
                         $fp = $c.Parent
                         while ($null -ne $fp -and -not ($fp -is [System.Management.Automation.Language.FunctionDefinitionAst])) { $fp = $fp.Parent }
-                        if ($null -eq $fp -or $fp.Name -cne 'Import-AtmGuiAssemblies') { $bad.Add("${n}: Add-Type fora de Import-AtmGuiAssemblies") }
+                        if ($null -eq $fp -or $fp.Name -cne $only) { $bad.Add("${n}: $cn fora de $only") }
                     }
                     continue
                 }
                 $bad.Add("${n}: comando fora da lista fechada: $cn")
+            }
+            # P4b: the GUI keeps its own copies of the TUI's tables and never reads a variable of the TUI.
+            foreach ($va in $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.VariableExpressionAst] }, $true)) {
+                if ($va.VariablePath.UserPath -match '(?i)^((script|global|local|private):)?AtmTui') { $bad.Add("${n}: variavel da TUI: " + $va.VariablePath.UserPath) }
             }
             foreach ($w in $guiForbidden) { if ($txt.IndexOf($w, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $bad.Add("${n}: nome proibido: $w") } }
             foreach ($g in $guiOtherGates) { if ($txt.Contains($g)) { $bad.Add("${n}: trava de outra funcionalidade: $g") } }
@@ -14449,6 +14488,10 @@ $res.afterGui = (& $wf)
             'path-detail'        = @('function Test-AtmPlanted { Show-AtmPathDetail -Path $null }', 'comando fora da lista fechada: Show-AtmPathDetail')
             # P4a: the clean engine's gate of one candidate (the GUI shows only the preview's rows, never its own gates).
             'candidate'          = @('function Test-AtmPlanted { Test-AtmCandidate -Partition $null -Inventory $null }', 'comando fora da lista fechada: Test-AtmCandidate')
+            # P4b: the agent resources export of the report, a read of a TUI table, and the JSON parser outside its place.
+            'agent-resources'    = @('function Test-AtmPlanted { ConvertTo-AtmAgentResourcesJson -Result $null }', 'comando fora da lista fechada: ConvertTo-AtmAgentResourcesJson')
+            'tui-table'          = @('function Test-AtmPlanted { $script:AtmTuiDiagCatKinds.Keys }', 'variavel da TUI: script:AtmTuiDiagCatKinds')
+            'json-elsewhere'     = @("function Test-AtmPlanted { '{}' | ConvertFrom-Json }", 'ConvertFrom-Json fora de Invoke-AtmGuiDiagnose')
         }
         foreach ($k in $plants.Keys) {
             $pc = Join-Path $pl ('Gui-' + $k + '.ps1')
@@ -14758,8 +14801,8 @@ Write-Output ('GUI-D7 edition={0} ps={1} clr={2} apartment={3} environment={4} w
     }
     Test-Case 'GUI P2' 'Estatico (P2): lista fechada com exatamente os oito nomes novos; costura da fonte do inventario com uma unica atribuicao a $null; nenhum timer, nenhuma caixa de texto editavel, nenhum closure; so Label, ListView e botoes; argumentos do inventario iguais aos do lancador; chaves de estado nos dois idiomas' {
         $p2 = @('Get-AtmAutoPurgeNoticeLines', 'Get-AtmSum', 'Format-AtmMB', 'Format-AtmGB', 'Format-AtmTime', 'Get-AtmProfileStatusLabel', 'Get-AtmStatusText', 'Get-AtmIncompleteProfileCount')
-        Assert-True ($guiAllowedEngine.Count -eq 21 -and @($p2 | Where-Object { $guiAllowedEngine -ccontains $_ }).Count -eq 8) "lista: os 9 nomes da P1, os 8 da P2 e os 4 da P3, nenhum outro ($($guiAllowedEngine -join ','))"
-        Assert-Eq ($guiAllowedCmdlets -join ',') 'Write-Host,New-Object,Add-Type' 'cmdlets permitidos inalterados'
+        Assert-True ($guiAllowedEngine.Count -eq 23 -and @($p2 | Where-Object { $guiAllowedEngine -ccontains $_ }).Count -eq 8) "lista: os 9 nomes da P1, os 8 da P2, os 4 da P3 e os 2 da P4b, nenhum outro ($($guiAllowedEngine -join ','))"
+        Assert-Eq ($guiAllowedCmdlets -join ',') 'Write-Host,New-Object,Add-Type,ConvertFrom-Json' 'cmdlets permitidos: os tres da P1 e ConvertFrom-Json da P4b'
         $gt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1')); $mt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\GuiModel.ps1'))
         Assert-True ([regex]::Matches($gt, '\$script:AtmGuiInventorySource\s*=').Count -eq 1 -and $gt -match '(?m)^\$script:AtmGuiInventorySource = \$null\r?$') 'costura da fonte do inventario: uma unica atribuicao, a $null'
         foreach ($pair in @(@('Gui.ps1', $gt), @('GuiModel.ps1', $mt))) {
@@ -15013,7 +15056,7 @@ Write-Output ('GUI-D7 edition={0} ps={1} clr={2} apartment={3} environment={4} w
     }
     Test-Case 'GUI P3' 'Estatico (P3): lista fechada com exatamente os quatro nomes novos; Show-AtmPathDetail plantado e recusado; nenhum timer, caixa de texto editavel, closure nem botao de cancelar (Esc volta uma tela); nenhuma dica de isolamento nem do detalhamento do CLI; telas 1 a 7 e 9; nome acessivel do catalogo nos controles novos; chaves novas nos dois idiomas' {
         $p3 = @('Get-AtmYesNo', 'Get-AtmInventoryProfileList', 'Get-AtmBaseIndex', 'Get-AtmNotAuditedBaseStates')
-        Assert-True ($guiAllowedEngine.Count -eq 21 -and @($p3 | Where-Object { $guiAllowedEngine -ccontains $_ }).Count -eq 4) "lista: os 4 nomes da P3, nenhum outro ($($guiAllowedEngine -join ','))"
+        Assert-True ($guiAllowedEngine.Count -eq 23 -and @($p3 | Where-Object { $guiAllowedEngine -ccontains $_ }).Count -eq 4) "lista: os 4 nomes da P3 (23 com os 2 da P4b) ($($guiAllowedEngine -join ','))"
         $gt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1')); $mt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\GuiModel.ps1'))
         foreach ($pair in @(@('Gui.ps1', $gt), @('GuiModel.ps1', $mt))) {
             # The preview call is P4a's (its static case checks that it is the only one).
@@ -15327,7 +15370,7 @@ if ($null -eq $res.env) {
         Assert-Eq (@(& $guiP3DetailText (Get-AtmGuiScreen -Inventory $back.Inv -Screen $o2.Top -Preview @($back.Preview))) -join "`n") (@(& $guiP3DetailText (Get-AtmGuiScreen -Inventory $inv -Screen $o1.Top -Preview $script:guiP4Rows)) -join "`n") 'reimportado: detalhe do preview igual'
     }
     Test-Case 'GUI P4a' 'Estatico (P4a): nenhum nome novo na lista fechada; Invoke-AtmPreview num unico lugar de src/lib/Gui*.ps1 (Invoke-AtmGuiPreview); Test-AtmCandidate plantado e recusado; costura do preview com uma unica atribuicao a $null; telas 1 a 9 e P; tecla P no KeyDown; um fechar durante o preview espera a chamada; nenhum timer, caixa de texto editavel, closure nem botao de cancelar; aviso fixo e chaves novas nos dois idiomas' {
-        Assert-True ($guiAllowedEngine.Count -eq 21 -and $guiAllowedEngine -ccontains 'Invoke-AtmPreview') "lista: nenhum nome novo; o preview ja estava nela ($($guiAllowedEngine -join ','))"
+        Assert-True ($guiAllowedEngine.Count -eq 23 -and $guiAllowedEngine -ccontains 'Invoke-AtmPreview') "lista: nenhum nome novo na P4a (23 com os 2 da P4b); o preview ja estava nela ($($guiAllowedEngine -join ','))"
         $gp = Join-Path $srcDir 'lib\Gui.ps1'; $mp = Join-Path $srcDir 'lib\GuiModel.ps1'
         $gt = [IO.File]::ReadAllText($gp); $mt = [IO.File]::ReadAllText($mp)
         Assert-Eq ([regex]::Matches($gt + "`n" + $mt, 'Invoke-AtmPreview\b').Count) 1 'Invoke-AtmPreview aparece num unico lugar do texto'
@@ -15352,7 +15395,7 @@ if ($null -eq $res.env) {
         Assert-True (@($pv | Where-Object { $_.Contains('comando fora da lista fechada: Test-AtmCandidate') }).Count -ge 1) "plantado Test-AtmCandidate: recusado ($($pv -join ' | '))"
         Assert-Eq ((& $guiCheck @($gp, $mp)) -join ' | ') '' 'arquivos reais dentro da lista fechada'
         $items = @(Get-AtmGuiNavItemList)
-        Assert-Eq (@($items | ForEach-Object { $_.Key }) -join ',') '1,2,3,4,5,6,7,8,9,P' 'telas da GUI: 1 a 9 e P'
+        Assert-Eq (@($items | ForEach-Object { $_.Key }) -join ',') '1,2,3,4,5,6,7,8,9,P,D' 'telas da GUI: 1 a 9, P e (P4b) D'
         $i8 = @($items | Where-Object { $_.Key -ceq '8' })[0]; $iP = @($items | Where-Object { $_.Key -ceq 'P' })[0]
         Assert-True ($i8.Screen.Name -ceq 'gates' -and $i8.Screen.Filter.Category -ceq 'BLOCKED' -and $iP.Screen.Name -ceq 'gates' -and $null -eq $iP.Screen.Filter.Category -and $iP.Screen.Title -ceq 'Preview') '8 e P: a tela gates da TUI com o filtro de categoria'
         foreach ($w in @("`$kn -ceq 'P'", "elseif (`$guiSession.PreviewBusy) { `$guiSession.CloseAfterPreview = `$true; `$ev.Cancel = `$true }", "if (`$guiSession.CloseAfterPreview) { `$guiSession.CloseAfterPreview = `$false; `$guiForm.Close() }", "-Name 'PreviewNotice'", "Get-AtmText 'tui.computingPreview'")) { Assert-True ($gt.Contains($w)) "Gui.ps1: $w" }
@@ -15491,6 +15534,538 @@ if ($null -eq $res.env) {
             Assert-True ([int]$j.newProcesses -eq 0 -and [int]$j.newSandbox -eq 0 -and [int]$j.newConfig -eq 0 -and [int]$j.newTemp -eq 0) "janela P4a ${lang}: nada deixado (processos $($j.newProcesses), sandbox $($j.newSandbox), configuracao $($j.newConfig), TEMP $($j.newTemp))"
         }
         $script:caseNote = 'janela real em en-US e pt-BR: P, Enter com a linha Preview, Esc, 8, Esc, F5, P chamado de novo; fechar durante o preview esperou a chamada'
+    }
+
+    # ------------------------------------------------------------------ V0.2.1 P4b: the diagnose area (ADR-0014)
+    # The dubbed views of the parity: the schema view of the P5-A result (tdBuild above), parsed back as the GUI and the
+    # TUI parse it, then edited in memory. No collector runs.
+    $guiP4bView = { param($Res) (ConvertTo-AtmDiagnoseJson -Result $Res) | ConvertFrom-Json }
+    $guiP4bAddCov = { param($V, [string]$Name, [string]$Status, [string[]]$Reasons)
+        $c = @($V.coverage)[0].PSObject.Copy(); $c.collector = $Name; $c.status = $Status; $c.reasons = @($Reasons); $V.coverage = @(@($V.coverage) + @($c)) }
+    $guiP4bViews = {
+        $out = [ordered]@{}
+        # Complete: every collector of the categories present and conclusive, no reason (the worktree finding included).
+        $v = & $guiP4bView (& $tdBuild -WithWorktree)
+        foreach ($c in @($v.coverage)) { $c.status = 'COMPLETE'; $c.reasons = @() }
+        foreach ($cn in @('inventory', 'process-snapshot', 'agent-processes', 'services', 'virtualization-platform', 'virtual-machines', 'worktree-discovery')) {
+            if (@(@($v.coverage) | Where-Object { [string]$_.collector -ceq $cn }).Count -eq 0) { & $guiP4bAddCov $v $cn 'COMPLETE' @() }
+        }
+        $v.coverageComplete = $true
+        $out['completo'] = $v
+        $out['parcial'] = & $guiP4bView $tdRes
+        # The earlier result after a failed run: outdated, with the exception code only (the driver marks it).
+        $out['parcial desatualizado'] = & $guiP4bView $tdRes
+        $v = & $guiP4bView $tdRes
+        $v.coverage = @(@($v.coverage) | Where-Object { [string]$_.collector -cne 'services' -and [string]$_.collector -cne 'virtual-machines' })
+        $out['coletor ausente'] = $v
+        # UNKNOWN with GRAPH_REASON: the first UNKNOWN finding gets the same reason twice (the TUI keeps it once).
+        $v = & $guiP4bView $tdRes
+        $u = @(@($v.findings) | Where-Object { [string]$_.state -ceq 'UNKNOWN' })[0]
+        $g1 = [pscustomobject]@{ code = 'GRAPH_REASON'; collector = 'dependency-graph'; detail = 'TEST_GRAPH_REASON'; observedUtc = $null }
+        $u.evidence = @(@(@($u.evidence) | Where-Object { $null -ne $_ }) + @($g1, $g1.PSObject.Copy()))
+        $out['UNKNOWN com GRAPH_REASON'] = $v
+        $v = & $guiP4bView $tdRes
+        $e1 = @($v.graph.edges)[0]; $e1.strength = 'AMBIGUOUS'
+        $out['aresta AMBIGUOUS'] = $v
+        # More than 40 edges on a node: 45 in and 42 out (the TUI shows 40 per direction, then how many more).
+        $v = & $guiP4bView $tdRes
+        $n0 = @($v.graph.nodes)[0]; $e0 = @($v.graph.edges)[0]
+        $more = New-Object System.Collections.Generic.List[object]
+        for ($i = 1; $i -le 45; $i++) { $x = $e0.PSObject.Copy(); $x.toKind = [string]$n0.kind; $x.to = [string]$n0.key; $x.fromKind = 'Process'; $x.from = 'pid:' + (9000 + $i); $more.Add($x) }
+        for ($i = 1; $i -le 42; $i++) { $x = $e0.PSObject.Copy(); $x.fromKind = [string]$n0.kind; $x.from = [string]$n0.key; $x.toKind = 'Process'; $x.to = 'pid:' + (9500 + $i); $more.Add($x) }
+        $v.graph.edges = @(@($v.graph.edges) + $more.ToArray())
+        $out['mais de 40 arestas'] = $v
+        # The four V0.2 gates closed: the engine's worktree and open-file gates, plus git and the export.
+        $v = & $guiP4bView $tdRes
+        $w = @(@($v.coverage) | Where-Object { [string]$_.collector -ceq 'worktree-discovery' })[0]
+        $w.reasons = @(@($w.reasons) + @('GIT_EXECUTION_GATE_CLOSED'))
+        & $guiP4bAddCov $v 'diagnose-export' 'NOT_OBSERVABLE' @('EXPORT_SECURITY_GATE_CLOSED')
+        $out['quatro travas fechadas'] = $v
+        return $out
+    }
+    # Every screen of the area over one result: the area, its nine categories, then every coverage record, finding and node.
+    $guiP4bScreens = { param($Diag)
+        $l = New-Object System.Collections.Generic.List[object]
+        $l.Add(@{ Name = 'diag'; Title = (Get-AtmText 'tui.diag.title'); Filter = $null })
+        foreach ($c in @(Get-AtmGuiDiagCategoryList -Diag $Diag)) { $p = @{} + $c.Push; if (-not $p.ContainsKey('Filter')) { $p['Filter'] = $null }; $l.Add($p) }
+        foreach ($c in @($Diag.Index.Coverage)) { $l.Add(@{ Name = 'dcovdet'; Title = [string]$c.collector; Filter = @{ C = $c } }) }
+        foreach ($f in @($Diag.View.findings)) { if ($null -ne $f) { $l.Add(@{ Name = 'dfind'; Title = [string]$f.kind; Filter = @{ F = $f } }) } }
+        foreach ($n in @($Diag.Index.Nodes)) { $l.Add(@{ Name = 'dnode'; Title = [string]$n.kind; Filter = @{ N = $n } }) }
+        return , $l.ToArray() }
+    # One result, every screen: the GUI's lines against the TUI's (Get-AtmTuiDiagList at width 4000 with the lines its
+    # frame draws above the table and the text of an empty one; Get-AtmTuiDiagText), without the gate lines, the only
+    # allowed difference. One row per screen: TUI lines, GUI lines, gate lines, equal.
+    $guiP4bParity = { param($View, [bool]$Stale)
+        $err = $(if ($Stale) { 'EXCEPTION_IOEXCEPTION' } else { $null })
+        $d = New-AtmGuiDiagState -View $View; $d.Stale = $Stale; $d.Error = $err
+        $st = @{ Diag = @{ View = $View; Index = (New-AtmTuiDiagIndex -View $View); Stale = $Stale; Error = $err }; Width = 4000; Height = 400; G = (Get-AtmTuiGlyphs $true); Inventory = $null; Message = $null; Stack = New-Object System.Collections.Generic.List[object] }
+        $out = New-Object System.Collections.Generic.List[object]
+        foreach ($scr in (& $guiP4bScreens $d)) {
+            $vm = Get-AtmGuiScreen -Inventory $null -Screen $scr -Diag $d
+            $gl = @($vm.GateLines)
+            $diff = $null
+            $tui = New-Object System.Collections.Generic.List[string]
+            $mine = New-Object System.Collections.Generic.List[string]
+            if (@(Get-AtmGuiDiagListNames) -ccontains [string]$scr.Name) {
+                $data = Get-AtmTuiDiagList -State $st -Screen $scr
+                $items = @($data.Items)
+                $fr = & $tdFrame $st $scr
+                $pre = @(@($vm.Pre) | Where-Object { $gl -cnotcontains $_ })
+                $tuiCols = @(@($data.Columns) | ForEach-Object { [string]$_.Name })
+                for ($i = 1; $i -le $pre.Count; $i++) { $tui.Add($fr[$i].Substring(1)) }
+                $tui.Add(($tuiCols -join "`t"))
+                foreach ($it in $items) { $r0 = & $data.Row $it $st; $tui.Add(($r0 -join "`t")) }
+                if ($items.Count -eq 0) { $tui.Add($fr[$pre.Count + 2].Substring(2)) }
+                foreach ($cn in $tuiCols) { if (-not $fr[$pre.Count + 1].Contains($cn)) { $diff = "cabecalho da TUI sem a coluna $cn" } }
+                foreach ($x in $pre) { $mine.Add([string]$x) }
+                $mine.Add((@($vm.Columns) -join "`t"))
+                foreach ($r in @($vm.Rows)) { $mine.Add((@($r) -join "`t")) }
+                if ($null -ne $vm.Empty) { $mine.Add([string]$vm.Empty) }
+                $vmCount = $mine.Count + $gl.Count
+            } else {
+                foreach ($x in @(Get-AtmTuiDiagText -State $st -Screen $scr -Width 4000)) { $tui.Add([string]$x.Text) }
+                foreach ($x in @($vm.Lines)) { if ($gl -cnotcontains $x) { $mine.Add([string]$x) } }
+                $vmCount = @($vm.Lines).Count
+            }
+            $a = $tui.ToArray(); $b = $mine.ToArray()
+            if ($null -eq $diff -and ($a -join "`n") -cne ($b -join "`n")) {
+                for ($i = 0; $i -lt [math]::Max($a.Count, $b.Count); $i++) { if ($i -ge $a.Count -or $i -ge $b.Count -or $a[$i] -cne $b[$i]) { $diff = "linha $i TUI [$(if ($i -lt $a.Count) { $a[$i] })] GUI [$(if ($i -lt $b.Count) { $b[$i] })]"; break } }
+            }
+            $out.Add([pscustomobject]@{ Screen = [string]$scr.Name; Tui = $a.Count; Vm = $vmCount; Gates = $gl.Count; Equal = ($null -eq $diff); Diff = $diff })
+        }
+        return , $out.ToArray() }
+
+    Test-Case 'GUI P4b' 'Paridade com a TUI (sem janela), em en-US e pt-BR, sobre as vistas dubladas (completa, cobertura parcial, parcial desatualizada, coletor ausente, UNKNOWN com GRAPH_REASON, aresta AMBIGUOUS, mais de 40 arestas num no, as quatro travas da V0.2 fechadas): cada tela da area, linha por linha e na mesma ordem, igual a da TUI (Get-AtmTuiDiagList na largura 4000 com as linhas acima da tabela, e Get-AtmTuiDiagText), menos as linhas das travas, a unica diferenca permitida' {
+        $views = & $guiP4bViews
+        # Each view has the feature it is named for.
+        $vC = $views['completo']
+        Assert-True ($vC.coverageComplete -and @(@($vC.coverage) | Where-Object { $script:AtmConclusiveCoverage -cnotcontains [string]$_.status }).Count -eq 0) 'completo: toda cobertura conclusiva'
+        Assert-True (@(@($views['parcial'].coverage) | Where-Object { $script:AtmConclusiveCoverage -cnotcontains [string]$_.status }).Count -gt 0) 'parcial: cobertura incompleta'
+        Assert-True (@(@($views['coletor ausente'].coverage) | Where-Object { [string]$_.collector -ceq 'services' -or [string]$_.collector -ceq 'virtual-machines' }).Count -eq 0) 'coletor ausente: services e virtual-machines'
+        $vU = $views['UNKNOWN com GRAPH_REASON']
+        Assert-True (@(@($vU.findings) | Where-Object { [string]$_.state -ceq 'UNKNOWN' -and @(@($_.evidence) | Where-Object { $null -ne $_ -and [string]$_.code -ceq 'GRAPH_REASON' }).Count -ge 2 }).Count -ge 1) 'UNKNOWN com GRAPH_REASON'
+        Assert-True (@(@($views['aresta AMBIGUOUS'].graph.edges) | Where-Object { [string]$_.strength -ceq 'AMBIGUOUS' }).Count -ge 1) 'aresta AMBIGUOUS'
+        $codes = @(foreach ($c in @($views['quatro travas fechadas'].coverage)) { @($c.reasons) })
+        foreach ($g in @(Get-AtmGuiDiagGateCodes)) { Assert-True ($codes -ccontains $g) "quatro travas: $g" }
+        $bad = New-Object System.Collections.Generic.List[string]
+        $table = New-Object System.Collections.Generic.List[string]
+        $nScreens = 0
+        $old = Get-AtmLanguage
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                foreach ($name in @($views.Keys)) {
+                    $rows = & $guiP4bParity $views[$name] ($name -ceq 'parcial desatualizado')
+                    $agg = [ordered]@{}
+                    foreach ($r in $rows) {
+                        $nScreens++
+                        if (-not $r.Equal) { $bad.Add("$lang $name $($r.Screen): $($r.Diff)") }
+                        if (-not $agg.Contains($r.Screen)) { $agg[$r.Screen] = @{ N = 0; T = 0; V = 0; G = 0; E = $true } }
+                        $ag = $agg[$r.Screen]; $ag.N++; $ag.T += $r.Tui; $ag.V += $r.Vm; $ag.G += $r.Gates; if (-not $r.Equal) { $ag.E = $false }
+                    }
+                    foreach ($k in @($agg.Keys)) { $ag = $agg[$k]; $table.Add(('{0} | {1} | {2} ({3}) | {4} | {5} | {6} | {7}' -f $lang, $name, $k, $ag.N, $ag.T, $ag.V, $ag.G, $(if ($ag.E) { 'sim' } else { 'nao' }))) }
+                }
+                # The features, in the GUI's lines. More than 40 edges: 40 per direction, then how many more.
+                $vE = $views['mais de 40 arestas']; $dE = New-AtmGuiDiagState -View $vE
+                $n0 = @($vE.graph.nodes)[0]; $nk = [string]$n0.kind + '|' + [string]$n0.key
+                $ln = @((Get-AtmGuiScreen -Inventory $null -Screen @{ Name = 'dnode'; Title = 'n'; Filter = @{ N = $n0 } } -Diag $dE).Lines)
+                $inN = $dE.Index.InBy[$nk].Count; $outN = $dE.Index.OutBy[$nk].Count
+                Assert-True ($inN -ge 45 -and $outN -ge 42 -and @($ln | Where-Object { $_ -cmatch '^  \[[DA? ]\] ' }).Count -eq 80) "${lang}: 40 arestas por direcao ($inN entrando, $outN saindo)"
+                foreach ($m in @(($inN - 40), ($outN - 40))) { Assert-True ($ln -ccontains ('  ' + (Get-AtmText 'tui.diag.det.more' $m))) "${lang}: a linha de mais $m arestas" }
+                # The AMBIGUOUS edge: its marker and text on the screen of its node.
+                $vA = $views['aresta AMBIGUOUS']; $dA = New-AtmGuiDiagState -View $vA; $eA = @($vA.graph.edges)[0]
+                $nA = $dA.Index.NodeBy[[string]$eA.toKind + '|' + [string]$eA.to]
+                Assert-True ($null -ne $nA) "${lang}: o no da aresta AMBIGUOUS"
+                $la = @((Get-AtmGuiScreen -Inventory $null -Screen @{ Name = 'dnode'; Title = 'n'; Filter = @{ N = $nA } } -Diag $dA).Lines)
+                Assert-True (@($la | Where-Object { $_.StartsWith('  [?] ') -and $_.EndsWith(' ' + (Get-AtmText 'tui.diag.ambEdge')) }).Count -ge 1) "${lang}: aresta AMBIGUOUS com [?] e o texto"
+                # UNKNOWN with GRAPH_REASON: the issue row has the reason once.
+                $iss = Get-AtmGuiScreen -Inventory $null -Screen @{ Name = 'dissues'; Title = 'i'; Filter = $null } -Diag (New-AtmGuiDiagState -View $vU)
+                $hit = @(@($iss.Rows) | Where-Object { ([string]@($_)[3]).Contains('TEST_GRAPH_REASON') })
+                Assert-True ($hit.Count -eq 1 -and [regex]::Matches([string]@($hit[0])[3], 'TEST_GRAPH_REASON').Count -eq 1) "${lang}: UNKNOWN com o GRAPH_REASON uma vez ($($hit.Count))"
+            }
+        } finally { Set-AtmLanguage -Requested $old }
+        Write-Host '   paridade: idioma | vista | tela (telas) | linhas TUI | linhas GUI | linhas de trava | igual'
+        foreach ($t in $table) { Write-Host ('   paridade: ' + $t) }
+        Assert-True ($bad.Count -eq 0) ('diferencas: ' + ($bad.ToArray() -join ' ; '))
+        $script:caseNote = "$nScreens telas comparadas em 8 vistas e 2 idiomas, todas iguais (menos as linhas das travas)"
+    }
+    Test-Case 'GUI P4b' 'Travas da V0.2 (sem janela), nos dois idiomas: cada um dos quatro codigos aparece numa linha de desabilitado nesta versao, com o texto do catalogo (reason.<codigo>, ou a chave nova da GUI), no resumo e na categoria afetada; worktrees: as linhas do worktree e do git; a lista dessa categoria nunca mostra common.none, nem quando a cobertura e conclusiva' {
+        $views = & $guiP4bViews
+        $v = $views['quatro travas fechadas']
+        $old = Get-AtmLanguage
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                $cat = $script:AtmMessages[$lang]
+                $word = $(if ($lang -ceq 'pt-BR') { 'Desabilitado nesta vers' } else { 'Disabled in this version' })
+                # The expected lines, built here from the coverage records and the catalog.
+                $want = New-Object System.Collections.Generic.List[object]
+                foreach ($c in @($v.coverage)) {
+                    foreach ($r in @($c.reasons)) {
+                        if (@('WORKTREE_DIAGNOSTICS_GATE_CLOSED', 'HANDLE_SECURITY_GATE_CLOSED', 'EXPORT_SECURITY_GATE_CLOSED', 'GIT_EXECUTION_GATE_CLOSED') -cnotcontains [string]$r) { continue }
+                        $tx = $(if ($cat.ContainsKey('reason.' + $r)) { $cat['reason.' + $r] } else { $cat['gui.diag.gate.' + $r] })
+                        Assert-True ([bool]$tx) "${lang}: texto do catalogo para $r"
+                        $want.Add([pscustomobject]@{ Code = [string]$r; Collector = [string]$c.collector; Line = ($cat['gui.diag.disabled'] -f [string]$r, [string]$c.collector, $tx) })
+                    }
+                }
+                Assert-Eq (@($want | ForEach-Object { $_.Code }) -join ',') 'WORKTREE_DIAGNOSTICS_GATE_CLOSED,GIT_EXECUTION_GATE_CLOSED,HANDLE_SECURITY_GATE_CLOSED,EXPORT_SECURITY_GATE_CLOSED' "${lang}: os quatro codigos, na ordem da cobertura"
+                $d = New-AtmGuiDiagState -View $v
+                $sum = Get-AtmGuiScreen -Inventory $null -Screen @{ Name = 'dsum'; Title = 's'; Filter = $null } -Diag $d
+                Assert-Eq (@($sum.GateLines) -join "`n") (@($want | ForEach-Object { $_.Line }) -join "`n") "${lang}: as quatro linhas no resumo"
+                foreach ($w in $want) { Assert-True (@($sum.Lines) -ccontains $w.Line -and $w.Line.StartsWith($word) -and $w.Line.Contains($w.Code)) "${lang}: $($w.Code) desabilitado no resumo" }
+                $wt = Get-AtmGuiScreen -Inventory $null -Screen @{ Name = 'dlist'; Title = 'w'; Filter = @{ Cat = 'worktrees' } } -Diag $d
+                Assert-Eq (@($wt.GateLines) -join "`n") (@($want | Where-Object { $_.Collector -ceq 'worktree-discovery' } | ForEach-Object { $_.Line }) -join "`n") "${lang}: worktrees com as linhas do worktree e do git"
+                Assert-True (@($wt.Items).Count -eq 0 -and $wt.Empty -ceq (Get-AtmText 'tui.diag.emptyNotObserved') -and $wt.Empty -cne (Get-AtmText 'common.none')) "${lang}: worktrees vazia: nada observado, nunca nenhum ($($wt.Empty))"
+                foreach ($g in @($wt.GateLines)) { Assert-True (@($wt.Pre) -ccontains $g) "${lang}: a linha da trava acima da tabela de worktrees" }
+                foreach ($c in @('procs', 'services', 'virt', 'parts')) { Assert-Eq @((Get-AtmGuiScreen -Inventory $null -Screen @{ Name = 'dlist'; Title = 'c'; Filter = @{ Cat = $c } } -Diag $d).GateLines).Count 0 "${lang}: nenhuma linha de trava em $c" }
+                Assert-True (@(@($d.Gates) | Where-Object { $null -eq $_.Cat }).Count -eq 2) "${lang}: arquivos abertos e exportacao so no resumo"
+                # A conclusive coverage record that still carries a gate: no gap, the gate line, never common.none (the TUI
+                # would show common.none here: this is the difference the round allows).
+                $v2 = & $guiP4bView $tdRes
+                $w2 = @(@($v2.coverage) | Where-Object { [string]$_.collector -ceq 'worktree-discovery' })[0]
+                $w2.status = 'COMPLETE'; $w2.reasons = @('GIT_EXECUTION_GATE_CLOSED')
+                $d2 = New-AtmGuiDiagState -View $v2
+                Assert-True ($null -eq $d2.Index.Gap['worktrees']) "${lang}: cobertura conclusiva de worktrees"
+                $wt2 = Get-AtmGuiScreen -Inventory $null -Screen @{ Name = 'dlist'; Title = 'w'; Filter = @{ Cat = 'worktrees' } } -Diag $d2
+                Assert-True (@($wt2.GateLines).Count -eq 1 -and $wt2.Empty -ceq (Get-AtmText 'tui.diag.emptyNotObserved')) "${lang}: com a trava e cobertura conclusiva, nunca nenhum ($($wt2.Empty))"
+            }
+        } finally { Set-AtmLanguage -Requested $old }
+    }
+    Test-Case 'GUI P4b' 'Quando o diagnose roda (sem janela): D antes do primeiro audit roda uma vez, com os argumentos da TUI (InventoryArgs da sessao com o callback); D de novo usa o guardado; U fora da area nao faz nada; U dentro roda de novo e volta para a area; o indice e o mesmo objeto na navegacao e outro depois do U; F5 nao descarta o resultado; um pedido durante a chamada e ignorado; um fechar para a fase do inventario e descarta o resultado; uma falha com resultado anterior o marca desatualizado so com o codigo; sem resultado anterior a area nao abre; nada repetido sozinho; o resultado reimportado por CLIXML da a mesma exportacao' {
+        $script:p4bInv = & $guiP3Multi
+        $script:p4bRes = $tdRes
+        $script:p4bCalls = 0; $script:p4bStarts = 0; $script:p4bFail = $false; $script:p4bArgs = $null; $script:p4bPct = $null
+        $script:p4bCancel = $false; $script:p4bCbThrew = $false; $script:p4bDuring = $null; $script:p4bProbe = $false
+        $savedInv = $script:AtmGuiInventorySource; $savedDiag = $script:AtmGuiDiagnoseSource
+        $old = Get-AtmLanguage
+        try {
+            Set-AtmLanguage -Requested 'en-US'
+            $script:AtmGuiInventorySource = { param($a) $null = $a; $script:p4bInv }
+            # As the engine: the inventory phase calls the progress callback, and an exception there (a cancel) ends only
+            # that phase. During one call, the source asks for more (they must be ignored); in another, it asks to close.
+            $script:AtmGuiDiagnoseSource = { param($a)
+                $script:p4bCalls++; $script:p4bArgs = $a
+                if ($script:p4bCancel) { $s.DiagCancelRequested = $true }
+                if ($script:p4bProbe) { $script:p4bDuring = @((Invoke-AtmGuiDiagnose -Session $s -Refresh), (Invoke-AtmGuiRefresh -Session $s), (Invoke-AtmGuiPreview -Session $s), (Invoke-AtmGuiNavKey -Nav $s.Nav -Inventory $s.Inventory -Key 'U' -Busy ([bool]$s.DiagBusy) -Diag $s.Diag)) }
+                try { & $a.InventoryArgs.ProgressCallback 40 'C:\SENTINEL-PROGRESS\base' } catch { $script:p4bCbThrew = $true }
+                if ($script:p4bFail) { throw (New-Object System.IO.IOException 'SENTINEL-DIAG-TEXT') }
+                $script:p4bRes }
+            $s = Initialize-AtmGuiSession -ConfigDir $cfgDir
+            # As the form does: the key, then the diagnose when the key asks for it, then the move.
+            $req = { param($S0, [string]$K)
+                $r = Invoke-AtmGuiNavKey -Nav $S0.Nav -Inventory $S0.Inventory -Key $K -Busy ([bool]$S0.Busy -or [bool]$S0.PreviewBusy -or [bool]$S0.DiagBusy) -Preview $S0.Preview -Diag $S0.Diag
+                if ($r -cne 'DIAG_OPEN' -and $r -cne 'DIAG_REFRESH') { return $r }
+                $isU = ($r -ceq 'DIAG_REFRESH')
+                $dr = Invoke-AtmGuiDiagnose -Session $S0 -Pump { $script:p4bPct = $S0.DiagPercent } -OnStart { $script:p4bStarts++ } -Refresh:$isU
+                if ($dr -cne 'CANCELLED') { Invoke-AtmGuiNavDiag -Nav $S0.Nav -Diag $S0.Diag -Result $dr -Refresh:$isU }
+                return $dr }
+            $top = { param($S0) [string](Get-AtmGuiNavTop -Nav $S0.Nav).Name }
+            # Before the first audit, D runs the diagnose (as the TUI does), once, with the session's arguments.
+            Assert-Eq (& $req $s 'D') 'OK' 'antes do primeiro audit: D roda o diagnose'
+            Assert-True ($script:p4bCalls -eq 1 -and $script:p4bStarts -eq 1 -and $s.DiagCalls -eq 1 -and (& $top $s) -ceq 'diag' -and $s.Nav.Stack.Count -eq 2 -and $null -eq $s.Nav.Message) "uma chamada, a area aberta ($($script:p4bCalls))"
+            $ia = $script:p4bArgs.InventoryArgs
+            Assert-True (@($script:p4bArgs.Keys).Count -eq 1 -and $ia.ConfigDir -ceq $s.InventoryArgs.ConfigDir -and $ia['NoProgress'] -eq $false -and $ia['ProgressCallback'] -is [scriptblock] -and -not $s.InventoryArgs.ContainsKey('ProgressCallback')) 'argumentos da TUI: os InventoryArgs da sessao, com o callback; a sessao nao muda'
+            Assert-True ($script:p4bPct -eq 40 -and $s.DiagPercent -eq -1 -and -not $s.DiagBusy) "progresso: so a porcentagem ($($script:p4bPct))"
+            # The index is built once per result: navigation keeps the same object.
+            $ix0 = $s.Diag.Index
+            foreach ($k in @('Return', 'Escape')) { Assert-Eq (& $req $s $k) 'RENDER' "tecla $k na area" }
+            (Get-AtmGuiNavTop -Nav $s.Nav).Sel = 5
+            Assert-Eq (& $req $s 'Return') 'RENDER' 'Enter na categoria worktrees'
+            Assert-True ((& $top $s) -ceq 'dlist' -and [object]::ReferenceEquals($s.Diag.Index, $ix0)) 'o indice e o mesmo objeto depois da navegacao'
+            # D again, from the dashboard: the kept result, no call; U outside the area does nothing.
+            Assert-Eq (& $req $s 'D1') 'RENDER' '1: dashboard'
+            Assert-Eq (& $req $s 'U') 'NONE' 'U fora da area nao faz nada'
+            Assert-Eq (& $req $s 'D') 'CACHED' 'D com o resultado guardado'
+            Assert-True ($script:p4bCalls -eq 1 -and (& $top $s) -ceq 'diag') 'nenhuma chamada a mais; a area aberta'
+            # U inside the area (on a screen above it): a new call, back to the area's first row, a new index.
+            (Get-AtmGuiNavTop -Nav $s.Nav).Sel = 5
+            $null = & $req $s 'Return'
+            Assert-Eq (& $req $s 'U') 'OK' 'U dentro da area'
+            Assert-True ($script:p4bCalls -eq 2 -and (& $top $s) -ceq 'diag' -and $s.Nav.Stack.Count -eq 2 -and (Get-AtmGuiNavTop -Nav $s.Nav).Sel -eq 0 -and $s.Nav.Message -ceq (Get-AtmText 'tui.diag.refreshed') -and -not [object]::ReferenceEquals($s.Diag.Index, $ix0)) "U: nova chamada, de volta a area, outro indice ($($script:p4bCalls); $($s.Nav.Message))"
+            # F5 (an audit) keeps the result and the screen.
+            $kept = $s.Diag
+            $rr = Invoke-AtmGuiRefresh -Session $s
+            Invoke-AtmGuiNavRefreshed -Nav $s.Nav -Inventory $s.Inventory -PreviewDiscarded $false -Preview $s.Preview -Diag $s.Diag
+            Assert-True ($rr -ceq 'OK' -and [object]::ReferenceEquals($s.Diag, $kept) -and (& $top $s) -ceq 'diag' -and $script:p4bCalls -eq 2) 'F5 nao descarta o resultado nem muda a tela'
+            Assert-Eq (& $req $s 'D') 'CACHED' 'D depois do audit: o guardado'
+            # A request during the run is ignored, never queued.
+            $script:p4bProbe = $true
+            Assert-Eq (& $req $s 'U') 'OK' 'U com pedidos durante a chamada'
+            $script:p4bProbe = $false
+            Assert-Eq (@($script:p4bDuring) -join ',') 'IGNORED,IGNORED,IGNORED,IGNORED' 'durante o diagnose: outro diagnose, audit, preview e tecla ignorados'
+            Assert-Eq $script:p4bCalls 3 'uma chamada so'
+            # A close request during the run: the inventory phase stops at its callback, the result is discarded, and the
+            # earlier result stays as it was.
+            $kept = $s.Diag
+            $script:p4bCancel = $true
+            Assert-Eq (& $req $s 'U') 'CANCELLED' 'fechar durante o diagnose'
+            $script:p4bCancel = $false
+            Assert-True ($script:p4bCbThrew -and [object]::ReferenceEquals($s.Diag, $kept) -and -not $s.Diag.Stale -and $s.DiagCancelled -eq 1 -and -not $s.DiagBusy) 'o callback para a fase do inventario; o resultado anterior fica como estava'
+            # A failure with an earlier result: it stays, outdated, with the exception code only.
+            $script:p4bFail = $true
+            Assert-Eq (& $req $s 'U') 'FAILED' 'U que falha'
+            $code = ConvertTo-AtmExceptionCode 'IOException'
+            $vm = Get-AtmGuiScreen -Inventory $s.Inventory -Screen (Get-AtmGuiNavTop -Nav $s.Nav) -Diag $s.Diag
+            Assert-True ([object]::ReferenceEquals($s.Diag.View, $kept.View) -and $s.Diag.Stale -and $s.Diag.Error -ceq $code -and $s.Nav.Message -ceq (Get-AtmText 'tui.diag.failed' $code) -and @($vm.Pre) -ccontains (Get-AtmText 'tui.diag.stale' $code)) "falha com resultado anterior: fica, desatualizado, com o codigo ($($s.Diag.Error))"
+            $txt = (@($vm.Pre) + @([string]$s.Nav.Message, [string]$s.Diag.Error)) -join "`n"
+            Assert-True (-not $txt.Contains('SENTINEL')) 'nunca a mensagem da excecao nem a do progresso'
+            Assert-True ($script:p4bCalls -eq 5 -and $s.DiagFailures -eq 1) "nada repetido sozinho ($($script:p4bCalls))"
+            # A failure without an earlier result: the area is not entered; the next D tries again.
+            $s2 = Initialize-AtmGuiSession -ConfigDir $cfgDir
+            Assert-Eq (& $req $s2 'D') 'FAILED' 'D que falha sem resultado anterior'
+            Assert-True ($s2.Nav.Stack.Count -eq 1 -and $null -eq $s2.Diag.View -and $s2.Diag.Error -ceq $code -and $s2.Nav.Message -ceq (Get-AtmText 'tui.diag.failed' $code)) 'a area nao e aberta; so o codigo'
+            Assert-Eq (& $req $s2 'D') 'FAILED' 'o proximo D tenta de novo'
+            $script:p4bFail = $false
+            Assert-Eq (& $req $s2 'D') 'OK' 'e o seguinte, que funciona, abre a area'
+            Assert-True ($script:p4bCalls -eq 8 -and (& $top $s2) -ceq 'diag' -and -not $s2.Diag.Stale -and $null -eq $s2.Diag.Error) "cada chamada pedida ($($script:p4bCalls))"
+            # Nothing runs while an audit or the preview runs.
+            $s2.Busy = $true
+            Assert-True ((Invoke-AtmGuiDiagnose -Session $s2 -Refresh) -ceq 'IGNORED' -and (Invoke-AtmGuiNavKey -Nav $s2.Nav -Inventory $null -Key 'D' -Busy $true) -ceq 'IGNORED') 'durante um audit: nenhum diagnose'
+            $s2.Busy = $false; $s2.PreviewBusy = $true
+            Assert-Eq (Invoke-AtmGuiDiagnose -Session $s2 -Refresh) 'IGNORED' 'durante o preview: nenhum diagnose'
+            $s2.PreviewBusy = $false
+            Assert-Eq $script:p4bCalls 8 'nenhuma chamada a mais'
+        } finally { $script:AtmGuiInventorySource = $savedInv; $script:AtmGuiDiagnoseSource = $savedDiag; Set-AtmLanguage -Requested $old }
+        # The real-window child receives the result as CLIXML: the same export, so the same schema view.
+        $cx = Join-Path $sandbox 'gui-p4b-cache.clixml'
+        $tdRes | Export-Clixml -LiteralPath $cx -Depth 20
+        $back = Import-Clixml -LiteralPath $cx
+        Assert-True ((ConvertTo-AtmDiagnoseJson -Result $back) -ceq (ConvertTo-AtmDiagnoseJson -Result $tdRes)) 'reimportado por CLIXML: a mesma exportacao'
+    }
+    Test-Case 'GUI P4b' 'Privacidade (sem janela), nos dois idiomas: com a identidade (TEST\alice) e o nome da maquina (TESTHOST) dublados no resultado, nenhum dos dois aparece em nenhum texto de nenhuma tela da area (titulo, colunas, linhas, linhas acima da tabela, linhas das travas), nem num resultado desatualizado' {
+        $j = ConvertTo-AtmDiagnoseJson -Result $tdRes
+        Assert-True ($j.Contains('TESTHOST') -and $j.Contains('alice')) 'o resultado dublado tem os dois (o teste e significativo)'
+        $views = & $guiP4bViews
+        $leaks = New-Object System.Collections.Generic.List[string]
+        $n = 0
+        $old = Get-AtmLanguage
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                foreach ($name in @('parcial', 'quatro travas fechadas', 'parcial desatualizado')) {
+                    $d = New-AtmGuiDiagState -View $views[$name]
+                    if ($name -ceq 'parcial desatualizado') { $d.Stale = $true; $d.Error = 'EXCEPTION_IOEXCEPTION' }
+                    foreach ($scr in (& $guiP4bScreens $d)) {
+                        $vm = Get-AtmGuiScreen -Inventory $null -Screen $scr -Diag $d
+                        $all = New-Object System.Collections.Generic.List[string]
+                        foreach ($x in (@($vm.Title, $vm.Note, $vm.Notice, $vm.Empty) + @($vm.Columns) + @($vm.Pre) + @($vm.Lines) + @($vm.GateLines))) { $all.Add([string]$x) }
+                        foreach ($r in @($vm.Rows)) { foreach ($c in @($r)) { $all.Add([string]$c) } }
+                        foreach ($x in $all) { $n++; foreach ($w in @('alice', 'TESTHOST')) { if ($x.IndexOf($w, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $leaks.Add("$lang $name $($scr.Name): $x") } } }
+                    }
+                }
+            }
+        } finally { Set-AtmLanguage -Requested $old }
+        Assert-True ($leaks.Count -eq 0) ('identidade ou maquina na area: ' + ($leaks.ToArray() -join ' ; '))
+        Assert-True ($n -gt 500) "textos conferidos: $n"
+        $script:caseNote = "$n textos da area conferidos, nenhum com a identidade ou o nome da maquina"
+    }
+    Test-Case 'GUI P4b' 'Estatico (P4b): lista fechada com exatamente os 2 nomes novos (23) e ConvertFrom-Json como quarto cmdlet; Invoke-AtmDiagnose, ConvertTo-AtmDiagnoseJson e ConvertFrom-Json num unico lugar (Invoke-AtmGuiDiagnose); ConvertTo-AtmAgentResourcesJson, a leitura de uma tabela da TUI e ConvertFrom-Json fora do lugar plantados e recusados; costura do diagnose com uma unica atribuicao a $null; nenhum timer, caixa de texto editavel, closure, botao de cancelar, ConvertTo-Json, Out-* nem Export-*; as copias das tabelas da TUI e de Format-AtmTuiUtc iguais as da TUI; teclas D e U; chaves novas nos dois idiomas' {
+        Assert-True ($guiAllowedEngine.Count -eq 23 -and $guiAllowedEngine[21] -ceq 'Get-AtmCodeText' -and $guiAllowedEngine[22] -ceq 'ConvertTo-AtmExceptionCode') "lista: 23 nomes, os 2 da P4b no fim ($($guiAllowedEngine -join ','))"
+        Assert-Eq ($guiAllowedCmdlets -join ',') 'Write-Host,New-Object,Add-Type,ConvertFrom-Json' 'cmdlets: o quarto e ConvertFrom-Json'
+        $gp = Join-Path $srcDir 'lib\Gui.ps1'; $mp = Join-Path $srcDir 'lib\GuiModel.ps1'
+        $gt = [IO.File]::ReadAllText($gp); $mt = [IO.File]::ReadAllText($mp)
+        # The single places, by the parsed commands of both files.
+        $where = @{ 'Invoke-AtmDiagnose' = (New-Object System.Collections.Generic.List[string]); 'ConvertTo-AtmDiagnoseJson' = (New-Object System.Collections.Generic.List[string]); 'ConvertFrom-Json' = (New-Object System.Collections.Generic.List[string]) }
+        foreach ($f in @($gp, $mp)) {
+            $tok = $null; $perr = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($f, [ref]$tok, [ref]$perr)
+            foreach ($c in $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+                $cn = $c.GetCommandName()
+                if ($null -eq $cn -or -not $where.ContainsKey($cn)) { continue }
+                $up = $c.Parent; while ($null -ne $up -and -not ($up -is [System.Management.Automation.Language.FunctionDefinitionAst])) { $up = $up.Parent }
+                $where[$cn].Add($(if ($up) { $up.Name } else { '-' }))
+            }
+        }
+        foreach ($cn in @($where.Keys)) { Assert-True ($where[$cn].Count -eq 1 -and $where[$cn][0] -ceq 'Invoke-AtmGuiDiagnose') "$cn num unico lugar, Invoke-AtmGuiDiagnose ($($where[$cn].ToArray() -join ','))" }
+        # The planted calls, in a copy (the real files never change).
+        $pl = Join-Path $sandbox 'gui-planted-p4b'
+        [void][IO.Directory]::CreateDirectory($pl)
+        $gc = Join-Path $pl 'Gui.ps1'
+        [IO.File]::WriteAllText($gc, $gt, (New-Object Text.UTF8Encoding $false))
+        $mc = Join-Path $pl 'GuiModel.ps1'
+        foreach ($pp in @(@('ConvertTo-AtmAgentResourcesJson -Result $null', 'comando fora da lista fechada: ConvertTo-AtmAgentResourcesJson'), @('$script:AtmTuiDiagCatKinds.Keys', 'variavel da TUI: script:AtmTuiDiagCatKinds'), @("'{}' | ConvertFrom-Json", 'ConvertFrom-Json fora de Invoke-AtmGuiDiagnose'))) {
+            [IO.File]::WriteAllText($mc, $mt + "`r`nfunction Test-AtmPlanted { " + $pp[0] + " }`r`n", (New-Object Text.UTF8Encoding $false))
+            $pv = & $guiCheck @($gc, $mc)
+            Assert-True (@($pv | Where-Object { $_.Contains($pp[1]) }).Count -ge 1) "plantado $($pp[0]): recusado ($($pv -join ' | '))"
+        }
+        Assert-Eq ((& $guiCheck @($gp, $mp)) -join ' | ') '' 'arquivos reais dentro da lista fechada'
+        Assert-True ([regex]::Matches($gt, '\$script:AtmGuiDiagnoseSource\s*=').Count -eq 1 -and $gt -match '(?m)^\$script:AtmGuiDiagnoseSource = \$null\r?$') 'costura do diagnose: uma unica atribuicao, a $null'
+        foreach ($pair in @(@('Gui.ps1', $gt), @('GuiModel.ps1', $mt))) {
+            foreach ($w in @('Timer', 'TextBox', 'GetNewClosure', 'CancelButton')) { Assert-True ($pair[1].IndexOf($w, [StringComparison]::OrdinalIgnoreCase) -lt 0) "$($pair[0]) contem '$w'" }
+            Assert-True ($pair[1] -notmatch '(?i)\b(ConvertTo-Json|Out-\w+|Export-\w+)\b') "$($pair[0]): nenhum ConvertTo-Json, Out-* nem Export-*"
+        }
+        # The GUI's copies of the TUI's tables and of its time format, equal to the TUI's.
+        $eqTable = { param($A, $B)
+            $ka = @(@($A.Keys) | Sort-Object); $kb = @(@($B.Keys) | Sort-Object)
+            if (($ka -join ',') -cne ($kb -join ',')) { return $false }
+            foreach ($k in $ka) { if ((@($A[$k]) -join ',') -cne (@($B[$k]) -join ',')) { return $false } }
+            return $true }
+        Assert-True (& $eqTable (Get-AtmGuiDiagCatKinds) $script:AtmTuiDiagCatKinds) 'copia de AtmTuiDiagCatKinds igual a da TUI'
+        Assert-True (& $eqTable (Get-AtmGuiDiagCatCollectors) $script:AtmTuiDiagCatCollectors) 'copia de AtmTuiDiagCatCollectors igual a da TUI'
+        $marks = @{}; foreach ($k in @($script:AtmTuiDiagStrength.Keys)) { $marks[$k] = $script:AtmTuiDiagStrength[$k][0] }
+        Assert-True (& $eqTable (Get-AtmGuiDiagStrength) $marks) 'copia dos marcadores de AtmTuiDiagStrength igual a da TUI'
+        Assert-True ($script:AtmGuiDiagMaxEdges -eq 40 -and $script:AtmGuiDiagMaxEdges -eq $script:AtmTuiDiagMaxEdges) 'AtmGuiDiagMaxEdges igual a AtmTuiDiagMaxEdges (40)'
+        Assert-Eq (@(Get-AtmGuiDiagScreenNames) -join ',') ($script:AtmTuiDiagScreens -join ',') 'telas da area iguais as da TUI'
+        Assert-Eq (@(Get-AtmGuiDiagListNames) -join ',') (@($script:AtmTuiDiagScreens | Where-Object { $script:AtmTuiListScreens -ccontains $_ }) -join ',') 'telas que sao tabelas iguais as da TUI'
+        $strip = { param($Sb) (@(([string]$Sb) -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') }) -join "`n") }
+        Assert-Eq (& $strip ${function:Format-AtmGuiUtc}) (& $strip ${function:Format-AtmTuiUtc}) 'Format-AtmGuiUtc: o mesmo codigo de Format-AtmTuiUtc'
+        $samples = @($null, '', '2026-10-25T03:00:05Z', '2026-10-25T03:00:05.1234567Z', '2026-10-25T05:00:05+02:00', 'nao-e-data', (New-Object DateTime(2026, 10, 25, 3, 0, 5, [DateTimeKind]::Utc)), (New-Object DateTime(2026, 10, 25, 3, 0, 5, [DateTimeKind]::Local)), (New-Object DateTime(2026, 10, 25, 3, 0, 5, [DateTimeKind]::Unspecified)), 42)
+        foreach ($x in $samples) { Assert-Eq (Format-AtmGuiUtc $x) (Format-AtmTuiUtc $x) "Format-AtmGuiUtc igual a Format-AtmTuiUtc ($x)" }
+        # Keys, buttons and the close during the diagnose.
+        foreach ($w in @("`$kn -ceq 'D'", "`$kn -ceq 'U'", "elseif (`$guiSession.DiagBusy) { `$guiSession.DiagCancelRequested = `$true; `$guiSession.CloseAfterDiag = `$true; `$ev.Cancel = `$true }", "if (`$guiSession.CloseAfterDiag) { `$guiSession.CloseAfterDiag = `$false; `$guiForm.Close() }", "`$guiDiagRefresh.Tag = 'U'", "`$guiDiagRefresh.Enabled = `$false", "-Name 'DiagLines'", "-Name 'NavHintDiag'", "Get-AtmText 'tui.diag.running'")) { Assert-True ($gt.Contains($w)) "Gui.ps1: $w" }
+        $iD = @(Get-AtmGuiNavItemList | Where-Object { $_.Key -ceq 'D' })[0]
+        Assert-True ($iD.Screen.Name -ceq 'diag' -and $iD.Label -ceq (Get-AtmText 'menu.diagnose') -and $iD.Screen.Title -ceq (Get-AtmText 'tui.diag.title')) 'D: a area do diagnose, com o rotulo e o titulo da TUI'
+        foreach ($lang in @('en-US', 'pt-BR')) {
+            $cat = $script:AtmMessages[$lang]
+            foreach ($key in @('gui.navHintDiag', 'gui.diagRefresh', 'gui.diagProgress', 'gui.diagLinesName', 'gui.diag.disabled', 'gui.diag.gate.EXPORT_SECURITY_GATE_CLOSED', 'gui.diag.gate.GIT_EXECUTION_GATE_CLOSED', 'reason.WORKTREE_DIAGNOSTICS_GATE_CLOSED', 'reason.HANDLE_SECURITY_GATE_CLOSED', 'tui.diag.running', 'tui.diag.failed', 'tui.diag.stale', 'tui.diag.refreshed', 'menu.diagnose')) { Assert-True ($cat.ContainsKey($key) -and $cat[$key]) "${lang}: $key" }
+            Assert-True ($cat['gui.diagRefresh'].Contains('&U') -and $cat['gui.diag.disabled'].Contains('{0}') -and $cat['gui.diag.disabled'].Contains('{1}') -and $cat['gui.diag.disabled'].Contains('{2}') -and $cat['gui.diagProgress'].Contains('{1}')) "${lang}: tecla de acesso U, codigo, coletor e texto na linha da trava"
+            Assert-True ($cat['gui.diag.disabled'].StartsWith($(if ($lang -ceq 'pt-BR') { 'Desabilitado nesta vers' } else { 'Disabled in this version' }))) "${lang}: desabilitado nesta versao"
+        }
+    }
+    Test-Case 'GUI P4b' 'Janela real (Windows PowerShell; trava aberta, inventario e diagnose dublados so num processo filho): D, Enter no resumo, Esc, a categoria worktrees (com a linha de desabilitado), Enter, Esc, U (o diagnose chamado de novo), F5, D (nenhuma chamada nova) e fechar; titulo, uma linha conhecida, as linhas acima da tabela, U habilitado so na area e contagem de chamadas em cada passo; a identidade e o nome da maquina do resultado em nenhum controle; nenhum processo filho, timer ou arquivo deixado no sandbox, na configuracao ou no TEMP; nos dois idiomas; sem janela possivel: NAO_TESTADO' {
+        if ($PSVersionTable.PSEdition -ne 'Desktop') { $script:caseSkipped = $true; $script:caseNote = 'PowerShell 7: janela real NAO_TESTADO nesta fase (GUI-D7)'; return }
+        $inv = & $guiP3Multi
+        $cx = Join-Path $sandbox 'gui-p4b-window.clixml'
+        @{ Inv = $inv; Res = $tdRes } | Export-Clixml -LiteralPath $cx -Depth 20
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $child = Join-Path $sandbox 'gui-p4b-window-child.ps1'
+        [IO.File]::WriteAllText($child, @'
+param([string]$Src, [string]$Lang, [string]$Sandbox, [string]$Out, [string]$InvFile)
+$ErrorActionPreference = 'Stop'
+foreach ($lib in @('Engine.Audit.ps1', 'Engine.Clean.ps1', 'Engine.Isolate.ps1', 'Engine.Diagnose.ps1', 'Report.ps1', 'Tui.ps1', 'GuiModel.ps1', 'Gui.ps1')) { . (Join-Path $Src ('lib\' + $lib)) }
+Set-AtmLanguage -Requested $Lang
+$res = [ordered]@{ env = (Test-AtmGuiEnvironment) }
+if ($null -eq $res.env) {
+    $names = { param($p, [switch]$Top) $h = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase); foreach ($e in @(Get-ChildItem -LiteralPath $p -Recurse:(-not $Top) -Force -ErrorAction SilentlyContinue)) { [void]$h.Add($e.FullName) }; , $h }
+    $kids = { @(Get-CimInstance -ClassName Win32_Process -Filter ('ParentProcessId = {0}' -f $PID) | ForEach-Object { [int]$_.ProcessId }) }
+    $temp = [IO.Path]::GetTempPath()
+    $b1 = & $names $Sandbox; $b2 = & $names (Join-Path $Src 'config'); $b3 = & $names $temp -Top
+    $k1 = & $kids
+    $data = Import-Clixml -LiteralPath $InvFile
+    $script:guiInv = $data.Inv
+    $script:guiRes = $data.Res
+    $script:AtmGuiEnabled = $true
+    # An exception in an event handler ends the child with its message, instead of a modal error dialog.
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.Application]::SetUnhandledExceptionMode([System.Windows.Forms.UnhandledExceptionMode]::ThrowException)
+    $script:guiInvCalls = 0; $script:guiDiagCalls = 0
+    $script:AtmGuiInventorySource = { param($a) $script:guiInvCalls++; & $a.ProgressCallback 50 'C:\SENTINEL-PROGRESS\base'; $script:guiInv }
+    # The window turns any exception of the source into a failed diagnose, so the source records its own here.
+    $script:guiDiagError = $null
+    $script:AtmGuiDiagnoseSource = { param($a) $script:guiDiagCalls++
+        try { & $a.InventoryArgs.ProgressCallback 50 'C:\SENTINEL-PROGRESS\base' } catch { $script:guiDiagError = $_.Exception.GetType().Name + ': ' + $_.Exception.Message }
+        $script:guiRes }
+    $script:guiSnaps = New-Object System.Collections.Generic.List[object]
+    $script:guiError = $null; $script:guiForm = $null
+    $hook = { param($f)
+        $script:guiForm = $f
+        $m = [System.Windows.Forms.Form].GetMethod('OnKeyDown', [Reflection.BindingFlags]'NonPublic, Instance')
+        $first = { param($lv) if ($lv.Items.Count -eq 0) { '' } else { $it = $lv.Items[0]; (@($it.Text) + @(for ($i = 1; $i -lt $it.SubItems.Count; $i++) { $it.SubItems[$i].Text })) -join "`t" } }
+        # Every text the window shows: the controls, the list's columns and cells.
+        $texts = { param($c0)
+            $t = New-Object System.Collections.Generic.List[string]
+            $todo = New-Object System.Collections.Generic.Stack[object]
+            $todo.Push($c0)
+            while ($todo.Count -gt 0) {
+                $x = $todo.Pop()
+                $t.Add([string]$x.Text)
+                if ($x -is [System.Windows.Forms.ListView]) { foreach ($col in $x.Columns) { $t.Add([string]$col.Text) }; foreach ($it in $x.Items) { foreach ($si in $it.SubItems) { $t.Add([string]$si.Text) } } }
+                foreach ($ch in $x.Controls) { $todo.Push($ch) }
+            }
+            ($t.ToArray() -join "`n") }
+        $snap = { param([string]$Step)
+            $rows = $f.Controls.Find('Rows', $true)[0]; $sum = $f.Controls.Find('Summary', $true)[0]; $dl = $f.Controls.Find('DiagLines', $true)[0]
+            $all = & $texts $f
+            [ordered]@{ step = $Step; title = [string]$f.Controls.Find('ScreenTitle', $true)[0].Text; identity = [string]$f.Controls.Find('IdentityLine', $true)[0].Text
+                rowsVisible = [bool]$rows.Visible; first = $(if ($rows.Visible) { & $first $rows } else { & $first $sum })
+                sel = $(if ($rows.Visible -and $rows.SelectedIndices.Count -gt 0) { [int]$rows.SelectedIndices[0] } else { -1 })
+                diagLinesVisible = [bool]$dl.Visible; diagLines = [string]$dl.Text; uEnabled = [bool]$f.Controls.Find('DiagRefresh', $true)[0].Enabled
+                message = [string]$f.Controls.Find('Message', $true)[0].Text; invCalls = $script:guiInvCalls; diagCalls = $script:guiDiagCalls
+                leak = ($all.IndexOf('alice', [StringComparison]::OrdinalIgnoreCase) -ge 0 -or $all.IndexOf('TESTHOST', [StringComparison]::OrdinalIgnoreCase) -ge 0 -or $all.IndexOf('SENTINEL', [StringComparison]::OrdinalIgnoreCase) -ge 0) } }
+        foreach ($st in @('start', 'D', 'Return', 'Escape', 'Row5', 'Return', 'Escape', 'U', 'F5', 'D')) {
+            try {
+                if ($st -ceq 'Row5') { $f.Controls.Find('Rows', $true)[0].Items[5].Selected = $true }
+                elseif ($st -cne 'start') { $ka = [System.Windows.Forms.KeyEventArgs]::new([System.Windows.Forms.Keys]$st); $null = $m.Invoke($f, [object[]]@($ka)) }
+                $script:guiSnaps.Add((& $snap $st))
+            } catch { $script:guiError = $st + ': ' + $_.Exception.Message; break }
+        }
+        $f.Close()
+    }
+    $id = { [pscustomobject]@{ Name = 'TEST\gui'; Sid = 'S-1-5-21-1-2-3-9301'; IsAdmin = $false; ElevationTypeRaw = 3; IntegrityRid = 8192; SessionId = 1 } }
+    $o = @(Invoke-AtmGuiCommand -IdentitySource $id -OnShown $hook 6>&1)
+    $res.code = @($o | Where-Object { $_ -is [int] })[-1]
+    # ToArray, not @(): on Windows PowerShell 5.1 the array subexpression over this generic list throws.
+    $res.snaps = $script:guiSnaps.ToArray()
+    $res.error = $script:guiError
+    $res.diagError = $script:guiDiagError
+    $res.disposed = ($null -ne $script:guiForm -and [bool]$script:guiForm.IsDisposed)
+    $k2 = & $kids
+    $res.newProcesses = @($k2 | Where-Object { $k1 -notcontains $_ }).Count
+    $a1 = & $names $Sandbox; $a2 = & $names (Join-Path $Src 'config'); $a3 = & $names $temp -Top
+    $res.newSandbox = @($a1 | Where-Object { -not $b1.Contains($_) }).Count
+    $res.newConfig = @($a2 | Where-Object { -not $b2.Contains($_) }).Count
+    $res.newTemp = @($a3 | Where-Object { -not $b3.Contains($_) }).Count
+}
+($res | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $Out -Encoding UTF8
+'@, (New-Object Text.UTF8Encoding $true))
+        foreach ($lang in @('en-US', 'pt-BR')) {
+            $out = Join-Path $sandbox ('gui-p4b-window-' + $lang + '.json')
+            $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Lang $lang -Sandbox `"$sandbox`" -Out `"$out`" -InvFile `"$cx`"") -TimeoutSec 180
+            Assert-True ($r.Exit -eq 0 -and (Test-Path -LiteralPath $out -PathType Leaf)) "janela P4b ${lang}: processo filho saida $($r.Exit) $($r.Text)"
+            $j = Get-Content -LiteralPath $out -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($null -ne $j.env) { $script:caseSkipped = $true; $script:caseNote = "runner sem janela possivel ($($j.env)): NAO_TESTADO"; return }
+            Assert-True ($null -eq $j.error -and [int]$j.code -eq 0) "janela P4b ${lang}: sem erro em nenhum passo, saida 0 ($($j.error); $($j.code))"
+            Assert-True ($null -eq $j.diagError) "janela P4b ${lang}: a fonte do diagnose nao falhou ($($j.diagError))"
+            $snaps = @($j.snaps)
+            Assert-Eq (@($snaps | ForEach-Object { $_.step }) -join ',') 'start,D,Return,Escape,Row5,Return,Escape,U,F5,D' "janela P4b ${lang}: todos os passos"
+            # The expected screens, computed over the same inventory and result in this process and language.
+            $old = Get-AtmLanguage
+            try {
+                Set-AtmLanguage -Requested $lang
+                $d = New-AtmGuiDiagState -View (& $guiP4bView $tdRes)
+                $cats = @(Get-AtmGuiDiagCategoryList -Diag $d)
+                $dvm = Get-AtmGuiScreen -Inventory $inv -Screen @{ Name = 'diag'; Title = (Get-AtmText 'tui.diag.title'); Filter = $null } -Diag $d
+                $sumS = @{} + $cats[0].Push; $sumS['Filter'] = $null
+                $svm = Get-AtmGuiScreen -Inventory $inv -Screen $sumS -Diag $d
+                $wvm = Get-AtmGuiScreen -Inventory $inv -Screen (@{} + $cats[5].Push) -Diag $d
+                $dash = Get-AtmGuiDashboard -Inventory $inv
+                $t = { param([string]$x) Get-AtmText 'gui.screenTitle' $x }
+                $nl = [Environment]::NewLine
+                $dLine = [string]$dash.Groups[0].Title + "`t" + [string]$dash.Groups[0].Items[0].Text
+                $aT = & $t (Get-AtmText 'tui.diag.title'); $aLine = (@($dvm.Rows)[0] -join "`t"); $aPre = (@($dvm.Pre) -join $nl)
+                $wPre = ((@($wvm.Pre) + @([string]$wvm.Empty)) -join $nl)
+                $gateWt = @(@($d.Gates) | Where-Object { $_.Cat -ceq 'worktrees' } | ForEach-Object { $_.Line })
+                # step, title, rows visible, known line, lines above shown, their text, U enabled, audits, diagnoses
+                $want = @(
+                    @('start', (& $t (Get-AtmText 'menu.dashboard')), $false, $dLine, $false, '', $false, 1, 0),
+                    @('D', $aT, $true, $aLine, $true, $aPre, $true, 1, 1),
+                    @('Return', (& $t $sumS.Title), $true, [string]@($svm.Lines)[0], $false, '', $true, 1, 1),
+                    @('Escape', $aT, $true, $aLine, $true, $aPre, $true, 1, 1),
+                    @('Row5', $aT, $true, $aLine, $true, $aPre, $true, 1, 1),
+                    @('Return', (& $t $cats[5].Push.Title), $true, '', $true, $wPre, $true, 1, 1),
+                    @('Escape', $aT, $true, $aLine, $true, $aPre, $true, 1, 1),
+                    @('U', $aT, $true, $aLine, $true, $aPre, $true, 1, 2),
+                    @('F5', $aT, $true, $aLine, $true, $aPre, $true, 2, 2),
+                    @('D', $aT, $true, $aLine, $true, $aPre, $true, 2, 2)
+                )
+                $idLine = Get-AtmText 'gui.identity' 'TEST\gui'
+                $refreshed = Get-AtmText 'tui.diag.refreshed'
+            } finally { Set-AtmLanguage -Requested $old }
+            Assert-True ($gateWt.Count -ge 1 -and @($gateWt | Where-Object { $wPre.Contains($_) }).Count -eq $gateWt.Count) "janela P4b ${lang}: a linha de desabilitado nas linhas de worktrees"
+            for ($i = 0; $i -lt $want.Count; $i++) {
+                $s = $snaps[$i]; $w = $want[$i]
+                Assert-True ([string]$s.title -ceq $w[1] -and [bool]$s.rowsVisible -eq $w[2]) "janela P4b ${lang} passo $i ($($w[0])): titulo '$($s.title)' (esperado '$($w[1])'), lista $($s.rowsVisible)"
+                Assert-Eq ([string]$s.first) $w[3] "janela P4b ${lang} passo $i ($($w[0])): linha conhecida"
+                Assert-True ([bool]$s.diagLinesVisible -eq $w[4] -and (-not $w[4] -or [string]$s.diagLines -ceq $w[5])) "janela P4b ${lang} passo $i ($($w[0])): linhas acima da tabela $($s.diagLinesVisible) '$($s.diagLines)'"
+                Assert-True ([bool]$s.uEnabled -eq $w[6]) "janela P4b ${lang} passo $i ($($w[0])): U habilitado $($s.uEnabled)"
+                Assert-True ([int]$s.invCalls -eq $w[7] -and [int]$s.diagCalls -eq $w[8]) "janela P4b ${lang} passo $i ($($w[0])): audits $($s.invCalls) (esperado $($w[7])), diagnoses $($s.diagCalls) (esperado $($w[8]))"
+                Assert-True ([string]$s.identity -ceq $idLine -and -not [bool]$s.leak) "janela P4b ${lang} passo ${i}: cabecalho com a identidade da janela, nada do resultado nem do progresso ($($s.identity))"
+            }
+            Assert-True ([int]$snaps[4].sel -eq 5 -and [string]$snaps[7].message -ceq $refreshed) "janela P4b ${lang}: a linha 5 escolhida ($($snaps[4].sel)); U diz que o resultado e novo ($($snaps[7].message))"
+            Assert-True ([bool]$j.disposed) "janela P4b ${lang}: formulario liberado"
+            Assert-True ([int]$j.newProcesses -eq 0 -and [int]$j.newSandbox -eq 0 -and [int]$j.newConfig -eq 0 -and [int]$j.newTemp -eq 0) "janela P4b ${lang}: nada deixado (processos $($j.newProcesses), sandbox $($j.newSandbox), configuracao $($j.newConfig), TEMP $($j.newTemp))"
+        }
+        $script:caseNote = 'janela real em en-US e pt-BR: D, Enter no resumo, Esc, worktrees com a linha de desabilitado, Esc, U chamado de novo, F5, D sem chamada nova'
     }
 
     # ------------------------------------------------------------------ scale

@@ -17,6 +17,9 @@
 # Phase P4a: the preview screens (P every category, 8 the blocked paths) and the Preview line of a detail opened from
 # them. The clean engine computes the preview once, when P or 8 is first opened after an audit; the session keeps it
 # until the next audit. It is an evaluation only: no category is a button, and nothing is cleaned or isolated.
+# Phase P4b: the diagnose area (D), the TUI's screens over the schema view of one diagnose result. The diagnose runs
+# only on request: D runs it when the session has no result yet, U (inside the area) runs it again; an audit keeps it.
+# The features behind the V0.2 gates are shown as disabled in this version; nothing is exported or acted on.
 
 # Release gate of the desktop GUI (D-A). Closed in every distributed copy: `agent-temp gui` opens no window and loads no
 # WinForms assembly. Tests open it only in their own process memory.
@@ -30,12 +33,14 @@ $script:AtmGuiExitEnvironment = 8
 # returns whether an interactive desktop is available. Assembly loader: loads the assemblies or throws. Inventory
 # source: called with the inventory arguments (a hashtable that carries the ProgressCallback); returns an inventory or
 # throws. Preview source (P4a): called with the session's inventory and inventory arguments; returns the preview rows or
-# throws.
+# throws. Diagnose source (P4b): called with the diagnose arguments (InventoryArgs, which carries the ProgressCallback);
+# returns a diagnose result or throws.
 $script:AtmGuiApartmentSource = $null
 $script:AtmGuiDesktopSource = $null
 $script:AtmGuiAssemblyLoader = $null
 $script:AtmGuiInventorySource = $null
 $script:AtmGuiPreviewSource = $null
+$script:AtmGuiDiagnoseSource = $null
 
 function Test-AtmGuiEnvironment {
     # $null when a window can be shown here, otherwise the reason code. Loads nothing and changes nothing.
@@ -80,6 +85,67 @@ function Initialize-AtmGuiSession {
         # P4a: the preview rows of the current audit ($null: not computed), the exception type of a failed preview, and
         # a close requested while the preview runs.
         Preview = $null; PreviewFailureType = $null; PreviewBusy = $false; CloseAfterPreview = $false; PreviewCalls = 0; PreviewFailures = 0
+        # P4b: the diagnose result (New-AtmGuiDiagState; an audit keeps it), a run in progress, a close requested during
+        # it, the counters and the percentage of its inventory phase.
+        Diag = $null; DiagBusy = $false; DiagCancelRequested = $false; CloseAfterDiag = $false; DiagCalls = 0; DiagFailures = 0; DiagCancelled = 0; DiagPercent = -1
+    }
+}
+
+function Invoke-AtmGuiDiagnose {
+    # The only place the GUI runs the diagnose, on request (D when the session has no result, U inside the area), on the
+    # calling (UI) thread, with the TUI's arguments: the session's inventory arguments. -Pump is called at each progress
+    # callback of the inventory phase (the form shows the percentage and a fixed text, never the engine's message, and
+    # handles its messages there). -OnStart runs just before the call, only when the call happens. -Refresh: U. Returns:
+    #  OK         the new result replaces the earlier one (its index is built once, here);
+    #  CACHED     D with a result kept: no call;
+    #  IGNORED    an audit, the preview or the diagnose runs: no call (a request is dropped, never queued);
+    #  CANCELLED  a close request: the inventory phase stops at its next callback, the collectors end within their own
+    #             deadlines, and the result is discarded; the earlier result stays as it was;
+    #  FAILED     only the exception code of the type is kept (never its message): an earlier result stays, marked
+    #             outdated; without one, there is no result. Nothing retries by itself.
+    param([hashtable]$Session, [scriptblock]$Pump, [scriptblock]$OnStart, [switch]$Refresh)
+    if ($Session.Busy -or $Session.PreviewBusy -or $Session.DiagBusy) { return 'IGNORED' }
+    if (-not $Refresh -and $null -ne $Session.Diag -and $null -ne $Session.Diag.View) { return 'CACHED' }
+    $Session.DiagBusy = $true
+    $Session.DiagCancelRequested = $false
+    $Session.DiagPercent = 0
+    # Read by the callback through dynamic scoping (gui-prefixed names; no closure, which could not see the functions).
+    $guiDiagSession = $Session
+    $guiDiagPump = $Pump
+    $cb = {
+        param($pct, $msg)
+        # The engine's progress message names temporary bases: never shown.
+        $null = $msg
+        if ($guiDiagSession.DiagCancelRequested) { throw 'ATM_GUI_DIAGNOSE_CANCELLED' }
+        $guiDiagSession.DiagPercent = [int]$pct
+        if ($null -ne $guiDiagPump) { & $guiDiagPump }
+        if ($guiDiagSession.DiagCancelRequested) { throw 'ATM_GUI_DIAGNOSE_CANCELLED' }
+    }
+    try {
+        if ($null -ne $OnStart) { & $OnStart }
+        $ia = @{} + $Session.InventoryArgs
+        $ia['NoProgress'] = $false
+        $ia['ProgressCallback'] = $cb
+        $a = @{ InventoryArgs = $ia }
+        $Session.DiagCalls++
+        $res = $null
+        if ($null -ne $script:AtmGuiDiagnoseSource) { $res = & $script:AtmGuiDiagnoseSource $a } else { $res = Invoke-AtmDiagnose @a }
+        # The engine records a failed inventory phase in its coverage and goes on: a cancel is known by the flag.
+        if ($Session.DiagCancelRequested) { $Session.DiagCancelled++; return 'CANCELLED' }
+        # The schema view: what the export may show, parsed back in memory (the TUI's path; nothing is written).
+        $view = (ConvertTo-AtmDiagnoseJson -Result $res) | ConvertFrom-Json
+        $Session.Diag = New-AtmGuiDiagState -View $view
+        return 'OK'
+    } catch {
+        if ($Session.DiagCancelRequested) { $Session.DiagCancelled++; return 'CANCELLED' }
+        $code = ConvertTo-AtmExceptionCode $_.Exception.GetType().Name
+        if ($null -ne $Session.Diag -and $null -ne $Session.Diag.View) { $Session.Diag.Stale = $true; $Session.Diag.Error = $code }
+        else { $Session.Diag = @{ View = $null; Index = $null; Gates = @(); Stale = $false; Error = $code } }
+        $Session.DiagFailures++
+        return 'FAILED'
+    } finally {
+        $Session.DiagBusy = $false
+        $Session.DiagPercent = -1
     }
 }
 
@@ -94,7 +160,7 @@ function Invoke-AtmGuiPreview {
     #  IGNORED   an audit or a preview runs: no call;
     #  FAILED    nothing is kept but the exception type (never its message); the next opening tries again.
     param([hashtable]$Session, [scriptblock]$OnStart)
-    if ($Session.Busy -or $Session.PreviewBusy) { return 'IGNORED' }
+    if ($Session.Busy -or $Session.PreviewBusy -or $Session.DiagBusy) { return 'IGNORED' }
     if ($null -eq $Session.Inventory) { return 'NO_AUDIT' }
     if ($null -ne $Session.Preview) { return 'CACHED' }
     $Session.PreviewBusy = $true
@@ -123,7 +189,7 @@ function Invoke-AtmGuiRefresh {
     #  CANCELLED  a close request, honoured at the next callback; the earlier result stays;
     #  FAILED     the earlier result stays, and only the exception type is kept (never its message).
     param([hashtable]$Session, [scriptblock]$Pump)
-    if ($Session.Busy -or $Session.PreviewBusy) { $Session.Ignored++; return 'IGNORED' }
+    if ($Session.Busy -or $Session.PreviewBusy -or $Session.DiagBusy) { $Session.Ignored++; return 'IGNORED' }
     $Session.Busy = $true
     $Session.CancelRequested = $false
     $Session.Percent = 0
@@ -241,8 +307,18 @@ function Show-AtmGuiScreen {
     param($Form, [hashtable]$Session)
     $nav = $Session.Nav
     $top = Get-AtmGuiNavTop -Nav $nav
-    $vm = Get-AtmGuiScreen -Inventory $Session.Inventory -Screen $top -Preview $Session.Preview -PreviewFailure $Session.PreviewFailureType
+    $vm = Get-AtmGuiScreen -Inventory $Session.Inventory -Screen $top -Preview $Session.Preview -PreviewFailure $Session.PreviewFailureType -Diag $Session.Diag
     $isDash = ($vm.Kind -ceq 'dashboard')
+    # P4b: the lines the TUI draws above a diagnose table (last run, outdated, the no-authorization line, the legend, the
+    # coverage note, the lines of the V0.2 gates) and the text of an empty one; U only inside the area.
+    $diagText = New-Object System.Collections.Generic.List[string]
+    foreach ($ln in @($vm.Pre)) { $diagText.Add([string]$ln) }
+    if ($vm.Empty) { $diagText.Add([string]$vm.Empty) }
+    $diagLines = $Form.Controls.Find('DiagLines', $true)[0]
+    $diagLines.Visible = ($diagText.Count -gt 0)
+    $diagLines.Text = ($diagText.ToArray() -join [Environment]::NewLine)
+    $diagLines.AccessibleName = $(if ($diagText.Count -gt 0) { $diagLines.Text } else { Get-AtmText 'gui.diagLinesName' })
+    $Form.Controls.Find('DiagRefresh', $true)[0].Enabled = (@(Get-AtmGuiDiagScreenNames) -ccontains [string]$top.Name)
     foreach ($n in @('Summary', 'ClassesTitle', 'Classes', 'OrphanInfo', 'AuditTime')) { $Form.Controls.Find($n, $true)[0].Visible = $isDash }
     $title = $Form.Controls.Find('ScreenTitle', $true)[0]
     $title.Text = Get-AtmText 'gui.screenTitle' $vm.Title
@@ -345,6 +421,7 @@ function Start-AtmGui {
         # the message of the last move.
         $layout.Controls.Add((New-AtmGuiLabel -Text (Get-AtmText 'gui.navHint') -TabIndex ($tab++) -Name 'NavHint'))
         $layout.Controls.Add((New-AtmGuiLabel -Text (Get-AtmText 'gui.navHintPreview') -TabIndex ($tab++) -Name 'NavHintPreview'))
+        $layout.Controls.Add((New-AtmGuiLabel -Text (Get-AtmText 'gui.navHintDiag') -TabIndex ($tab++) -Name 'NavHintDiag'))
         $guiScreens = New-Object -TypeName System.Windows.Forms.FlowLayoutPanel
         $guiScreens.Name = 'Screens'
         $guiScreens.AccessibleName = Get-AtmText 'gui.screensName'
@@ -365,6 +442,17 @@ function Start-AtmGui {
             $b.add_Click({ param($src, $ev) $null = $ev; & $guiNavKey ([string]$src.Tag) })
             $guiScreens.Controls.Add($b)
         }
+        # P4b: U, a new diagnose, enabled only inside the area (Show-AtmGuiScreen sets it).
+        $guiDiagRefresh = New-Object -TypeName System.Windows.Forms.Button
+        $guiDiagRefresh.Name = 'DiagRefresh'
+        $guiDiagRefresh.Text = Get-AtmText 'gui.diagRefresh'
+        $guiDiagRefresh.AccessibleName = ($guiDiagRefresh.Text -replace '&', '')
+        $guiDiagRefresh.Tag = 'U'
+        $guiDiagRefresh.AutoSize = $true
+        $guiDiagRefresh.TabIndex = ($btab++)
+        $guiDiagRefresh.Enabled = $false
+        $guiDiagRefresh.add_Click({ param($src, $ev) $null = $ev; & $guiNavKey ([string]$src.Tag) })
+        $guiScreens.Controls.Add($guiDiagRefresh)
         $layout.Controls.Add($guiScreens)
         $layout.Controls.Add((New-AtmGuiLabel -Text '' -TabIndex ($tab++) -Name 'ScreenTitle'))
         $guiMessage = New-AtmGuiLabel -Text '' -TabIndex ($tab++) -Name 'Message'
@@ -374,6 +462,11 @@ function Start-AtmGui {
         $guiNotice = New-AtmGuiLabel -Text (Get-AtmText 'gui.previewNotice') -TabIndex ($tab++) -Name 'PreviewNotice'
         $guiNotice.Visible = $false
         $layout.Controls.Add($guiNotice)
+        # P4b: the lines above a diagnose table, shown only there.
+        $guiDiagLines = New-AtmGuiLabel -Text '' -TabIndex ($tab++) -Name 'DiagLines'
+        $guiDiagLines.AccessibleName = Get-AtmText 'gui.diagLinesName'
+        $guiDiagLines.Visible = $false
+        $layout.Controls.Add($guiDiagLines)
         $layout.Controls.Add((New-AtmGuiListView -Name 'Summary' -AccessibleName (Get-AtmText 'gui.summaryName') -Columns @(@((Get-AtmText 'gui.col.group'), 200), @((Get-AtmText 'gui.col.measure'), 340)) -Width 560 -Height 250 -TabIndex ($tab++)))
         $layout.Controls.Add((New-AtmGuiLabel -Text (Get-AtmText 'dash.classes') -TabIndex ($tab++) -Name 'ClassesTitle'))
         $layout.Controls.Add((New-AtmGuiListView -Name 'Classes' -AccessibleName (Get-AtmText 'gui.classesName') -Columns @(@((Get-AtmText 'gui.col.class'), 220), @((Get-AtmText 'gui.col.roots'), 120), @((Get-AtmText 'gui.col.mb'), 160)) -Width 560 -Height 120 -TabIndex ($tab++)))
@@ -417,7 +510,7 @@ function Start-AtmGui {
         $guiDoRefresh = {
             # A request while an audit runs is dropped (counted), never queued: F5 reaches the form even with the button
             # disabled.
-            if ($guiSession.Busy -or $guiSession.PreviewBusy) { $null = Invoke-AtmGuiRefresh -Session $guiSession; return }
+            if ($guiSession.Busy -or $guiSession.PreviewBusy -or $guiSession.DiagBusy) { $null = Invoke-AtmGuiRefresh -Session $guiSession; return }
             $guiRefresh.Enabled = $false
             $guiScreens.Enabled = $false
             $guiProgress.Text = Get-AtmText 'gui.progress' 0
@@ -430,7 +523,8 @@ function Start-AtmGui {
                 $guiScreens.Enabled = $true
                 # P3: the current screen is computed again over the new result (a detail whose root is gone goes back).
                 # P4a: a successful audit discards a kept (or failed) preview; its screens go back to the dashboard.
-                Invoke-AtmGuiNavRefreshed -Nav $guiSession.Nav -Inventory $guiSession.Inventory -PreviewDiscarded ($rr -ceq 'OK' -and $hadPreview) -Preview $guiSession.Preview
+                # P4b: an audit keeps the diagnose result; its screens stay.
+                Invoke-AtmGuiNavRefreshed -Nav $guiSession.Nav -Inventory $guiSession.Inventory -PreviewDiscarded ($rr -ceq 'OK' -and $hadPreview) -Preview $guiSession.Preview -Diag $guiSession.Diag
                 $guiSummary.State = (Show-AtmGuiView -Form $guiForm -Session $guiSession).Code
             }
             # A close requested during the audit: the audit is cancelled, then the window closes.
@@ -445,9 +539,38 @@ function Start-AtmGui {
             $guiProgress.Text = Get-AtmText 'tui.computingPreview'
             $guiForm.Refresh()
         }
+        # P4b: while the diagnose runs, the screens, U and Refresh are disabled; the progress label shows a fixed text and
+        # the percentage of the inventory phase.
+        $guiDiagStart = {
+            $guiRefresh.Enabled = $false
+            $guiScreens.Enabled = $false
+            $guiProgress.Text = Get-AtmText 'tui.diag.running'
+            $guiForm.Refresh()
+        }
+        $guiDiagProgress = {
+            $guiProgress.Text = Get-AtmText 'gui.diagProgress' (Get-AtmText 'tui.diag.running') $guiSession.DiagPercent
+            [System.Windows.Forms.Application]::DoEvents()
+        }
         $guiNavKey = {
             param([string]$Key)
-            $r = Invoke-AtmGuiNavKey -Nav $guiSession.Nav -Inventory $guiSession.Inventory -Key $Key -Busy ([bool]$guiSession.Busy -or [bool]$guiSession.PreviewBusy) -Preview $guiSession.Preview
+            $r = Invoke-AtmGuiNavKey -Nav $guiSession.Nav -Inventory $guiSession.Inventory -Key $Key -Busy ([bool]$guiSession.Busy -or [bool]$guiSession.PreviewBusy -or [bool]$guiSession.DiagBusy) -Preview $guiSession.Preview -Diag $guiSession.Diag
+            if ($r -ceq 'DIAG_OPEN' -or $r -ceq 'DIAG_REFRESH') {
+                # D or U: the session's function decides whether the diagnose runs (D: only without a result).
+                $isU = ($r -ceq 'DIAG_REFRESH')
+                $dr = $null
+                try { $dr = Invoke-AtmGuiDiagnose -Session $guiSession -Pump $guiDiagProgress -OnStart $guiDiagStart -Refresh:$isU }
+                finally {
+                    $guiProgress.Text = ''
+                    $guiRefresh.Enabled = $true
+                    $guiScreens.Enabled = $true
+                }
+                if ($dr -cne 'CANCELLED') { Invoke-AtmGuiNavDiag -Nav $guiSession.Nav -Diag $guiSession.Diag -Result $dr -Refresh:$isU }
+                $null = Show-AtmGuiScreen -Form $guiForm -Session $guiSession
+                if ($guiRows.Visible) { $null = $guiRows.Focus() }
+                # A close requested while the diagnose ran: its result was discarded; the window closes now.
+                if ($guiSession.CloseAfterDiag) { $guiSession.CloseAfterDiag = $false; $guiForm.Close() }
+                return
+            }
             if ($r -ceq 'CLOSE') { $guiForm.Close() }
             elseif ($r -ceq 'RENDER') {
                 # P4a: opening P or 8 asks for the preview; the session's function decides whether the engine is called
@@ -477,7 +600,7 @@ function Start-AtmGui {
                 if ($ev.Alt -or $ev.Control) { return }
                 $kn = [string]$ev.KeyCode
                 # Keys.Return and Keys.Enter are one value; its name can be either.
-                if ($kn -cmatch '^(D|NumPad)[1-9]$' -or $kn -ceq 'P' -or $kn -ceq 'Return' -or $kn -ceq 'Enter' -or $kn -ceq 'Escape') {
+                if ($kn -cmatch '^(D|NumPad)[1-9]$' -or $kn -ceq 'P' -or $kn -ceq 'D' -or $kn -ceq 'U' -or $kn -ceq 'Return' -or $kn -ceq 'Enter' -or $kn -ceq 'Escape') {
                     $ev.Handled = $true
                     $ev.SuppressKeyPress = $true
                     & $guiNavKey $kn
@@ -487,6 +610,8 @@ function Start-AtmGui {
                 param($src, $ev)
                 $null = $src
                 if ($guiSession.Busy) { $guiSession.CancelRequested = $true; $guiSession.CloseAfterRefresh = $true; $ev.Cancel = $true }
+                # P4b: the diagnose stops its inventory phase at the next callback; the window closes when the call ends.
+                elseif ($guiSession.DiagBusy) { $guiSession.DiagCancelRequested = $true; $guiSession.CloseAfterDiag = $true; $ev.Cancel = $true }
                 # P4a: the preview cannot be cancelled inside its call; the window closes when it ends.
                 elseif ($guiSession.PreviewBusy) { $guiSession.CloseAfterPreview = $true; $ev.Cancel = $true }
             })

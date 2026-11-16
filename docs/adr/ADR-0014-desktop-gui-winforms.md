@@ -3,8 +3,8 @@
 Status: ACCEPTED for the technology and the architecture (maintainer decisions D-B and D-A, 2026-11-16).
 GUI-D1 to GUI-D6 are ACCEPTED (decided by the maintainer as recommended, 2026-11-16); GUI-D7 to GUI-D11 are ACCEPTED
 (technical decisions accepted by the auditor as recommended, 2026-11-16). Implemented, with the gate closed in every
-copy: P1 (the skeleton), P2 (the dashboard), P3 (the drill-down) and P4a (the preview). P4b to P6 are not
-implemented.
+copy: P1 (the skeleton), P2 (the dashboard), P3 (the drill-down), P4a (the preview) and P4b (the diagnose area). P5
+and P6 are not implemented.
 Date: 2026-11-16
 Phase: V0.2.1, phases P1 to P6 (section 10)
 
@@ -485,3 +485,58 @@ diagnose area. P4b is not implemented. What P4a implements, with the gate closed
   one place only. The planted violations gain a call to `Test-AtmCandidate`, an engine helper outside the list.
 * **Catalog:** new `gui.*` keys only, in en-US and pt-BR: the navigation hint, the notice, the failure, the discarded
   result and the note before the preview is computed.
+
+## Implementation record: P4b (V021-P4b, 2026-11-16)
+
+The second half of phase P4: the diagnose area. What P4b implements, with the gate closed in every copy:
+
+* **The area,** key `D`, with the TUI's nine screens (the menu of categories, each category's list, the summary and
+  the details of a coverage record, a finding and a node). `Enter` opens a row as the TUI's area does, and `Esc` goes
+  back one screen. Each screen has the TUI's lines, columns, order and text, and the lines the TUI writes above the
+  table (the time of the last run, the outdated mark, the missing authorization, the legend of the edges, the coverage
+  note). The suite checks this cell by cell over eight dubbed views, in en-US and pt-BR.
+* **The tables are GuiModel functions,** copies of the TUI's: the kinds and collectors of each category, the edge
+  strengths (`[D]`, `[A]`, `[?]`), the gate codes and the screen names. The GUI never reads a TUI variable: the static
+  test refuses any variable of the GUI files whose name starts as the TUI's (a planted read is detected), and a case
+  checks each copy equals the TUI's table. The edge limit per node is `$script:AtmGuiDiagMaxEdges = 40`, the TUI's.
+* **Sorting without pipeline cmdlets.** The TUI sorts and groups with pipeline cmdlets, which are outside the closed
+  list. The GUI uses loops with `List.Sort` and a culture comparison that ignores case, as the TUI's sort does, and
+  groups in first-seen order with a dictionary that ignores case. The order and the ties equal the TUI's, checked by
+  the parity case.
+* **Times through `Format-AtmGuiUtc`,** an exact copy of the TUI's `Format-AtmTuiUtc`, with an equality test. On
+  Windows PowerShell 5.1 and PowerShell 7, `ConvertFrom-Json` reads dates differently; the copy formats both the same
+  way, so the parity holds in both shells.
+* **`ConvertFrom-Json` added to the allowed cmdlets** (three to four), approved by the auditor: it only converts text
+  into objects in memory, has no system effect, and is the TUI's own path. It appears in one place,
+  `Invoke-AtmGuiDiagnose`, next to `ConvertTo-AtmDiagnoseJson`, which the static test checks; a planted use elsewhere is
+  detected. No other cmdlet was added: no JSON serializer, `Out-*` or `Export-*`.
+* **The closed list grows by two names, to 23:** `Get-AtmCodeText` (the catalog text of a code, as the TUI writes it)
+  and `ConvertTo-AtmExceptionCode` (the code of an exception type). A planted call to another JSON export of the engine
+  is detected.
+* **When the diagnose runs** (`Invoke-AtmGuiDiagnose` in `Gui.ps1`, the only place that calls `Invoke-AtmDiagnose`):
+  * the first `D` runs it once, on the UI thread, with the session's inventory arguments and a progress callback;
+    the next `D` shows the kept result. `U`, only inside the area, runs it again (GUI-D3). An audit keeps the result
+    and does not run it; moving between screens runs nothing. Nothing repeats by itself;
+  * while it runs, the screen keys, the buttons and Refresh are disabled, a second request is ignored, and the window
+    shows the TUI's fixed text with the percentage of the inventory phase;
+  * the result is read through the schema view: `ConvertTo-AtmDiagnoseJson`, then `ConvertFrom-Json`, as the TUI.
+    The identity block and the machine name are never rendered (section 3); a privacy case checks it;
+  * a close request during a run stops the inventory phase at its next callback. The collectors still run, within the
+    diagnose deadline (300 seconds by default); then the result is discarded and the window closes. This is the limit
+    of section 5, declared: the engine offers no callback inside the collectors;
+  * a failure keeps an earlier result, marked outdated, with the exception code only; with no earlier result the area
+    does not open and the window says so. The test seam `$script:AtmGuiDiagnoseSource` is a single `$null` assignment.
+* **The one difference from the TUI: the gate lines.** Each collector that a closed V0.2 gate keeps off
+  (`WORKTREE_DIAGNOSTICS_GATE_CLOSED`, `HANDLE_SECURITY_GATE_CLOSED`, and `EXPORT_SECURITY_GATE_CLOSED` and
+  `GIT_EXECUTION_GATE_CLOSED` when a result names them) gets a line "Disabled in this version" ("Desabilitado nesta
+  versão"), with the code, the collector and the catalog reason, in the summary and in the category it affects. The
+  parity case allows only these lines. A second case follows from it: a category whose collector is conclusive but
+  carries a gate code shows `tui.diag.emptyNotObserved` when it has no rows, where the TUI would show `common.none`,
+  so that a disabled collector is never read as an empty result.
+* **Digit keys inside the area.** In the GUI, `1` to `9` and `P` work inside the area and leave it for their screen,
+  as they do from every other screen; the TUI ignores them there. `D` from inside the area goes back to its menu.
+* **Window:** a `U` button (enabled only inside the area), a navigation hint and a label for the lines above the
+  table. Only `Label`, `ListView` and `Button` controls, no timer, no editable text field, no cancel button and no
+  action. The form's key handler takes `D` and `U`.
+* **Catalog:** new `gui.*` keys only, in en-US and pt-BR: the hint, the button, the progress, the label's name, the
+  "disabled in this version" line, and the reasons of the two gates the catalog had no text for (export and Git).

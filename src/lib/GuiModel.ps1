@@ -6,12 +6,14 @@
 #    file and src/lib/Gui.ps1 and fails on any other command.
 #  * Nothing here decides: no class, eligibility, gate or coverage verdict is computed. The engine's results are only
 #    counted and formatted, with the helpers the TUI dashboard uses (Get-AtmTuiDashboardLines).
-#  * Loading this file defines functions only (no assembly, no type, no state).
+#  * Loading this file defines functions and one numeric constant only (no assembly, no type, no state).
 # Phase P1: the identity header (PRIV-10). Phase P2: the dashboard, the state of the view and the automatic purge
 # notice (GUI-D1). Phase P3: the drill-down by user, project and root, the detail of a root, the coverage and errors
 # screen, and the navigation between them (the TUI's screens, keys 1 to 7 and 9). Phase P4a: the screens of the preview
 # (P every category, 8 the blocked paths) over the rows of the clean engine, and the Preview line of a detail opened
-# from them; the categories, reasons and requirements are the engine's, as they come.
+# from them; the categories, reasons and requirements are the engine's, as they come. Phase P4b: the diagnose area (D),
+# the TUI's screens over the schema view of one diagnose result, with the features behind the V0.2 gates shown as
+# disabled in this version.
 
 function Get-AtmGuiIdentityHeader {
     # The process identity and its elevation state, as `version` shows them, and the language. -Source: test override
@@ -157,8 +159,8 @@ function Get-AtmGuiOpt {
 }
 
 function Get-AtmGuiNavItemList {
-    # The screens of the TUI menu that the GUI shows (keys 1 to 9 and P), with the TUI's labels, titles and filters. The
-    # diagnose comes in phase P4b; isolation, cleanup and the quarantine area are never offered (ADR-0014 section 6).
+    # The screens of the TUI menu that the GUI shows (keys 1 to 9, P and D), with the TUI's labels, titles and filters.
+    # D (P4b) opens the diagnose area; isolation, cleanup and the quarantine area are never offered (ADR-0014 section 6).
     return @(
         @{ Key = '1'; Label = (Get-AtmText 'menu.dashboard'); Screen = @{ Name = 'dashboard'; Title = (Get-AtmText 'menu.dashboard') } }
         @{ Key = '2'; Label = (Get-AtmText 'menu.users'); Screen = @{ Name = 'users'; Title = (Get-AtmText 'menu.users') } }
@@ -170,6 +172,7 @@ function Get-AtmGuiNavItemList {
         @{ Key = '8'; Label = (Get-AtmText 'menu.blocked'); Screen = @{ Name = 'gates'; Title = (Get-AtmText 'menu.blockedTitle'); Filter = @{ Category = 'BLOCKED' } } }
         @{ Key = '9'; Label = (Get-AtmText 'menu.errors'); Screen = @{ Name = 'errors'; Title = (Get-AtmText 'menu.errorsTitle') } }
         @{ Key = 'P'; Label = (Get-AtmText 'menu.preview'); Screen = @{ Name = 'gates'; Title = 'Preview'; Filter = @{ Category = $null } } }
+        @{ Key = 'D'; Label = (Get-AtmText 'menu.diagnose'); Screen = @{ Name = 'diag'; Title = (Get-AtmText 'tui.diag.title') } }
     )
 }
 
@@ -390,10 +393,23 @@ function Get-AtmGuiScreen {
     # pairs (the detail) or lines (coverage and errors). Known = $false before the first audit: no row is invented. Gone
     # = $true when the root of a detail is not in the inventory. Notice: the fixed line of the preview's screens.
     # -Preview: the preview rows kept in the session ($null: not computed for this audit); -PreviewFailure: the
-    # exception type of the last failed preview (never its message).
-    param($Inventory, [hashtable]$Screen, $Preview, [string]$PreviewFailure)
+    # exception type of the last failed preview (never its message). -Diag (P4b): the diagnose result the session keeps
+    # (New-AtmGuiDiagState); its screens do not depend on an audit. Pre: the lines above a diagnose table; Empty: the
+    # text of an empty diagnose table; GateLines: the lines of the V0.2 gates among Pre or Lines.
+    param($Inventory, [hashtable]$Screen, $Preview, [string]$PreviewFailure, $Diag)
     $known = ($null -ne $Inventory)
-    $vm = [ordered]@{ Name = $Screen.Name; Title = $Screen.Title; Kind = 'table'; Known = $known; Gone = $false; Columns = @(); Rows = @(); Items = @(); Pairs = @(); Lines = @(); Note = $(if ($known) { $null } else { Get-AtmText 'gui.noAudit' }); Notice = $null }
+    $isDiag = (@(Get-AtmGuiDiagScreenNames) -ccontains [string]$Screen.Name)
+    $vm = [ordered]@{ Name = $Screen.Name; Title = $Screen.Title; Kind = 'table'; Known = $known; Gone = $false; Columns = @(); Rows = @(); Items = @(); Pairs = @(); Lines = @(); Note = $(if ($known -or $isDiag) { $null } else { Get-AtmText 'gui.noAudit' }); Notice = $null; Pre = @(); Empty = $null; GateLines = @() }
+    if ($isDiag) {
+        if (@(Get-AtmGuiDiagListNames) -ccontains [string]$Screen.Name) {
+            $t = Get-AtmGuiDiagTable -Diag $Diag -Screen $Screen
+            $vm.Columns = $t.Columns; $vm.Rows = $t.Rows; $vm.Items = $t.Items; $vm.Pre = $t.Pre; $vm.Empty = $t.Empty; $vm.GateLines = $t.GateLines
+        } else {
+            $t = Get-AtmGuiDiagText -Diag $Diag -Screen $Screen
+            $vm.Kind = 'lines'; $vm.Columns = @((Get-AtmText 'gui.col.line')); $vm.Lines = $t.Lines; $vm.GateLines = $t.GateLines
+        }
+        return [pscustomobject]$vm
+    }
     switch ($Screen.Name) {
         'dashboard' { $vm.Kind = 'dashboard' }
         'users' { $t = Get-AtmGuiUserTable -Inventory $Inventory; $vm.Columns = $t.Columns; $vm.Rows = $t.Rows; $vm.Items = $t.Items }
@@ -438,15 +454,25 @@ function Get-AtmGuiNavTop {
 }
 
 function Invoke-AtmGuiNavKey {
-    # One key or screen button, as the TUI handles it. -Key: '1' to '9' (or D1/NumPad1 to 9), 'P', Return/Enter,
-    # Escape. Returns RENDER (the screen changed), CLOSE (Esc on the dashboard), IGNORED (an audit or the preview runs:
-    # nothing moves) or NONE. -Preview: the preview rows kept in the session (the rows Enter opens on its screens).
+    # One key or screen button, as the TUI handles it. -Key: '1' to '9' (or D1/NumPad1 to 9), 'P', 'D', 'U',
+    # Return/Enter, Escape. Returns RENDER (the screen changed), CLOSE (Esc on the dashboard), IGNORED (an audit, the
+    # preview or the diagnose runs: nothing moves), DIAG_OPEN or DIAG_REFRESH (the form asks for the diagnose, then
+    # Invoke-AtmGuiNavDiag moves) or NONE. -Preview: the preview rows kept in the session (the rows Enter opens on its
+    # screens). -Diag: the diagnose result kept in the session (the items Enter opens in its area).
     #  * 1 to 9 and P: the screen of that key, over the dashboard (1: the dashboard itself);
+    #  * D: the diagnose area (DIAG_OPEN, nothing moves yet); U, only inside the area: a new observation (DIAG_REFRESH);
     #  * Enter on a row: user -> the roots of that user; project -> the roots of that project; root -> its detail (from
-    #    the preview, with its gate: the detail shows the Preview line);
+    #    the preview, with its gate: the detail shows the Preview line); in the diagnose area, as the TUI: a category ->
+    #    its screen; a coverage record -> its detail; a finding -> its detail; a node -> its detail; an issue -> the
+    #    detail of its coverage record or finding;
     #  * Esc: one screen back; on the dashboard it closes the window.
-    param([hashtable]$Nav, $Inventory, [string]$Key, [bool]$Busy, $Preview)
+    param([hashtable]$Nav, $Inventory, [string]$Key, [bool]$Busy, $Preview, $Diag)
     if ($Busy) { return 'IGNORED' }
+    if ($Key -ceq 'D') { return 'DIAG_OPEN' }
+    if ($Key -ceq 'U') {
+        if (@(Get-AtmGuiDiagScreenNames) -ccontains [string](Get-AtmGuiNavTop -Nav $Nav).Name) { return 'DIAG_REFRESH' }
+        return 'NONE'
+    }
     $digit = $null
     if ($Key -cmatch '^(D|NumPad)?([1-9])$') { $digit = $Matches[2] }
     elseif ($Key -ceq 'P') { $digit = 'P' }
@@ -472,6 +498,27 @@ function Invoke-AtmGuiNavKey {
     }
     if ($Key -ceq 'Return' -or $Key -ceq 'Enter') {
         $top = Get-AtmGuiNavTop -Nav $Nav
+        if (@(Get-AtmGuiDiagListNames) -ccontains [string]$top.Name) {
+            # The diagnose area, before the items of the audit: its items are the view's records (a finding has its own
+            # kind property).
+            $dItems = @((Get-AtmGuiScreen -Inventory $Inventory -Screen $top -Diag $Diag).Items)
+            if ($dItems.Count -eq 0) { return 'NONE' }
+            $it = $dItems[[math]::Min([int]$top.Sel, $dItems.Count - 1)]
+            $push = $null
+            switch ([string]$top.Name) {
+                'diag' { $push = @{} + $it.Push }
+                'dcov' { $push = @{ Name = 'dcovdet'; Title = [string]$it.collector; Filter = @{ C = $it } } }
+                'dlist' { $push = @{ Name = 'dfind'; Title = [string]$it.kind; Filter = @{ F = $it } } }
+                'dnodes' { $push = @{ Name = 'dnode'; Title = [string]$it.kind; Filter = @{ N = $it } } }
+                'dissues' { if ($it.T -ceq 'cov') { $push = @{ Name = 'dcovdet'; Title = [string]$it.C.collector; Filter = @{ C = $it.C } } } else { $push = @{ Name = 'dfind'; Title = [string]$it.F.kind; Filter = @{ F = $it.F } } } }
+            }
+            if ($null -eq $push) { return 'NONE' }
+            if (-not $push.ContainsKey('Filter')) { $push['Filter'] = $null }
+            $push['Sel'] = 0
+            $Nav.Message = $null
+            $Nav.Stack.Add($push)
+            return 'RENDER'
+        }
         $vm = Get-AtmGuiScreen -Inventory $Inventory -Screen $top -Preview $Preview
         if ($vm.Kind -cne 'table' -or @($vm.Items).Count -eq 0) { return 'NONE' }
         $it = @($vm.Items)[[math]::Max(0, [math]::Min([int]$top.Sel, @($vm.Items).Count - 1))]
@@ -499,8 +546,9 @@ function Invoke-AtmGuiNavRefreshed {
     # back to its list, with a catalog text; nothing is invented. The selected row stays inside the new rows.
     # -PreviewDiscarded (P4a: a successful audit discards the kept preview): the preview's screens, and a detail opened
     # from them, are left for the dashboard with a catalog text, because a new preview starts only when P or 8 is opened.
-    # -Preview: the preview rows the session keeps (a failed audit keeps them).
-    param([hashtable]$Nav, $Inventory, [bool]$PreviewDiscarded, $Preview)
+    # -Preview: the preview rows the session keeps (a failed audit keeps them). -Diag (P4b): the diagnose result the
+    # session keeps; an audit never discards it (as in the TUI), and its screens stay where they are.
+    param([hashtable]$Nav, $Inventory, [bool]$PreviewDiscarded, $Preview, $Diag)
     if ($PreviewDiscarded) {
         $at = -1
         for ($i = 0; $i -lt $Nav.Stack.Count; $i++) { if ($at -lt 0 -and $Nav.Stack[$i].Name -ceq 'gates') { $at = $i } }
@@ -515,6 +563,478 @@ function Invoke-AtmGuiNavRefreshed {
         $Nav.Message = Get-AtmText 'gui.detailGone' ([string]$top.Filter.Name)
         $top = Get-AtmGuiNavTop -Nav $Nav
     }
-    $n = @((Get-AtmGuiScreen -Inventory $Inventory -Screen $top -Preview $Preview).Items).Count
+    $n = @((Get-AtmGuiScreen -Inventory $Inventory -Screen $top -Preview $Preview -Diag $Diag).Items).Count
     if ([int]$top.Sel -ge $n) { $top.Sel = [math]::Max(0, $n - 1) }
+}
+
+# ------------------------------------------------------------------ the diagnose area (P4b)
+# The TUI's diagnose screens over the schema view of one diagnose result (the JSON export, parsed back), with the same
+# rows, order and text. The GUI keeps its own copies of the TUI's tables (a test checks they equal the TUI's) and never
+# reads the TUI's variables. Nothing here runs the diagnose: Gui.ps1 runs it on request, and the index below is built
+# once per result. The only difference from the TUI: a line "disabled in this version" for each coverage reason that is
+# one of the V0.2 gates, in the category it affects and in the summary.
+
+$script:AtmGuiDiagMaxEdges = 40
+
+function Get-AtmGuiDiagCatKinds {
+    # The finding kinds of each category (copy of the TUI table).
+    return @{ procs = @('Process', 'AgentSession'); services = @('Service'); virt = @('VirtualizationPlatform', 'VirtualMachine'); worktrees = @('Worktree', 'Repository'); parts = @('TempPartition') }
+}
+
+function Get-AtmGuiDiagCatCollectors {
+    # The collectors whose coverage decides whether an empty or short category is "none" or "not observed" (copy of the
+    # TUI table).
+    return @{ parts = @('inventory'); procs = @('process-snapshot', 'agent-processes'); services = @('services'); virt = @('virtualization-platform', 'virtual-machines'); worktrees = @('worktree-discovery') }
+}
+
+function Get-AtmGuiDiagStrength {
+    # The marker of each edge strength (copy of the TUI table, marker only: the GUI has no colors).
+    return @{ DIRECT = '[D]'; ANCESTOR = '[A]'; AMBIGUOUS = '[?]' }
+}
+
+function Get-AtmGuiDiagGateCodes {
+    # The coverage reasons of the features behind the V0.2 gates: shown as disabled in this version.
+    return @('WORKTREE_DIAGNOSTICS_GATE_CLOSED', 'HANDLE_SECURITY_GATE_CLOSED', 'EXPORT_SECURITY_GATE_CLOSED', 'GIT_EXECUTION_GATE_CLOSED')
+}
+
+function Get-AtmGuiDiagScreenNames {
+    return @('diag', 'dcov', 'dlist', 'dnodes', 'dissues', 'dsum', 'dcovdet', 'dfind', 'dnode')
+}
+
+function Get-AtmGuiDiagListNames {
+    # The screens of the area that are tables (the others are lines).
+    return @('diag', 'dcov', 'dlist', 'dnodes', 'dissues')
+}
+
+function Format-AtmGuiUtc {
+    # Copy of the TUI's display form of an exported time, the same in both shells (PowerShell 7 parses ISO strings into
+    # dates).
+    param($Value)
+    if ($null -eq $Value -or "$Value" -eq '') { return '-' }
+    $d = $null
+    if ($Value -is [datetime]) { $d = $Value.ToUniversalTime() }
+    else { try { $d = [datetime]::Parse([string]$Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime() } catch { return [string]$Value } }
+    return $d.ToString('yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture) + ' UTC'
+}
+
+function Get-AtmGuiCultureCompare {
+    # The comparison Sort-Object applies to strings: current culture, case ignored.
+    param([string]$A, [string]$B)
+    return [string]::Compare($A, $B, $true, [Globalization.CultureInfo]::CurrentCulture)
+}
+
+function Get-AtmGuiGroupList {
+    # Group-Object by a string key, then Sort-Object Name, without the cmdlets: groups in the order of their first item,
+    # keys compared in the current culture with case ignored, a group named by its first key, then sorted by name.
+    # Returns objects with Name and Group (an array), unrolled: callers wrap the result in @().
+    param([object[]]$Items, [scriptblock]$Key)
+    $by = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::CurrentCultureIgnoreCase)
+    $order = New-Object System.Collections.Generic.List[object]
+    foreach ($i in $Items) {
+        $k = [string](& $Key $i)
+        if (-not $by.ContainsKey($k)) {
+            $g = [pscustomobject]@{ Name = $k; List = (New-Object System.Collections.Generic.List[object]) }
+            $by[$k] = $g
+            $order.Add($g)
+        }
+        $by[$k].List.Add($i)
+    }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($g in @(Get-AtmGuiSorted -Items $order.ToArray() -Compare { param($a, $b) Get-AtmGuiCultureCompare $a.Name $b.Name })) { $out.Add([pscustomobject]@{ Name = $g.Name; Group = $g.List.ToArray() }) }
+    return $out.ToArray()
+}
+
+function Get-AtmGuiSortedUnique {
+    # Sort-Object -Unique over strings, without the cmdlet: sorted in the current culture with case ignored, equal
+    # strings (case ignored) kept once. Unrolled: callers wrap the result in @().
+    param([object[]]$Items)
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($s in @(Get-AtmGuiSorted -Items $Items -Compare { param($a, $b) Get-AtmGuiCultureCompare $a $b })) {
+        if ($out.Count -gt 0 -and (Get-AtmGuiCultureCompare $out[$out.Count - 1] $s) -eq 0) { continue }
+        $out.Add($s)
+    }
+    return $out.ToArray()
+}
+
+function New-AtmGuiDiagIndex {
+    # The TUI's index of one view (New-AtmTuiDiagIndex), built once per result: findings by category, the coverage gap of
+    # each category, the summary figures, findings, worst coverage record and node by key, edges in and out of each
+    # node, and the issues (coverage records that are not conclusive, then UNKNOWN findings).
+    param($View)
+    $kinds = Get-AtmGuiDiagCatKinds; $colls = Get-AtmGuiDiagCatCollectors
+    $cat = @{}
+    foreach ($c in @($kinds.Keys)) { $cat[$c] = New-Object System.Collections.Generic.List[object] }
+    $catOf = @{}
+    foreach ($c in @($kinds.Keys)) { foreach ($k in $kinds[$c]) { $catOf[$k] = $c } }
+    $findingBy = @{}; $unknown = New-Object System.Collections.Generic.List[object]; $found = New-Object System.Collections.Generic.List[object]
+    foreach ($x in @($View.findings)) {
+        if ($null -eq $x) { continue }
+        $found.Add($x)
+        $k = [string]$x.kind
+        if ($catOf.ContainsKey($k)) { $cat[$catOf[$k]].Add($x) }
+        $findingBy[$k + '|' + [string]$x.key] = $x
+        if ([string]$x.state -ceq 'UNKNOWN') { $unknown.Add($x) }
+    }
+    # Worst record per collector.
+    $covBy = @{}
+    $coverage = New-Object System.Collections.Generic.List[object]
+    $incomplete = New-Object System.Collections.Generic.List[object]
+    foreach ($c in @($View.coverage)) {
+        if ($null -eq $c) { continue }
+        $coverage.Add($c)
+        if ($script:AtmConclusiveCoverage -cnotcontains [string]$c.status) { $incomplete.Add($c) }
+        $ck = [string]$c.collector
+        if (-not $covBy.ContainsKey($ck) -or ($script:AtmConclusiveCoverage -ccontains [string]$covBy[$ck].status -and $script:AtmConclusiveCoverage -cnotcontains [string]$c.status)) { $covBy[$ck] = $c }
+    }
+    $nodeList = New-Object System.Collections.Generic.List[object]; $inBy = @{}; $outBy = @{}; $nodeBy = @{}
+    if ($null -ne $View.graph) {
+        foreach ($n in @($View.graph.nodes)) { if ($null -ne $n) { $nodeList.Add($n) } }
+        foreach ($n in $nodeList) { $nodeBy[[string]$n.kind + '|' + [string]$n.key] = $n }
+        foreach ($e in @($View.graph.edges)) {
+            if ($null -eq $e) { continue }
+            $tk = [string]$e.toKind + '|' + [string]$e.to; $fk = [string]$e.fromKind + '|' + [string]$e.from
+            if (-not $inBy.ContainsKey($tk)) { $inBy[$tk] = New-Object System.Collections.Generic.List[object] }; $inBy[$tk].Add($e)
+            if (-not $outBy.ContainsKey($fk)) { $outBy[$fk] = New-Object System.Collections.Generic.List[object] }; $outBy[$fk].Add($e)
+        }
+    }
+    $issues = New-Object System.Collections.Generic.List[object]
+    foreach ($c in $incomplete) { $issues.Add([pscustomobject]@{ T = 'cov'; C = $c; F = $null }) }
+    foreach ($x in $unknown) { $issues.Add([pscustomobject]@{ T = 'find'; C = $null; F = $x }) }
+    $byCat = @{}; foreach ($c in @($cat.Keys)) { $byCat[$c] = $cat[$c].ToArray() }
+    # Coverage gap of each category: the collectors that are missing or not conclusive (null when conclusive).
+    $gap = @{}
+    foreach ($c in @($colls.Keys)) {
+        $parts = New-Object System.Collections.Generic.List[string]; $why = New-Object System.Collections.Generic.List[string]; $missing = 0
+        foreach ($cn in $colls[$c]) {
+            if (-not $covBy.ContainsKey($cn)) { $parts.Add($cn + '=-'); $missing++; continue }
+            $r = $covBy[$cn]
+            if ($script:AtmConclusiveCoverage -cnotcontains [string]$r.status) { $parts.Add($cn + '=' + [string]$r.status); foreach ($x in @($r.reasons)) { $why.Add([string]$x) } }
+        }
+        $gap[$c] = $null
+        if ($parts.Count -gt 0) { $gap[$c] = [pscustomobject]@{ Status = ($parts -join ', '); Reasons = $(if ($why.Count) { $why -join ',' } else { '-' }); AllMissing = ($missing -eq @($colls[$c]).Count) } }
+    }
+    # Summary figures, once per result (the summary screen only formats them).
+    $kindList = New-Object System.Collections.Generic.List[object]
+    foreach ($g in @(Get-AtmGuiGroupList -Items $found.ToArray() -Key { param($y) [string]$y.kind })) {
+        $st = New-Object System.Collections.Generic.List[string]
+        foreach ($s in @(Get-AtmGuiGroupList -Items $g.Group -Key { param($y) [string]$y.state })) { $st.Add($s.Name + ' ' + @($s.Group).Count) }
+        $kindList.Add([pscustomobject]@{ Kind = $g.Name; Count = @($g.Group).Count; States = ($st.ToArray() -join ', ') })
+    }
+    $cnt = @{ PartsInUse = 0; PartsUnknown = 0; PartsNone = 0; ProcVerified = 0; ProcUnverified = 0; Sessions = 0; Vms = 0; Worktrees = 0 }
+    foreach ($y in $byCat['parts']) {
+        if ([string]$y.state -ceq 'IN_USE') { $cnt.PartsInUse++ }
+        if ([string]$y.state -ceq 'UNKNOWN') { $cnt.PartsUnknown++ }
+        if ([string]$y.state -ceq 'NO_DEPENDENCY_OBSERVED') { $cnt.PartsNone++ }
+    }
+    foreach ($y in $byCat['procs']) {
+        if ([string]$y.kind -ceq 'Process' -and ([string]$y.key).Contains('@')) { $cnt.ProcVerified++ }
+        if ([string]$y.kind -ceq 'Process' -and -not ([string]$y.key).Contains('@')) { $cnt.ProcUnverified++ }
+        if ([string]$y.kind -ceq 'AgentSession') { $cnt.Sessions++ }
+    }
+    foreach ($y in $byCat['virt']) { if ([string]$y.kind -ceq 'VirtualMachine') { $cnt.Vms++ } }
+    foreach ($y in $byCat['worktrees']) { if ([string]$y.kind -ceq 'Worktree') { $cnt.Worktrees++ } }
+    $sum = [pscustomobject]@{
+        Kinds = $kindList.ToArray()
+        PartsInUse = $cnt.PartsInUse; PartsUnknown = $cnt.PartsUnknown; PartsNone = $cnt.PartsNone
+        ProcVerified = $cnt.ProcVerified; ProcUnverified = $cnt.ProcUnverified; Sessions = $cnt.Sessions; Services = @($byCat['services']).Count
+        Vms = $cnt.Vms; Worktrees = $cnt.Worktrees
+        Incomplete = $incomplete.ToArray()
+    }
+    return [pscustomobject]@{ ByCat = $byCat; Gap = $gap; Sum = $sum; FindingBy = $findingBy; CovBy = $covBy; Coverage = $coverage.ToArray(); Nodes = $nodeList.ToArray(); NodeBy = $nodeBy; InBy = $inBy; OutBy = $outBy; Issues = $issues.ToArray() }
+}
+
+function Get-AtmGuiDiagGateList {
+    # One entry per (gate code, collector) among the coverage reasons, in the order of the coverage records: the code, the
+    # collector, the category it affects ($null: the summary only) and its line, with the catalog text of the reason (or
+    # the GUI's own text when the catalog has none).
+    param($Index)
+    $codes = Get-AtmGuiDiagGateCodes; $colls = Get-AtmGuiDiagCatCollectors
+    $seen = @{}
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($c in @($Index.Coverage)) {
+        foreach ($r in @($c.reasons)) {
+            $code = [string]$r
+            if ($codes -cnotcontains $code) { continue }
+            $cn = [string]$c.collector
+            if ($seen.ContainsKey($code + '|' + $cn)) { continue }
+            $seen[$code + '|' + $cn] = $true
+            $cat = $null
+            foreach ($k in @($colls.Keys)) { if (@($colls[$k]) -ccontains $cn) { $cat = $k } }
+            $tx = Get-AtmCodeText 'reason' $code
+            if (-not $tx) { $tx = Get-AtmText ('gui.diag.gate.' + $code) }
+            $out.Add([pscustomobject]@{ Code = $code; Collector = $cn; Cat = $cat; Line = (Get-AtmText 'gui.diag.disabled' $code $cn $tx) })
+        }
+    }
+    # Unrolled: callers wrap the result in @().
+    return $out.ToArray()
+}
+
+function New-AtmGuiDiagState {
+    # The diagnose result the session keeps: the view, its index and its gate lines (built once), outdated or not, and the
+    # exception type of the last failure.
+    param($View)
+    $ix = New-AtmGuiDiagIndex -View $View
+    return @{ View = $View; Index = $ix; Gates = @(Get-AtmGuiDiagGateList -Index $ix); Stale = $false; Error = $null }
+}
+
+function Get-AtmGuiDiagCategoryList {
+    # The rows of the area's first screen, as the TUI's categories: label, count (with '*' when the coverage of the
+    # category is incomplete) and the screen it opens.
+    param($Diag)
+    $ix = $Diag.Index
+    $n = { param($c) [string]@($ix.ByCat[$c]).Count + $(if ($null -ne $ix.Gap[$c]) { '*' } else { '' }) }
+    return @(
+        @{ Label = (Get-AtmText 'tui.diag.cat.summary'); Count = '-'; Push = @{ Name = 'dsum'; Title = (Get-AtmText 'tui.diag.cat.summary') } }
+        @{ Label = (Get-AtmText 'tui.diag.cat.coverage'); Count = @($ix.Coverage).Count; Push = @{ Name = 'dcov'; Title = (Get-AtmText 'tui.diag.cat.coverage') } }
+        @{ Label = (Get-AtmText 'tui.diag.cat.procs'); Count = (& $n 'procs'); Push = @{ Name = 'dlist'; Title = (Get-AtmText 'tui.diag.cat.procs'); Filter = @{ Cat = 'procs' } } }
+        @{ Label = (Get-AtmText 'tui.diag.cat.services'); Count = (& $n 'services'); Push = @{ Name = 'dlist'; Title = (Get-AtmText 'tui.diag.cat.services'); Filter = @{ Cat = 'services' } } }
+        @{ Label = (Get-AtmText 'tui.diag.cat.virt'); Count = (& $n 'virt'); Push = @{ Name = 'dlist'; Title = (Get-AtmText 'tui.diag.cat.virt'); Filter = @{ Cat = 'virt' } } }
+        @{ Label = (Get-AtmText 'tui.diag.cat.worktrees'); Count = (& $n 'worktrees'); Push = @{ Name = 'dlist'; Title = (Get-AtmText 'tui.diag.cat.worktrees'); Filter = @{ Cat = 'worktrees' } } }
+        @{ Label = (Get-AtmText 'tui.diag.cat.parts'); Count = (& $n 'parts'); Push = @{ Name = 'dlist'; Title = (Get-AtmText 'tui.diag.cat.parts'); Filter = @{ Cat = 'parts' } } }
+        @{ Label = (Get-AtmText 'tui.diag.cat.graph'); Count = @($ix.Nodes).Count; Push = @{ Name = 'dnodes'; Title = (Get-AtmText 'tui.diag.cat.graph') } }
+        @{ Label = (Get-AtmText 'tui.diag.cat.issues'); Count = @($ix.Issues).Count; Push = @{ Name = 'dissues'; Title = (Get-AtmText 'tui.diag.cat.issues') } }
+    )
+}
+
+function Get-AtmGuiDiagReasonText {
+    # The reasons of a coverage record as the TUI writes them: joined by commas, or '-'.
+    param($Record)
+    if (@($Record.reasons).Count) { return (@($Record.reasons) -join ',') }
+    return '-'
+}
+
+function Get-AtmGuiDiagTable {
+    # A table screen of the area, with the TUI's columns at width 90 or more, its items and rows, the lines the TUI draws
+    # above the table (Pre), the text of an empty table (Empty) and the gate lines among Pre (GateLines).
+    param($Diag, [hashtable]$Screen)
+    $out = [ordered]@{ Columns = @(); Rows = @(); Items = @(); Pre = @(); Empty = $null; GateLines = @() }
+    if ($null -eq $Diag -or $null -eq $Diag.View) { return [pscustomobject]$out }
+    $ix = $Diag.Index
+    $rows = New-Object System.Collections.Generic.List[object]
+    $pre = New-Object System.Collections.Generic.List[string]
+    $gates = New-Object System.Collections.Generic.List[string]
+    $items = @()
+    $gp = $null
+    switch ([string]$Screen.Name) {
+        'diag' {
+            $out.Columns = @((Get-AtmText 'tui.diag.col.area'), (Get-AtmText 'tui.diag.col.items'))
+            $items = @(Get-AtmGuiDiagCategoryList -Diag $Diag)
+            foreach ($i in $items) { $rows.Add((ConvertTo-AtmGuiRow @($i.Label, [string]$i.Count))) }
+            $pre.Add((Get-AtmText 'tui.diag.lastRun' (Format-AtmGuiUtc $Diag.View.finishedUtc)))
+            if ($Diag.Stale) { $pre.Add((Get-AtmText 'tui.diag.stale' $Diag.Error)) }
+            $pre.Add((Get-AtmText 'tui.diag.noAuth'))
+            $pre.Add((Get-AtmText 'tui.diag.starLegend'))
+        }
+        'dcov' {
+            $out.Columns = @((Get-AtmText 'tui.diag.col.collector'), (Get-AtmText 'tui.diag.col.status'), (Get-AtmText 'tui.diag.col.reasons'), (Get-AtmText 'tui.diag.col.elev'))
+            $items = @($ix.Coverage)
+            foreach ($c in $items) { $rows.Add((ConvertTo-AtmGuiRow @([string]$c.collector, [string]$c.status, (Get-AtmGuiDiagReasonText $c), [string]$c.elevationWouldHelp))) }
+        }
+        'dlist' {
+            $out.Columns = @((Get-AtmText 'tui.diag.col.state'), (Get-AtmText 'tui.diag.col.kind'), (Get-AtmText 'tui.diag.col.key'), (Get-AtmText 'tui.diag.col.provider'))
+            $catName = [string](Get-AtmGuiOpt $Screen.Filter 'Cat')
+            if ($ix.ByCat.ContainsKey($catName)) { $items = @($ix.ByCat[$catName]) }
+            foreach ($f in $items) { $rows.Add((ConvertTo-AtmGuiRow @([string]$f.state, [string]$f.kind, [string]$f.key, $(if ($f.provider) { [string]$f.provider } else { '-' })))) }
+            $gp = $ix.Gap[$catName]
+            if ($null -ne $gp) { $pre.Add((Get-AtmText 'tui.diag.covNote' $gp.Status $gp.Reasons)) }
+            foreach ($g in @($Diag.Gates)) { if ($g.Cat -ceq $catName) { $pre.Add($g.Line); $gates.Add($g.Line) } }
+        }
+        'dnodes' {
+            $out.Columns = @((Get-AtmText 'tui.diag.col.kind'), (Get-AtmText 'tui.diag.col.key'), (Get-AtmText 'tui.diag.col.finding'), (Get-AtmText 'tui.diag.col.inout'))
+            $items = @($ix.Nodes)
+            foreach ($n in $items) {
+                $nk = [string]$n.kind + '|' + [string]$n.key
+                $i0 = 0; if ($ix.InBy.ContainsKey($nk)) { $i0 = $ix.InBy[$nk].Count }
+                $o0 = 0; if ($ix.OutBy.ContainsKey($nk)) { $o0 = $ix.OutBy[$nk].Count }
+                $rows.Add((ConvertTo-AtmGuiRow @([string]$n.kind, [string]$n.key, $(if ($n.finding) { Get-AtmText 'tui.diag.findingShortYes' } else { Get-AtmText 'tui.diag.findingShortNo' }), "$i0/$o0")))
+            }
+        }
+        'dissues' {
+            $out.Columns = @((Get-AtmText 'tui.diag.col.type'), (Get-AtmText 'tui.diag.col.status'), (Get-AtmText 'tui.diag.col.item'), (Get-AtmText 'tui.diag.col.reasons'))
+            $items = @($ix.Issues)
+            foreach ($i in $items) {
+                if ($i.T -ceq 'cov') { $rows.Add((ConvertTo-AtmGuiRow @((Get-AtmText 'tui.diag.typeCov'), [string]$i.C.status, [string]$i.C.collector, (Get-AtmGuiDiagReasonText $i.C)))) }
+                else {
+                    # The GRAPH_REASON details, then the incomplete coverage, each kept once (case-sensitive), as the TUI.
+                    $why = New-Object System.Collections.Generic.List[object]
+                    foreach ($ev in @($i.F.evidence)) { if ($ev.code -ceq 'GRAPH_REASON') { $why.Add([string]$ev.detail) } }
+                    foreach ($x in @($i.F.incompleteCoverage)) { $why.Add($x) }
+                    $uniq = New-Object System.Collections.Generic.List[object]
+                    foreach ($x in $why) {
+                        $dup = $false
+                        foreach ($u in $uniq) { if ($u -ceq $x) { $dup = $true } }
+                        if (-not $dup) { $uniq.Add($x) }
+                    }
+                    $rows.Add((ConvertTo-AtmGuiRow @((Get-AtmText 'tui.diag.typeFind'), [string]$i.F.state, ([string]$i.F.kind + ' ' + [string]$i.F.key), $(if ($why.Count) { $uniq.ToArray() -join ',' } else { '-' }))))
+                }
+            }
+        }
+    }
+    $out.Items = $items
+    $out.Rows = $rows.ToArray()
+    $out.Pre = $pre.ToArray()
+    $out.GateLines = $gates.ToArray()
+    if (@($items).Count -eq 0) {
+        # An empty list with incomplete coverage (or a feature behind a gate) is "nothing observed", never "none".
+        if ($null -ne $gp -or $gates.Count -gt 0) { $out.Empty = Get-AtmText 'tui.diag.emptyNotObserved' } else { $out.Empty = Get-AtmText 'common.none' }
+    }
+    return [pscustomobject]$out
+}
+
+function Add-AtmGuiDiagEdgeLines {
+    # The edges of a node, both directions, as the TUI writes them: marker, relation, the other end and the evidence; at
+    # most AtmGuiDiagMaxEdges per direction, then a line with how many more.
+    param($Index, [string]$NodeKey, $Lines)
+    $strength = Get-AtmGuiDiagStrength
+    foreach ($dir in @('in', 'out')) {
+        $list = @(if ($dir -ceq 'in') { if ($Index.InBy.ContainsKey($NodeKey)) { $Index.InBy[$NodeKey].ToArray() } } else { if ($Index.OutBy.ContainsKey($NodeKey)) { $Index.OutBy[$NodeKey].ToArray() } })
+        $Lines.Add((Get-AtmText $(if ($dir -ceq 'in') { 'tui.diag.det.in' } else { 'tui.diag.det.out' }) $list.Count))
+        if ($list.Count -eq 0) { $Lines.Add(('  ' + (Get-AtmText 'common.none'))) }
+        $shown = 0
+        foreach ($e in $list) {
+            if ($shown -ge $script:AtmGuiDiagMaxEdges) { $Lines.Add(('  ' + (Get-AtmText 'tui.diag.det.more' ($list.Count - $shown)))); break }
+            $mk = $strength[[string]$e.strength]; if (-not $mk) { $mk = '[ ]' }
+            $other = $(if ($dir -ceq 'in') { [string]$e.fromKind + ' ' + [string]$e.from } else { [string]$e.toKind + ' ' + [string]$e.to })
+            $arrow = $(if ($dir -ceq 'in') { '<-' } else { '->' })
+            $amb = $(if ([string]$e.strength -ceq 'AMBIGUOUS') { ' ' + (Get-AtmText 'tui.diag.ambEdge') } else { '' })
+            $Lines.Add(('  {0} {1} {2} {3}{4}' -f $mk, [string]$e.relation, $arrow, $other, $amb))
+            foreach ($ev in @($e.evidence)) { $Lines.Add(('      {0} [{1}]{2}' -f [string]$ev.code, [string]$ev.collector, $(if ($ev.detail) { ' ' + [string]$ev.detail } else { '' }))) }
+            $shown++
+        }
+    }
+}
+
+function Get-AtmGuiDiagText {
+    # A text screen of the area (summary, coverage record, finding, node), line by line as the TUI writes it, without the
+    # wrapping of the console. Returns Lines and GateLines (the gate lines among them: the summary only).
+    param($Diag, [hashtable]$Screen)
+    $L = New-Object System.Collections.Generic.List[string]
+    $gates = New-Object System.Collections.Generic.List[string]
+    if ($null -eq $Diag -or $null -eq $Diag.View) { return [pscustomobject]@{ Lines = @(); GateLines = @() } }
+    $v = $Diag.View; $ix = $Diag.Index; $colls = Get-AtmGuiDiagCatCollectors
+    $covLine = {
+        param([string]$Label, [int]$Count, [string]$Cat)
+        $gp = $ix.Gap[$Cat]
+        if ($null -eq $gp) { $L.Add((Get-AtmText 'tui.diag.sumCount' $Label $Count)) }
+        elseif ($gp.AllMissing) { $L.Add((Get-AtmText 'tui.diag.sumNotObserved' $Label (@($colls[$Cat]) -join ','))) }
+        else { $L.Add((Get-AtmText 'tui.diag.sumCountPartial' $Label $Count $gp.Status $gp.Reasons)) }
+    }
+    $gapNote = { param([string]$Cat) $gp = $ix.Gap[$Cat]; if ($null -ne $gp) { $L.Add(('  ' + (Get-AtmText 'tui.diag.covNote' $gp.Status $gp.Reasons))) } }
+    switch ([string]$Screen.Name) {
+        'dsum' {
+            $L.Add((Get-AtmText 'tui.diag.lastRun' (Format-AtmGuiUtc $v.finishedUtc)))
+            if ($Diag.Stale) { $L.Add((Get-AtmText 'tui.diag.stale' $Diag.Error)) }
+            $L.Add((Get-AtmText 'tui.diag.noAuth'))
+            foreach ($g in @($Diag.Gates)) { $L.Add($g.Line); $gates.Add($g.Line) }
+            $L.Add('')
+            $sm = $ix.Sum
+            $inc = @($sm.Incomplete)
+            $L.Add((Get-AtmText 'tui.diag.sumCoverage' $(if ($v.coverageComplete) { Get-AtmText 'common.complete' } else { Get-AtmText 'common.incomplete' })))
+            if ($inc.Count) {
+                $parts = New-Object System.Collections.Generic.List[string]
+                foreach ($c in $inc) { $parts.Add(([string]$c.collector + '=' + [string]$c.status)) }
+                $L.Add((Get-AtmText 'tui.diag.sumIncomplete' ($parts.ToArray() -join ', ')))
+            }
+            $L.Add('')
+            foreach ($g in @($sm.Kinds)) { $L.Add((Get-AtmText 'tui.diag.sumKind' $g.Kind $g.Count $g.States)) }
+            $L.Add('')
+            $L.Add((Get-AtmText 'tui.diag.sumParts' $sm.PartsInUse $sm.PartsUnknown $sm.PartsNone))
+            & $gapNote 'parts'
+            $L.Add((Get-AtmText 'tui.diag.sumProcs' $sm.ProcVerified $sm.ProcUnverified $sm.Sessions))
+            & $gapNote 'procs'
+            & $covLine (Get-AtmText 'tui.diag.lblServices') $sm.Services 'services'
+            & $covLine (Get-AtmText 'tui.diag.lblVms') $sm.Vms 'virt'
+            & $covLine (Get-AtmText 'tui.diag.lblWorktrees') $sm.Worktrees 'worktrees'
+            $gc = $(if ($null -ne $v.graph) { $v.graph.coverage } else { $null })
+            if ($null -ne $gc) { $L.Add((Get-AtmText 'tui.diag.sumGraph' $gc.nodes $gc.edges ([string]$gc.status + $(if (@($gc.reasons).Count) { ' (' + (@($gc.reasons) -join ',') + ')' } else { '' })))) }
+            if ($inc.Count) {
+                $L.Add('')
+                $L.Add((Get-AtmText 'tui.diag.sumLimits'))
+                foreach ($c in $inc) { $L.Add(('  ' + (Get-AtmText 'tui.diag.limitLine' ([string]$c.collector) ([string]$c.status) (Get-AtmGuiDiagReasonText $c)))) }
+            }
+            $L.Add('')
+            $L.Add((Get-AtmText 'tui.diag.unknownNote'))
+        }
+        'dcovdet' {
+            $c = $Screen.Filter.C
+            $L.Add(('{0,-22}: {1}' -f (Get-AtmText 'tui.diag.col.collector'), [string]$c.collector))
+            $L.Add(('{0,-22}: {1} - {2}' -f (Get-AtmText 'tui.diag.col.status'), [string]$c.status, (Get-AtmText ('coverage.' + [string]$c.status))))
+            if ($null -ne $c.observed -and $null -ne $c.expected) { $L.Add((Get-AtmText 'tui.diag.cov.observed' $c.observed $c.expected)) }
+            $L.Add((Get-AtmText $(switch ([string]$c.elevationWouldHelp) { 'YES' { 'tui.diag.elevYes' } 'NO' { 'tui.diag.elevNo' } default { 'tui.diag.elevUnknown' } })))
+            $L.Add('')
+            $L.Add((Get-AtmText 'tui.diag.col.reasons'))
+            if (@($c.reasons).Count -eq 0) { $L.Add(('  ' + (Get-AtmText 'common.none'))) }
+            foreach ($x in @($c.reasons)) { $tx = Get-AtmCodeText 'reason' ([string]$x); $L.Add(('  ' + [string]$x + $(if ($tx) { ' - ' + $tx } else { '' }))) }
+        }
+        'dfind' {
+            $f = $Screen.Filter.F
+            $nk = [string]$f.kind + '|' + [string]$f.key
+            $L.Add(('{0,-22}: {1}' -f (Get-AtmText 'tui.diag.col.kind'), [string]$f.kind))
+            $L.Add(('{0,-22}: {1}' -f (Get-AtmText 'tui.diag.det.key'), [string]$f.key))
+            $L.Add(('{0,-22}: {1}' -f (Get-AtmText 'tui.diag.col.state'), [string]$f.state))
+            if ($f.requestedState -and [string]$f.requestedState -cne [string]$f.state) { $L.Add(('{0,-22}: {1}' -f (Get-AtmText 'tui.diag.det.requested'), [string]$f.requestedState)) }
+            $amb = New-Object System.Collections.Generic.List[string]
+            foreach ($ev in @($f.evidence)) { if ($ev.code -ceq 'PROVIDER_ATTRIBUTION_AMBIGUOUS') { $amb.Add([string]$ev.detail) } }
+            if ($amb.Count) { $L.Add(('{0,-22}: {1}' -f (Get-AtmText 'tui.diag.col.provider'), (Get-AtmText 'tui.diag.det.providerAmbiguous' ($amb.ToArray() -join ',')))) }
+            elseif ($f.provider) { $L.Add(('{0,-22}: {1}' -f (Get-AtmText 'tui.diag.col.provider'), [string]$f.provider)) }
+            $tl = New-Object System.Collections.Generic.List[object]
+            foreach ($ev in @($f.evidence)) { $t0 = Format-AtmGuiUtc $ev.observedUtc; if ($t0 -ne '-') { $tl.Add($t0) } }
+            $times = @(Get-AtmGuiSortedUnique -Items $tl.ToArray())
+            $L.Add(('{0,-22}: {1}' -f (Get-AtmText 'tui.diag.det.observed'), $(if ($times.Count) { $times -join ', ' } else { '-' })))
+            if ([string]$f.state -ceq 'UNKNOWN') { $L.Add((Get-AtmText 'tui.diag.unknownNote')) }
+            $L.Add('')
+            $L.Add((Get-AtmText 'tui.diag.det.evidence'))
+            if (@($f.evidence).Count -eq 0) { $L.Add(('  ' + (Get-AtmText 'common.none'))) }
+            foreach ($ev in @($f.evidence)) {
+                $tx = Get-AtmCodeText 'evidence' ([string]$ev.code)
+                $L.Add(('  - {0} [{1}]{2}{3}' -f [string]$ev.code, [string]$ev.collector, $(if ($ev.detail) { ' ' + [string]$ev.detail } else { '' }), $(if ($tx) { ' - ' + $tx } else { '' })))
+            }
+            $L.Add('')
+            $L.Add((Get-AtmText 'tui.diag.det.coverage'))
+            foreach ($cn in @($f.coverage)) { $cr = $(if ($ix.CovBy.ContainsKey([string]$cn)) { [string]$ix.CovBy[[string]$cn].status } else { '-' }); $L.Add(('  - {0}: {1}' -f [string]$cn, $cr)) }
+            $L.Add(('{0}: {1}' -f (Get-AtmText 'tui.diag.det.incomplete'), $(if (@($f.incompleteCoverage).Count) { @($f.incompleteCoverage) -join ', ' } else { Get-AtmText 'common.none' })))
+            $L.Add('')
+            $L.Add((Get-AtmText 'tui.diag.det.graph'))
+            $L.Add((Get-AtmText 'tui.diag.legend'))
+            if (-not $ix.NodeBy.ContainsKey($nk)) { $L.Add(('  ' + (Get-AtmText 'tui.diag.det.noNode'))) }
+            else { Add-AtmGuiDiagEdgeLines -Index $ix -NodeKey $nk -Lines $L }
+        }
+        'dnode' {
+            $n = $Screen.Filter.N
+            $nk = [string]$n.kind + '|' + [string]$n.key
+            $L.Add(('{0,-22}: {1}' -f (Get-AtmText 'tui.diag.col.kind'), [string]$n.kind))
+            $L.Add(('{0,-22}: {1}' -f (Get-AtmText 'tui.diag.det.key'), [string]$n.key))
+            if ($n.finding) {
+                $L.Add(('{0,-22}: {1}' -f (Get-AtmText 'tui.diag.col.finding'), (Get-AtmText 'tui.diag.finding.yes')))
+                if ($ix.FindingBy.ContainsKey($nk)) { $L.Add(('{0,-22}: {1}' -f (Get-AtmText 'tui.diag.col.state'), [string]$ix.FindingBy[$nk].state)) }
+            } else { $L.Add(('{0,-22}: {1}' -f (Get-AtmText 'tui.diag.col.finding'), (Get-AtmText 'tui.diag.finding.no'))) }
+            $L.Add((Get-AtmText 'tui.diag.legend'))
+            $L.Add('')
+            Add-AtmGuiDiagEdgeLines -Index $ix -NodeKey $nk -Lines $L
+        }
+    }
+    return [pscustomobject]@{ Lines = $L.ToArray(); GateLines = $gates.ToArray() }
+}
+
+function Invoke-AtmGuiNavDiag {
+    # The move after a diagnose request (Gui.ps1 ran it, or not), as the TUI moves. -Result: what the request did (CACHED,
+    # OK, FAILED or IGNORED; CANCELLED never comes here). -Diag: the result the session keeps after it.
+    #  * D: with a view, the area opens over the dashboard; without one (the first run failed), the window stays where it
+    #    is with the failure's text (its type only);
+    #  * U (-Refresh): back to the area's first screen, first row; the text says the result is new, or that the run
+    #    failed (the previous result stays, marked outdated).
+    param([hashtable]$Nav, $Diag, [string]$Result, [switch]$Refresh)
+    if ($Result -ceq 'IGNORED') { return }
+    $hasView = ($null -ne $Diag -and $null -ne $Diag.View)
+    $failed = $(if ($Result -ceq 'FAILED' -and $null -ne $Diag) { Get-AtmText 'tui.diag.failed' $Diag.Error } else { $null })
+    if ($Refresh) {
+        while ($Nav.Stack.Count -gt 1 -and $Nav.Stack[$Nav.Stack.Count - 1].Name -cne 'diag') { $Nav.Stack.RemoveAt($Nav.Stack.Count - 1) }
+        if ($Nav.Stack.Count -gt 1) { $Nav.Stack[$Nav.Stack.Count - 1].Sel = 0 }
+        $Nav.Message = $(if ($Result -ceq 'OK') { Get-AtmText 'tui.diag.refreshed' } else { $failed })
+        return
+    }
+    if (-not $hasView) { $Nav.Message = $failed; return }
+    while ($Nav.Stack.Count -gt 1) { $Nav.Stack.RemoveAt($Nav.Stack.Count - 1) }
+    $Nav.Stack.Add(@{ Name = 'diag'; Title = (Get-AtmText 'tui.diag.title'); Filter = $null; Sel = 0 })
+    $Nav.Message = $failed
 }

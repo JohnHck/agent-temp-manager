@@ -52,7 +52,7 @@ change it; enabling deletion requires a code change in the administrator-owned, 
 released under a specific authorization. The automated suite flips it only in its own process, against its
 isolated sandbox.
 
-## Desktop GUI gate (V0.2.1 phases P1 to P4a)
+## Desktop GUI gate (V0.2.1 phases P1 to P4b)
 
 * **The seventh gate:** `$script:AtmGuiEnabled`, `$false` in every shipped copy (maintainer decision D-A,
   [ADR-0014](adr/ADR-0014-desktop-gui-winforms.md)). It is a single assignment in `lib\Gui.ps1`, with no option,
@@ -104,6 +104,22 @@ isolated sandbox.
     audit, which discards it. A failure shows only the exception type, never the engine's message;
   * both screens show a fixed notice that the preview is an evaluation only and that the window deletes and isolates
     nothing.
+* **P4b, the diagnostics area (keys `D` and `U`):**
+  * the area renders only the schema view of the diagnose (ADR-0009, P5-A): the result goes through
+    `ConvertTo-AtmDiagnoseJson`, the same text as the `diagnose` JSON export, and back to objects in memory with
+    `ConvertFrom-Json`, as the TUI does. It holds pseudonyms and codes only: no path, account, identity block, machine
+    name or command line. The suite checks that a dubbed identity and machine name appear in no text of the area;
+  * nothing runs by itself: the diagnose runs once, on the first `D`, and again only on `U` inside the area. An audit
+    keeps the result and does not run it, and moving between screens runs nothing. The call sits in one function of
+    `lib\Gui.ps1`, with the launcher's inventory arguments; the static test checks the one place;
+  * the gates stay closed: the window writes no export and runs no Git, and the worktree and handle collectors stay off.
+    Each collector a closed gate keeps off is shown as "disabled in this version" with its code, never as an empty
+    result;
+  * the closed list grows by two catalog and code helpers of the engine, and the allowed cmdlets by `ConvertFrom-Json`,
+    which only turns text into objects in memory and has no system effect (ADR-0014, P4b record). No JSON serializer,
+    `Out-*` or `Export-*` cmdlet is allowed;
+  * a failure shows only the exception code; a close during a run stops its inventory phase, discards the result and
+    closes the window once the collectors end, within the diagnose deadline.
 
 ## Clean gates (all must pass, re-run immediately before each deletion)
 

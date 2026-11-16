@@ -737,7 +737,7 @@ Order of a run:
    a non-interactive session) or `GUI_WINFORMS_UNAVAILABLE`. It is never relaunched in another shell;
 4. Windows Forms is loaded, and the window opens.
 
-What the window shows in this version (phases P1 to P4a):
+What the window shows in this version (phases P1 to P4b):
 
 * **A header:**
   * the process identity and its elevation state (elevated administrator, token elevation type, integrity level);
@@ -771,6 +771,8 @@ What the window shows in this version (phases P1 to P4a):
   | `8` | the blocked paths: the roots the preview of the cleanup puts in `BLOCKED` (phase P4a) |
   | `9` | coverage and errors: the coverage and the processes, references, incomplete profiles, temporary directories, discovery notes, partitions with issues and the limits |
   | `P` | the preview: every root with its category (phase P4a) |
+  | `D` | the diagnostics area: the TUI's `Diagnostics V0.2` (phase P4b) |
+  | `U` | inside the diagnostics area only: run the diagnose again (phase P4b) |
 
   Each screen also has a button, with its digit as the access key. `Enter` on a row opens it: a user or a project shows
   its roots, and a root shows its detail (the TUI's fields, then the evidence, the references and the samples of errors
@@ -794,6 +796,29 @@ What the window shows in this version (phases P1 to P4a):
   * A failed preview shows only the exception type, and changes nothing. The next `P` or `8` tries again; nothing
     repeats by itself.
   * Before the first audit has finished, `P` and `8` show the same text as the other screens, and compute nothing.
+* **The diagnostics area (phase P4b),** key `D`, with the same categories, rows, order and text as the TUI's area
+  `D`: the summary, the coverage of every collector, agent processes and sessions, services, the virtualization
+  platform and VMs, repositories and worktrees, temporary partitions, the graph nodes and their edges, and the
+  `UNKNOWN` items. `Enter` opens a row as in the TUI, and `Esc` goes back one screen.
+  * **When the diagnose runs:** only when you ask. The first `D` runs it once, as the TUI's area does; after that, `D`
+    shows the kept result and runs nothing. Moving between the area's screens and opening details run nothing.
+    **U** (or its button, enabled only inside the area) runs it again. An audit (`F5` or Refresh) keeps the result
+    and does not run the diagnose. Nothing repeats by itself.
+  * While it runs, the window shows the TUI's fixed text and a percentage, and the screen keys, the buttons and
+    Refresh do nothing; a second request is ignored. Closing the window then stops the inventory phase at its next
+    progress step; the collectors still run within the diagnose deadline (300 seconds by default), then the result is
+    discarded and the window closes.
+  * It shows only the schema view, the same content as the `diagnose` JSON export: pseudonyms and codes, with no path,
+    account, identity, machine name or command line.
+  * Collectors that a closed release gate keeps off are listed with **"Disabled in this version"** ("Desabilitado
+    nesta versão" in pt-BR), the gate's code, the collector and the reason: worktree diagnostics and handles today,
+    and also the diagnostics export and running Git when a result names them. These lines are the one addition to
+    the TUI's text, so that a disabled collector is never read as an empty result: a category with such a line says
+    "not observed" instead of "none".
+  * A failed run shows only the exception type. A result already shown stays, marked as outdated; nothing repeats
+    by itself.
+  * The digits `1` to `9` and `P` work inside the area too, and leave it for that screen (the TUI ignores them
+    there).
 
 **Audits.** The window runs one audit when it opens, as the TUI does. After that, an audit runs only when you ask for
 it, with **Refresh** or `F5`. Nothing repeats by itself, and no live monitoring exists yet.
@@ -810,7 +835,7 @@ it, with **Refresh** or `F5`. Nothing repeats by itself, and no live monitoring 
   the categories; it offers no button to act on them;
 * the path drill-down of `agent-temp audit -Path`, and the isolation hint of the TUI's detail;
 * list the quarantine;
-* run the diagnose;
+* run the diagnose by itself, export it, or run Git: the export and Git stay behind their closed gates;
 * copy to the clipboard;
 * export;
 * remember its size or position;

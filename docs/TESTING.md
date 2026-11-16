@@ -405,9 +405,9 @@ The quarantine is a folder of the sandbox (the `AtmIsolationQuarantineRoot` seam
     action, run as registered once the installation is gone, exits non-zero with nothing created (fail closed); the
     harness then removes it.
 
-## Desktop GUI in the suite (V0.2.1 phases P1 to P4a)
+## Desktop GUI in the suite (V0.2.1 phases P1 to P4b)
 
-The suite areas `GUI P1`, `GUI P2`, `GUI P3` and `GUI P4a` cover `agent-temp gui` ([ADR-0014](adr/ADR-0014-desktop-gui-winforms.md)). None
+The suite areas `GUI P1`, `GUI P2`, `GUI P3`, `GUI P4a` and `GUI P4b` cover `agent-temp gui` ([ADR-0014](adr/ADR-0014-desktop-gui-winforms.md)). None
 of their cases opens a window in a shipped copy: the gate stays closed in every file, and the cases that go past it open
 it only in their own process memory.
 
@@ -461,11 +461,30 @@ both `BLOCKED`, so that the order of ties is tested. P3's navigation case now ex
 | Static (P4a) | the closed list still has 21 names; `Invoke-AtmPreview` appears once in the GUI files, inside `Invoke-AtmGuiPreview`; the preview seam is a single `$null` assignment; no timer, no editable text field, no closure, no cancel button; a planted call to `Test-AtmCandidate`, an engine helper outside the list, is detected; the keys are `1` to `9` and `P`; the form handles `P` in its key handler, defers a close during the preview and shows the notice; the new keys exist in both languages |
 | Real window (P4a) | Windows PowerShell only, in a job-object process with a timeout, with the inventory and the preview dubbed. The walk dashboard, `P`, `Enter` (the detail with the `Preview` line), `Esc`, `8`, `Esc`, `F5`, `P` (the preview is called again). The second preview call asks the window to close: the window stays open until the call ends, then closes. Each step checks the screen title, the visible rows, the notice line, the `Preview` line and the audit and preview call counts. Runs in en-US and pt-BR; no child process and no new file is left behind. `NAO_TESTADO` on PowerShell 7 and when no window can be shown |
 
+`GUI P4b`, the diagnostics area (keys `D` and `U`). The diagnose results are dubbed in memory, built from the suite's
+diagnose fixtures and read through the schema view, as the window reads them. The dubbed views are: complete; partial
+coverage; partial and outdated (a failed refresh); a collector missing; `UNKNOWN` items with a graph reason; an
+`AMBIGUOUS` edge; a node with more than 40 edges each way; and the four V0.2 gates closed. Since P4b, the static case of
+P1 also refuses a GUI variable that reads one of the TUI's (a planted read of a TUI table), a planted call to another
+JSON export of the engine, and `ConvertFrom-Json` outside its one place; P2 to P4a count 23 names in the closed list, and
+P4a's keys are `1` to `9`, `P` and `D`.
+
+| Case | What it checks |
+|---|---|
+| Parity with the TUI | no window, en-US and pt-BR, every dubbed view: every screen of the area (the menu, each category, the detail of every coverage record, finding and node) has the TUI's lines, cell by cell and in the same order, the TUI's columns, the lines above the table and the empty text. The only difference allowed is the gate lines ("disabled in this version"). The CI log prints one line per view and screen, starting `   paridade: `: language, view, screen, TUI lines, GUI lines, gate lines added, equal |
+| V0.2 gates | no window, both languages: each of the four gate codes has a "disabled in this version" line with its catalog text, in the summary and in the category it affects; the worktrees category shows the worktree and Git lines; a category with a gate line never shows the text for "none", even when its coverage is conclusive |
+| When the diagnose runs | no window: the first `D` runs it once, with the TUI's arguments (the session's inventory arguments with the progress callback); the next `D` uses the kept result; `U` outside the area does nothing; `U` inside runs it again and goes back to the area; navigation reuses the same result, `U` gives a new one; an audit keeps the result; a request during a run is ignored; a close stops the inventory phase and discards the result; a failure with an earlier result marks it outdated with the exception code only; with no earlier result the area does not open; nothing repeats by itself; a result read back from a CLIXML export gives the same export |
+| Privacy | no window, both languages: with a dubbed identity and machine name in the result, neither appears in any text of any screen of the area (titles, columns, rows, the lines above the table, gate lines), nor in an outdated result |
+| Static (P4b) | the closed list has exactly the two new names (23) and `ConvertFrom-Json` as the fourth allowed cmdlet; `Invoke-AtmDiagnose`, `ConvertTo-AtmDiagnoseJson` and `ConvertFrom-Json` appear in one place only, `Invoke-AtmGuiDiagnose`; planted violations (another JSON export, a read of a TUI table, `ConvertFrom-Json` elsewhere) are refused; the diagnose seam is a single `$null` assignment; no timer, editable text field, closure, cancel button, JSON serializer, `Out-*` or `Export-*`; the GUI's copies of the TUI's tables and of its UTC time format equal the TUI's; keys `D` and `U`; the new keys exist in both languages |
+| Real window (P4b) | Windows PowerShell only, in a job-object process with a timeout, with the inventory and the diagnose dubbed in that process only. The walk `D`, `Enter` on the summary, `Esc`, the worktrees category (with its "disabled in this version" line), `Enter`, `Esc`, `U` (the diagnose is called again), `F5`, `D` (no new call), then close. Each step checks the title, a known line, the lines above the table, that `U` is enabled only inside the area, and the call counts; the result's identity and machine name appear in no control. Runs in en-US and pt-BR; no child process, timer or file is left behind in the sandbox, the configuration or the TEMP folder. `NAO_TESTADO` on PowerShell 7 and when no window can be shown |
+
 The read-only case (sandbox identical in names, sizes, times and attributes) also runs a GUI session, with no window,
 that audits the sandbox three times through the real engine and walks the new screens between the audits: users, a
 user's roots and a detail; projects, a project's roots and a detail; coverage and errors, then roots and a detail.
 Since P4a it also opens `P`, `8` and `P` again with the real preview engine (one call, then the kept result), opens the
-detail of a preview row, and checks the sandbox is still identical.
+detail of a preview row, and checks the sandbox is still identical. Since P4b it also opens `D` twice with the real
+diagnose engine (one run, then the kept result), checks the worktree and handle gate lines, walks every category of the
+area with `Enter` on its first row, and checks the sandbox is still identical.
 
 The install e2e adds the step `shipped-gui-gate`: the installed `lib\Gui.ps1` has the single `$false` assignment, both
 GUI files are in the manifest, `version` shows the gate disabled, and `agent-temp gui` exits with code 7 in en-US and
