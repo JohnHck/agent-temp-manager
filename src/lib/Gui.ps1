@@ -214,7 +214,7 @@ function Show-AtmGuiScreen {
     $rows.Columns.Clear()
     if (-not $isDash) {
         $cols = @($vm.Columns)
-        $widths = $(if ($vm.Kind -ceq 'pairs') { @(260, 640) } elseif ($vm.Kind -ceq 'lines') { @(900) } else { @() })
+        $widths = @(if ($vm.Kind -ceq 'pairs') { 260, 640 } elseif ($vm.Kind -ceq 'lines') { 900 })
         for ($i = 0; $i -lt $cols.Count; $i++) { $null = $rows.Columns.Add([string]$cols[$i], $(if ($i -lt $widths.Count) { [int]$widths[$i] } else { 150 })) }
         if ($vm.Kind -ceq 'table') {
             foreach ($r in @($vm.Rows)) {
