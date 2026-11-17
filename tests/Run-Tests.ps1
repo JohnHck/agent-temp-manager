@@ -18379,7 +18379,9 @@ if ($null -eq $res.env) {
                 $pd = & $r1Plan (& $r1Coll (& $r1Prov @((& $r1Hint 'R'), (& $r1Hint 'D2'))) @((& $r1Row 'R'), (& $r1Row 'D2')) (& $r1Deps @((& $r1Link 'D2' 'R'))))
                 Assert-True ($pd.Offered -and (@($pd.DeclaredDependencyStopped) -join ',') -ceq 'D2' -and (@($pd.Capture.DependsOn) -join ',') -ceq 'D2|STOPPED') "dependencia declarada parada: oferecido e mostrado ($(@($pd.Codes) -join ','))" } }
         @{ Code = 'RECOVERY_DEPENDENCIES_UNREADABLE'; Why = 'nao coletadas, leitura falhou, estado ilegivel ou nao listado'; Checks = {
-                $nd = Get-AtmRecoverCollection -Providers @((& $r1Prov @((& $r1Hint 'R')))) -IdentitySource $diagIdUser -ServiceSource ({ param($Names) @((& $r1Row 'R')) }.GetNewClosure())
+                # The row is built here: the closure captures only local variables, never the area's helpers.
+                $ndRow = & $r1Row 'R'
+                $nd = Get-AtmRecoverCollection -Providers @((& $r1Prov @((& $r1Hint 'R')))) -IdentitySource $diagIdUser -ServiceSource ({ param($Names) @($ndRow) }.GetNewClosure())
                 Assert-Eq (& $r1Codes $nd) 'RECOVERY_DEPENDENCIES_UNREADABLE' 'nao coletadas'
                 Assert-Eq (& $r1Codes (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R')) { param($Names) throw (New-Object InvalidOperationException('x')) })) 'RECOVERY_DEPENDENCIES_UNREADABLE' 'leitura falhou'
                 Assert-Eq (& $r1Codes (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R')) (& $r1Deps @((& $r1Link 'R' 'Gone'))))) 'RECOVERY_DEPENDENCIES_UNREADABLE' 'dependente nao listado'
