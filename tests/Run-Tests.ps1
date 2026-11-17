@@ -6236,8 +6236,11 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
     # --- V5 tools (V5-TOOLS) ---
     # The read-only evidence tools of the V5 pilot (tools\v5-pilot; ADR-0015, sections 6 to 8, decision V5-D7 (a)), on
     # synthetic folders of the sandbox only. Nothing here deletes anything: a "removal" is two snapshots compared in the
-    # reverse order of their creation. The T1 logs are made by the engine's own Write-AtmCleanLogRecord
-    # (src\lib\Engine.Clean.ps1) with the fields of the records of Invoke-AtmCleanCore; only the writer is a stand-in.
+    # reverse order of their creation, or (V5-TOOLS-ISO, the isolation sequence) a folder moved inside the sandbox, out
+    # of the snapshot's roots. The T1 logs are made by the engine's own Write-AtmCleanLogRecord (src\lib\Engine.Clean.ps1)
+    # with the fields of the records of Invoke-AtmCleanCore; the isolate, restore and purge logs and the manifests by its
+    # Write-AtmIsolationRecord (src\lib\Engine.Isolate.ps1) with the fields of the records of Invoke-AtmIsolateCore,
+    # Invoke-AtmRestoreCore and Invoke-AtmPurgeCore. Only the writer is a stand-in. No isolation gate is touched.
     $v5Dir = Join-Path (Split-Path -Parent $testsDir) 'tools\v5-pilot'
     $v5Snap = Join-Path $v5Dir 'Get-AtmPilotSnapshot.ps1'
     $v5Cmp = Join-Path $v5Dir 'Compare-AtmPilotSnapshot.ps1'
@@ -6325,8 +6328,71 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
         }
         return , $recs
     }
-    $v5CmpKeys = @('onlyExpectedChange', 'roots', 'expectedRemovedGiven', 'expectedRemovedFound', 'expectedNewPatterns', 'removed.expected', 'removed.unexpected', 'new.expected', 'new.unexpected',
-        'changed.expected', 'changed.unexpected', 'unchanged.expected', 'unchanged.unexpected', 'rootsChanged.expected', 'rootsChanged.unexpected')
+    function New-V5IsoLog {
+        # An isolate, restore or purge log (or an entry's manifest) as the engine writes it: each line by
+        # Write-AtmIsolationRecord (src\lib\Engine.Isolate.ps1), with a stand-in writer (AppendLine). -Seq: the records
+        # already in the file; -Append adds to it (a manifest that grows).
+        param([string]$Path, [string]$Id, [string]$Schema, [object[]]$Records, [int]$Seq = 0, [switch]$Append)
+        $w = [pscustomobject]@{ Lines = (New-Object System.Collections.Generic.List[string]) }
+        $w | Add-Member -MemberType ScriptMethod -Name AppendLine -Value { param($l) $this.Lines.Add($l); return $null }
+        $st = @{ Id = $Id; Seq = $Seq }
+        foreach ($rec in $Records) { $lc = Write-AtmIsolationRecord -Log $w -State $st -Schema $Schema -Type $rec[0] -Fields $rec[1]; if ($null -ne $lc) { throw "registro de teste recusado: $lc" } }
+        $text = ($w.Lines -join "`n") + "`n"
+        $enc = New-Object System.Text.UTF8Encoding($false)
+        if ($Append) { [IO.File]::AppendAllText($Path, $text, $enc) } else { [IO.File]::WriteAllText($Path, $text, $enc) }
+    }
+    function Get-V5IsoRecords {
+        # The records of Invoke-AtmIsolateCore, Invoke-AtmRestoreCore and Invoke-AtmPurgeCore (src\lib\Engine.Isolate.ps1)
+        # for one root (isolate, under the B1 exception) or one entry (restore, purge) that ends COMPLETE. -Set replaces
+        # one field of every record of a type ('<type>.<field>' = value: a planted value).
+        param([string]$Kind, [string]$RunId, [string]$EntryId, [string]$PlanId, [string]$Path, [hashtable]$Set = @{})
+        $op = $RunId + ':1'
+        $ia = [ordered]@{ caller = 'CLI'; consoleRequiredByCaller = $true; callerFieldsVerified = $false; interactiveConsoleObserved = $true; observedBy = 'ENGINE_CONSOLE_CHECK'; identifiesRespondent = $false }
+        $user = 'PILOTVM\alice'; $sid = 'S-1-5-21-1-2-3-4444'; $nw = '2026-11-10T08:00:00.0000000Z'; $dg = ('d1' * 32)
+        $recs = $null
+        switch -CaseSensitive ($Kind) {
+            'isolate' {
+                $recs = @(
+                    , @('run-start', [ordered]@{ tool = $script:AtmVersion; user = $user; sid = $sid; elevated = $false; planned = 1; planId = $PlanId; b1Exception = $true; uninspectableProcesses = 2 })
+                    , @('plan', [ordered]@{ opId = $op; path = $Path; fingerprint = 'f1f2'; files = 2; dirs = 1; bytes = 18; newestWriteUtc = $nw; category = 'ELIGIBLE_WITH_DECLARED_RISK'; uninspectableKeys = @('4@638000000000000000', '812@638000000000000001') })
+                    , @('confirmation', [ordered]@{ accepted = $true; planId = $PlanId; roots = 1; b1ResidualRiskAccepted = $true; interaction = $ia })
+                    , @('plan-check', [ordered]@{ planId = $PlanId; matched = $true; reasons = @() })
+                    , @('move-intent', [ordered]@{ opId = $op; path = $Path; entryId = $EntryId; fingerprint = 'f1f2'; files = 2; dirs = 1; bytes = 18; newestWriteUtc = $nw })
+                    , @('move-result', [ordered]@{ opId = $op; outcome = 'COMPLETE'; moved = $true; verified = $true; filesAfter = 2; dirsAfter = 1; bytesAfter = 18; digestPlanned = $dg; digestAfter = $dg; renameStatus = '0x00000000'; abortReason = $null; exceptionType = $null; path = $Path; entryId = $EntryId })
+                    , @('run-end', [ordered]@{ results = 1; complete = 1; stoppedBy = $null; entryId = $EntryId })
+                )
+            }
+            'restore' {
+                $recs = @(
+                    , @('run-start', [ordered]@{ tool = $script:AtmVersion; operation = 'restore'; user = $user; sid = $sid; elevated = $false; entryId = $EntryId; planId = $PlanId; destination = $Path; alternative = $false; reconcile = $false })
+                    , @('confirmation', [ordered]@{ accepted = $true; planId = $PlanId; step = $null; interaction = $ia })
+                    , @('plan-check', [ordered]@{ planId = $PlanId; matched = $true; reasons = @() })
+                    , @('restore-intent', [ordered]@{ opId = $op; entryId = $EntryId; destination = $Path; files = 2; dirs = 1; bytes = 18 })
+                    , @('restore-result', [ordered]@{ opId = $op; outcome = 'COMPLETE'; moved = $true; verified = $true; destination = $Path; filesAfter = 2; dirsAfter = 1; bytesAfter = 18; digestPlanned = $dg; digestAfter = $dg; renameStatus = '0x00000000'; abortReason = $null; exceptionType = $null; entryId = $EntryId })
+                    , @('run-end', [ordered]@{ results = 1; complete = 1; stoppedBy = $null; entryId = $EntryId })
+                )
+            }
+            'purge' {
+                $recs = @(
+                    , @('run-start', [ordered]@{ tool = $script:AtmVersion; operation = 'purge'; user = $user; sid = $sid; elevated = $false; entryId = $EntryId; planId = $PlanId; files = 2; dirs = 1; bytes = 18; uninspectableProcesses = 0 })
+                    , @('declaration', [ordered]@{ entryId = $EntryId; declaredBy = 'OPERATOR'; taskCompleted = $true; contentDecision = 'RESULTS_PRESERVED'; preservation = [ordered]@{ basis = (Get-AtmPreservationBasis 'RESULTS_PRESERVED'); verifiedByTool = $false } })
+                    , @('confirmation', [ordered]@{ accepted = $true; planId = $PlanId; entryId = $EntryId; interaction = $ia; limitations = @($script:AtmCleanDeclarationLimitations) })
+                    , @('plan-check', [ordered]@{ planId = $PlanId; matched = $true; reasons = @() })
+                    , @('purge-intent', [ordered]@{ opId = $op; entryId = $EntryId; files = 2; dirs = 1; bytes = 18; automatic = $false })
+                    , @('purge-result', [ordered]@{ opId = $op; outcome = 'COMPLETE'; filesDeleted = 2; dirsDeleted = 2; automatic = $false; attempted = $true; completed = $true; filesPlanned = 2; dirsPlanned = 2; abortReason = $null; verifiedGone = $true; exceptionType = $null; entryId = $EntryId })
+                    , @('run-end', [ordered]@{ results = 1; complete = 1; stoppedBy = $null; entryId = $EntryId })
+                )
+            }
+            default { throw "tipo de log de teste desconhecido: $Kind" }
+        }
+        foreach ($k in $Set.Keys) {
+            $t, $f = $k.Split('.', 2)
+            foreach ($r in $recs) { if ($r[0] -ceq $t) { $r[1][$f] = $Set[$k] } }
+        }
+        return , $recs
+    }
+    $v5CmpKeys = @('onlyExpectedChange', 'roots', 'expectedRemovedGiven', 'expectedRemovedFound', 'expectedNewPatterns', 'expectedTouchedPatterns', 'removed.expected', 'removed.unexpected', 'new.expected',
+        'new.unexpected', 'changed.expected', 'changed.unexpected', 'touched.expected', 'unchanged.expected', 'unchanged.unexpected', 'rootsChanged.expected', 'rootsChanged.unexpected')
     Test-Case 'V5 tools' 'Snapshot: arquivos, pastas aninhadas, arquivo vazio, nome com acento e com espaco; SHA-256 igual ao Get-FileHash; datas de escrita e de criacao inalteradas; juncao registrada e nunca seguida (o alvo fora da raiz nao aparece); arquivo em uso exclusivo registrado com codigo, sem conteudo; entradas e console sem caminho absoluto' {
         $base = Join-Path $sandbox 'v5-snap'
         $root = Join-Path $base 'root'
@@ -6486,7 +6552,7 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
         [IO.File]::WriteAllText((Join-Path $d 'outro.txt'), ('S-1-5-21-' + '111111111-222222222-333333333-1001'))
         $cmpFile = Join-Path $d 'cmp.txt'
         $cv = @{ onlyExpectedChange = 'true'; roots = 'R1,R2,R3,R4'; expectedRemovedGiven = 'true'; expectedRemovedFound = 'true'; expectedNewPatterns = '1'; 'removed.expected' = '4' }
-        [IO.File]::WriteAllText($cmpFile, ("atm-pilot-compare`t1`r`n" + (($v5CmpKeys | ForEach-Object { "$_`t" + $(if ($cv.ContainsKey($_)) { $cv[$_] } else { '0' }) }) -join "`r`n") + "`r`nend`tcompare`r`n"))
+        [IO.File]::WriteAllText($cmpFile, ("atm-pilot-compare`t2`r`n" +(($v5CmpKeys | ForEach-Object { "$_`t" + $(if ($cv.ContainsKey($_)) { $cv[$_] } else { '0' }) }) -join "`r`n") + "`r`nend`tcompare`r`n"))
         $out = Join-Path $d 'summary.json'
         $r = Invoke-V5Tool $v5Sum @{ LogFile = $log; Compare = $cmpFile; PinnedSha = ('0123456789abcdef' * 3).Substring(0, 40); Out = $out }
         Assert-True ($r.Code -eq 0 -and [IO.File]::Exists($out)) "resumo escrito ($($r.Text))"
@@ -6500,7 +6566,8 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
         Assert-True ($j.counts.uninspectableProcesses -eq 3 -and $j.counts.filesDeleted -eq 2 -and $j.counts.dirsDeleted -eq 2 -and $j.counts.bytesDeleted -eq 4096 -and $null -eq $j.counts.newUninspectableIdentities -and $j.counts.complete -eq 1 -and $j.counts.planCheckChanged -eq 0) 'contagens'
         Assert-True ($j.compare.given -eq $true -and $j.compare.onlyExpectedChange -eq $true -and $j.compare.'removed.expected' -eq 4 -and $j.checks.changedOutsideRoot -eq $false -and $j.checks.consoleByEngineCheck -eq $true) 'compare e booleanos respondidos'
         Assert-True ($null -eq $j.checks.checkoutDiffersByGateLineOnly -and $null -eq $j.checks.guestClockWithinSecondsOfHost -and $null -eq $j.checks.networkDisconnectedAtDeletingRun) 'o que o log nao responde fica null, nunca inventado'
-        Assert-True ($j.pinnedSha -ceq ('0123456789abcdef' * 3).Substring(0, 40) -and $j.schema -ceq 'atm-pilot-summary-1') 'SHA fixado e esquema'
+        Assert-True ($j.pinnedSha -ceq ('0123456789abcdef' * 3).Substring(0, 40) -and $j.schema -ceq 'atm-pilot-summary-2' -and $j.log.kind -ceq 'clean' -and $j.log.fullRunOrder -eq $true) 'SHA fixado, esquema e tipo do log'
+        Assert-True ($null -eq $j.counts.filesMoved -and $null -eq $j.counts.filesPurged -and $null -eq $j.run.declaredBy -and $null -eq $j.run.automatic -and $null -eq $j.run.moved -and $j.compare.expectedTouchedPatterns -eq 0 -and $j.compare.'touched.expected' -eq 0) 'campos do isolamento e do expurgo null no clean; contagens novas do compare'
         foreach ($x in @('alice', 'PILOTVM', 'S-1-', '\', 'C--Users', $run, ('ab' * 32), 'f1f2', '638000000000000000', '@')) { Assert-True ($txt.IndexOf($x, [StringComparison]::OrdinalIgnoreCase) -lt 0) "resumo sem '$x'" }
     }
     Test-Case 'V5 tools' 'Resumo: log T1 de recusa por F-A (REVALIDATION_REFUSED com B1_EXCEPTION_NEW_UNINSPECTABLE_PROCESS) e execucoes sem log (CLEAN_LOCK_BUSY e exit 6: -NoLog, o codigo e o exit mostrados no console); log ausente sem -NoLog recusado' {
@@ -6571,13 +6638,239 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
         $r = Invoke-V5Tool $v5Sum @{ LogFile = $log; Out = $out; NeedlesFile = $needles }
         Assert-True ($r.Code -eq 4 -and -not [IO.File]::Exists($out) -and $r.Text -match 'PRIVATE_IDENTIFIER') "achado no resumo: exit 4 ($($r.Text))"
         $ref = @(Get-ChildItem -LiteralPath $d -Filter 'summary.json.*.REFUSED')
-        Assert-True ($ref.Count -eq 1 -and ([IO.File]::ReadAllText($ref[0].FullName)).Contains('atm-pilot-summary-1')) 'o resumo fica com o nome REFUSED (nunca apagado)'
+        Assert-True ($ref.Count -eq 1 -and ([IO.File]::ReadAllText($ref[0].FullName)).Contains('atm-pilot-summary-2')) 'o resumo fica com o nome REFUSED (nunca apagado)'
         $r = Invoke-V5Tool $v5Sum @{ LogFile = $log; Out = (Join-Path $d 'summary2.json'); NeedlesFile = (Join-Path $sandbox 'v5-nao-existe.txt') }
         Assert-True ($r.Code -eq 2 -and $r.Text -match 'NEEDLES_MISSING') "arquivo de agulhas ausente: recusado ($($r.Text))"
         $alone = Join-Path $sandbox 'v5-sem-scanner\v5-pilot'; [void][IO.Directory]::CreateDirectory($alone)
         [IO.File]::Copy($v5Sum, (Join-Path $alone 'Get-AtmPilotSummary.ps1'))
         $r = Invoke-V5Tool (Join-Path $alone 'Get-AtmPilotSummary.ps1') @{ LogFile = $log; Out = (Join-Path $d 'summary3.json') }
         Assert-True ($r.Code -eq 2 -and $r.Text -match 'SCANNER_MISSING' -and @(Get-ChildItem -LiteralPath $d -Filter 'summary3.json*').Count -eq 0) "scanner ausente: recusado antes de escrever ($($r.Text))"
+    }
+    Test-Case 'V5 tools' 'Resumo (V5-TOOLS-ISO): logs do isolar, do restaurar e do expurgar escritos pelo Write-AtmIsolationRecord do motor - log.kind, tipos na ordem, desfechos, contagens movidas, restauradas e expurgadas, declaredBy, verifiedByTool e automatic; o que nao se aplica ao tipo fica null; nenhum id de entrada, plan id, digest, caminho, SID ou conta; execucoes de trava fechada sem log' {
+        $d = Join-Path $sandbox 'v5-sum-iso'; [void][IO.Directory]::CreateDirectory($d)
+        $eid = '20261117T101500Z-5e6f7a8b'; $plan = ('c4' * 32)
+        $path = 'C:\Users\alice\AppData\Local\Temp\claude\C--Users-alice-proj\' + [guid]::NewGuid().ToString()
+        $kinds = @(
+            , @('isolate', $script:AtmIsolateLogSchema, 'run-start,plan,confirmation,plan-check,move-intent,move-result,run-end')
+            , @('restore', $script:AtmIsolateLogSchema, 'run-start,confirmation,plan-check,restore-intent,restore-result,run-end')
+            , @('purge', $script:AtmPurgeLogSchema, 'run-start,declaration,confirmation,plan-check,purge-intent,purge-result,run-end')
+        )
+        $docs = @{}
+        foreach ($k in $kinds) {
+            $run = [guid]::NewGuid().ToString()
+            $log = Join-Path $d "$($k[0]).jsonl"
+            New-V5IsoLog -Path $log -Id $run -Schema $k[1] -Records (Get-V5IsoRecords -Kind $k[0] -RunId $run -EntryId $eid -PlanId $plan -Path $path)
+            $od = Join-Path $d "out-$($k[0])"; [void][IO.Directory]::CreateDirectory($od)
+            $out = Join-Path $od 'summary.json'
+            $r = Invoke-V5Tool $v5Sum @{ LogFile = $log; Out = $out; ExitCode = '0' }
+            Assert-True ($r.Code -eq 0 -and [IO.File]::Exists($out)) "$($k[0]): resumo escrito ($($r.Text))"
+            $txt = [IO.File]::ReadAllText($out)
+            $j = $txt | ConvertFrom-Json
+            Assert-True ($j.schema -ceq 'atm-pilot-summary-2' -and $j.log.kind -ceq $k[0]) "$($k[0]): esquema e log.kind"
+            Assert-Eq (@($j.log.recordTypes) -join ',') $k[2] "$($k[0]): tipos de registro, na ordem"
+            Assert-True ($j.log.fullRunOrder -eq $true -and $null -eq $j.log.deletingRunOrder -and $j.log.recSeqContiguous -eq $true -and $j.log.singleRun -eq $true) "$($k[0]): execucao completa, sequencia contigua, uma execucao"
+            Assert-True ((@($j.run.outcomes) -join ',') -ceq 'COMPLETE' -and $null -eq $j.run.stoppedBy -and $j.run.confirmationAccepted -eq $true -and $j.run.planCheckMatched -eq $true -and @($j.run.planCheckReasonCodes).Count -eq 0 -and $j.counts.results -eq 1 -and $j.counts.complete -eq 1 -and $j.run.consoleBy -ceq 'ENGINE_CONSOLE_CHECK') "$($k[0]): desfecho, confirmacao e verificacao do plano"
+            Assert-True ($null -eq $j.counts.filesDeleted -and $null -eq $j.counts.bytesDeleted -and $null -eq $j.counts.planCheckChanged) "$($k[0]): contagens do clean ficam null"
+            foreach ($x in @('alice', 'PILOTVM', 'S-1-', '\', 'C--Users', $run, $plan, $plan.Substring(0, 8), $eid, $eid.Substring($eid.Length - 8), '20261117', 'd1d1d1d1', 'f1f2', '638000000000000000', '0x00000000', '@')) { Assert-True ($txt.IndexOf($x, [StringComparison]::OrdinalIgnoreCase) -lt 0) "$($k[0]): resumo sem '$x'" }
+            $docs[$k[0]] = $j
+        }
+        $i = $docs['isolate']
+        Assert-True ((@($i.run.moved) -join ',') -eq 'True' -and (@($i.run.verified) -join ',') -eq 'True' -and $i.counts.filesMoved -eq 2 -and $i.counts.dirsMoved -eq 1 -and $i.counts.bytesMoved -eq 18 -and $null -eq $i.counts.filesRestored -and $null -eq $i.counts.filesPurged) 'isolar: movido, verificado e contagens movidas'
+        Assert-True ($i.run.b1Exception -eq $true -and (@($i.run.b1ResidualRiskAccepted) -join ',') -eq 'True' -and (@($i.run.planCategories) -join ',') -ceq 'ELIGIBLE_WITH_DECLARED_RISK' -and $i.counts.uninspectableProcesses -eq 2 -and @($i.run.planCheckChangedFields).Count -eq 0 -and $null -ne $i.run.planCheckChangedFields) 'isolar: excecao B1 aceita na confirmacao; nenhum campo mudou na verificacao do plano'
+        Assert-True ($null -eq $i.run.verifiedGone -and $null -eq $i.run.declaredBy -and $null -eq $i.run.verifiedByTool -and $null -eq $i.run.automatic -and $null -eq $i.run.alternative) 'isolar: campos do expurgo e do restaurar null'
+        $s = $docs['restore']
+        Assert-True ((@($s.run.moved) -join ',') -eq 'True' -and $s.counts.filesRestored -eq 2 -and $s.counts.dirsRestored -eq 1 -and $s.counts.bytesRestored -eq 18 -and $null -eq $s.counts.filesMoved -and $s.run.alternative -eq $false -and $s.run.reconcile -eq $false) 'restaurar: contagens restauradas, sem alternativa e sem reconciliacao'
+        Assert-True ($null -eq $s.run.planCheckChangedFields -and @($s.run.b1ResidualRiskAccepted).Count -eq 0 -and $null -eq $s.run.verifiedGone -and $null -eq $s.run.automatic -and $null -eq $s.run.refusalStep) 'restaurar: o que nao se aplica fica null'
+        $p = $docs['purge']
+        Assert-True ($p.run.declaredBy -ceq 'OPERATOR' -and $p.run.verifiedByTool -eq $false -and $p.run.automatic -eq $false -and (@($p.run.contentDecisions) -join ',') -ceq 'RESULTS_PRESERVED' -and (@($p.run.verifiedGone) -join ',') -ceq 'GONE') 'expurgar: declaredBy OPERATOR, verifiedByTool e automatic falsos, decisao de conteudo, verificado'
+        Assert-True ($p.counts.filesPurged -eq 2 -and $p.counts.dirsPurged -eq 2 -and $p.counts.bytesPurged -eq 18 -and $p.counts.uninspectableProcesses -eq 0 -and $null -eq $p.run.moved -and $null -eq $p.counts.filesMoved) 'expurgar: contagens expurgadas'
+        # The gate closed: isolate and purge stop after the plan, before any log (the code and the exit code the console showed).
+        foreach ($code in @('ISOLAMENTO_REAL_DESABILITADO', 'EXPURGO_REAL_DESABILITADO', 'RESTAURACAO_REAL_DESABILITADA')) {
+            $od = Join-Path $d "out-$code"; [void][IO.Directory]::CreateDirectory($od)
+            $r = Invoke-V5Tool $v5Sum @{ NoLog = $true; LogFile = (Join-Path $d "$code.jsonl"); ShownCode = $code; ExitCode = '3'; Out = (Join-Path $od 'summary.json') }
+            Assert-True ($r.Code -eq 0) "${code}: resumo sem log ($($r.Text))"
+            $j = [IO.File]::ReadAllText((Join-Path $od 'summary.json')) | ConvertFrom-Json
+            Assert-True ($j.log.present -eq $false -and $null -eq $j.log.kind -and $j.log.fileAbsent -eq $true -and $j.run.shownCode -ceq $code -and $j.run.exitCode -eq 3) "${code}: sem log, sem tipo, codigo e exit do console"
+        }
+        # A log of the automatic purge (another schema) and a log of two schemas are refused before anything is written.
+        $auto = Join-Path $d 'autopurge.jsonl'
+        New-V5IsoLog -Path $auto -Id ([guid]::NewGuid().ToString()) -Schema $script:AtmAutoPurgeLogSchema -Records @(, @('run-start', [ordered]@{ operation = 'autopurge' }))
+        $r = Invoke-V5Tool $v5Sum @{ LogFile = $auto; Out = (Join-Path $d 'summary-auto.json') }
+        Assert-True ($r.Code -eq 2 -and $r.Text -match 'LOG_SCHEMA_UNKNOWN' -and @(Get-ChildItem -LiteralPath $d -Filter 'summary-auto*').Count -eq 0) "expurgo automatico: esquema recusado ($($r.Text))"
+        $mixed = Join-Path $d 'mixed.jsonl'
+        [IO.File]::WriteAllText($mixed, ([IO.File]::ReadAllText((Join-Path $d 'isolate.jsonl')) + [IO.File]::ReadAllText((Join-Path $d 'purge.jsonl'))))
+        $r = Invoke-V5Tool $v5Sum @{ LogFile = $mixed; Out = (Join-Path $d 'summary-mixed.json') }
+        Assert-True ($r.Code -eq 2 -and $r.Text -match 'LOG_SCHEMA_MIXED' -and @(Get-ChildItem -LiteralPath $d -Filter 'summary-mixed*').Count -eq 0) "dois esquemas num log: recusado ($($r.Text))"
+    }
+    Test-Case 'V5 tools' 'Resumo (V5-TOOLS-ISO): plantados e recusados, cada um sozinho - um id de entrada (deste log ou outro), um plan id, os 8 caracteres de um plan id ou de uma entrada dentro de um codigo de familia, um codigo de outro tipo de log, um codigo fora da lista, um motivo fora da lista e automatic verdadeiro; nenhuma saida final, so o REFUSED com o campo e a regra, sem o valor' {
+        $eid = '20261117T101500Z-5e6f7a8b'; $plan = ('c4' * 32)
+        $path = 'C:\Users\alice\AppData\Local\Temp\claude\C--Users-alice-proj\' + [guid]::NewGuid().ToString()
+        $plants = @(
+            , @('entrada', 'isolate', @{ 'run-end.stoppedBy' = $eid }, 'run.stoppedBy', 'ENTRY_ID')
+            , @('entrada-outra', 'purge', @{ 'run-end.stoppedBy' = ('20251231T235959Z-' + '0badc0de') }, 'run.stoppedBy', 'ENTRY_ID')
+            , @('plano', 'restore', @{ 'run-end.stoppedBy' = $plan }, 'run.stoppedBy', 'PLAN_ID')
+            , @('plano8', 'isolate', @{ 'run-end.stoppedBy' = ('CLEAN_LOCK_ERROR_' + $plan.Substring(0, 8).ToUpperInvariant()) }, 'run.stoppedBy', 'PLAN_ID')
+            , @('entrada8', 'purge', @{ 'run-end.stoppedBy' = ('CLEAN_LOCK_ERROR_' + $eid.Substring($eid.Length - 8).ToUpperInvariant()) }, 'run.stoppedBy', 'ENTRY_ID')
+            , @('outro-tipo', 'isolate', @{ 'run-end.stoppedBy' = 'EXPURGO_REAL_DESABILITADO' }, 'run.stoppedBy', 'NOT_OF_TYPE_stopCode')
+            , @('fora-da-lista', 'purge', @{ 'run-end.stoppedBy' = 'PURGE_DONE_ANYWAY' }, 'run.stoppedBy', 'NOT_OF_TYPE_stopCode')
+            , @('motivo', 'restore', @{ 'plan-check.reasons' = @('NOT_A_REASON (1)') }, 'run.planCheckReasonCodes[0]', 'NOT_OF_TYPE_reasonCode')
+            , @('automatico', 'purge', @{ 'purge-result.automatic' = $true }, 'run.automatic', 'NOT_OF_TYPE_falseOnly')
+        )
+        foreach ($p in $plants) {
+            $d = Join-Path $sandbox ('v5-iso-plant-' + $p[0]); [void][IO.Directory]::CreateDirectory($d)
+            $run = [guid]::NewGuid().ToString()
+            $log = Join-Path $d 'log.jsonl'
+            $schema = $(if ($p[1] -ceq 'purge') { $script:AtmPurgeLogSchema } else { $script:AtmIsolateLogSchema })
+            New-V5IsoLog -Path $log -Id $run -Schema $schema -Records (Get-V5IsoRecords -Kind $p[1] -RunId $run -EntryId $eid -PlanId $plan -Path $path -Set $p[2])
+            $out = Join-Path $d 'summary.json'
+            $r = Invoke-V5Tool $v5Sum @{ LogFile = $log; Out = $out }
+            Assert-True ($r.Code -eq 3 -and -not [IO.File]::Exists($out)) "$($p[0]): recusado, nenhuma saida final ($($r.Text))"
+            $ref = @(Get-ChildItem -LiteralPath $d -Filter 'summary.json.*.REFUSED')
+            Assert-Eq $ref.Count 1 "$($p[0]): o temporario fica com REFUSED no nome"
+            $rt = [IO.File]::ReadAllText($ref[0].FullName)
+            Assert-True ($rt.Contains("field`t$($p[3])`t$($p[4])") -and @($rt -split "`r?`n" | Where-Object { $_ -like "field`t*" }).Count -eq 1) "$($p[0]): o campo e a regra ($($p[3]) $($p[4])): $rt"
+            $v = @($p[2].Values)[0]
+            if ($v -is [string]) { Assert-True ($rt.IndexOf($v, [StringComparison]::OrdinalIgnoreCase) -lt 0 -and $r.Text.IndexOf($v, [StringComparison]::OrdinalIgnoreCase) -lt 0) "$($p[0]): o valor nao aparece no arquivo nem no console" }
+            foreach ($x in @($eid, $eid.Substring($eid.Length - 8), $plan.Substring(0, 8))) { Assert-True ($rt.IndexOf($x, [StringComparison]::OrdinalIgnoreCase) -lt 0 -and $r.Text.IndexOf($x, [StringComparison]::OrdinalIgnoreCase) -lt 0) "$($p[0]): nenhum id no REFUSED nem no console" }
+        }
+    }
+    Test-Case 'V5 tools' 'Compare (formato 2): raiz que nasce coberta por R5:\ esperada; sem cobertura, ou coberta so por uma pasta dela, inesperada; raiz que some continua inesperada com R5:\; -ExpectedTouched aceita so a data da pasta nomeada (exata, sem caixa); outra mudanca dela, um filho e um arquivo nomeado continuam inesperados; -ExpectedTouched sem pasta recusado' {
+        $base = Join-Path $sandbox 'v5-cmp-iso'
+        $r1 = Join-Path $base 'base'; $q = Join-Path $base 'AgentTempManager\Q'; $s = Join-Path $base 'snaps'
+        $slug = Join-Path $r1 'claude\C--Users-alice-proj'
+        foreach ($d in @((Join-Path $slug 'irma'), (Join-Path $base 'instalado'), (Join-Path $base 'checkout'), (Join-Path $base 'evid'), $s)) { [void][IO.Directory]::CreateDirectory($d) }
+        [IO.File]::WriteAllText((Join-Path $slug 'irma\f.txt'), 'f')
+        $roots = @($r1, (Join-Path $base 'instalado'), (Join-Path $base 'checkout'), (Join-Path $base 'evid'), $q)
+        $a = New-V5Snap $roots (Join-Path $s 'a.txt')
+        $entry = '20261117T101500Z-5e6f7a8b'
+        [void][IO.Directory]::CreateDirectory((Join-Path $q $entry))
+        [IO.File]::WriteAllText((Join-Path $q "$entry\manifest.jsonl"), '{}')
+        $b = New-V5Snap $roots (Join-Path $s 'b.txt')
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $a; After = $b; ExpectedNew = @('R5:\') }
+        Assert-True ($r.Code -eq 0 -and (Get-V5Count $r.Text 'rootsChanged.expected') -ceq '1' -and (Get-V5Count $r.Text 'new.expected') -ceq '2' -and (Get-V5Count $r.Text 'onlyExpectedChange') -ceq 'true') "raiz que nasce coberta por R5:\ - esperada ($($r.Text))"
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $a; After = $b }
+        Assert-True ($r.Code -eq 1 -and (Get-V5Count $r.Text 'rootsChanged.unexpected') -ceq '1' -and (Get-V5Count $r.Text 'new.unexpected') -ceq '2') "raiz que nasce sem cobertura: inesperada ($($r.Text))"
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $a; After = $b; ExpectedNew = @("R5:$entry\") }
+        Assert-True ($r.Code -eq 1 -and (Get-V5Count $r.Text 'rootsChanged.unexpected') -ceq '1' -and (Get-V5Count $r.Text 'new.expected') -ceq '2') "raiz que nasce coberta so por uma pasta dela: o nascimento e inesperado ($($r.Text))"
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $b; After = $a; ExpectedNew = @('R5:\') }
+        Assert-True ($r.Code -eq 1 -and (Get-V5Count $r.Text 'rootsChanged.unexpected') -ceq '1') "raiz que some, com R5:\ - inesperada ($($r.Text))"
+        # -ExpectedTouched: the parent of a root that left and came back changes only its last write time.
+        $c = New-V5Snap $roots (Join-Path $s 'c.txt')
+        [IO.Directory]::SetLastWriteTimeUtc($slug, [IO.Directory]::GetLastWriteTimeUtc($slug).AddMinutes(-7))
+        $dd = New-V5Snap $roots (Join-Path $s 'd.txt')
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $c; After = $dd }
+        Assert-True ($r.Code -eq 1 -and (Get-V5Count $r.Text 'changed.unexpected') -ceq '1') "pasta com a data mudada, sem -ExpectedTouched: inesperada ($($r.Text))"
+        foreach ($t in @('R1:claude\C--Users-alice-proj', 'R1:CLAUDE/c--users-alice-proj\')) {
+            $r = Invoke-V5Tool $v5Cmp @{ Before = $c; After = $dd; ExpectedTouched = @($t) }
+            Assert-True ($r.Code -eq 0 -and (Get-V5Count $r.Text 'changed.expected') -ceq '1' -and (Get-V5Count $r.Text 'touched.expected') -ceq '1' -and (Get-V5Count $r.Text 'expectedTouchedPatterns') -ceq '1') "-ExpectedTouched '$t': so a data, esperada ($($r.Text))"
+        }
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $c; After = $dd; ExpectedTouched = @('R1:claude') }
+        Assert-True ($r.Code -eq 1 -and (Get-V5Count $r.Text 'touched.expected') -ceq '0') "-ExpectedTouched no avo: exato, nao cobre a pasta de baixo ($($r.Text))"
+        # Another change of the named folder (its code, in a synthetic copy of the snapshot): unexpected.
+        $lines = [IO.File]::ReadAllLines($dd)
+        for ($n = 0; $n -lt $lines.Length; $n++) { $f = $lines[$n].Split("`t"); if ($f[0] -ceq 'E' -and $f[1] -ceq 'R1' -and $f[7] -ceq 'claude\C--Users-alice-proj') { $f[6] = 'ACCESS_DENIED'; $lines[$n] = $f -join "`t" } }
+        $e2 = Join-Path $s 'e.txt'; [IO.File]::WriteAllText($e2, (($lines -join "`r`n") + "`r`n"))
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $c; After = $e2; ExpectedTouched = @('R1:claude\C--Users-alice-proj') }
+        Assert-True ($r.Code -eq 1 -and (Get-V5Count $r.Text 'changed.unexpected') -ceq '1' -and (Get-V5Count $r.Text 'touched.expected') -ceq '0') "pasta nomeada com outra mudanca: inesperada ($($r.Text))"
+        # A child of the named folder whose date changed, and a file named by -ExpectedTouched: unexpected.
+        [IO.Directory]::SetLastWriteTimeUtc((Join-Path $slug 'irma'), [IO.Directory]::GetLastWriteTimeUtc((Join-Path $slug 'irma')).AddMinutes(-7))
+        [IO.File]::WriteAllText((Join-Path $slug 'irma\f.txt'), 'mudou')
+        $g = New-V5Snap $roots (Join-Path $s 'g.txt')
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $c; After = $g; ExpectedTouched = @('R1:claude\C--Users-alice-proj', 'R1:claude\C--Users-alice-proj\irma\f.txt') }
+        Assert-True ($r.Code -eq 1 -and (Get-V5Count $r.Text 'touched.expected') -ceq '1' -and (Get-V5Count $r.Text 'changed.unexpected') -ceq '2') "filho com a data mudada e arquivo nomeado: inesperados ($($r.Text))"
+        foreach ($t in @('R1:', 'R1:\')) {
+            $r = Invoke-V5Tool $v5Cmp @{ Before = $c; After = $dd; ExpectedTouched = @($t) }
+            Assert-True ($r.Code -eq 2 -and $r.Text -match 'EXPECTED_FORMAT') "-ExpectedTouched '$t' sem pasta: recusado ($($r.Text))"
+        }
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $c; After = $dd; ExpectedTouched = @('R9:x') }
+        Assert-True ($r.Code -eq 2 -and $r.Text -match 'EXPECTED_LABEL_UNKNOWN') "-ExpectedTouched de rotulo desconhecido: recusado ($($r.Text))"
+    }
+    Test-Case 'V5 tools' 'Sequencia sintetica do roteiro do isolamento (I-4, I-6, I-7 e E-3): isolar, restaurar, isolar de novo e expurgar, por movimentos na sandbox (o expurgo leva o payload para fora das raizes); cada compare com os parametros do roteiro da onlyExpectedChange, e cada resumo, com o log do motor e esse compare, sai com o tipo certo e sem id, plan id nem caminho' {
+        $base = Join-Path $sandbox 'v5-seq'
+        $r1 = Join-Path $base 'AgentTempBase'; $r2 = Join-Path $base 'instalado'; $r3 = Join-Path $base 'co-iso'; $evid = Join-Path $base 'evid'; $q = Join-Path $base 'AgentTempManager\Q'
+        $snaps = Join-Path $base 'snaps'; $sums = Join-Path $base 'resumos'; $away = Join-Path $base 'fora-das-raizes'
+        $slugRel = 'claude\C--Users-alice-proj'; $rootRel = "$slugRel\0f0e0d0c-1111-2222-3333-444455556666"
+        $raiz = Join-Path $r1 $rootRel
+        foreach ($d in @((Join-Path $raiz 'tmp'), (Join-Path $r1 "$slugRel\irma"), $r2, $r3, $evid, $snaps, $sums, $away)) { [void][IO.Directory]::CreateDirectory($d) }
+        [IO.File]::WriteAllText((Join-Path $raiz 'saida.txt'), 'sintetico')
+        [IO.File]::WriteAllText((Join-Path $raiz 'tmp\x.txt'), 'sintetico')
+        [IO.File]::WriteAllText((Join-Path $r1 "$slugRel\irma\y.txt"), 'irma')
+        [IO.File]::WriteAllText((Join-Path $r2 'atm.ps1'), 'copia instalada')
+        [IO.File]::WriteAllText((Join-Path $r3 'README.md'), 'checkout')
+        $roots = @($r1, $r2, $r3, $evid, $q)
+        $sha = ('0123456789abcdef' * 3).Substring(0, 40)
+        $id1 = '20261117T101500Z-5e6f7a8b'; $id2 = '20261117T103000Z-9a0b1c2d'; $plan1 = ('c4' * 32); $plan2 = ('7e' * 32)
+        $needles = @($id1, $id2, $id1.Substring($id1.Length - 8), $id2.Substring($id2.Length - 8), $plan1.Substring(0, 8), $plan2.Substring(0, 8), 'alice', 'C--Users', '\', '20261117')
+        $man = {
+            # The entry's manifest, by the same writer (schema atm.quarantine/1); -Seq: the records already in it.
+            param([string]$Id, [object[]]$Recs, [int]$Seq)
+            New-V5IsoLog -Path (Join-Path $q "$Id\manifest.jsonl") -Id $Id -Schema $script:AtmQuarantineSchema -Records $Recs -Seq $Seq -Append:($Seq -gt 0)
+        }
+        $step = {
+            # One compare and one summary of the roteiro, with its parameters; both exit 0.
+            param([string]$Name, [string]$Before, [string]$After, [hashtable]$CmpArgs, [string]$Log, [string]$Kind)
+            $cmpOut = Join-Path $snaps "$Name-compare.txt"
+            $ca = @{ Before = $Before; After = $After; Out = $cmpOut } + $CmpArgs
+            $rc = Invoke-V5Tool $v5Cmp $ca
+            Assert-True ($rc.Code -eq 0 -and (Get-V5Count $rc.Text 'onlyExpectedChange') -ceq 'true') "${Name}: compare so com o esperado, exit 0 ($($rc.Text))"
+            $od = Join-Path $sums $Name; [void][IO.Directory]::CreateDirectory($od)
+            $out = Join-Path $od "$Name-summary.json"
+            $rs = Invoke-V5Tool $v5Sum @{ LogFile = $Log; Compare = $cmpOut; PinnedSha = $sha; ExitCode = '0'; Out = $out }
+            Assert-True ($rs.Code -eq 0 -and [IO.File]::Exists($out)) "${Name}: resumo escrito, exit 0 ($($rs.Text))"
+            $txt = [IO.File]::ReadAllText($out)
+            foreach ($x in $needles) { Assert-True ($txt.IndexOf($x, [StringComparison]::OrdinalIgnoreCase) -lt 0) "${Name}: resumo sem '$x'" }
+            $j = $txt | ConvertFrom-Json
+            Assert-True ($j.log.kind -ceq $Kind -and $j.log.fullRunOrder -eq $true -and $j.compare.onlyExpectedChange -eq $true -and $j.checks.changedOutsideRoot -eq $false -and (@($j.run.outcomes) -join ',') -ceq 'COMPLETE') "${Name}: tipo $Kind, execucao completa, so a mudanca esperada"
+            return $j
+        }
+        $s0 = New-V5Snap $roots (Join-Path $snaps 'I4-antes.txt')
+        # I-4: the quarantine (born here), the entry and its manifest, then the root moved to <entry>\payload.
+        $run1 = [guid]::NewGuid().ToString()
+        [void][IO.Directory]::CreateDirectory((Join-Path $q $id1))
+        & $man $id1 @(, @('entry', [ordered]@{ tool = $script:AtmVersion; runId = $run1; planId = $plan1; targetKind = 'SessionRoot'; originalPath = $raiz; provider = 'ClaudeCode' })) 0
+        & $man $id1 @(, @('move-intent', [ordered]@{ opId = "${run1}:1"; fingerprint = 'f1f2'; files = 2; dirs = 1; bytes = 18 })) 1
+        [IO.Directory]::Move($raiz, (Join-Path $q "$id1\payload"))
+        & $man $id1 @(, @('move-result', [ordered]@{ opId = "${run1}:1"; outcome = 'COMPLETE'; moved = $true; verified = $true })) 2
+        New-V5IsoLog -Path (Join-Path $evid 'I4-isolate.jsonl') -Id $run1 -Schema $script:AtmIsolateLogSchema -Records (Get-V5IsoRecords -Kind 'isolate' -RunId $run1 -EntryId $id1 -PlanId $plan1 -Path $raiz)
+        [IO.File]::WriteAllText((Join-Path $evid 'I4-console.txt'), 'console copiado a mao')
+        $s1 = New-V5Snap $roots (Join-Path $snaps 'I4-depois.txt')
+        $j = & $step 'I4' $s0 $s1 @{ ExpectedRemoved = "R1:$rootRel"; ExpectedNew = @('R5:\', 'R4:\') } (Join-Path $evid 'I4-isolate.jsonl') 'isolate'
+        Assert-True ($j.compare.'removed.expected' -eq 4 -and $j.compare.'rootsChanged.expected' -eq 1 -and $j.compare.expectedRemovedFound -eq $true -and $j.counts.filesMoved -eq 2) 'I-4: a raiz saiu, a quarentena nasceu'
+        # I-6: the payload back to the original path; the manifest grows.
+        $run2 = [guid]::NewGuid().ToString()
+        & $man $id1 @(, @('restore-intent', [ordered]@{ opId = "${run2}:1"; runId = $run2; planId = $plan1; destination = $raiz; alternative = $false })) 3
+        [IO.Directory]::Move((Join-Path $q "$id1\payload"), $raiz)
+        & $man $id1 @(, @('restore-result', [ordered]@{ opId = "${run2}:1"; outcome = 'COMPLETE'; moved = $true; verified = $true; destination = $raiz })) 4
+        New-V5IsoLog -Path (Join-Path $evid 'I6-restore.jsonl') -Id $run2 -Schema $script:AtmIsolateLogSchema -Records (Get-V5IsoRecords -Kind 'restore' -RunId $run2 -EntryId $id1 -PlanId $plan1 -Path $raiz)
+        [IO.File]::WriteAllText((Join-Path $evid 'I6-console.txt'), 'console copiado a mao')
+        $s2 = New-V5Snap $roots (Join-Path $snaps 'I6-depois.txt')
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $s0; After = $s2; ExpectedNew = @('R5:\', 'R4:\') }
+        Assert-True ($r.Code -eq 1 -and (Get-V5Count $r.Text 'changed.unexpected') -ceq '1') "I-6 sem -ExpectedTouched: a data do pai e inesperada ($($r.Text))"
+        $j = & $step 'I6' $s0 $s2 @{ ExpectedTouched = @("R1:$slugRel"); ExpectedNew = @('R5:\', 'R4:\') } (Join-Path $evid 'I6-restore.jsonl') 'restore'
+        Assert-True ($j.compare.'touched.expected' -eq 1 -and $j.compare.'removed.unexpected' -eq 0 -and $j.compare.'rootsChanged.expected' -eq 1 -and $j.counts.filesRestored -eq 2) 'I-6: a arvore voltou identica, o pai so mudou a data'
+        # I-7: a second isolation of the same root, a new entry, left in quarantine.
+        $run3 = [guid]::NewGuid().ToString()
+        [void][IO.Directory]::CreateDirectory((Join-Path $q $id2))
+        & $man $id2 @(, @('entry', [ordered]@{ tool = $script:AtmVersion; runId = $run3; planId = $plan2; targetKind = 'SessionRoot'; originalPath = $raiz; provider = 'ClaudeCode' })) 0
+        & $man $id2 @(, @('move-intent', [ordered]@{ opId = "${run3}:1"; fingerprint = 'f1f2'; files = 2; dirs = 1; bytes = 18 })) 1
+        [IO.Directory]::Move($raiz, (Join-Path $q "$id2\payload"))
+        & $man $id2 @(, @('move-result', [ordered]@{ opId = "${run3}:1"; outcome = 'COMPLETE'; moved = $true; verified = $true })) 2
+        New-V5IsoLog -Path (Join-Path $evid 'I7-isolate.jsonl') -Id $run3 -Schema $script:AtmIsolateLogSchema -Records (Get-V5IsoRecords -Kind 'isolate' -RunId $run3 -EntryId $id2 -PlanId $plan2 -Path $raiz)
+        [IO.File]::WriteAllText((Join-Path $evid 'I7-console.txt'), 'console copiado a mao')
+        $s3 = New-V5Snap $roots (Join-Path $snaps 'I7-depois.txt')
+        $j = & $step 'I7' $s2 $s3 @{ ExpectedRemoved = "R1:$rootRel"; ExpectedNew = @("R5:$id2\", 'R4:\') } (Join-Path $evid 'I7-isolate.jsonl') 'isolate'
+        Assert-True ($j.compare.'removed.expected' -eq 4 -and $j.compare.'rootsChanged.expected' -eq 0 -and $j.compare.'unchanged.unexpected' -eq 0) 'I-7: a raiz saiu de novo, a primeira entrada ficou igual'
+        # E-3: the payload leaves every root (the deleter, here a move out of the roots); the entry and its manifest stay.
+        $run4 = [guid]::NewGuid().ToString()
+        $s3e = New-V5Snap $roots (Join-Path $snaps 'E3-antes.txt')
+        & $man $id2 @(, @('purge-intent', [ordered]@{ opId = "${run4}:1"; runId = $run4; planId = ('5a' * 32); files = 2; dirs = 1; bytes = 18; automatic = $false; declaredBy = 'OPERATOR' })) 3
+        [IO.Directory]::Move((Join-Path $q "$id2\payload"), (Join-Path $away 'payload'))
+        & $man $id2 @(, @('purge-result', [ordered]@{ opId = "${run4}:1"; outcome = 'COMPLETE'; filesDeleted = 2; dirsDeleted = 2; automatic = $false; verifiedGone = $true })) 4
+        New-V5IsoLog -Path (Join-Path $evid 'E3-purge.jsonl') -Id $run4 -Schema $script:AtmPurgeLogSchema -Records (Get-V5IsoRecords -Kind 'purge' -RunId $run4 -EntryId $id2 -PlanId ('5a' * 32) -Path $raiz)
+        [IO.File]::WriteAllText((Join-Path $evid 'E3-console.txt'), 'console copiado a mao')
+        $s4 = New-V5Snap $roots (Join-Path $snaps 'E3-depois.txt')
+        $j = & $step 'E3' $s3e $s4 @{ ExpectedRemoved = "R5:$id2\payload"; ExpectedNew = @("R5:$id2\manifest.jsonl", 'R4:\') } (Join-Path $evid 'E3-purge.jsonl') 'purge'
+        Assert-True ($j.compare.'removed.expected' -eq 4 -and $j.compare.'changed.expected' -ge 1 -and $j.run.declaredBy -ceq 'OPERATOR' -and $j.run.verifiedByTool -eq $false -and $j.run.automatic -eq $false -and $j.counts.filesPurged -eq 2) 'E-3: o payload saiu, o manifesto cresceu, declaredBy OPERATOR'
     }
     Test-Case 'V5 tools' 'Processo novo, sem o motor carregado: snapshot, compare e resumo pela linha de comando (-File), com os codigos de saida 0, 1 e 2' {
         $shell = (Get-Process -Id $PID).Path

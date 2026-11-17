@@ -41,7 +41,7 @@ pwsh       -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1       
 | Clean environment | Windows Sandbox configuration generator (valid `.wsb`, networking disabled, release read-only); the in-sandbox script itself needs an administrator-enabled Windows Sandbox or VM (`NAO_TESTADO` on this machine) |
 | Scale | 200,000 files in one root, bounded managed memory |
 | Privacy | scanner self-test with planted data; working tree and Git index free of SIDs, e-mails, user paths, tokens, machine/user names and private identifiers; only `dist/` ignored |
-| V5 tools | the read-only evidence tools of the V5 pilot (`tools/v5-pilot/`, ADR-0015): snapshot, compare and summary on synthetic sandbox folders and T1 logs (see [V5 pilot evidence tools](#v5-pilot-evidence-tools-in-the-suite-v5-tools)) |
+| V5 tools | the read-only evidence tools of the V5 pilot (`tools/v5-pilot/`, ADR-0015): snapshot, compare and summary on synthetic sandbox folders, T1 logs and isolate, restore and purge logs (see [V5 pilot evidence tools](#v5-pilot-evidence-tools-in-the-suite-v5-tools)) |
 | Portability | one user; several users (audited / inaccessible / hive not loaded / no Claude Code); profile on another drive letter (`subst`); no Claude Code; empty TEMP and empty root; unidentified projects and session-based identification with collision handling; Unicode, spaces, apostrophe, `&`, `#`, parentheses in profile and install paths; per-profile TEMP expansion (redirected, other drive, unresolvable variable) |
 
 ## Privilege matrix
@@ -608,9 +608,13 @@ the V2 one; what differs:
 The three read-only tools of the V5 pilot ([ADR-0015](adr/ADR-0015-v5-pilot-disposable-vm.md), section 6 and its
 implementation record), tested in the suite's area `V5 tools`. The pilot itself is not run anywhere, and no gate is
 opened. The cases use synthetic folders of the suite's sandbox only. Nothing in them deletes anything: a removal is two
-snapshots compared in the reverse order of their creation. The T1 logs are written by the engine's own
-`Write-AtmCleanLogRecord`, with the fields of the records of `Invoke-AtmCleanCore` (`src/lib/Engine.Clean.ps1`). Only
-the writer is a stand-in, so the format is the one the engine writes.
+snapshots compared in the reverse order of their creation, or, in the isolation sequence (V5-TOOLS-ISO), a folder
+moved inside the sandbox and out of the snapshot's roots. The T1 logs are written by the engine's own
+`Write-AtmCleanLogRecord`, with the fields of the records of `Invoke-AtmCleanCore` (`src/lib/Engine.Clean.ps1`). The
+isolate, restore and purge logs, and the entries' manifests, are written by its `Write-AtmIsolationRecord`, with the
+fields of the records of `Invoke-AtmIsolateCore`, `Invoke-AtmRestoreCore` and `Invoke-AtmPurgeCore`
+(`src/lib/Engine.Isolate.ps1`). Only the writer is a stand-in, so the format is the one the engine writes. No isolation
+gate is touched.
 
 * **Snapshot** (`Get-AtmPilotSnapshot.ps1`):
   * covers files, nested folders, an empty file, a name with accents and one with a space, a junction to a folder
@@ -660,6 +664,35 @@ the writer is a stand-in, so the format is the one the engine writes.
 * **Summary and the privacy scanner:**
   * a private needle found in the summary: exit `4`, the summary kept under its `.REFUSED` name, no final output;
   * a missing needles file and a missing scanner are refused before anything is written.
+* **Summary of isolate, restore and purge** (V5-TOOLS-ISO):
+  * one `COMPLETE` log of each kind gives `log.kind` (`isolate`, `restore`, `purge`), the record types in order,
+    `log.fullRunOrder`, the outcome, and the counts moved, restored or purged;
+  * the purge gives `declaredBy` `OPERATOR`, `verifiedByTool` false and `automatic` false;
+  * a field that does not apply to the kind is `null`;
+  * no entry id, plan id (whole or its 8 characters), digest, path, SID or account in the summary;
+  * runs with the gate closed (`ISOLAMENTO_REAL_DESABILITADO`, `EXPURGO_REAL_DESABILITADO`,
+    `RESTAURACAO_REAL_DESABILITADA`) use `-NoLog`, and `log.kind` is `null`;
+  * a log of the automatic purge (`atm.autopurgelog/1`) and a log of two schemas are refused before anything is
+    written.
+* **Summary of isolate, restore and purge, planted values**, each one alone, refused with exit `3` and one `.REFUSED`
+  file naming the field and the rule:
+  * an entry id, of this log or another (`ENTRY_ID`);
+  * a plan id (`PLAN_ID`);
+  * the 8 characters of this log's plan id or entry id inside a code of an allowed family;
+  * a stop code of another kind of log, and a code outside every list;
+  * a plan-check reason outside the list;
+  * `automatic` true in the purge.
+* **Compare, format 2:**
+  * a root born between the snapshots is expected only when `-ExpectedNew '<label>:\'` covers it whole; uncovered, or
+    covered by a folder of it only, it is unexpected; a root that disappears stays unexpected with `'<label>:\'`;
+  * `-ExpectedTouched` accepts only a change of last write time of the named folder (exact, ignoring case, `/` or
+    `\`), counted in `touched.expected`; another change of that folder, a child folder whose date changed and a named
+    file stay unexpected;
+  * an `-ExpectedTouched` that names no folder, or an unknown label, is refused.
+* **Isolation sequence of the pilot's run sheet** (I-4, I-6, I-7, E-3): isolate, restore, isolate again, purge, on five
+  roots (base, installed copy, checkout, evidence folder and the quarantine, born at I-4). Each compare, with the
+  parameters the run sheet uses, gives `onlyExpectedChange`; I-6 without `-ExpectedTouched` does not. Each summary of
+  the step's log with that compare exits `0`, with the right kind, and holds no id, plan id or path.
 * **New process:** snapshot, compare and summary run from the command line (`-File`), with no engine loaded, and give
   exit codes `0`, `1` and `2`.
 * **Static:** the three tools contain no gate, test seam, lock name or `Invoke-AtmClean`, and call no function defined in
@@ -674,7 +707,9 @@ the writer is a stand-in, so the format is the one the engine writes.
   `tools/v5-pilot/` ships as read-only operator tools. The folder holds exactly the three tools, and the privacy
   scanner finds nothing in them. The `build package` job runs the same scanner on the real staged package.
 * **Not tested here:** a real pilot root, a real Claude Code session, a real console, UAC, and the operator's VM (they
-  are the pilot itself, ADR-0015); a file symbolic link where the account cannot create one.
+  are the pilot itself, ADR-0015); a file symbolic link where the account cannot create one; a real isolation, restore
+  or purge, and the real mover's and deleter's effect on the parent folder's dates (the sequence moves folders with
+  .NET).
 
 ## Service fault signals in the suite (V0.4 R0)
 

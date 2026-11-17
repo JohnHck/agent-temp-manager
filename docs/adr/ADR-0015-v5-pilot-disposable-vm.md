@@ -488,3 +488,90 @@ where the account cannot create one.
 * The summary trusts the codes and exit codes the operator types, and checks only their type.
 * The compare cannot tell a write that keeps an item's size, time and hash.
 * The last access time follows the volume's policy, not the tools.
+
+## Implementation record: V5-TOOLS-ISO (2026-11-17)
+
+**Context.** On 2026-11-17 the maintainer decided that the pilot of the 0.3.x isolation and purge runs in the same
+disposable VM as V5. That pilot is the one that stopped on the real machine because of F-A. Its steps include isolate
+(I-4), restore (I-6), isolate again and leave the entry in quarantine (I-7), and the manual purge (E-3). The pilot
+therefore now also covers isolation and purge. Their logs are not T1:
+
+* isolate and restore write `atm.isolatelog/1`;
+* the manual purge writes `atm.purgelog/1`.
+
+The tools of V5-TOOLS refused them. The pilot is still not executed, and no gate is opened anywhere.
+
+**`Get-AtmPilotSummary.ps1` (summary schema `atm-pilot-summary-2`).**
+
+* **The kind of the log** is a new field, `log.kind`: `clean`, `isolate`, `restore` or `purge`. It comes from the
+  schema and the records:
+  * a restore is an `atm.isolatelog/1` whose `run-start` says `operation: restore`, or that holds a `reconcile`,
+    `restore-intent` or `restore-result` record;
+  * every record must be of one schema;
+  * the automatic purge's schema stays refused.
+  * With `-NoLog` there is no kind: a typed code is checked against every kind's stop codes.
+* **Closed lists per kind**, taken from `src/lib/Engine.Isolate.ps1` at this commit:
+  * the record types;
+  * the stop and refusal codes, with the quarantine's and the manifest's native code families for isolate;
+  * the plan-check reason codes (the gates of clean, the plan check of isolate, the quarantine capacity, and the plans
+    of restore and purge);
+  * the outcomes and the refusal steps.
+* **New fields**, each with a fixed type, `null` when the kind or the log does not answer:
+  * `log.kind`;
+  * `log.fullRunOrder`, the records of one complete run of that kind in order (`log.deletingRunOrder` stays, for clean
+    only);
+  * `run.declaredBy` (`OPERATOR`), `run.verifiedByTool` (yes/no) and `run.automatic` (yes/no, and only `false` passes),
+    for purge;
+  * `run.alternative` and `run.reconcile`, for restore;
+  * `run.planCheckReasonCodes`, every kind but clean;
+  * `run.planCheckChangedFields`, isolate only;
+  * `run.moved` and `run.verified`, isolate and restore;
+  * `counts.filesMoved`, `dirsMoved` and `bytesMoved` for isolate; `filesRestored`, `dirsRestored` and `bytesRestored`
+    for restore. They are the mover's measurement after a tree that moved;
+  * `counts.filesPurged`, `dirsPurged` and `bytesPurged` for purge, as clean's deleted counts;
+  * `compare.expectedTouchedPatterns` and `compare.touched.expected`.
+
+  Clean's deleted counts and `counts.planCheckChanged` are now `null` for the other kinds.
+* **A new value rule.** A quarantine entry id (`yyyyMMddTHHmmssZ-` and 8 hex) or 64 hex digits (a plan id) is refused
+  in any value (`ENTRY_ID`, `PLAN_ID`). So are this log's entry ids and plan ids inside text, and the 8 characters of
+  each that the phrases show. They identify the run; only types, codes, counts and yes/no leave the VM.
+
+**`Compare-AtmPilotSnapshot.ps1` (format `atm-pilot-compare 2`).**
+
+* **A root born between the snapshots** (`MISSING` to `PRESENT`) is expected when `-ExpectedNew '<label>:\'` covers it
+  whole. This is the quarantine folder, which the first isolation creates. `PRESENT` to `MISSING` stays unexpected
+  unless it is exactly `-ExpectedRemoved '<label>:'`.
+* **`-ExpectedTouched '<label>:<relative folder>'[]`** names folders that may change their last write time only, with
+  the same type, size, hash and code. A match is exact and counted in `touched.expected`. Any other change of that
+  folder, or of anything below it, stays unexpected. This is the parent of a root that left and came back (isolate,
+  then restore).
+* **The output** gains `expectedTouchedPatterns` and `touched.expected`. It still holds no path.
+
+**How the operator uses them.** The pilot's run sheet keeps the snapshots in a folder outside the five roots:
+`-Root <base>, <installed copy>, <checkout>, <evidence folder>, <quarantine>`. The quarantine is
+`%LOCALAPPDATA%\AgentTempManager\Q` and may be missing before I-4. Each step's compare and summary:
+
+* **I-4** (before and after isolate): `-ExpectedRemoved 'R1:claude\<slug>\<root>' -ExpectedNew 'R5:\', 'R4:\'`.
+* **I-6** (before I-4 and after restore): `-ExpectedTouched 'R1:claude\<slug>' -ExpectedNew 'R5:\', 'R4:\'`.
+* **I-7**: `-ExpectedRemoved 'R1:claude\<slug>\<root>' -ExpectedNew 'R5:<entry>\', 'R4:\'`.
+* **E-3** (with the purge's checkout as `R3` in both snapshots):
+  `-ExpectedRemoved 'R5:<entry>\payload' -ExpectedNew 'R5:<entry>\manifest.jsonl', 'R4:\'`.
+* **Summaries:** one per step, `-LogFile <step log> -Compare <step compare> -PinnedSha <SHA> -ExitCode <n>`, each
+  `-Out` in a folder of its own. A run that stops with the gate closed is summarized with `-NoLog`.
+
+**Tests.** The suite's area `V5 tools` ([TESTING.md](../TESTING.md#v5-pilot-evidence-tools-in-the-suite-v5-tools)):
+
+* logs of each kind written by the engine's own `Write-AtmIsolationRecord`;
+* planted entry ids, plan ids and codes outside the lists;
+* the born root and `-ExpectedTouched`;
+* the sequence isolate, restore, isolate, purge, made of folder moves inside the sandbox, with the compare parameters
+  above.
+
+**Not tested:** a real isolation, restore or purge (the pilot itself); the real mover's and deleter's effect on the
+dates of the parent folders.
+
+**Limits:**
+
+* `-ExpectedTouched` cannot tell why a folder's date changed. Another entry added to that folder and removed again
+  between the snapshots looks the same.
+* A reason code that a future version adds is refused until these lists are updated, which fails closed.

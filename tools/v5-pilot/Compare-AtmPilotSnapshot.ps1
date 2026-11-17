@@ -12,23 +12,27 @@
     '\' ('<label>:<folder>\'), which covers that folder and everything below it. An item matched by -ExpectedNew may
     also change (a log or a transcript that grows).
   * changed: unexpected, except an item matched by -ExpectedNew, and a folder whose only change is its last write time
-    when it is the direct parent of the expected removed item or of an expected new item (Windows updates a folder's
-    last write time when an entry is added to it or removed from it).
+    (type, size, hash and code the same) when it is the direct parent of the expected removed item or of an expected
+    new item (Windows updates a folder's last write time when an entry is added to it or removed from it), or when it
+    is named by -ExpectedTouched ('<label>:<relative folder>', exact; counted again in touched.expected). That is the
+    parent of a root that left and came back (isolate, then restore). Any other change of a named folder is unexpected.
   * unchanged: unexpected under -ExpectedRemoved (it should be gone), expected anywhere else.
-  * a root that exists in one snapshot and is missing in the other is an unexpected change, unless that root is
-    exactly the -ExpectedRemoved ('<label>:').
+  * a root that exists in one snapshot and is missing in the other is an unexpected change, except: PRESENT to MISSING
+    when that root is exactly the -ExpectedRemoved ('<label>:'), and MISSING to PRESENT when an -ExpectedNew covers the
+    whole root ('<label>:\'), as the quarantine folder that the first isolation creates.
   -ExpectedRemoved must exist in -Before and be gone from -After; otherwise only-expected-change is false.
   Refusals (exit 2): a file that is not a complete snapshot (unknown format, malformed or truncated), snapshots that are
-  not of the same roots (labels or paths differ in the header), an -Expected* value with an unknown label or format,
-  and an -Out that already exists (never overwritten).
+  not of the same roots (labels or paths differ in the header), an -Expected* value with an unknown label or format
+  (an -ExpectedTouched that names no folder), and an -Out that already exists (never overwritten).
   The output, on the console and in -Out, holds no path at all: the root labels, counts and yes/no only. Relative paths
   are left out too (folder names under a base can hold a user's path). It does not load the product's engine and never
   uses the network. Read only, except -Out, created as a new file.
 .FORMAT
-  -Out (and the console): UTF-8 text, one 'key <tab> value' per line: 'atm-pilot-compare <tab> 1', onlyExpectedChange,
-  roots, expectedRemovedGiven, expectedRemovedFound, expectedNewPatterns, removed.expected, removed.unexpected,
-  new.expected, new.unexpected, changed.expected, changed.unexpected, unchanged.expected, unchanged.unexpected,
-  rootsChanged.expected, rootsChanged.unexpected, and a last line 'end <tab> compare'.
+  -Out (and the console): UTF-8 text, one 'key <tab> value' per line: 'atm-pilot-compare <tab> 2', onlyExpectedChange,
+  roots, expectedRemovedGiven, expectedRemovedFound, expectedNewPatterns, expectedTouchedPatterns, removed.expected,
+  removed.unexpected, new.expected, new.unexpected, changed.expected, changed.unexpected, touched.expected,
+  unchanged.expected, unchanged.unexpected, rootsChanged.expected, rootsChanged.unexpected, and a last line
+  'end <tab> compare'. Format 2 (V5-TOOLS-ISO) adds expectedTouchedPatterns and touched.expected to format 1.
 .EXITCODES
   0  compared: only the expected change.
   1  compared: some change was not expected (or the expected removal did not happen).
@@ -41,6 +45,7 @@ param(
     [Parameter(Mandatory)][string]$After,
     [string]$ExpectedRemoved,
     [string[]]$ExpectedNew = @(),
+    [string[]]$ExpectedTouched = @(),
     [string]$Out
 )
 Set-StrictMode -Version 2.0
@@ -147,16 +152,31 @@ try {
         }
         return $false
     }
+    # -ExpectedTouched: exact folders (never a prefix, never the root itself) that may change their last write time only.
+    $touch = @(foreach ($x in $ExpectedTouched) {
+            if (-not $x) { continue }
+            $t = ConvertTo-PilotTarget $x $labels '-ExpectedTouched'
+            if ($t.Rel -eq '') { Stop-Pilot 2 "refused: -ExpectedTouched names no folder under its root (EXPECTED_FORMAT)" }
+            $t
+        })
+    $isTouched = {
+        param($e)
+        foreach ($t in $touch) { if ($e.Label -ceq $t.Label -and [string]::Equals($e.Rel, $t.Rel, [StringComparison]::OrdinalIgnoreCase)) { return $true } }
+        return $false
+    }
 
     $c = [ordered]@{ 'removed.expected' = 0; 'removed.unexpected' = 0; 'new.expected' = 0; 'new.unexpected' = 0; 'changed.expected' = 0; 'changed.unexpected' = 0
-        'unchanged.expected' = 0; 'unchanged.unexpected' = 0; 'rootsChanged.expected' = 0; 'rootsChanged.unexpected' = 0 }
+        'touched.expected' = 0; 'unchanged.expected' = 0; 'unchanged.unexpected' = 0; 'rootsChanged.expected' = 0; 'rootsChanged.unexpected' = 0 }
 
-    # Roots present in one snapshot and missing in the other.
+    # Roots present in one snapshot and missing in the other: expected only when it is the whole expected removal, or
+    # when a root that did not exist is born covered whole by -ExpectedNew ('<label>:\').
     for ($i = 0; $i -lt $b.Roots.Count; $i++) {
         $sb = $b.Roots[$i].State; $sa = $a.Roots[$i].State
         if ($sb -ceq $sa) { continue }
-        $whole = ($null -ne $rem -and $rem.Label -ceq $b.Roots[$i].Label -and $rem.Rel -eq '')
-        if ($sb -ceq 'PRESENT' -and $sa -ceq 'MISSING' -and $whole) { $c['rootsChanged.expected']++ } else { $c['rootsChanged.unexpected']++ }
+        $lb = $b.Roots[$i].Label
+        $whole = ($null -ne $rem -and $rem.Label -ceq $lb -and $rem.Rel -eq '')
+        $born = (@($news | Where-Object { $_.Label -ceq $lb -and $_.Prefix -and $_.Rel -eq '' }).Count -gt 0)
+        if (($sb -ceq 'PRESENT' -and $sa -ceq 'MISSING' -and $whole) -or ($sb -ceq 'MISSING' -and $sa -ceq 'PRESENT' -and $born)) { $c['rootsChanged.expected']++ } else { $c['rootsChanged.unexpected']++ }
     }
 
     # Direct parents of the expected removal and of the expected new items: their last write time may change.
@@ -190,18 +210,23 @@ try {
             continue
         }
         $onlyWrite = ($e.Type -ceq 'DIR' -and $f.Type -ceq 'DIR' -and $e.Size -ceq $f.Size -and $e.Sha -ceq $f.Sha -and $e.Code -ceq $f.Code)
-        if ((-not (& $isRemoved $e)) -and ((& $isNew $f) -or ($onlyWrite -and $parents.Contains($k)))) { $c['changed.expected']++ } else { $c['changed.unexpected']++ }
+        $touched = ($onlyWrite -and (& $isTouched $e))
+        if ((-not (& $isRemoved $e)) -and ((& $isNew $f) -or ($onlyWrite -and $parents.Contains($k)) -or $touched)) {
+            $c['changed.expected']++
+            if ($touched) { $c['touched.expected']++ }
+        } else { $c['changed.unexpected']++ }
     }
 
     $unexpected = $c['removed.unexpected'] + $c['new.unexpected'] + $c['changed.unexpected'] + $c['unchanged.unexpected'] + $c['rootsChanged.unexpected']
     $only = ($unexpected -eq 0 -and ($null -eq $rem -or $remFound))
     $lines = New-Object System.Collections.Generic.List[string]
-    $lines.Add("atm-pilot-compare`t1")
+    $lines.Add("atm-pilot-compare`t2")
     $lines.Add("onlyExpectedChange`t" + $(if ($only) { 'true' } else { 'false' }))
     $lines.Add("roots`t" + ($labels -join ','))
     $lines.Add("expectedRemovedGiven`t" + $(if ($null -ne $rem) { 'true' } else { 'false' }))
     $lines.Add("expectedRemovedFound`t" + $(if ($remFound) { 'true' } else { 'false' }))
     $lines.Add("expectedNewPatterns`t" + $news.Count)
+    $lines.Add("expectedTouchedPatterns`t" + $touch.Count)
     foreach ($k in $c.Keys) { $lines.Add("$k`t" + $c[$k]) }
     $lines.Add("end`tcompare")
     $text = ($lines -join "`r`n") + "`r`n"
