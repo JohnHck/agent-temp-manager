@@ -65,8 +65,8 @@ jobs:
   # FINAL-A: the suite on Windows 11 ARM64 (the native safe-creation code and its fixture tests run there too).
   # A separate job, so the names of the existing checks do not change. Informative: not a required check, but a FAIL
   # here is still a FAILURE of the job and is reported as such (continue-on-error only keeps the workflow running; it
-  # is never evidence of a PASS). Windows PowerShell 5.1 runs the whole suite (45 minutes bound a hang, with room for
-  # the GUI cases of V0.2.1). PowerShell 7 runs the suite without the launcher-heavy cases (-Except, FINAL-B): there each Windows
+  # is never evidence of a PASS). Windows PowerShell 5.1 runs the whole suite (45 minutes bound a hang, with room
+  # for GUI cases). PowerShell 7 runs the suite without the launcher-heavy cases (-Except, FINAL-B): there each Windows
   # PowerShell 5.1 child spends about 22 s in its own module analysis (release/V0.2-FINAL-B-VALIDATION.md, section C),
   # so those cases alone take over 50 minutes; the cases left out are listed in the log and NOT TESTED there.
   test-arm64:

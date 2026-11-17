@@ -16655,8 +16655,11 @@ if ($null -eq $res.env) {
                 Set-AtmLanguage -Requested $lang
                 $unknown = Get-AtmText 'gui.state.UNKNOWN'
                 $offTxt = Get-AtmText 'gui.monitor.off'
-                $onTxt = { param([string]$Iv, [string]$Next) Get-AtmText 'gui.monitor.on' $Iv $Next }
-                $cur = { param([string]$At) Get-AtmText 'gui.state.CURRENT' $At }
+                # The templates are read here, in this language; the blocks below run after the finally.
+                $onTpl = Get-AtmText 'gui.monitor.on'
+                $curTpl = Get-AtmText 'gui.state.CURRENT'
+                $onTxt = { param([string]$Iv, [string]$Next) $onTpl -f $Iv, $Next }
+                $cur = { param([string]$At) $curTpl -f $At }
                 $staleTxt = Get-AtmText 'gui.state.STALE' ([string]$sn['project'].refreshed) (ConvertTo-AtmExceptionCode 'IOException')
                 $dashTitle = Get-AtmText 'gui.screenTitle' (Get-AtmText 'menu.dashboard')
                 $diagTitle = Get-AtmText 'gui.screenTitle' (Get-AtmText 'tui.diag.title')
@@ -16665,13 +16668,13 @@ if ($null -eq $res.env) {
             $ao = $j.atOpen
             Assert-True ($null -ne $ao -and [string]$ao.state -ceq $unknown -and -not [bool]$ao.checked -and [string]$ao.combo -ceq '60 s' -and [string]$ao.style -ceq 'DropDownList' -and [string]$ao.status -ceq $offTxt -and (@($ao.items) -join ',') -ceq ($labels -join ',')) "janela P5 ${lang}: ao abrir UNKNOWN, caixa desmarcada, 60 s numa lista DropDownList dos seis valores, desligado ($($ao.state); $($ao.combo); $($ao.style))"
             $x = $sn['open']
-            Assert-True (-not [bool]$x.checked -and -not [bool]$x.enabled -and [int]$x.interval -eq 60000 -and [string]$x.combo -ceq '60 s' -and [string]$x.state -ceq (& $cur $x.refreshed) -and [string]$x.status -ceq $offTxt -and [int]$x.invCalls -eq 1 -and [string]$x.title -ceq $dashTitle) "janela P5 ${lang}: depois do primeiro audit, ticker parado, CURRENT ($($x.state))"
+            Assert-True (-not [bool]$x.checked -and -not [bool]$x.enabled -and [int]$x.interval -eq 60000 -and [string]$x.combo -ceq '60 s' -and [string]$x.state -ceq (& $cur $x.refreshed) -and [string]$x.status -ceq $offTxt -and [int]$x.invCalls -eq 1 -and [string]$x.title -ceq $dashTitle) "janela P5 ${lang}: depois do primeiro audit, ticker parado, CURRENT ($($x.state); $($x.checked); $($x.enabled); $($x.interval); $($x.combo); $($x.status); $($x.invCalls); $($x.title))"
             $x = $sn['on']
             Assert-True ([bool]$x.checked -and [bool]$x.enabled -and [int]$x.interval -eq 60000 -and [int]$x.invCalls -eq 1 -and [string]$x.next -ceq '2026-11-01 10:01:01' -and [string]$x.status -ceq (& $onTxt '60 s' $x.next)) "janela P5 ${lang}: ligar: 60000 ms, nenhum audit, o proximo em 60 s ($($x.next); $($x.status))"
             $x = $sn['combo30']
             Assert-True ([bool]$x.enabled -and [int]$x.interval -eq 30000 -and [string]$x.combo -ceq '30 s' -and [int]$x.invCalls -eq 1 -and [string]$x.next -ceq '2026-11-01 10:00:31' -and [string]$x.status -ceq (& $onTxt '30 s' $x.next)) "janela P5 ${lang}: 30 s: 30000 ms, a contagem de agora ($($x.next))"
             $x = $sn['tick']
-            Assert-True ([string]$x.tick -ceq 'REFRESHED' -and [int]$x.invCalls -eq 2 -and [string]$x.refreshed -ceq '2026-11-01 10:00:32' -and [string]$x.state -ceq (& $cur $x.refreshed) -and [string]$x.next -ceq '2026-11-01 10:01:02' -and [bool]$x.enabled -and [bool]$x.refreshEnabled) "janela P5 ${lang}: tick: um audit, CURRENT, o proximo 30 s depois do fim ($($x.tick); $($x.state); $($x.next))"
+            Assert-True ([string]$x.tick -ceq 'REFRESHED' -and [int]$x.invCalls -eq 2 -and [string]$x.refreshed -ceq '2026-11-01 10:00:32' -and [string]$x.state -ceq (& $cur $x.refreshed) -and [string]$x.next -ceq '2026-11-01 10:01:02' -and [bool]$x.enabled -and [bool]$x.refreshEnabled) "janela P5 ${lang}: tick: um audit, CURRENT, o proximo 30 s depois do fim ($($x.tick); $($x.state); $($x.next); $($x.invCalls); $($x.refreshed); $($x.enabled); $($x.refreshEnabled))"
             $x = $sn['project']
             Assert-True ([string]$x.tick -ceq 'REFRESHED' -and [int]$x.invCalls -eq 3 -and $null -ne $x.pre -and [string]$x.title -ceq [string]$x.pre.title -and [int]$x.stack -eq 3 -and [int]$x.pre.stack -eq 3 -and [string]$x.title -cne $dashTitle -and [string]$x.first -ceq [string]$x.pre.first) "janela P5 ${lang}: um projeto aberto e o tick: a mesma tela ($($x.title); $($x.stack))"
             $x = $sn['fail']

@@ -604,7 +604,17 @@ every copy:
   * Local measurement (Windows PowerShell 5.1, x64): growth from the first to the twentieth audit 0.02 to 0.05 MB, and
     the first inventory collected.
   * The declared limit is 8 MB of growth. Keeping every result would grow by at least 19 MB from the ballast alone.
-  * The runners' numbers are recorded below after the first CI run.
+  * On the CI runners (first run of the PR), the growth from the first to the twentieth audit was:
+
+    | Job | Growth |
+    |---|---|
+    | `test (powershell)`, x64 | 0.02 MB |
+    | `test (pwsh)`, x64 | 0.03 MB |
+    | `test ARM64 (powershell)` | 0.01 MB |
+    | `test ARM64 (pwsh, subset)` | 0.02 MB |
+
+    The first inventory was collected in all four. The 8 MB limit stays: it is more than 200 times the largest number
+    measured, and still well under the 19 MB that keeping every result would add.
 * **Close.** `FormClosing` marks the session as closing, turns the monitoring off, and stops and releases the ticker. The
   `finally` block of `Start-AtmGui` does the same if the form never closed. A tick that arrives after that does nothing
   (`SKIPPED_NOT_DUE`), and the real-window case checks it.
