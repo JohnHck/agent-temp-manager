@@ -965,6 +965,21 @@ function Show-AtmDiagnoseServices {
         $proc = $(if (@($s.Evidence | Where-Object { $_.Code -ceq 'SERVICE_PROCESS_VERIFIED' }).Count -gt 0) { & $val $s 'SERVICE_PROCESS_VERIFIED' } elseif (@($s.Evidence | Where-Object { $_.Code -ceq 'SERVICE_PROCESS_UNVERIFIED' }).Count -gt 0) { 'UNVERIFIED (' + (& $val $s 'SERVICE_PROCESS_UNVERIFIED') + ')' } else { '-' })
         $who = $(if ($s.Provider) { $s.Provider } else { & $val $s 'PROVIDER_ATTRIBUTION_AMBIGUOUS' })
         Write-Host ('    ' + (Get-AtmText 'diag.svcDetail' (& $val $s 'SERVICE_START_MODE') (& $val $s 'SERVICE_DELAYED_AUTO_START') $acct $exe $proc $who))
+        # V0.4 R0 (read only): condition, exit code, accepts stop, image result, dependencies ('name|STATE'; a related
+        # service that is neither declared nor a system service has no name). Never a path or an account.
+        $has = { param($F, [string]$Code) @($F.Evidence | Where-Object { $_.Code -ceq $Code }).Count -gt 0 }
+        $cond = $(if (& $has $s 'SERVICE_CONDITION') { & $val $s 'SERVICE_CONDITION' } elseif (& $has $s 'SERVICE_SIGNALS_NOT_COLLECTED') { Get-AtmText 'diag.svcUnknownValue' } else { '-' })
+        $exit = & $val $s 'SERVICE_EXIT_CODE'
+        if (& $has $s 'SERVICE_SPECIFIC_EXIT_CODE') { $exit += '/' + (& $val $s 'SERVICE_SPECIFIC_EXIT_CODE') }
+        $img = $(if (& $has $s 'SERVICE_IMAGE') { & $val $s 'SERVICE_IMAGE' } elseif (& $has $s 'SERVICE_IMAGE_NOT_DECLARED') { Get-AtmText 'diag.svcImageNotDeclared' } else { Get-AtmText 'diag.svcUnknownValue' })
+        $deps = {
+            param($F, [string]$Code)
+            if (-not (& $has $F 'SERVICE_DEPENDS_ON') -and -not (& $has $F 'SERVICE_DEPENDENT')) { if (& $has $F 'SERVICE_DEPENDENCIES_NONE') { return (Get-AtmText 'diag.svcDepNone') } else { return (Get-AtmText 'diag.svcUnknownValue') } }
+            $items = @($F.Evidence | Where-Object { $_.Code -ceq $Code } | ForEach-Object { $p = ([string]$_.Detail).Split('|'); if ($p[0] -ceq '*') { Get-AtmText 'diag.svcDepHidden' $p[1] } else { $p[0] + ' ' + $p[1] } })
+            if ($items.Count -eq 0) { return (Get-AtmText 'diag.svcDepNone') }
+            return ($items -join ', ')
+        }
+        Write-Host ('    ' + (Get-AtmText 'diag.svcSignals' $cond $exit (& $val $s 'SERVICE_ACCEPT_STOP') $img (& $deps $s 'SERVICE_DEPENDS_ON') (& $deps $s 'SERVICE_DEPENDENT')))
     }
     if ($sf.Count -gt $script:AtmRuntimeListMax) { Write-Host ('  ' + (Get-AtmText 'diag.runtimeMore' ($sf.Count - $script:AtmRuntimeListMax))) }
     foreach ($c in @($cov | Where-Object { $script:AtmConclusiveCoverage -cnotcontains $_.Status })) { Write-Host ('  ' + (Get-AtmText 'diag.runtimeCoverageLine' $c.Collector $c.Status (@($c.Reasons) -join ', '))) -ForegroundColor Yellow }

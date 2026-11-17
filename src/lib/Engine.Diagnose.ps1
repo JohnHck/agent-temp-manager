@@ -220,7 +220,7 @@ function Get-AtmIdentityState {
 $script:AtmHintMaxItems = 256
 $script:AtmHintSpecs = @(
     [pscustomobject]@{ Member = 'GetProcessMatchers'; Slot = 'ProcessMatchers'; Code = 'PROCESS_MATCHERS'; Props = @('ImageName', 'CommandLineMarker') },
-    [pscustomobject]@{ Member = 'GetServiceHints'; Slot = 'ServiceHints'; Code = 'SERVICE_HINTS'; Props = @('Name', 'Role') },
+    [pscustomobject]@{ Member = 'GetServiceHints'; Slot = 'ServiceHints'; Code = 'SERVICE_HINTS'; Props = @('Name', 'Role', 'ExpectedImage') },
     [pscustomobject]@{ Member = 'GetVirtualizationHints'; Slot = 'VirtualizationHints'; Code = 'VIRTUALIZATION_HINTS'; Props = @('Kind', 'Value') }
 )
 
@@ -241,10 +241,26 @@ function Test-AtmHintItem {
     param([string]$Slot, $Values)
     switch ($Slot) {
         'ProcessMatchers' { return ((Test-AtmHintText $Values.ImageName) -and $Values.ImageName -match '^[^\/:*?"<>|]+\.exe$' -and ($null -eq $Values.CommandLineMarker -or (Test-AtmHintText $Values.CommandLineMarker))) }
-        'ServiceHints' { return ((Test-AtmHintText $Values.Name) -and $Values.Name -match '^[A-Za-z0-9_.\- ]+$' -and ($null -eq $Values.Role -or ($Values.Role -is [string] -and $Values.Role -cmatch $script:AtmIdPattern))) }
+        'ServiceHints' { return ((Test-AtmHintText $Values.Name) -and $Values.Name -match '^[A-Za-z0-9_.\- ]+$' -and ($null -eq $Values.Role -or ($Values.Role -is [string] -and $Values.Role -cmatch $script:AtmIdPattern)) -and ($null -eq $Values.ExpectedImage -or (Test-AtmServiceExpectedImage $Values.ExpectedImage))) }
         'VirtualizationHints' { return (@('ServiceOwner', 'VmName') -ccontains $Values.Kind -and (Test-AtmHintText $Values.Value)) }
     }
     return $false
+}
+
+function Test-AtmServiceExpectedImage {
+    # ExpectedImage of a service hint (V0.4 R0, ADR-0016 V04-D5 (b)): the expected executable of the service, as a
+    # file name only ('name.exe') or as a location under a well-known program folder placeholder
+    # ('%ProgramFiles%\Vendor\name.exe'; also %ProgramFiles(x86)%, %ProgramW6432% and %SystemRoot%). Never a drive
+    # letter, a profile folder, another variable or '~'; every folder plain (no empty, '.', '..', leading or trailing
+    # space or dot). Placeholders are resolved in memory only when compared (Compare-AtmServiceImage).
+    param($Value)
+    if (-not (Test-AtmHintText -Value $Value -Max 256)) { return $false }
+    $m = [regex]::Match($Value, '^(?:(%(?:SystemRoot|ProgramFiles|ProgramFiles\(x86\)|ProgramW6432)%)\\)?(.+)$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (-not $m.Success) { return $false }
+    $segs = $m.Groups[2].Value.Split('\')
+    if (-not $m.Groups[1].Success -and $segs.Count -ne 1) { return $false }
+    foreach ($s in $segs) { if ($s -eq '' -or $s -match '^\.+$|^[\s.]|[\s.]$|[/:*?"<>|%~]|[\p{C}\p{Zl}\p{Zp}]') { return $false } }
+    return ($segs[$segs.Count - 1] -match '^[^\s]+\.exe$')
 }
 
 function Get-AtmProviderRuntimeHints {
@@ -3125,19 +3141,51 @@ function Get-AtmProfileDiscoveryCoverage {
 # name, read as text only: nothing is looked up on disk) and dropped; its arguments are never kept. A declared name
 # the service control manager does not list is UNKNOWN (P2-A-S: not listed for this account is not proof of absence);
 # the collector never produces NOT_PRESENT. Account names are never exported (ADR-0012). No state authorizes anything.
+# V0.4 R0 (ADR-0016 section 6) adds read-only fault signals from the same query (ExitCode, ServiceSpecificExitCode,
+# CheckPoint, WaitHint, AcceptStop), one bounded second read of a PENDING service, the dependencies in both directions
+# (CIM association Win32_DependentService and a Win32_BaseService state query, enumerate and read only) and the
+# comparison with the executable a provider declares (ExpectedImage: a result, never a path). No handle to the service
+# control manager or to a service is opened by this module; CIM reads only. No condition authorizes anything either.
 # ---------------------------------------------------------------------------------------------
 
-$script:AtmServiceCimProperties = @('Name', 'State', 'StartMode', 'DelayedAutoStart', 'StartName', 'ProcessId', 'PathName')
+$script:AtmServiceCimProperties = @('Name', 'State', 'StartMode', 'DelayedAutoStart', 'StartName', 'ProcessId', 'PathName', 'ExitCode', 'ServiceSpecificExitCode', 'CheckPoint', 'WaitHint', 'AcceptStop')
+# Fault signals (V0.4 R0, ADR-0016 section 6): read with the same query, never a control right. A row without any of
+# them (an older injected row) has its signals NOT collected; a row with them has each one read or UNREADABLE.
+$script:AtmServiceSignalProperties = @('ExitCode', 'ServiceSpecificExitCode', 'CheckPoint', 'WaitHint', 'AcceptStop')
+# Win32 error codes read in ExitCode: 0 no error, 1066 service-specific error (see ServiceSpecificExitCode), 1077 the
+# service was never started since the last boot.
+$script:AtmServiceExitNoError = 0
+$script:AtmServiceExitSpecific = 1066
+$script:AtmServiceExitNeverStarted = 1077
+# Read-only classification of a STOPPED or PENDING service (SERVICE_CONDITION). It describes what was read; no
+# condition authorizes anything, and the finding's state is still the first read's.
+$script:AtmServiceConditions = @('STOPPED_CLEAN', 'STOPPED_NEVER_STARTED', 'STOPPED_FAILED', 'STOPPED_EXIT_UNREADABLE',
+    'PENDING_PROGRESSING', 'PENDING_STALLED', 'PENDING_UNCHANGED', 'PENDING_STATE_CHANGED', 'PENDING_SINGLE_READ')
+# Second read of a PENDING service: one wait of the largest WaitHint among them, at least SecondReadMinMs and at most
+# SecondReadCapMs, then the same query for those names only; skipped when the run's deadline is closer than the wait
+# plus one query budget.
+$script:AtmServiceSecondReadMinMs = 250
+$script:AtmServiceSecondReadCapMs = 2000
+$script:AtmServiceSecondReadReasons = @('NOT_COLLECTED', 'SIGNALS_UNREADABLE', 'DEADLINE', 'QUERY_DENIED', 'QUERY_FAILED', 'QUERY_TIMEOUT', 'NOT_LISTED', 'DUPLICATE_ROW')
+$script:AtmServiceDependencyReasons = @('DEADLINE', 'QUERY_DENIED', 'QUERY_FAILED', 'QUERY_TIMEOUT')
+$script:AtmServiceImageResults = @('IMAGE_MATCH', 'IMAGE_MISMATCH', 'IMAGE_UNKNOWN')
+# A related service whose name is not shown (neither declared nor a system service): its state only.
+$script:AtmServiceHiddenName = '*'
 $script:AtmServiceMaxNames = 64
 $script:AtmServiceTimeoutSec = 30
 $script:AtmServiceStateMap = @{ 'Running' = 'RUNNING'; 'Stopped' = 'STOPPED'; 'Paused' = 'PAUSED'; 'Start Pending' = 'PENDING'; 'Stop Pending' = 'PENDING'; 'Continue Pending' = 'PENDING'; 'Pause Pending' = 'PENDING' }
 $script:AtmServiceStartModes = @('Boot', 'System', 'Auto', 'Manual', 'Disabled')
 $script:AtmServiceAccountKinds = @('LOCAL_SYSTEM', 'LOCAL_SERVICE', 'NETWORK_SERVICE', 'VIRTUAL', 'BUILTIN', 'MANAGED', 'USER')
 $script:AtmServiceReasonCodes = @('SERVICE_HINTS_NONE', 'SERVICE_HINTS_INCOMPLETE', 'SERVICE_HINTS_CAPPED', 'SERVICE_QUERY_DENIED', 'SERVICE_QUERY_FAILED', 'SERVICE_QUERY_TIMEOUT',
-    'SERVICE_QUERY_NOT_COMPLETED', 'SERVICE_UNEXPECTED_ROW', 'SERVICE_DUPLICATE_ROW', 'SERVICE_PROPERTY_UNREADABLE', 'SERVICE_PROCESS_UNVERIFIED', 'SERVICE_NOT_LISTED_FOR_ACCOUNT')
+    'SERVICE_QUERY_NOT_COMPLETED', 'SERVICE_UNEXPECTED_ROW', 'SERVICE_DUPLICATE_ROW', 'SERVICE_PROPERTY_UNREADABLE', 'SERVICE_PROCESS_UNVERIFIED', 'SERVICE_NOT_LISTED_FOR_ACCOUNT',
+    'SERVICE_SIGNAL_UNREADABLE', 'SERVICE_DEPENDENCIES_UNREADABLE', 'SERVICE_DEPENDENCIES_CAPPED')
 $script:AtmServiceEvidenceCodes = @('SERVICE_HINT', 'SERVICE_NOT_LISTED', 'SERVICE_NOT_QUERIED', 'SERVICE_STATE', 'SERVICE_STATE_UNREADABLE', 'SERVICE_START_MODE', 'SERVICE_START_MODE_UNREADABLE',
     'SERVICE_DELAYED_AUTO_START', 'SERVICE_DELAYED_AUTO_START_UNREADABLE', 'SERVICE_ACCOUNT_KIND', 'SERVICE_ACCOUNT', 'SERVICE_ACCOUNT_UNREADABLE', 'SERVICE_EXECUTABLE', 'SERVICE_EXECUTABLE_NAME',
-    'SERVICE_EXECUTABLE_UNREADABLE', 'SERVICE_PROCESS_VERIFIED', 'SERVICE_PROCESS_UNVERIFIED', 'SERVICE_DUPLICATE_ROW')
+    'SERVICE_EXECUTABLE_UNREADABLE', 'SERVICE_PROCESS_VERIFIED', 'SERVICE_PROCESS_UNVERIFIED', 'SERVICE_DUPLICATE_ROW',
+    'SERVICE_CONDITION', 'SERVICE_EXIT_CODE', 'SERVICE_EXIT_CODE_UNREADABLE', 'SERVICE_SPECIFIC_EXIT_CODE', 'SERVICE_SPECIFIC_EXIT_CODE_UNREADABLE', 'SERVICE_CHECKPOINT',
+    'SERVICE_CHECKPOINT_UNREADABLE', 'SERVICE_WAIT_HINT_MS', 'SERVICE_WAIT_HINT_UNREADABLE', 'SERVICE_ACCEPT_STOP', 'SERVICE_ACCEPT_STOP_UNREADABLE', 'SERVICE_SIGNALS_NOT_COLLECTED',
+    'SERVICE_SECOND_READ_STATE', 'SERVICE_SECOND_READ_CHECKPOINT', 'SERVICE_SECOND_READ_WAIT_MS', 'SERVICE_SECOND_READ_NOT_DONE', 'SERVICE_DEPENDS_ON', 'SERVICE_DEPENDENT',
+    'SERVICE_DEPENDENCIES_NONE', 'SERVICE_DEPENDENCIES_UNREADABLE', 'SERVICE_DEPENDENCIES_NOT_COLLECTED', 'SERVICE_DEPENDENCIES_CAPPED', 'SERVICE_IMAGE', 'SERVICE_IMAGE_NOT_DECLARED')
 # Why a reported PID is not linked (detail of SERVICE_PROCESS_UNVERIFIED).
 $script:AtmServiceLinkCodes = @('PID_NOT_REPORTED', 'SERVICE_NOT_RUNNING', 'PROCESS_SNAPSHOT_UNAVAILABLE', 'SNAPSHOT_BEFORE_QUERY', 'DUPLICATE_PID', 'PROCESS_NOT_COLLECTED', 'CREATION_TIME_UNKNOWN', 'CREATED_AFTER_QUERY')
 
@@ -3232,6 +3280,92 @@ function ConvertTo-AtmServiceAccount {
     return [pscustomobject]@{ Kind = 'USER'; Account = $null }
 }
 
+function ConvertTo-AtmServiceUInt32 {
+    # A DWORD fault signal as read (ExitCode, ServiceSpecificExitCode, CheckPoint, WaitHint): an integer from 0 to
+    # 4294967295, or $null (unreadable) for anything else; text, booleans and fractions are never converted.
+    param($Value)
+    if ($null -eq $Value) { return $null }
+    $ok = $false
+    foreach ($t in @([byte], [sbyte], [int16], [uint16], [int32], [uint32], [int64], [uint64])) { if ($Value -is $t) { $ok = $true; break } }
+    if (-not $ok) { return $null }
+    $d = [decimal]$Value
+    if ($d -lt 0 -or $d -gt 4294967295) { return $null }
+    return [long]$d
+}
+
+function Test-AtmServiceRowProperty {
+    # Whether a row carries a property at all (a missing property is "not collected", a $null one "unreadable").
+    param($Item, [string]$Name)
+    if ($Item -is [System.Collections.IDictionary]) { return $Item.Contains($Name) }
+    return (@($Item.PSObject.Properties.Name) -contains $Name)
+}
+
+function ConvertTo-AtmServiceSignals {
+    # The fault signals of one row (V0.4 R0): $null when the row carries none of them (not collected); otherwise each
+    # value read or $null (unreadable), never a default.
+    param($Row)
+    if (@($script:AtmServiceSignalProperties | Where-Object { Test-AtmServiceRowProperty -Item $Row -Name $_ }).Count -eq 0) { return $null }
+    $as = Get-AtmHintProperty -Item $Row -Name 'AcceptStop'
+    return [pscustomobject]@{
+        ExitCode                = ConvertTo-AtmServiceUInt32 (Get-AtmHintProperty -Item $Row -Name 'ExitCode')
+        ServiceSpecificExitCode = ConvertTo-AtmServiceUInt32 (Get-AtmHintProperty -Item $Row -Name 'ServiceSpecificExitCode')
+        CheckPoint              = ConvertTo-AtmServiceUInt32 (Get-AtmHintProperty -Item $Row -Name 'CheckPoint')
+        WaitHint                = ConvertTo-AtmServiceUInt32 (Get-AtmHintProperty -Item $Row -Name 'WaitHint')
+        AcceptStop              = $(if ($as -is [bool]) { $as } else { $null })
+    }
+}
+
+function Test-AtmServiceSystemImage {
+    <#
+      Whether a related service (a dependency) is a system service, read as text only like
+      ConvertFrom-AtmServicePathName: its executable or driver file (.exe or .sys) is textually under the Windows
+      folder (\SystemRoot\, %SystemRoot%, %windir%, a relative system32\ or the folder itself). Only then is its name
+      shown; nothing is opened or looked up, and the path is never returned. Anything unclear is not a system service.
+    #>
+    param($PathName, [string]$WindowsRoot = $env:SystemRoot)
+    if (-not ($PathName -is [string]) -or [string]::IsNullOrWhiteSpace($PathName) -or [string]::IsNullOrWhiteSpace($WindowsRoot) -or $WindowsRoot -notmatch '^[A-Za-z]:\\') { return $false }
+    $root = $WindowsRoot.TrimEnd('\')
+    $s = $PathName.Trim()
+    if ($s.StartsWith('"')) { $e = $s.IndexOf('"', 1); if ($e -le 1) { return $false }; $s = $s.Substring(1, $e - 1) }
+    else { $m = [regex]::Match($s, '^(\S+?\.(?:exe|sys))(?=[ \t]|$)', [Text.RegularExpressions.RegexOptions]::IgnoreCase); if (-not $m.Success) { return $false }; $s = $m.Groups[1].Value }
+    if ($s -match '^\\\?\?\\[A-Za-z]:\\') { $s = $s.Substring(4) }
+    foreach ($k in @('\SystemRoot\', '%SystemRoot%\', '%windir%\')) { if ($s.StartsWith($k, [StringComparison]::OrdinalIgnoreCase)) { $s = $root + '\' + $s.Substring($k.Length); break } }
+    if ($s -match '^(?i)system32\\') { $s = $root + '\' + $s }
+    if ($s -notmatch '^[A-Za-z]:\\' -or $s -match '[%~"*?<>|]' -or $s.IndexOf(':', 2) -ge 0 -or $s -match '[\p{C}\p{Zl}\p{Zp}]') { return $false }
+    if (@($s.Substring(3).Split('\') | Where-Object { $_ -eq '' -or $_ -match '^\.+$' }).Count -gt 0) { return $false }
+    return $s.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Compare-AtmServiceImage {
+    <#
+      The reduced executable of a service (ConvertFrom-AtmServicePathName) against the ExpectedImage its provider
+      declares (V0.4 R0). Returns IMAGE_MATCH, IMAGE_MISMATCH or IMAGE_UNKNOWN, never a path:
+        * a file name only: equal file name MATCH, another MISMATCH;
+        * a placeholder location: another file name MISMATCH; the same file name with the full path read (only under a
+          well-known program location) MATCH or MISMATCH by the whole path; the same file name without the full path
+          (outside those locations, a packaged app folder, or a placeholder whose folder is not set) UNKNOWN;
+        * no executable read: UNKNOWN.
+      -Folders (tests): placeholder -> folder; default the process environment, resolved in memory only.
+    #>
+    param([string]$Expected, $Executable, [hashtable]$Folders = $null)
+    if ($null -eq $Executable) { return 'IMAGE_UNKNOWN' }
+    $xName = [string](Get-AtmHintProperty -Item $Executable -Name 'Name'); $xPath = [string](Get-AtmHintProperty -Item $Executable -Name 'Path')
+    if ([string]::IsNullOrEmpty($Expected) -or [string]::IsNullOrEmpty($xName)) { return 'IMAGE_UNKNOWN' }
+    $i = $Expected.LastIndexOf('\')
+    $leaf = $(if ($i -ge 0) { $Expected.Substring($i + 1) } else { $Expected })
+    if (-not [string]::Equals($leaf, $xName, [StringComparison]::OrdinalIgnoreCase)) { return 'IMAGE_MISMATCH' }
+    if ($i -lt 0) { return 'IMAGE_MATCH' }
+    if ([string]::IsNullOrEmpty($xPath)) { return 'IMAGE_UNKNOWN' }
+    if ($null -eq $Folders) { $Folders = @{ '%SystemRoot%' = $env:SystemRoot; '%ProgramFiles%' = $env:ProgramFiles; '%ProgramFiles(x86)%' = ${env:ProgramFiles(x86)}; '%ProgramW6432%' = $env:ProgramW6432 } }
+    $j = $Expected.IndexOf('\')
+    $var = $Expected.Substring(0, $j)
+    $root = $null
+    foreach ($k in @($Folders.Keys)) { if ([string]::Equals([string]$k, $var, [StringComparison]::OrdinalIgnoreCase)) { $root = [string]$Folders[$k]; break } }
+    if ([string]::IsNullOrWhiteSpace($root) -or $root -notmatch '^[A-Za-z]:\\[^%*?"<>|]*$') { return 'IMAGE_UNKNOWN' }
+    $full = $root.TrimEnd('\') + $Expected.Substring($j)
+    return $(if ([string]::Equals($full, $xPath, [StringComparison]::OrdinalIgnoreCase)) { 'IMAGE_MATCH' } else { 'IMAGE_MISMATCH' })
+}
+
 function Get-AtmServiceRaw {
     # One local CIM query of Win32_Service for the given exact names, the allowed properties only, bounded by the CIM
     # operation timeout (enforced by CIM; not a guaranteed cancellation). Names are checked again here (letters,
@@ -3245,6 +3379,211 @@ function Get-AtmServiceRaw {
             foreach ($p in $script:AtmServiceCimProperties) { $row[$p] = $_.$p }
             [pscustomobject]$row
         })
+}
+
+function Get-AtmServiceDependencyRaw {
+    <#
+      Dependencies of the given services (V0.4 R0), read only: one local CIM enumeration of the association class
+      Win32_DependentService (Antecedent: the service relied upon; Dependent: the service relying on it), kept only
+      where one end is a given name, then one query of Win32_BaseService (services and drivers) for the other ends'
+      Name, State and PathName, at most MaxRelated names. Both bounded by the CIM operation timeout. Returns Links
+      (Antecedent, Dependent names), Related (rows), RelatedFailed (an exception, or $null) and Capped (names whose
+      state was not asked). Names outside letters, digits, space, '_', '.', '-' are never put in a filter.
+    #>
+    param([string[]]$Names, [int]$TimeoutSec, [int]$MaxRelated = $script:AtmServiceMaxNames)
+    $want = @{}; foreach ($n in $Names) { $want[$n.ToUpperInvariant()] = $true }
+    $links = New-Object System.Collections.Generic.List[object]
+    foreach ($a in @(Get-CimInstance -ClassName Win32_DependentService -OperationTimeoutSec $TimeoutSec -ErrorAction Stop)) {
+        if ($null -eq $a) { continue }
+        $ar = Get-AtmHintProperty -Item $a -Name 'Antecedent'; $dr = Get-AtmHintProperty -Item $a -Name 'Dependent'
+        if ($null -eq $ar -or $null -eq $dr) { continue }
+        $an = Get-AtmHintProperty -Item $ar -Name 'Name'; $dn = Get-AtmHintProperty -Item $dr -Name 'Name'
+        if (-not ($an -is [string]) -or -not ($dn -is [string])) { continue }
+        if ($want.ContainsKey($an.ToUpperInvariant()) -or $want.ContainsKey($dn.ToUpperInvariant())) { $links.Add([pscustomobject]@{ Antecedent = $an; Dependent = $dn }) }
+    }
+    $other = New-Object System.Collections.Generic.List[string]
+    foreach ($l in $links) { foreach ($x in @($l.Antecedent, $l.Dependent)) { if (-not $want.ContainsKey($x.ToUpperInvariant()) -and $x -match '^[A-Za-z0-9_.\- ]+$' -and -not $other.Contains($x)) { $other.Add($x) } } }
+    $ask = @($other | Select-Object -First $MaxRelated)
+    $capped = @($other | Select-Object -Skip $MaxRelated)
+    $related = @(); $failed = $null
+    if ($ask.Count -gt 0) {
+        $filter = (@($ask | ForEach-Object { "Name='$_'" }) -join ' OR ')
+        try {
+            $related = @(Get-CimInstance -ClassName Win32_BaseService -Property Name, State, PathName -Filter $filter -OperationTimeoutSec $TimeoutSec -ErrorAction Stop |
+                ForEach-Object { [pscustomobject]@{ Name = $_.Name; State = $_.State; PathName = $_.PathName } })
+        } catch { $failed = $_.Exception }
+    }
+    return [pscustomobject]@{ Links = $links.ToArray(); Related = $related; RelatedFailed = $failed; Capped = $capped }
+}
+
+function ConvertTo-AtmServiceReadFailure {
+    # The code of a failed extra read (second read, dependencies): QUERY_DENIED, QUERY_TIMEOUT (the budget was used up)
+    # or QUERY_FAILED. Nothing of the message is read.
+    param($Exception, [long]$ElapsedMs, [long]$BudgetMs)
+    if (Test-AtmAccessDeniedException $Exception) { return 'QUERY_DENIED' }
+    if ($ElapsedMs -ge $BudgetMs) { return 'QUERY_TIMEOUT' }
+    return 'QUERY_FAILED'
+}
+
+function ConvertTo-AtmServiceStateCode {
+    # A state as the service control manager spells it (exact spelling only) -> RUNNING, STOPPED, PAUSED or PENDING;
+    # $null otherwise.
+    param($State)
+    if ($State -is [string] -and @($script:AtmServiceStateMap.Keys) -ccontains $State) { return $script:AtmServiceStateMap[$State] }
+    return $null
+}
+
+function Invoke-AtmServiceSecondRead {
+    <#
+      Second read of the PENDING services of a query (V0.4 R0, ADR-0016 section 6), read only. Only for rows with a
+      readable CheckPoint and WaitHint; one wait for all of them (the largest WaitHint, at least
+      AtmServiceSecondReadMinMs and at most -CapMs), then the same query for those names only. Skipped (DEADLINE) when
+      the run's deadline is closer than the wait plus one query budget, so the run never passes its deadline because
+      of it. With an injected -Source and no -Wait nothing is waited or read again (NOT_COLLECTED). Returns a table:
+      declared name -> Done, Reason (AtmServiceSecondReadReasons, when not done), State (as spelled), CheckPoint,
+      WaitedMs (the planned wait, the time the comparison relies on).
+    #>
+    param([hashtable]$Rows, [scriptblock]$Source = $null, [scriptblock]$Wait = $null, $Deadline = $null, [int]$TimeoutSec = $script:AtmServiceTimeoutSec, [int]$CapMs = $script:AtmServiceSecondReadCapMs)
+    $res = @{}
+    $nd = { param($Reason) [pscustomobject]@{ Done = $false; Reason = $Reason; State = $null; CheckPoint = $null; WaitedMs = $null } }
+    $pend = New-Object System.Collections.Generic.List[string]
+    foreach ($n in @($Rows.Keys | Sort-Object)) {
+        $r = $Rows[$n]
+        if ((ConvertTo-AtmServiceStateCode $r.State) -cne 'PENDING') { continue }
+        $sig = Get-AtmHintProperty -Item $r -Name 'Signals'
+        if ($r.Duplicate) { $res[$n] = & $nd 'DUPLICATE_ROW' }
+        elseif ($null -eq $sig) { $res[$n] = & $nd 'NOT_COLLECTED' }
+        elseif ($null -eq $sig.CheckPoint -or $null -eq $sig.WaitHint) { $res[$n] = & $nd 'SIGNALS_UNREADABLE' }
+        elseif ($null -ne $Source -and $null -eq $Wait) { $res[$n] = & $nd 'NOT_COLLECTED' }
+        else { $pend.Add($n) }
+    }
+    if ($pend.Count -eq 0) { return $res }
+    $hint = [long]0
+    foreach ($n in $pend) { if ([long]$Rows[$n].Signals.WaitHint -gt $hint) { $hint = [long]$Rows[$n].Signals.WaitHint } }
+    $waitMs = [int][Math]::Min([long]$CapMs, [Math]::Max([long]$script:AtmServiceSecondReadMinMs, $hint))
+    $budgetMs = [long]$TimeoutSec * 1000
+    if ($null -ne $Deadline -and (([datetime]$Deadline) - [datetime]::UtcNow).TotalMilliseconds -lt ($waitMs + $budgetMs)) { foreach ($n in $pend) { $res[$n] = & $nd 'DEADLINE' }; return $res }
+    if ($null -ne $Wait) { & $Wait $waitMs } else { Start-Sleep -Milliseconds $waitMs }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $raw = $null; $ex = $null
+    try { $raw = @(if ($null -ne $Source) { & $Source $pend.ToArray() } else { Get-AtmServiceRaw -Names $pend.ToArray() -TimeoutSec $TimeoutSec }) } catch { $ex = $_.Exception }
+    $sw.Stop()
+    if ($null -ne $ex) { $code = ConvertTo-AtmServiceReadFailure -Exception $ex -ElapsedMs $sw.ElapsedMilliseconds -BudgetMs $budgetMs; foreach ($n in $pend) { $res[$n] = & $nd $code }; return $res }
+    $seen = @{}; $dup = @{}
+    foreach ($r2 in @($raw | Where-Object { $null -ne $_ })) {
+        $rn = Get-AtmHintProperty -Item $r2 -Name 'Name'
+        if (-not ($rn -is [string])) { continue }
+        $k = @($pend | Where-Object { [string]::Equals($_, $rn, [StringComparison]::OrdinalIgnoreCase) })
+        if ($k.Count -ne 1) { continue }
+        if ($seen.ContainsKey($k[0])) { $dup[$k[0]] = $true } else { $seen[$k[0]] = $r2 }
+    }
+    foreach ($n in $pend) {
+        if ($dup.ContainsKey($n)) { $res[$n] = & $nd 'DUPLICATE_ROW'; continue }
+        if (-not $seen.ContainsKey($n)) { $res[$n] = & $nd 'NOT_LISTED'; continue }
+        $st2 = Get-AtmHintProperty -Item $seen[$n] -Name 'State'
+        $res[$n] = [pscustomobject]@{ Done = $true; Reason = $null; State = $(if ($st2 -is [string]) { $st2 } else { $null }); CheckPoint = ConvertTo-AtmServiceUInt32 (Get-AtmHintProperty -Item $seen[$n] -Name 'CheckPoint'); WaitedMs = $waitMs }
+    }
+    return $res
+}
+
+function Get-AtmServiceCondition {
+    <#
+      Read-only classification of one service (SERVICE_CONDITION, AtmServiceConditions); $null for RUNNING, PAUSED,
+      an unreadable state or signals not collected. It never authorizes anything.
+        STOPPED_CLEAN            STOPPED, ExitCode 0 (no error reported).
+        STOPPED_NEVER_STARTED    STOPPED, ExitCode 1077 (not started since the last boot).
+        STOPPED_FAILED           STOPPED, any other ExitCode (1066: see SERVICE_SPECIFIC_EXIT_CODE).
+        STOPPED_EXIT_UNREADABLE  STOPPED, ExitCode unreadable.
+        PENDING_PROGRESSING      the same pending state twice, CheckPoint changed.
+        PENDING_STALLED          the same pending state twice, CheckPoint unchanged after waiting at least a WaitHint
+                                 greater than 0 (the service should have advanced it within that time).
+        PENDING_UNCHANGED        the same pending state twice, CheckPoint unchanged, but the wait was shorter than
+                                 WaitHint or WaitHint is 0: nothing can be concluded.
+        PENDING_STATE_CHANGED    the second read gave another state (detail in SERVICE_SECOND_READ_STATE).
+        PENDING_SINGLE_READ      no usable second read (SERVICE_SECOND_READ_NOT_DONE says why, or a value unreadable).
+    #>
+    param([string]$State, $RawState, $Signals, $SecondRead)
+    if ($null -eq $Signals) { return $null }
+    if ($State -ceq 'STOPPED') {
+        if ($null -eq $Signals.ExitCode) { return 'STOPPED_EXIT_UNREADABLE' }
+        if ($Signals.ExitCode -eq $script:AtmServiceExitNoError) { return 'STOPPED_CLEAN' }
+        if ($Signals.ExitCode -eq $script:AtmServiceExitNeverStarted) { return 'STOPPED_NEVER_STARTED' }
+        return 'STOPPED_FAILED'
+    }
+    if ($State -cne 'PENDING') { return $null }
+    if ($null -eq $SecondRead -or -not $SecondRead.Done -or $null -eq (ConvertTo-AtmServiceStateCode $SecondRead.State)) { return 'PENDING_SINGLE_READ' }
+    if ([string]$SecondRead.State -cne [string]$RawState) { return 'PENDING_STATE_CHANGED' }
+    if ($null -eq $SecondRead.CheckPoint -or $null -eq $Signals.CheckPoint) { return 'PENDING_SINGLE_READ' }
+    if ($SecondRead.CheckPoint -ne $Signals.CheckPoint) { return 'PENDING_PROGRESSING' }
+    if ($null -ne $Signals.WaitHint -and $Signals.WaitHint -gt 0 -and $SecondRead.WaitedMs -ge $Signals.WaitHint) { return 'PENDING_STALLED' }
+    return 'PENDING_UNCHANGED'
+}
+
+function Get-AtmServiceDependencies {
+    <#
+      Dependencies of the listed declared services (V0.4 R0), from Get-AtmServiceDependencyRaw or an injected -Source.
+      Each related service becomes 'name|STATE': the name only when it is declared by a provider or a system service
+      (Test-AtmServiceSystemImage), otherwise AtmServiceHiddenName; STATE is RUNNING, STOPPED, PAUSED, PENDING,
+      UNREADABLE (not readable, or its query failed), NOT_LISTED (not returned) or NOT_QUERIED (over the cap). Its
+      command line is read here and dropped. Skipped (Failed DEADLINE) when the run's deadline is closer than two query
+      budgets. Returns Failed (AtmServiceDependencyReasons or $null), RelatedFailed, Capped and ByName (declared name ->
+      DependsOn, Dependents, ordinal order).
+    #>
+    param([string[]]$Names, [string[]]$Declared, [hashtable]$Rows, [scriptblock]$Source = $null, $Deadline = $null, [int]$TimeoutSec = $script:AtmServiceTimeoutSec,
+        [int]$MaxRelated = $script:AtmServiceMaxNames, [string]$WindowsRoot = $env:SystemRoot)
+    $out = [ordered]@{ Failed = $null; RelatedFailed = $null; Capped = $false; ByName = @{} }
+    $budgetMs = [long]$TimeoutSec * 1000
+    if ($null -ne $Deadline -and (([datetime]$Deadline) - [datetime]::UtcNow).TotalMilliseconds -lt (2 * $budgetMs)) { $out.Failed = 'DEADLINE'; return [pscustomobject]$out }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $raw = $null; $ex = $null
+    try { $raw = @(if ($null -ne $Source) { & $Source $Names } else { Get-AtmServiceDependencyRaw -Names $Names -TimeoutSec $TimeoutSec -MaxRelated $MaxRelated }) } catch { $ex = $_.Exception }
+    $sw.Stop()
+    if ($null -ne $ex) { $out.Failed = ConvertTo-AtmServiceReadFailure -Exception $ex -ElapsedMs $sw.ElapsedMilliseconds -BudgetMs (2 * $budgetMs); return [pscustomobject]$out }
+    $raw = @($raw | Where-Object { $null -ne $_ })
+    if ($raw.Count -ne 1) { $out.Failed = 'QUERY_FAILED'; return [pscustomobject]$out }
+    $raw = $raw[0]
+    $decl = @{}; foreach ($n in $Declared) { $decl[$n.ToUpperInvariant()] = $n }
+    $rel = @{}
+    foreach ($x in @(@(Get-AtmHintProperty -Item $raw -Name 'Related') | Where-Object { $null -ne $_ })) {
+        $xn = Get-AtmHintProperty -Item $x -Name 'Name'
+        if ($xn -is [string] -and -not $rel.ContainsKey($xn.ToUpperInvariant())) { $rel[$xn.ToUpperInvariant()] = $x }
+    }
+    $rf = Get-AtmHintProperty -Item $raw -Name 'RelatedFailed'
+    if ($null -ne $rf) { $out.RelatedFailed = $(if ($rf -is [Exception]) { ConvertTo-AtmServiceReadFailure -Exception $rf -ElapsedMs $sw.ElapsedMilliseconds -BudgetMs (2 * $budgetMs) } else { 'QUERY_FAILED' }) }
+    $capped = @{}; foreach ($c in @(Get-AtmHintProperty -Item $raw -Name 'Capped')) { if ($c -is [string]) { $capped[$c.ToUpperInvariant()] = $true } }
+    $out.Capped = ($capped.Count -gt 0)
+    $label = {
+        param([string]$Other)
+        $k = $Other.ToUpperInvariant()
+        if ($decl.ContainsKey($k)) {
+            $dn = $decl[$k]
+            $st = $(if ($Rows.ContainsKey($dn)) { $c0 = ConvertTo-AtmServiceStateCode $Rows[$dn].State; if ($c0) { $c0 } else { 'UNREADABLE' } } else { 'NOT_LISTED' })
+            return ('{0}|{1}' -f $dn, $st)
+        }
+        if ($capped.ContainsKey($k)) { return ('{0}|NOT_QUERIED' -f $script:AtmServiceHiddenName) }
+        if ($Other -notmatch '^[A-Za-z0-9_.\- ]+$' -or $null -ne $out.RelatedFailed) { return ('{0}|UNREADABLE' -f $script:AtmServiceHiddenName) }
+        if (-not $rel.ContainsKey($k)) { return ('{0}|NOT_LISTED' -f $script:AtmServiceHiddenName) }
+        $row = $rel[$k]
+        $c1 = ConvertTo-AtmServiceStateCode (Get-AtmHintProperty -Item $row -Name 'State')
+        $st = $(if ($c1) { $c1 } else { 'UNREADABLE' })
+        $shown = (Test-AtmServiceSystemImage -PathName (Get-AtmHintProperty -Item $row -Name 'PathName') -WindowsRoot $WindowsRoot)
+        return ('{0}|{1}' -f $(if ($shown) { $Other } else { $script:AtmServiceHiddenName }), $st)
+    }
+    $links = @(@(Get-AtmHintProperty -Item $raw -Name 'Links') | Where-Object { $null -ne $_ })
+    foreach ($n in $Names) {
+        $on = @{}; $by = @{}
+        foreach ($l in $links) {
+            $a = Get-AtmHintProperty -Item $l -Name 'Antecedent'; $d = Get-AtmHintProperty -Item $l -Name 'Dependent'
+            if (-not ($a -is [string]) -or -not ($d -is [string]) -or [string]::Equals($a, $d, [StringComparison]::OrdinalIgnoreCase)) { continue }
+            if ([string]::Equals($d, $n, [StringComparison]::OrdinalIgnoreCase) -and -not $on.ContainsKey($a.ToUpperInvariant())) { $on[$a.ToUpperInvariant()] = & $label $a }
+            if ([string]::Equals($a, $n, [StringComparison]::OrdinalIgnoreCase) -and -not $by.ContainsKey($d.ToUpperInvariant())) { $by[$d.ToUpperInvariant()] = & $label $d }
+        }
+        $out.ByName[$n] = [pscustomobject]@{
+            DependsOn  = @(Get-AtmOrdinalSorted -Items @($on.Values) -Signature { param($x) $x })
+            Dependents = @(Get-AtmOrdinalSorted -Items @($by.Values) -Signature { param($x) $x })
+        }
+    }
+    return [pscustomobject]$out
 }
 
 function Test-AtmAccessDeniedException {
@@ -3267,8 +3606,17 @@ function Invoke-AtmServiceQuery {
       declared name; PathName already reduced to the executable and dropped), QueryUtc, Capped (names not queried) and
       Coverage ('services'): NOT_OBSERVABLE (no declared name: nothing is queried, never "no services"), TIMEOUT,
       DENIED, FAILED, COMPLETE, or PARTIAL (hints incomplete or capped, unexpected or duplicate rows).
+      V0.4 R0 (read only, after the first read and before the process snapshot; never part of 'services'):
+        * SecondRead (declared name -> Done, Reason, State, CheckPoint, WaitedMs) for each PENDING service. -Wait
+          (tests): param($Ms), the wait before the second read (default: a real sleep). With an injected -Source and no
+          -Wait there is no second read (NOT_COLLECTED), so no test ever sleeps for real.
+        * Dependencies (Failed, Capped, ByName: declared name -> DependsOn and Dependents as 'name|STATE'; a name that
+          is neither declared nor a system service is '*'). -DependencySource (tests): param($Names) returning what
+          Get-AtmServiceDependencyRaw returns (or throwing). With an injected -Source and no -DependencySource,
+          dependencies are not collected ($null).
     #>
-    param($ProviderHints = @(), [scriptblock]$Source = $null, $Deadline = $null, [int]$TimeoutSec = $script:AtmServiceTimeoutSec, [int]$MaxNames = $script:AtmServiceMaxNames, $NowUtc = $null, [switch]$HintsIncomplete)
+    param($ProviderHints = @(), [scriptblock]$Source = $null, $Deadline = $null, [int]$TimeoutSec = $script:AtmServiceTimeoutSec, [int]$MaxNames = $script:AtmServiceMaxNames, $NowUtc = $null, [switch]$HintsIncomplete,
+        [scriptblock]$DependencySource = $null, [scriptblock]$Wait = $null, [int]$SecondReadCapMs = $script:AtmServiceSecondReadCapMs, [string]$WindowsRoot = $env:SystemRoot)
     $reasons = New-Object System.Collections.Generic.List[string]
     # A provider whose hints were never read (deadline, invalid contract) may declare names nobody asked for.
     if ($HintsIncomplete) { $reasons.Add('SERVICE_HINTS_INCOMPLETE') }
@@ -3280,12 +3628,14 @@ function Invoke-AtmServiceQuery {
             if (-not $byName.ContainsKey($k)) { $byName[$k] = [pscustomobject]@{ Name = [string]$s.Name; Providers = New-Object System.Collections.Generic.List[object] } }
             $e = $byName[$k]
             if ([string]::CompareOrdinal([string]$s.Name, $e.Name) -lt 0) { $e.Name = [string]$s.Name }
-            if (@($e.Providers | Where-Object { $_.Id -ceq [string]$h.ProviderId -and $_.Role -ceq [string]$s.Role }).Count -eq 0) { $e.Providers.Add([pscustomobject]@{ Id = [string]$h.ProviderId; Role = $(if ($s.Role) { [string]$s.Role } else { $null }) }) }
+            $img = Get-AtmHintProperty -Item $s -Name 'ExpectedImage'
+            $img = $(if ($img -is [string] -and $img) { $img } else { $null })
+            if (@($e.Providers | Where-Object { $_.Id -ceq [string]$h.ProviderId -and $_.Role -ceq [string]$s.Role -and [string]$_.ExpectedImage -ceq [string]$img }).Count -eq 0) { $e.Providers.Add([pscustomobject]@{ Id = [string]$h.ProviderId; Role = $(if ($s.Role) { [string]$s.Role } else { $null }); ExpectedImage = $img }) }
         }
     }
     foreach ($e in @($byName.Values)) { $e.Providers = $e.Providers.ToArray() }
     $declared = @(Get-AtmOrdinalSorted -Items @($byName.Values) -Signature { param($x) $x.Name.ToUpperInvariant() })
-    $out = [ordered]@{ Declared = $declared; Rows = @{}; QueryUtc = $null; QueryEndUtc = $null; QueryEndTimestamp = $null; Capped = @(); Coverage = $null }
+    $out = [ordered]@{ Declared = $declared; Rows = @{}; QueryUtc = $null; QueryEndUtc = $null; QueryEndTimestamp = $null; Capped = @(); Coverage = $null; SecondRead = @{}; Dependencies = $null }
     # The deadline first: a run that ran out of time is TIMEOUT, never "nothing declared".
     if ($null -ne $Deadline -and [datetime]::UtcNow -ge $Deadline) { $out.Coverage = New-AtmDeadlineCoverage 'services'; return [pscustomobject]$out }
     if ($declared.Count -eq 0) {
@@ -3326,10 +3676,16 @@ function Invoke-AtmServiceQuery {
         $rows[$dn] = [pscustomobject]@{
             State = Get-AtmHintProperty -Item $r -Name 'State'; StartMode = Get-AtmHintProperty -Item $r -Name 'StartMode'; DelayedAutoStart = Get-AtmHintProperty -Item $r -Name 'DelayedAutoStart'
             StartName = Get-AtmHintProperty -Item $r -Name 'StartName'; ProcessId = Get-AtmHintProperty -Item $r -Name 'ProcessId'; Executable = $exe; Duplicate = $false
+            Signals = ConvertTo-AtmServiceSignals $r
         }
     }
     foreach ($d in @($dup.Keys)) { $rows[$d].Duplicate = $true }
     $out.Rows = $rows
+    $out.SecondRead = Invoke-AtmServiceSecondRead -Rows $rows -Source $Source -Wait $Wait -Deadline $Deadline -TimeoutSec $TimeoutSec -CapMs $SecondReadCapMs
+    if ($rows.Count -gt 0 -and ($null -eq $Source -or $null -ne $DependencySource)) {
+        $allDeclared = @($declared | ForEach-Object { $_.Name })
+        $out.Dependencies = Get-AtmServiceDependencies -Names @($names | Where-Object { $rows.ContainsKey($_) }) -Declared $allDeclared -Rows $rows -Source $DependencySource -Deadline $Deadline -TimeoutSec $TimeoutSec -MaxRelated $MaxNames -WindowsRoot $WindowsRoot
+    }
     # The service control manager leaves out services the caller may not query (EnumServicesStatusEx): a declared
     # name that is not listed is not proof of absence, so the query is PARTIAL and the service UNKNOWN (P2-A-S).
     if (@($names | Where-Object { -not $rows.ContainsKey($_) }).Count -gt 0) { $reasons.Add('SERVICE_NOT_LISTED_FOR_ACCOUNT') }
@@ -3373,6 +3729,66 @@ function Resolve-AtmTemporalProcessLink {
     # The CIM creation time is truncated to 1 us: created before the query only with that margin.
     if ($p.CreationUtc.Ticks + $script:AtmCimCreationResolutionTicks -gt ([datetime]$QueryUtc).ToUniversalTime().Ticks) { return [pscustomobject]@{ Result = 'CREATED_AFTER_QUERY'; Process = $null } }
     return [pscustomobject]@{ Result = 'MATCH'; Process = $p }
+}
+
+function Get-AtmServiceSignalEvidence {
+    <#
+      The V0.4 R0 evidence of one listed service (Get-AtmServiceFindings): evidence objects, plus reason codes (strings)
+      for 'service-properties' when a value read is unreadable. Never a path or an account: exit codes and counters as
+      numbers, the condition (Get-AtmServiceCondition), the second read, the dependencies ('name|STATE', see
+      Get-AtmServiceDependencies) and the image result (Compare-AtmServiceImage).
+    #>
+    param([string]$Name, $Declared, $Row, $StateCode, $Query, [scriptblock]$Evidence)
+    $ev = $Evidence
+    $out = New-Object System.Collections.Generic.List[object]
+    $sig = Get-AtmHintProperty -Item $Row -Name 'Signals'
+    $unreadable = $false; $sr = $null
+    if ($null -eq $sig) { $out.Add((& $ev 'SERVICE_SIGNALS_NOT_COLLECTED' $null)) }
+    else {
+        if ($null -ne $sig.ExitCode) { $out.Add((& $ev 'SERVICE_EXIT_CODE' ([string]$sig.ExitCode))) } else { $out.Add((& $ev 'SERVICE_EXIT_CODE_UNREADABLE' $null)); $unreadable = $true }
+        if ($sig.ExitCode -eq $script:AtmServiceExitSpecific) {
+            if ($null -ne $sig.ServiceSpecificExitCode) { $out.Add((& $ev 'SERVICE_SPECIFIC_EXIT_CODE' ([string]$sig.ServiceSpecificExitCode))) } else { $out.Add((& $ev 'SERVICE_SPECIFIC_EXIT_CODE_UNREADABLE' $null)); $unreadable = $true }
+        }
+        if ($null -ne $sig.AcceptStop) { $out.Add((& $ev 'SERVICE_ACCEPT_STOP' $(if ($sig.AcceptStop) { 'TRUE' } else { 'FALSE' }))) } else { $out.Add((& $ev 'SERVICE_ACCEPT_STOP_UNREADABLE' $null)); $unreadable = $true }
+        if ($StateCode -ceq 'PENDING') {
+            if ($null -ne $sig.CheckPoint) { $out.Add((& $ev 'SERVICE_CHECKPOINT' ([string]$sig.CheckPoint))) } else { $out.Add((& $ev 'SERVICE_CHECKPOINT_UNREADABLE' $null)); $unreadable = $true }
+            if ($null -ne $sig.WaitHint) { $out.Add((& $ev 'SERVICE_WAIT_HINT_MS' ([string]$sig.WaitHint))) } else { $out.Add((& $ev 'SERVICE_WAIT_HINT_UNREADABLE' $null)); $unreadable = $true }
+            $all = Get-AtmHintProperty -Item $Query -Name 'SecondRead'
+            $sr = $(if ($all -is [hashtable] -and $all.ContainsKey($Name)) { $all[$Name] } else { $null })
+            if ($null -eq $sr) { $out.Add((& $ev 'SERVICE_SECOND_READ_NOT_DONE' 'NOT_COLLECTED')) }
+            elseif (-not $sr.Done) { $out.Add((& $ev 'SERVICE_SECOND_READ_NOT_DONE' ([string]$sr.Reason))) }
+            else {
+                $s2 = ConvertTo-AtmServiceStateCode $sr.State
+                $out.Add((& $ev 'SERVICE_SECOND_READ_WAIT_MS' ([string]$sr.WaitedMs)))
+                $out.Add((& $ev 'SERVICE_SECOND_READ_STATE' $(if ($s2) { $s2 } else { 'UNREADABLE' })))
+                $out.Add((& $ev 'SERVICE_SECOND_READ_CHECKPOINT' $(if ($null -ne $sr.CheckPoint) { [string]$sr.CheckPoint } else { 'UNREADABLE' })))
+            }
+        }
+        if (-not $Row.Duplicate) {
+            $cond = Get-AtmServiceCondition -State $StateCode -RawState $Row.State -Signals $sig -SecondRead $sr
+            if ($cond) { $out.Add((& $ev 'SERVICE_CONDITION' $cond)) }
+        }
+    }
+    if ($unreadable) { $out.Add('SERVICE_SIGNAL_UNREADABLE') }
+    $deps = Get-AtmHintProperty -Item $Query -Name 'Dependencies'
+    $bn = $(if ($null -ne $deps -and $null -eq $deps.Failed -and $deps.ByName.ContainsKey($Name)) { $deps.ByName[$Name] } else { $null })
+    if ($null -eq $deps) { $out.Add((& $ev 'SERVICE_DEPENDENCIES_NOT_COLLECTED' $null)) }
+    elseif ($null -ne $deps.Failed) { $out.Add((& $ev 'SERVICE_DEPENDENCIES_UNREADABLE' ([string]$deps.Failed))); $out.Add('SERVICE_DEPENDENCIES_UNREADABLE') }
+    elseif ($null -eq $bn) { $out.Add((& $ev 'SERVICE_DEPENDENCIES_NOT_COLLECTED' $null)) }
+    else {
+        foreach ($x in @($bn.DependsOn)) { $out.Add((& $ev 'SERVICE_DEPENDS_ON' $x)) }
+        foreach ($x in @($bn.Dependents)) { $out.Add((& $ev 'SERVICE_DEPENDENT' $x)) }
+        $labels = @(@($bn.DependsOn) + @($bn.Dependents))
+        if ($labels.Count -eq 0) { $out.Add((& $ev 'SERVICE_DEPENDENCIES_NONE' $null)) }
+        if ($null -ne $deps.RelatedFailed -and @($labels | Where-Object { $_.EndsWith('|UNREADABLE') }).Count -gt 0) { $out.Add((& $ev 'SERVICE_DEPENDENCIES_UNREADABLE' ([string]$deps.RelatedFailed))); $out.Add('SERVICE_DEPENDENCIES_UNREADABLE') }
+        if ($deps.Capped -and @($labels | Where-Object { $_.EndsWith('|NOT_QUERIED') }).Count -gt 0) { $out.Add((& $ev 'SERVICE_DEPENDENCIES_CAPPED' $null)); $out.Add('SERVICE_DEPENDENCIES_CAPPED') }
+    }
+    $images = @()
+    foreach ($p in @($Declared.Providers)) { $im = Get-AtmHintProperty -Item $p -Name 'ExpectedImage'; if ($im -is [string] -and $im -and @($images | Where-Object { [string]::Equals($_, $im, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 0) { $images += $im } }
+    if ($images.Count -eq 0) { $out.Add((& $ev 'SERVICE_IMAGE_NOT_DECLARED' $null)) }
+    elseif ($images.Count -gt 1 -or $Row.Duplicate) { $out.Add((& $ev 'SERVICE_IMAGE' 'IMAGE_UNKNOWN')) }
+    else { $out.Add((& $ev 'SERVICE_IMAGE' (Compare-AtmServiceImage -Expected $images[0] -Executable $Row.Executable))) }
+    return $out.ToArray()
 }
 
 function Get-AtmServiceFindings {
@@ -3428,6 +3844,11 @@ function Get-AtmServiceFindings {
                 else { $list.Add((New-AtmEvidence -Code 'SERVICE_PROCESS_UNVERIFIED' -Source 'diagnose' -Collector 'process-snapshot' -ObservedUtc $now -Detail $lk.Result)); $propReasons.Add('SERVICE_PROCESS_UNVERIFIED'); $ok = $false }
             } elseif ($null -ne $pid0 -and $pid0 -ne 0) {
                 $list.Add((New-AtmEvidence -Code 'SERVICE_PROCESS_UNVERIFIED' -Source 'diagnose' -Collector 'process-snapshot' -ObservedUtc $now -Detail 'SERVICE_NOT_RUNNING'))
+            }
+            # V0.4 R0: fault signals, condition, second read, dependencies and image. Read only; none of them changes
+            # the state or authorizes anything.
+            foreach ($e in @(Get-AtmServiceSignalEvidence -Name $d.Name -Declared $d -Row $row -StateCode $sc -Query $Query -Evidence $ev)) {
+                if ($e -is [string]) { $propReasons.Add($e); $ok = $false } else { $list.Add($e) }
             }
             if ($ok) { $fullyRead++ }
         }
@@ -4511,19 +4932,22 @@ function Invoke-AtmDiagnose {
       Pseudonyms (ADR-0010, P1-B4-d): -PseudonymKey: the operator's key bytes (Read-AtmPseudonymKeyFile); without it
       the key is ephemeral. The key lives only in this call: the pseudonymizer is closed (HMAC disposed, buffer cleared)
       when it returns or throws. -PartitionKeyFunction: test override of the partition key.
-      Services (P2-A): -ServiceSource: test override of the Win32_Service rows (param($Names)).
+      Services (P2-A): -ServiceSource: test override of the Win32_Service rows (param($Names)). V0.4 R0:
+      -ServiceDependencySource (param($Names)) and -ServiceWait (param($Ms)): test overrides of the dependency read and
+      of the wait before the second read of a PENDING service (Invoke-AtmServiceQuery).
       Virtualization (P2-B): -VirtualizationSource: test override of the platform and VM queries (param($Op)).
     #>
     param([hashtable]$InventoryArgs = @{}, [scriptblock]$IdentitySource, $Providers, [int]$DeadlineSeconds = $script:AtmDiagnoseDefaultDeadlineSeconds,
         [scriptblock]$ProcessSource = $null, [int]$CpuSampleMs = $script:AtmDiagnoseCpuSampleMs, $SelfPid = $PID, $SelfCreationUtc = $null,
         [byte[]]$PseudonymKey = $null, [scriptblock]$PartitionKeyFunction = $null, [string[]]$RepositoryPaths = @(), [scriptblock]$HandleQuery = $null, [scriptblock]$ServiceSource = $null,
-        [scriptblock]$VirtualizationSource = $null)
+        [scriptblock]$VirtualizationSource = $null, [scriptblock]$ServiceDependencySource = $null, [scriptblock]$ServiceWait = $null)
     if ($DeadlineSeconds -lt 0) { throw (Get-AtmText 'err.diagDeadline' $DeadlineSeconds) }
     if ($CpuSampleMs -ne 0 -and ($CpuSampleMs -lt $script:AtmCpuSampleMinMs -or $CpuSampleMs -gt $script:AtmCpuSampleMaxMs)) { throw (Get-AtmText 'err.diagProcess' "CpuSampleMs $CpuSampleMs") }
     $pz = New-AtmPseudonymizer -Key $PseudonymKey
     try {
         $runArgs = @{ InventoryArgs = $InventoryArgs; IdentitySource = $IdentitySource; Providers = $Providers; DeadlineSeconds = $DeadlineSeconds; ProcessSource = $ProcessSource
-            CpuSampleMs = $CpuSampleMs; SelfPid = $SelfPid; SelfCreationUtc = $SelfCreationUtc; Pseudonymizer = $pz; PartitionKeyFunction = $PartitionKeyFunction; RepositoryPaths = $RepositoryPaths; HandleQuery = $HandleQuery; ServiceSource = $ServiceSource; VirtualizationSource = $VirtualizationSource }
+            CpuSampleMs = $CpuSampleMs; SelfPid = $SelfPid; SelfCreationUtc = $SelfCreationUtc; Pseudonymizer = $pz; PartitionKeyFunction = $PartitionKeyFunction; RepositoryPaths = $RepositoryPaths; HandleQuery = $HandleQuery; ServiceSource = $ServiceSource; VirtualizationSource = $VirtualizationSource
+            ServiceDependencySource = $ServiceDependencySource; ServiceWait = $ServiceWait }
         return (Invoke-AtmDiagnoseRun @runArgs)
     } finally { Close-AtmPseudonymizer $pz }
 }
@@ -4532,7 +4956,7 @@ function Invoke-AtmDiagnoseRun {
     # The body of Invoke-AtmDiagnose, with its pseudonymizer (parameters already checked there).
     param([hashtable]$InventoryArgs, [scriptblock]$IdentitySource, $Providers, [int]$DeadlineSeconds, [scriptblock]$ProcessSource, [int]$CpuSampleMs, $SelfPid, $SelfCreationUtc,
         $Pseudonymizer, [scriptblock]$PartitionKeyFunction, [string[]]$RepositoryPaths = @(), [scriptblock]$HandleQuery = $null, [scriptblock]$ServiceSource = $null,
-        [scriptblock]$VirtualizationSource = $null, $Inventory = $null)
+        [scriptblock]$VirtualizationSource = $null, $Inventory = $null, [scriptblock]$ServiceDependencySource = $null, [scriptblock]$ServiceWait = $null)
     # -Inventory (V0.3 B2-1, Get-AtmRuntimeRefusals only): a V0.1 inventory the caller already took, used instead of
     # taking another one, so the findings describe the same partitions; its coverage is read from it. Without it (the
     # diagnose command and every other caller) nothing changes.
@@ -4615,7 +5039,7 @@ function Invoke-AtmDiagnoseRun {
     # control manager reports can be proved to belong to a snapshot process (Resolve-AtmServiceProcess). Only names
     # declared by providers; none declared: nothing is queried.
     $svcIncomplete = (@($coverage | Where-Object { $_.Collector.StartsWith('provider-', [StringComparison]::Ordinal) -and ($_.Status -ceq 'TIMEOUT' -or @($_.Reasons) -ccontains 'PROVIDER_CONTRACT_INVALID') }).Count -gt 0)
-    $svcQuery = Invoke-AtmServiceQuery -ProviderHints $hints.ToArray() -Source $ServiceSource -Deadline $deadline -HintsIncomplete:$svcIncomplete
+    $svcQuery = Invoke-AtmServiceQuery -ProviderHints $hints.ToArray() -Source $ServiceSource -Deadline $deadline -HintsIncomplete:$svcIncomplete -DependencySource $ServiceDependencySource -Wait $ServiceWait
     # Virtualization (P2-B): platform and VM queries here too, before the snapshot (VM worker links).
     $virtQuery = Invoke-AtmVirtualizationQuery -Source $VirtualizationSource -Deadline $deadline -Elevated $identity.IsElevatedAdministrator
 

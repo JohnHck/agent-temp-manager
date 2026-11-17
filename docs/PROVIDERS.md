@@ -50,7 +50,7 @@ A v2 provider declares:
 | Runtime member | Signature | Returns |
 |---|---|---|
 | `GetProcessMatchers` | `{ }` | `@({ ImageName; CommandLineMarker })`: exact image file name (`*.exe`), optional marker matched in memory against the command line (the command line is never stored or printed). |
-| `GetServiceHints` | `{ }` | `@({ Name; Role })`: exact Windows service names; `Role` is an optional lower-case id. Since V0.2-P2-A the diagnose queries only these names (one local `Win32_Service` query, read-only), never similar names; a name declared by two providers is reported once with the attribution ambiguous. Declaring no service means that no service is checked, never that none exists; a declared name that is not listed is reported `UNKNOWN`, never absent. |
+| `GetServiceHints` | `{ }` | `@({ Name; Role; ExpectedImage })`: exact Windows service names; `Role` is an optional lower-case id. Since V0.2-P2-A the diagnose queries only these names (one local `Win32_Service` query, read-only), never similar names; a name declared by two providers is reported once with the attribution ambiguous. Declaring no service means that no service is checked, never that none exists; a declared name that is not listed is reported `UNKNOWN`, never absent. `ExpectedImage` (optional, V0.4 R0, ADR-0016 V04-D5 (b)): the service's expected executable, either a file name only (`name.exe`) or a location under `%SystemRoot%`, `%ProgramFiles%`, `%ProgramFiles(x86)%` or `%ProgramW6432%` with plain folders (`%ProgramFiles%\Vendor\name.exe`). Never a drive letter, a profile folder or another variable, `..` or `~`: such a value makes the provider's service hints malformed. Declare only what a public source supports; when the folder is not known, give the file name or nothing. The diagnose compares it with the service's reduced executable in memory and reports only `IMAGE_MATCH`, `IMAGE_MISMATCH` or `IMAGE_UNKNOWN` (`SERVICE_IMAGE`), or `SERVICE_IMAGE_NOT_DECLARED`; the path is never reported. |
 | `GetVirtualizationHints` | `{ }` | `@({ Kind; Value })` with `Kind` `ServiceOwner` (a service that owns a VM) or `VmName`. Since V0.2-P2-B: a `VmName` attributes an observed VM whose display name matches exactly (the name is never exported); a `ServiceOwner` attributes a VM only when its worker process is a verified child of the running service, which the same provider must also declare in `GetServiceHints`. A worker process is never attributed by its name. |
 | `GetWorktreeHints` | `{ param($ProfileInfo, $Registry) }` | `{ Readable; Dirs }`: absolute local starting directories (used from V0.2-P3). |
 
@@ -109,6 +109,11 @@ read. Sources checked on 2026-10-24:
 * **Service hint:** `CoworkVMService` (role `cowork-vm`), exact name. A running service with a verified process is
   positive evidence of the local Cowork service, not of a running VM; a service not listed is `UNKNOWN` (Cowork in a
   remote environment, the `.exe` installer, or a service the account cannot see), never "not installed".
+* **No `ExpectedImage` (V0.4 R0):** neither Anthropic's documentation nor the two public reports above name the
+  executable of `CoworkVMService` or its folder, so the provider declares nothing and the diagnose reports
+  `SERVICE_IMAGE_NOT_DECLARED`. No path or file name is invented. Even a known file name could only be compared by
+  name if, as for a service that an MSIX package declares, the executable sits in the package folder (`WindowsApps`),
+  whose full path the diagnose never keeps.
 * **No virtualization hint:** the Cowork VM is an HCS compute system with a per-installation name, not a Hyper-V
   Manager VM, so it is not expected in `Msvm_ComputerSystem`; a `VmName` hint would depend on an arbitrary name, and
   no `ServiceOwner` relation (service -> worker process) is established. `vmmem`, `vmwp`, `vmcompute` and HCS

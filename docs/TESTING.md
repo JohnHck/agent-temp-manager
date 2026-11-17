@@ -676,6 +676,57 @@ the writer is a stand-in, so the format is the one the engine writes.
 * **Not tested here:** a real pilot root, a real Claude Code session, a real console, UAC, and the operator's VM (they
   are the pilot itself, ADR-0015); a file symbolic link where the account cannot create one.
 
+## Service fault signals in the suite (V0.4 R0)
+
+The read-only signals of phase R0 of [ADR-0016](adr/ADR-0016-v04-assisted-recovery.md) (see its R0 implementation
+record), tested in the suite's area `V0.4 R0`, in both shells. Service rows, dependencies and the wait before the
+second read are injected. No service is started, stopped or changed, and no case sleeps: the wait is a recorded seam.
+
+* **Stopped services:**
+  * `STOPPED_CLEAN` (exit 0), `STOPPED_NEVER_STARTED` (1077) and `STOPPED_FAILED` (1066 with its service-specific code,
+    and another code);
+  * `STOPPED_EXIT_UNREADABLE` for an exit code that is null, text or out of range;
+  * a running service gets no condition, and the state of the finding never changes;
+  * an unreadable signal gives its `_UNREADABLE` code and `service-properties` `PARTIAL`;
+  * a row injected without the signals gives `SERVICE_SIGNALS_NOT_COLLECTED`, with no `PARTIAL`.
+* **Pending services, two reads:**
+  * `PENDING_PROGRESSING`, `PENDING_STALLED`, `PENDING_UNCHANGED` (a `WaitHint` over the cap, or 0),
+    `PENDING_STATE_CHANGED` and `PENDING_SINGLE_READ` (not listed again, checkpoint unreadable);
+  * one wait, the largest `WaitHint` capped at 2000 ms (at least 250 ms);
+  * the second read asks for the pending names only.
+* **No second read:**
+  * an injected source without a wait (`NOT_COLLECTED`, nothing waited);
+  * a deadline closer than the wait plus one query (`DEADLINE`, nothing waited);
+  * a denied or failed read;
+  * a duplicate row;
+  * an unreadable state.
+* **Dependencies:**
+  * both directions, each with its state;
+  * named only when declared or a system service (an executable or driver under the Windows folder);
+  * a third-party, profile or missing service has no name;
+  * no dependency at all;
+  * denied, failed, related states failed, over the cap, the deadline, and not collected.
+* **`ExpectedImage`:**
+  * the contract: accepted file names and placeholders; refused drive letters, profile and other variables, `..`, `~`;
+    a malformed value makes the provider's hints `FAILED`;
+  * `IMAGE_MATCH`, `IMAGE_MISMATCH` and `IMAGE_UNKNOWN`: by name, by full path, a packaged app folder, an unreadable
+    executable, two providers that disagree, a placeholder whose folder is not set;
+  * `CoworkVMService` declares none (`SERVICE_IMAGE_NOT_DECLARED`).
+* **Static:** the services collector calls no control cmdlet, `sc.exe`, `ServiceController`, control method or service
+  manager handle. It queries only `Win32_Service`, `Win32_DependentService` and `Win32_BaseService`, the file keeps
+  exactly two `Win32_Service` queries, and the only wait is the second read's. The test area itself has no real sleep.
+* **Diagnose and privacy:**
+  * the seams reach the collector through `Invoke-AtmDiagnose`;
+  * the CLI shows the new line;
+  * no path or account appears in the new line, in the new evidence details or in the JSON.
+* **CI runner, read only:** the real signals and dependencies of `EventLog` and `Winmgmt`, with their states and start
+  modes compared before and after. Elsewhere it is `NAO_TESTADO`.
+* **Not tested here:**
+  * a real pending service, so the real second read runs only with the injected wait;
+  * a real denied or failed dependency read;
+  * a real failed service;
+  * a provider's real `ExpectedImage`, because no shipped provider declares one.
+
 ## Future: isolation, quarantine and Recovery Mode (0.3.x and V0.4)
 
 Criteria proposed by [ADR-0013](adr/ADR-0013-isolation-quarantine-recovery-mode.md) for accepting an implementation.

@@ -1,7 +1,6 @@
 # ADR-0016: Assisted recovery (V0.4)
 
-Status: PROPOSED. Decisions V04-D1 to V04-D8 are open and belong to the maintainer. Nothing is implemented, and no gate
-is opened anywhere.
+Status: ACCEPTED (V04-D1 to V04-D8 approved as recommended, 2026-11-17); R0 implemented
 Date: 2026-11-17
 Phase: V0.4 (phases R0 to R6 below, each a future round with its own contract and tests)
 
@@ -310,3 +309,109 @@ None is decided by this record.
   https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-service
 * In this repository: [ROADMAP](../ROADMAP.md) (V0.4), [ELEVATION.md](../ELEVATION.md), [ARCHITECTURE.md](../ARCHITECTURE.md),
   [PROVIDERS.md](../PROVIDERS.md), [ADR-0013](ADR-0013-isolation-quarantine-recovery-mode.md).
+
+## R0 implementation record (2026-11-17)
+
+The maintainer approved V04-D1 to V04-D8 as recommended on 2026-11-17. R0 is the only phase implemented. It adds no
+gate, opens none, and changes no finding state, eligibility, B1 or RECENT rule: every signal below is evidence in the
+diagnose, and none of them authorizes anything.
+
+**What is read, and how.**
+
+* **API and access.** CIM only, local, each query bounded by `-OperationTimeoutSec`. No class method is called, and the
+  product opens no handle to the service control manager or to a service: the CIM provider does the reads.
+  * `Win32_Service`: the query the diagnose already ran, for the declared names. It now also asks for `ExitCode`,
+    `ServiceSpecificExitCode`, `CheckPoint`, `WaitHint` and `AcceptStop`.
+  * The association class `Win32_DependentService` (`Antecedent` is the service relied upon, `Dependent` the one that
+    relies on it): one enumeration, kept in memory only where one end is a declared name.
+  * `Win32_BaseService` (services and drivers): `Name`, `State` and `PathName` of the related services, at most 64.
+* **Signals** (evidence of a listed service):
+  * `SERVICE_EXIT_CODE`, plus `SERVICE_SPECIFIC_EXIT_CODE` only with exit code 1066;
+  * `SERVICE_ACCEPT_STOP`;
+  * `SERVICE_CHECKPOINT` and `SERVICE_WAIT_HINT_MS` only for a `PENDING` service.
+
+  A value that cannot be read gets its `_UNREADABLE` code and the reason `SERVICE_SIGNAL_UNREADABLE` in
+  `service-properties`; it is never replaced by 0 or false. A row that carries none of these properties (rows injected
+  by tests written before R0) gives `SERVICE_SIGNALS_NOT_COLLECTED`.
+
+**Classification** (`SERVICE_CONDITION`). Only a `STOPPED` or `PENDING` service gets one. The finding keeps the state
+of the first read.
+
+| Condition | Meaning |
+|---|---|
+| `STOPPED_CLEAN` | Stopped, exit code 0 (no error reported). |
+| `STOPPED_NEVER_STARTED` | Stopped, exit code 1077 (not started since the last boot). |
+| `STOPPED_FAILED` | Stopped, any other exit code. With 1066, `SERVICE_SPECIFIC_EXIT_CODE` gives the service's own code. |
+| `STOPPED_EXIT_UNREADABLE` | Stopped, exit code unreadable. |
+| `PENDING_PROGRESSING` | The same pending state in both reads, and `CheckPoint` changed. |
+| `PENDING_STALLED` | The same pending state in both reads, `CheckPoint` unchanged after a wait at least as long as a `WaitHint` greater than 0. |
+| `PENDING_UNCHANGED` | The same pending state, `CheckPoint` unchanged, but the wait was shorter than `WaitHint`, or `WaitHint` is 0: nothing can be concluded. |
+| `PENDING_STATE_CHANGED` | The second read gave another state (`SERVICE_SECOND_READ_STATE`). |
+| `PENDING_SINGLE_READ` | No usable second read; `SERVICE_SECOND_READ_NOT_DONE` says why. |
+
+**The second read of a `PENDING` service.**
+
+* **What happens.** One wait for all pending services, then the same `Win32_Service` query for those names only.
+  * The wait is the largest `WaitHint` among them, at least 250 ms and at most 2000 ms.
+  * The second read is skipped (`DEADLINE`) when the run's deadline is closer than the wait plus one query budget
+    (30 s), so the diagnose never passes its deadline because of it.
+  * Without readable `CheckPoint` and `WaitHint` there is no second read (`SIGNALS_UNREADABLE`).
+* **Why.** Microsoft documents that a pending service must advance `CheckPoint` or change its state before `WaitHint`
+  elapses (`SERVICE_STATUS`). So "stalled" is claimed only when the wait reached `WaitHint`. A longer `WaitHint` gives
+  `PENDING_UNCHANGED`, never a guess. The 2 s cap keeps the diagnose interactive: it costs at most about 2 s and one
+  query, and only when a declared service is pending.
+* **Tests.** The wait is injected (`-ServiceWait`); with injected rows and no injected wait there is no second read, so
+  no test sleeps.
+
+**Dependencies** (`SERVICE_DEPENDS_ON`, `SERVICE_DEPENDENT`, detail `name|STATE`).
+
+* A related service is named only when a provider declares it or when it is a system service: its executable or driver
+  file is, as text, under the Windows folder. Any other related service is `*`, with its state only. Its command line
+  is read in memory and dropped.
+* `STATE` is `RUNNING`, `STOPPED`, `PAUSED` or `PENDING`, or one of:
+  * `UNREADABLE`;
+  * `NOT_LISTED` (not returned);
+  * `NOT_QUERIED` (over the cap of 64; `SERVICE_DEPENDENCIES_CAPPED`).
+* `SERVICE_DEPENDENCIES_NONE` means neither direction has a dependency.
+* A failed read gives `SERVICE_DEPENDENCIES_UNREADABLE` with `QUERY_DENIED`, `QUERY_FAILED`, `QUERY_TIMEOUT` or
+  `DEADLINE`. It is skipped when the deadline is closer than two query budgets.
+
+**The provider field `ExpectedImage`** (V04-D5 (b)).
+
+* **What a provider may declare.** A file name (`name.exe`), or a location under `%SystemRoot%`, `%ProgramFiles%`,
+  `%ProgramFiles(x86)%` or `%ProgramW6432%` with plain folders. Never a drive letter, a profile folder, another
+  variable, `..` or `~`. A malformed value makes the provider's service hints malformed, like any other malformed hint.
+* **What is recorded.** The collector compares the reduced executable and records only `IMAGE_MATCH`, `IMAGE_MISMATCH`
+  or `IMAGE_UNKNOWN` (`SERVICE_IMAGE`), never a path. Placeholders are resolved in memory. No declaration gives
+  `SERVICE_IMAGE_NOT_DECLARED`.
+* **`CoworkVMService` declares none.** Neither Anthropic's documentation nor the two public reports the provider cites
+  name its executable.
+  * Open point for R2, for the maintainer: under V04-D5 (b) there is no image to check for this service. R2 has to say
+    how it treats `SERVICE_IMAGE_NOT_DECLARED`, and refusing is the reading consistent with (b).
+
+**Where it shows.**
+
+* **CLI** (`diagnose`): one line per listed service with the condition, exit code, accepts stop, image result and
+  dependencies.
+* **TUI:** unchanged. Its detail view already lists every evidence code with its text.
+* **JSON export** (behind its gate): the evidence like any other.
+* **Coverage:** `services` is unchanged. Only `service-properties` gains the reasons `SERVICE_SIGNAL_UNREADABLE`,
+  `SERVICE_DEPENDENCIES_UNREADABLE` and `SERVICE_DEPENDENCIES_CAPPED`.
+
+**Tests:** the area `V0.4 R0` of `tests/Run-Tests.ps1`, in both shells.
+
+* Injected rows, dependencies and wait cover every condition, unreadable values, dependencies (system, declared, other,
+  missing, failed, capped), the deadline cases and the three image results.
+* A static check: the services collector calls no control cmdlet, `sc.exe`, `ServiceController` or control method,
+  queries only the three classes above, and keeps exactly two `Win32_Service` queries in the file.
+* A privacy check: no path or account in the new lines or details, nor in the JSON.
+* A CI-runner case reads `EventLog` and `Winmgmt` (read only, states compared before and after).
+
+**Not tested:**
+
+* a real service in a pending state, so the real second read runs only with the injected wait;
+* a real denied or failed dependency read;
+* a real stopped service that failed;
+* `IMAGE_MATCH` against a provider's real declaration, because no shipped provider declares one.
+
+**Outside this round:** `docs/DIAGNOSE-SCHEMA.md` lists evidence codes in prose and does not list the new ones yet.

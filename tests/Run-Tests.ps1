@@ -13064,6 +13064,250 @@ try {
         if (@($f.Evidence | Where-Object { $_.Code -ceq 'SERVICE_STATE' }).Count -eq 0) { $script:caseSkipped = $true; $script:caseNote = "Claude Desktop nao instalado no runner: CoworkVMService $($f.State) ($($q.Coverage.Status)); instalacao real NAO_TESTADA"; return }
         $script:caseNote = "CoworkVMService $($f.State)"
     }
+    # ------------------------------------------------------------------ V0.4 R0 (read-only service fault signals, ADR-0016 section 6)
+    # Service rows, dependencies and the wait before the second read are injected: no service is started, stopped or
+    # changed, and no test sleeps (the wait is a recorded seam). Only the CI-runner case reads the local service control
+    # manager, read only, and compares states before and after.
+    $r0Row = { param([string]$Name, $State = 'Stopped', $Exit = 0, $Specific = 0, $Cp = 0, $Wh = 0, $Accept = $false, $PathName = $svcSys, $StartName = 'LocalSystem')
+        [pscustomobject]@{ Name = $Name; State = $State; StartMode = 'Manual'; DelayedAutoStart = $false; StartName = $StartName; ProcessId = 0; PathName = $PathName
+            ExitCode = $Exit; ServiceSpecificExitCode = $Specific; CheckPoint = $Cp; WaitHint = $Wh; AcceptStop = $Accept } }
+    $r0Hint = { param([string]$Name, $Image = $null) [pscustomobject]@{ Name = $Name; Role = $null; ExpectedImage = $Image } }
+    # -Second: the rows of the second read (or a scriptblock param($Names)); -Deps: what the dependency source returns
+    # (or a scriptblock param($Names)); -Waits: a list that records each wait (the clock of the second read).
+    $r0Query = { param($Hints, [object[]]$First, $Second = @(), $Deps = $null, $Waits = $null, $Deadline = $null, $Log = $null)
+        $st = @{ N = 0 }; $f1 = @($First); $s2 = $Second; $lg = $Log
+        $src = {
+            param($Names)
+            $st.N++
+            if ($null -ne $lg) { $lg.Add(('read{0}:{1}' -f $st.N, (@($Names) -join ','))) }
+            if ($st.N -eq 1) { return $f1 }
+            if ($s2 -is [scriptblock]) { return (& $s2 $Names) }
+            return @(@($s2) | Where-Object { @($Names) -contains $_.Name })
+        }.GetNewClosure()
+        $qa = @{ ProviderHints = @($Hints); Source = $src; NowUtc = $svcT0 }
+        if ($null -ne $Deps) { $dd = $Deps; $qa.DependencySource = $(if ($dd -is [scriptblock]) { $dd } else { { param($Names) if ($null -ne $lg) { $lg.Add('deps:' + (@($Names) -join ',')) }; $dd }.GetNewClosure() }) }
+        if ($null -ne $Waits) { $ww = $Waits; $qa.Wait = { param($Ms) $ww.Add([int]$Ms) }.GetNewClosure() }
+        if ($null -ne $Deadline) { $qa.Deadline = $Deadline }
+        $q = Invoke-AtmServiceQuery @qa
+        Get-AtmServiceFindings -Query $q
+    }
+    $r0Cond = { param($F) (& $svcEv $F 'SERVICE_CONDITION') -join ',' }
+    Test-Case 'V0.4 R0' 'R0: sinais de leitura e STOPPED - CLEAN (0), NEVER_STARTED (1077), FAILED (1066 com codigo especifico, e outro codigo), EXIT_UNREADABLE (nulo, texto, fora da faixa); RUNNING sem condicao; estado inalterado; ilegivel vira _UNREADABLE e service-properties PARTIAL; linha antiga sem sinais: NOT_COLLECTED, sem PARTIAL' {
+        $names = @('R0Clean', 'R0Never', 'R0Specific', 'R0Failed', 'R0NoExit', 'R0TextExit', 'R0BigExit', 'R0Run')
+        $h = & $svcHints 'fake-r0' @($names | ForEach-Object { & $r0Hint $_ })
+        $rows = @((& $r0Row 'R0Clean' 'Stopped' ([uint32]0)), (& $r0Row 'R0Never' 'Stopped' ([uint32]1077)), (& $r0Row 'R0Specific' 'Stopped' ([uint32]1066) ([uint32]42)), (& $r0Row 'R0Failed' 'Stopped' ([uint32]5)),
+            (& $r0Row 'R0NoExit' 'Stopped' $null 0 0 0 $null), (& $r0Row 'R0TextExit' 'Stopped' '0'), (& $r0Row 'R0BigExit' 'Stopped' ([long]5000000000)), (& $r0Row 'R0Run' 'Running' ([uint32]0) 0 0 0 $true))
+        $r = & $r0Query $h $rows
+        $f = & $svcByKey $r
+        Assert-True ((& $r0Cond $f['R0Clean']) -ceq 'STOPPED_CLEAN' -and (& $svcEv $f['R0Clean'] 'SERVICE_EXIT_CODE')[0] -ceq '0' -and (& $svcEv $f['R0Clean'] 'SERVICE_ACCEPT_STOP')[0] -ceq 'FALSE') 'exit 0: STOPPED_CLEAN, aceita parada FALSE'
+        Assert-True ((& $r0Cond $f['R0Never']) -ceq 'STOPPED_NEVER_STARTED' -and (& $svcEv $f['R0Never'] 'SERVICE_EXIT_CODE')[0] -ceq '1077') 'exit 1077: STOPPED_NEVER_STARTED'
+        Assert-True ((& $r0Cond $f['R0Specific']) -ceq 'STOPPED_FAILED' -and (& $svcEv $f['R0Specific'] 'SERVICE_EXIT_CODE')[0] -ceq '1066' -and (& $svcEv $f['R0Specific'] 'SERVICE_SPECIFIC_EXIT_CODE')[0] -ceq '42') 'exit 1066: STOPPED_FAILED com o codigo especifico'
+        Assert-True ((& $r0Cond $f['R0Failed']) -ceq 'STOPPED_FAILED' -and (& $svcEv $f['R0Failed'] 'SERVICE_SPECIFIC_EXIT_CODE').Count -eq 0) 'outro codigo: STOPPED_FAILED, sem codigo especifico'
+        foreach ($k in @('R0NoExit', 'R0TextExit', 'R0BigExit')) { Assert-True ((& $r0Cond $f[$k]) -ceq 'STOPPED_EXIT_UNREADABLE' -and (& $svcEv $f[$k] 'SERVICE_EXIT_CODE_UNREADABLE').Count -eq 1 -and (& $svcEv $f[$k] 'SERVICE_EXIT_CODE').Count -eq 0) "${k}: STOPPED_EXIT_UNREADABLE, nunca um palpite" }
+        Assert-Eq (& $svcEv $f['R0NoExit'] 'SERVICE_ACCEPT_STOP_UNREADABLE').Count 1 'aceita parada nula: ilegivel'
+        Assert-True ((& $r0Cond $f['R0Run']) -ceq '' -and (& $svcEv $f['R0Run'] 'SERVICE_ACCEPT_STOP')[0] -ceq 'TRUE') 'em execucao: sem condicao; aceita parada TRUE'
+        Assert-True (@($r.Findings | Where-Object { $_.Key -cne 'R0Run' -and $_.State -cne 'STOPPED' }).Count -eq 0 -and $f['R0Run'].State -ceq 'RUNNING') 'estado da primeira leitura inalterado (nenhuma condicao muda o estado)'
+        Assert-True (@($r.Findings | Where-Object { (& $svcEv $_ 'SERVICE_CHECKPOINT').Count -gt 0 -or (& $svcEv $_ 'SERVICE_SECOND_READ_NOT_DONE').Count -gt 0 }).Count -eq 0) 'checkpoint e segunda leitura so para PENDING'
+        Assert-True ((& $svcCov $r 'services').Status -ceq 'COMPLETE' -and @((& $svcCov $r 'service-properties').Reasons) -ccontains 'SERVICE_SIGNAL_UNREADABLE' -and (& $svcCov $r 'service-properties').Status -ceq 'PARTIAL') "ilegivel: service-properties PARTIAL com SERVICE_SIGNAL_UNREADABLE; services intacto ($(@((& $svcCov $r 'service-properties').Reasons) -join ','))"
+        $old = & $svcRun (& $svcHints 'fake-r0' @(& $svcHint 'R0Old')) @(& $svcRow 'R0Old' 'Stopped' 'Manual' $false 'LocalSystem' 0) $null
+        $fo = @($old.Findings)[0]
+        Assert-True ((& $svcEv $fo 'SERVICE_SIGNALS_NOT_COLLECTED').Count -eq 1 -and (& $svcEv $fo 'SERVICE_CONDITION').Count -eq 0 -and (& $svcEv $fo 'SERVICE_DEPENDENCIES_NOT_COLLECTED').Count -eq 1 -and (& $svcEv $fo 'SERVICE_IMAGE_NOT_DECLARED').Count -eq 1) 'linha sem sinais: nao coletados, sem condicao, dependencias nao coletadas, imagem nao declarada'
+        Assert-Eq (& $svcCov $old 'service-properties').Status 'COMPLETE' 'linha sem sinais: service-properties COMPLETE como antes'
+    }
+    Test-Case 'V0.4 R0' 'R0: PENDING com duas leituras pelo relogio dublavel - PROGRESSING, STALLED, UNCHANGED (WaitHint maior que o teto, ou 0), STATE_CHANGED, SINGLE_READ (nao listado, checkpoint ilegivel); uma unica espera, limitada ao teto; segunda leitura so dos pendentes' {
+        $waits = New-Object System.Collections.Generic.List[int]
+        $log = New-Object System.Collections.Generic.List[string]
+        $names = @('R0Prog', 'R0Stall', 'R0Long', 'R0Zero', 'R0Chg', 'R0Gone', 'R0BadCp', 'R0Halt')
+        $h = & $svcHints 'fake-r0' @($names | ForEach-Object { & $r0Hint $_ })
+        $first = @((& $r0Row 'R0Prog' 'Start Pending' 0 0 ([uint32]1) ([uint32]1000)), (& $r0Row 'R0Stall' 'Start Pending' 0 0 ([uint32]3) ([uint32]500)), (& $r0Row 'R0Long' 'Stop Pending' 0 0 ([uint32]2) ([uint32]30000)),
+            (& $r0Row 'R0Zero' 'Continue Pending' 0 0 ([uint32]4) ([uint32]0)), (& $r0Row 'R0Chg' 'Start Pending' 0 0 ([uint32]1) ([uint32]0)), (& $r0Row 'R0Gone' 'Start Pending' 0 0 ([uint32]1) ([uint32]0)),
+            (& $r0Row 'R0BadCp' 'Start Pending' 0 0 $null ([uint32]1000)), (& $r0Row 'R0Halt' 'Stopped' ([uint32]0)))
+        $second = @((& $r0Row 'R0Prog' 'Start Pending' 0 0 ([uint32]2)), (& $r0Row 'R0Stall' 'Start Pending' 0 0 ([uint32]3)), (& $r0Row 'R0Long' 'Stop Pending' 0 0 ([uint32]2)),
+            (& $r0Row 'R0Zero' 'Continue Pending' 0 0 ([uint32]4)), (& $r0Row 'R0Chg' 'Running' 0 0 ([uint32]0)))
+        $r = & $r0Query $h $first $second $null $waits $null $log
+        $f = & $svcByKey $r
+        Assert-Eq (@($waits) -join ',') '2000' 'uma unica espera: o maior WaitHint (30000) limitado ao teto de 2000 ms'
+        Assert-Eq (@($log) -join ';') 'read1:R0BadCp,R0Chg,R0Gone,R0Halt,R0Long,R0Prog,R0Stall,R0Zero;read2:R0Chg,R0Gone,R0Long,R0Prog,R0Stall,R0Zero' 'segunda leitura so dos pendentes com sinais legiveis'
+        Assert-True ((& $r0Cond $f['R0Prog']) -ceq 'PENDING_PROGRESSING' -and (& $svcEv $f['R0Prog'] 'SERVICE_CHECKPOINT')[0] -ceq '1' -and (& $svcEv $f['R0Prog'] 'SERVICE_SECOND_READ_CHECKPOINT')[0] -ceq '2' -and (& $svcEv $f['R0Prog'] 'SERVICE_SECOND_READ_STATE')[0] -ceq 'PENDING' -and (& $svcEv $f['R0Prog'] 'SERVICE_SECOND_READ_WAIT_MS')[0] -ceq '2000') 'checkpoint mudou: PENDING_PROGRESSING'
+        Assert-True ((& $r0Cond $f['R0Stall']) -ceq 'PENDING_STALLED' -and (& $svcEv $f['R0Stall'] 'SERVICE_WAIT_HINT_MS')[0] -ceq '500') 'checkpoint igual depois de esperar mais que o WaitHint: PENDING_STALLED'
+        Assert-Eq (& $r0Cond $f['R0Long']) 'PENDING_UNCHANGED' 'WaitHint maior que a espera: PENDING_UNCHANGED, nunca STALLED'
+        Assert-Eq (& $r0Cond $f['R0Zero']) 'PENDING_UNCHANGED' 'WaitHint 0: PENDING_UNCHANGED'
+        Assert-True ((& $r0Cond $f['R0Chg']) -ceq 'PENDING_STATE_CHANGED' -and (& $svcEv $f['R0Chg'] 'SERVICE_SECOND_READ_STATE')[0] -ceq 'RUNNING' -and $f['R0Chg'].State -ceq 'PENDING') 'outro estado na segunda leitura: PENDING_STATE_CHANGED; o estado do achado segue o da primeira'
+        Assert-True ((& $r0Cond $f['R0Gone']) -ceq 'PENDING_SINGLE_READ' -and (& $svcEv $f['R0Gone'] 'SERVICE_SECOND_READ_NOT_DONE')[0] -ceq 'NOT_LISTED') 'ausente na segunda leitura: SINGLE_READ (NOT_LISTED)'
+        Assert-True ((& $r0Cond $f['R0BadCp']) -ceq 'PENDING_SINGLE_READ' -and (& $svcEv $f['R0BadCp'] 'SERVICE_SECOND_READ_NOT_DONE')[0] -ceq 'SIGNALS_UNREADABLE' -and (& $svcEv $f['R0BadCp'] 'SERVICE_CHECKPOINT_UNREADABLE').Count -eq 1) 'checkpoint ilegivel: sem segunda leitura (SIGNALS_UNREADABLE)'
+        Assert-Eq (& $r0Cond $f['R0Halt']) 'STOPPED_CLEAN' 'parado na mesma consulta: nao relido'
+        Assert-True (@($r.Findings | Where-Object { $_.Key -cne 'R0Halt' -and $_.State -cne 'PENDING' }).Count -eq 0) 'estados da primeira leitura'
+        $w2 = New-Object System.Collections.Generic.List[int]
+        $null = & $r0Query (& $svcHints 'fake-r0' @(& $r0Hint 'R0Short')) @(& $r0Row 'R0Short' 'Start Pending' 0 0 ([uint32]1) ([uint32]100)) @(& $r0Row 'R0Short' 'Start Pending' 0 0 ([uint32]1)) $null $w2
+        Assert-Eq (@($w2) -join ',') '250' 'WaitHint curto: espera minima de 250 ms'
+    }
+    Test-Case 'V0.4 R0' 'R0: segunda leitura nao feita - fonte injetada sem relogio (NOT_COLLECTED, nenhuma espera real), prazo curto (DEADLINE, nenhuma espera), negada, falha, linha duplicada, estado ilegivel na segunda leitura' {
+        $h = & $svcHints 'fake-r0' @(& $r0Hint 'R0Pend')
+        $row = & $r0Row 'R0Pend' 'Start Pending' 0 0 ([uint32]1) ([uint32]1000)
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $r = & $r0Query $h @($row) @($row)
+        $sw.Stop()
+        $f = @($r.Findings)[0]
+        Assert-True ((& $r0Cond $f) -ceq 'PENDING_SINGLE_READ' -and (& $svcEv $f 'SERVICE_SECOND_READ_NOT_DONE')[0] -ceq 'NOT_COLLECTED' -and $sw.ElapsedMilliseconds -lt 900) "fonte injetada sem relogio: NOT_COLLECTED, sem espera ($($sw.ElapsedMilliseconds) ms)"
+        $waits = New-Object System.Collections.Generic.List[int]
+        $r = & $r0Query $h @($row) @($row) $null $waits ([datetime]::UtcNow.AddSeconds(20))
+        Assert-True ((& $svcEv @($r.Findings)[0] 'SERVICE_SECOND_READ_NOT_DONE')[0] -ceq 'DEADLINE' -and $waits.Count -eq 0) 'prazo mais perto que espera mais uma consulta: DEADLINE, nenhuma espera'
+        $r = & $r0Query $h @($row) { param($Names) throw (New-Object UnauthorizedAccessException('x')) } $null $waits
+        Assert-True ((& $svcEv @($r.Findings)[0] 'SERVICE_SECOND_READ_NOT_DONE')[0] -ceq 'QUERY_DENIED' -and (& $r0Cond @($r.Findings)[0]) -ceq 'PENDING_SINGLE_READ') 'segunda leitura negada: QUERY_DENIED'
+        $r = & $r0Query $h @($row) { param($Names) throw (New-Object InvalidOperationException('x')) } $null $waits
+        Assert-Eq (& $svcEv @($r.Findings)[0] 'SERVICE_SECOND_READ_NOT_DONE')[0] 'QUERY_FAILED' 'segunda leitura com falha: QUERY_FAILED'
+        $r = & $r0Query $h @($row) @($row, $row) $null $waits
+        Assert-Eq (& $svcEv @($r.Findings)[0] 'SERVICE_SECOND_READ_NOT_DONE')[0] 'DUPLICATE_ROW' 'segunda leitura duplicada: DUPLICATE_ROW'
+        $r = & $r0Query $h @($row) @(& $r0Row 'R0Pend' 'Weird' 0 0 ([uint32]2)) $null $waits
+        Assert-True ((& $svcEv @($r.Findings)[0] 'SERVICE_SECOND_READ_STATE')[0] -ceq 'UNREADABLE' -and (& $r0Cond @($r.Findings)[0]) -ceq 'PENDING_SINGLE_READ') 'estado ilegivel na segunda leitura: UNREADABLE, SINGLE_READ'
+        Assert-Eq $waits.Count 4 'uma espera por consulta que releu (nenhuma no caso do prazo)'
+    }
+    $r0Deps = {
+        param([string]$UserPath)
+        [pscustomobject]@{
+            Links         = @([pscustomobject]@{ Antecedent = 'R0SysSvc'; Dependent = 'R0Dep' }, [pscustomobject]@{ Antecedent = 'R0VendorSvc'; Dependent = 'R0Dep' }, [pscustomobject]@{ Antecedent = 'R0AbsentSvc'; Dependent = 'R0Dep' },
+                [pscustomobject]@{ Antecedent = 'R0UserSvc'; Dependent = 'R0Dep' }, [pscustomobject]@{ Antecedent = 'R0Dep'; Dependent = 'R0Other' }, [pscustomobject]@{ Antecedent = 'R0Dep'; Dependent = 'R0Driver' },
+                [pscustomobject]@{ Antecedent = 'R0Unrelated1'; Dependent = 'R0Unrelated2' })
+            Related       = @([pscustomobject]@{ Name = 'R0SysSvc'; State = 'Running'; PathName = "$env:SystemRoot\system32\svchost.exe -k r0group -p" },
+                [pscustomobject]@{ Name = 'R0VendorSvc'; State = 'Stopped'; PathName = '"C:\Program Files\R0Vendor\r0agent.exe" --r0-flag' },
+                [pscustomobject]@{ Name = 'R0UserSvc'; State = 'Running'; PathName = ('"' + $UserPath + '\AppData\Local\r0user\r0user.exe"') },
+                [pscustomobject]@{ Name = 'R0Driver'; State = 'Stopped'; PathName = '\SystemRoot\System32\drivers\r0drv.sys' })
+            RelatedFailed = $null
+            Capped        = @()
+        }
+    }
+    Test-Case 'V0.4 R0' 'R0: dependencias nos dois sentidos com o estado de cada uma - nome so de servico declarado ou do sistema (Windows, inclusive driver); terceiro, perfil e ausente sem nome; nenhuma dependencia; fonte chamada so com os nomes listados' {
+        $log = New-Object System.Collections.Generic.List[string]
+        $h = & $svcHints 'fake-r0' @((& $r0Hint 'R0Dep'), (& $r0Hint 'R0Other'), (& $r0Hint 'R0Lonely'), (& $r0Hint 'R0NotHere'))
+        $rows = @((& $r0Row 'R0Dep' 'Stopped' ([uint32]1066) ([uint32]7)), (& $r0Row 'R0Other' 'Running' ([uint32]0) 0 0 0 $true), (& $r0Row 'R0Lonely' 'Stopped' ([uint32]0)))
+        $r = & $r0Query $h $rows @() (& $r0Deps $svcUser) $null $null $log
+        $f = & $svcByKey $r
+        Assert-True (@($log) -ccontains 'deps:R0Dep,R0Lonely,R0Other') "dependencias pedidas so para os nomes listados ($(@($log) -join ';'))"
+        Assert-Eq ((& $svcEv $f['R0Dep'] 'SERVICE_DEPENDS_ON') -join ';') '*|NOT_LISTED;*|RUNNING;*|STOPPED;R0SysSvc|RUNNING' 'depende de: sistema pelo nome; terceiro, perfil e ausente sem nome, com o estado'
+        Assert-Eq ((& $svcEv $f['R0Dep'] 'SERVICE_DEPENDENT') -join ';') 'R0Driver|STOPPED;R0Other|RUNNING' 'dependentes: driver do sistema e servico declarado pelo nome'
+        Assert-True (((& $svcEv $f['R0Other'] 'SERVICE_DEPENDS_ON') -join ';') -ceq 'R0Dep|STOPPED' -and (& $svcEv $f['R0Other'] 'SERVICE_DEPENDENT').Count -eq 0 -and (& $svcEv $f['R0Other'] 'SERVICE_DEPENDENCIES_NONE').Count -eq 0) 'declarado que depende de declarado: o estado da primeira leitura'
+        Assert-True ((& $svcEv $f['R0Lonely'] 'SERVICE_DEPENDENCIES_NONE').Count -eq 1 -and (& $svcEv $f['R0Lonely'] 'SERVICE_DEPENDS_ON').Count -eq 0) 'sem dependencias: SERVICE_DEPENDENCIES_NONE'
+        Assert-True (@($f['R0NotHere'].Evidence | Where-Object { $_.Code -like 'SERVICE_DEPEND*' }).Count -eq 0 -and $f['R0NotHere'].State -ceq 'UNKNOWN') 'nao listado: nenhuma dependencia inventada'
+        $all = (@($r.Findings | ForEach-Object { @($_.Evidence | ForEach-Object { [string]$_.Detail }) }) -join "`n")
+        foreach ($x in @('R0VendorSvc', 'R0UserSvc', 'R0AbsentSvc', 'R0Unrelated', 'r0agent', 'r0user', 'R0Vendor', 'p2a-person', 'r0-flag', 'r0drv', 'r0group')) { Assert-True (-not $all.Contains($x)) "nenhum detalhe com '$x'" }
+        Assert-True ((& $svcCov $r 'service-properties').Status -ceq 'COMPLETE' -or @((& $svcCov $r 'service-properties').Reasons | Where-Object { $_ -like 'SERVICE_DEPENDENCIES*' }).Count -eq 0) 'dependencias lidas: nenhuma razao de dependencia'
+    }
+    Test-Case 'V0.4 R0' 'R0: dependencias ilegiveis - negada, falha, estados relacionados com falha, limite de nomes, prazo; fonte injetada sem fonte de dependencias: NOT_COLLECTED' {
+        $h = & $svcHints 'fake-r0' @((& $r0Hint 'R0Dep'), (& $r0Hint 'R0Other'))
+        $rows = @((& $r0Row 'R0Dep' 'Stopped' ([uint32]0)), (& $r0Row 'R0Other' 'Running' ([uint32]0)))
+        $r = & $r0Query $h $rows @() { param($Names) throw (New-Object UnauthorizedAccessException('x')) }
+        $f = & $svcByKey $r
+        Assert-True ((& $svcEv $f['R0Dep'] 'SERVICE_DEPENDENCIES_UNREADABLE')[0] -ceq 'QUERY_DENIED' -and @((& $svcCov $r 'service-properties').Reasons) -ccontains 'SERVICE_DEPENDENCIES_UNREADABLE' -and (& $svcCov $r 'services').Status -ceq 'COMPLETE') 'negada: QUERY_DENIED, service-properties PARTIAL, services intacto'
+        $r = & $r0Query $h $rows @() { param($Names) throw (New-Object InvalidOperationException('x')) }
+        Assert-Eq (& $svcEv @($r.Findings)[0] 'SERVICE_DEPENDENCIES_UNREADABLE')[0] 'QUERY_FAILED' 'falha: QUERY_FAILED'
+        $d = & $r0Deps $svcUser; $d.RelatedFailed = New-Object InvalidOperationException('x')
+        $r = & $r0Query $h $rows @() $d
+        $f = & $svcByKey $r
+        Assert-True (((& $svcEv $f['R0Dep'] 'SERVICE_DEPENDS_ON') -join ';') -ceq '*|UNREADABLE;*|UNREADABLE;*|UNREADABLE;*|UNREADABLE' -and ((& $svcEv $f['R0Dep'] 'SERVICE_DEPENDENT') -join ';') -ceq '*|UNREADABLE;R0Other|RUNNING' -and (& $svcEv $f['R0Dep'] 'SERVICE_DEPENDENCIES_UNREADABLE')[0] -ceq 'QUERY_FAILED') 'estados relacionados com falha: UNREADABLE e sem nome (o sistema nao foi provado); declarado segue pelo nome'
+        $d = & $r0Deps $svcUser; $d.Capped = @('R0SysSvc')
+        $r = & $r0Query $h $rows @() $d
+        $f = & $svcByKey $r
+        Assert-True ((& $svcEv $f['R0Dep'] 'SERVICE_DEPENDS_ON') -ccontains '*|NOT_QUERIED' -and (& $svcEv $f['R0Dep'] 'SERVICE_DEPENDENCIES_CAPPED').Count -eq 1 -and @((& $svcCov $r 'service-properties').Reasons) -ccontains 'SERVICE_DEPENDENCIES_CAPPED' -and (& $svcEv $f['R0Other'] 'SERVICE_DEPENDENCIES_CAPPED').Count -eq 0) 'acima do limite: NOT_QUERIED, sem nome, CAPPED so onde ocorre'
+        $q = Invoke-AtmServiceQuery -ProviderHints @($h) -Source ({ param($Names) $rows }.GetNewClosure()) -DependencySource { param($Names) throw (New-Object InvalidOperationException('x')) } -Deadline ([datetime]::UtcNow.AddSeconds(45))
+        Assert-True ($q.Dependencies.Failed -ceq 'DEADLINE' -and (& $svcEv @((Get-AtmServiceFindings -Query $q).Findings)[0] 'SERVICE_DEPENDENCIES_UNREADABLE')[0] -ceq 'DEADLINE') 'prazo mais perto que duas consultas: DEADLINE, nada consultado'
+        $r = & $r0Query $h $rows
+        Assert-True (@($r.Findings | Where-Object { (& $svcEv $_ 'SERVICE_DEPENDENCIES_NOT_COLLECTED').Count -eq 1 }).Count -eq 2 -and @((& $svcCov $r 'service-properties').Reasons | Where-Object { $_ -like 'SERVICE_DEPENDENCIES*' }).Count -eq 0) 'fonte injetada sem fonte de dependencias: NOT_COLLECTED, sem razao de dependencia'
+    }
+    Test-Case 'V0.4 R0' 'R0: ExpectedImage - contrato (nome do arquivo ou marcador de pasta conhecida; nunca drive, perfil, outra variavel, .., ~); IMAGE_MATCH, IMAGE_MISMATCH e IMAGE_UNKNOWN; nunca um caminho; CoworkVMService sem imagem declarada' {
+        foreach ($ok in @('r0svc.exe', '%ProgramFiles%\R0Vendor\r0svc.exe', '%programfiles(x86)%\R0 Vendor\bin\r0svc.exe', '%SystemRoot%\System32\r0svc.exe', '%ProgramW6432%\R0\r0svc.EXE')) { Assert-True (Test-AtmServiceExpectedImage $ok) "aceito: $ok" }
+        foreach ($bad in @('C:\Program Files\R0\r0svc.exe', '%USERPROFILE%\r0svc.exe', '%LOCALAPPDATA%\R0\r0svc.exe', '%APPDATA%\r0svc.exe', 'R0\r0svc.exe', '%ProgramFiles%\..\r0svc.exe', '%ProgramFiles%\R0~1\r0svc.exe',
+                '%ProgramFiles%\ R0\r0svc.exe', '%ProgramFiles%\R0.\r0svc.exe', '%ProgramFiles%\\r0svc.exe', 'r0svc.dll', 'r0 svc.exe', '\\r0host\share\r0svc.exe', '%ProgramFiles%\R0\%TEMP%\r0svc.exe', '', 12345, $true)) { Assert-True (-not (Test-AtmServiceExpectedImage $bad)) "recusado: $bad" }
+        $pv = [pscustomobject]@{ Id = 'fake-img'; DisplayName = 'F'; ContractVersion = 2; Capabilities = @('runtime'); GetServiceHints = { @([pscustomobject]@{ Name = 'R0Svc'; ExpectedImage = '%ProgramFiles%\R0\r0svc.exe' }) } }
+        $ph = Get-AtmProviderRuntimeHints $pv
+        Assert-True ($ph.Coverage.Status -ceq 'COMPLETE' -and $ph.ServiceHints[0].ExpectedImage -ceq '%ProgramFiles%\R0\r0svc.exe') 'dica valida: ExpectedImage mantido como declarado'
+        $pv.GetServiceHints = { @([pscustomobject]@{ Name = 'R0Svc'; ExpectedImage = 'C:\R0\r0svc.exe' }) }
+        $ph = Get-AtmProviderRuntimeHints $pv
+        Assert-True ($ph.Coverage.Status -ceq 'FAILED' -and @($ph.Coverage.Reasons) -ccontains 'HINT_MALFORMED_SERVICE_HINTS' -and @($ph.ServiceHints).Count -eq 0) 'caminho com drive: dica recusada inteira (provider FAILED)'
+        $winApp = '"C:\Program Files\WindowsApps\R0_1.0.0.0_x64__r0pub\r0svc.exe"'
+        $cases = @(
+            @('svchost.exe', $svcSys, 'IMAGE_MATCH'), @('r0other.exe', $svcSys, 'IMAGE_MISMATCH'), @('%SystemRoot%\System32\svchost.exe', $svcSys, 'IMAGE_MATCH'),
+            @('%SystemRoot%\SysWOW64\svchost.exe', $svcSys, 'IMAGE_MISMATCH'), @('%SystemRoot%\System32\r0other.exe', $svcSys, 'IMAGE_MISMATCH'),
+            @('%ProgramFiles%\WindowsApps\R0\r0svc.exe', $winApp, 'IMAGE_UNKNOWN'), @('r0svc.exe', $winApp, 'IMAGE_MATCH'), @('r0svc.exe', $null, 'IMAGE_UNKNOWN'), @('r0svc.exe', 'r0 svc.exe -x', 'IMAGE_UNKNOWN'))
+        $i = 0
+        foreach ($c in $cases) {
+            $i++
+            $r = & $r0Query (& $svcHints 'fake-r0' @(& $r0Hint "R0Img$i" $c[0])) @(& $r0Row "R0Img$i" 'Running' ([uint32]0) 0 0 0 $true $c[1])
+            Assert-Eq ((& $svcEv @($r.Findings)[0] 'SERVICE_IMAGE') -join ',') $c[2] "caso ${i}: $($c[2])"
+        }
+        $two = @((& $svcHints 'prov-a' @(& $r0Hint 'R0Img' 'svchost.exe')), (& $svcHints 'prov-b' @(& $r0Hint 'R0Img' 'r0other.exe')))
+        $r = & $r0Query $two @(& $r0Row 'R0Img' 'Running' ([uint32]0))
+        Assert-Eq ((& $svcEv @($r.Findings)[0] 'SERVICE_IMAGE') -join ',') 'IMAGE_UNKNOWN' 'dois providers com imagens diferentes: IMAGE_UNKNOWN'
+        $same = @((& $svcHints 'prov-a' @(& $r0Hint 'R0Img' 'svchost.exe')), (& $svcHints 'prov-b' @(& $r0Hint 'R0Img' 'SVCHOST.EXE')), (& $svcHints 'prov-c' @(& $r0Hint 'R0Img')))
+        $r = & $r0Query $same @(& $r0Row 'R0Img' 'Running' ([uint32]0))
+        Assert-Eq ((& $svcEv @($r.Findings)[0] 'SERVICE_IMAGE') -join ',') 'IMAGE_MATCH' 'a mesma imagem por dois providers (e um sem imagem): comparada uma vez'
+        Assert-Eq (Compare-AtmServiceImage -Expected '%ProgramFiles%\R0\svchost.exe' -Executable ([pscustomobject]@{ Path = 'C:\R0Root\R0\svchost.exe'; Name = 'svchost.exe' }) -Folders @{ '%ProgramFiles%' = $null }) 'IMAGE_UNKNOWN' 'pasta do marcador ausente: IMAGE_UNKNOWN'
+        Assert-Eq (Compare-AtmServiceImage -Expected '%ProgramFiles%\R0\svchost.exe' -Executable ([pscustomobject]@{ Path = 'C:\R0Root\R0\svchost.exe'; Name = 'svchost.exe' }) -Folders @{ '%ProgramFiles%' = 'C:\R0Root' }) 'IMAGE_MATCH' 'marcador resolvido em memoria: IMAGE_MATCH'
+        Assert-True ($null -eq $cdHints.ServiceHints[0].ExpectedImage -and @($cdHints.ServiceHints[0].PSObject.Properties.Name) -ccontains 'ExpectedImage') 'CoworkVMService: nenhuma imagem declarada (fonte publica nao nomeia o executavel)'
+        $cw = & $svcRun $cdHints @(& $r0Row 'CoworkVMService' 'Running' ([uint32]0) 0 0 0 $true) $null
+        Assert-True ((& $svcEv @($cw.Findings)[0] 'SERVICE_IMAGE_NOT_DECLARED').Count -eq 1 -and (& $svcEv @($cw.Findings)[0] 'SERVICE_IMAGE').Count -eq 0) 'CoworkVMService: SERVICE_IMAGE_NOT_DECLARED'
+    }
+    Test-Case 'V0.4 R0' 'R0 (estatico): o coletor so le - nenhum Start-Service, Stop-Service, Set-Service, sc.exe, ServiceController, metodo de controle do CIM nem handle do gerenciador; tres consultas CIM de leitura; Win32_Service segue com duas; uma unica espera, na segunda leitura; area de teste sem espera real' {
+        $diag = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Diagnose.ps1'))
+        $sec = $diag.Substring($diag.IndexOf('# Windows services (P2-A'), $diag.IndexOf('# Virtualization (P2-B') - $diag.IndexOf('# Windows services (P2-A'))
+        foreach ($pat in @('Start-Service', 'Stop-Service', 'Set-Service', 'Restart-Service', 'sc.exe', 'ServiceController', 'Invoke-CimMethod', 'Get-CimAssociatedInstance', 'OpenSCManager', 'OpenService', 'Add-Type', 'DllImport', 'Start-Process')) { Assert-True (-not $sec.Contains($pat)) "coletor sem '$pat'" }
+        Assert-True (-not ($sec -match '(?i)\b(StartService|StopService|ChangeStartMode|PauseService|ResumeService|ControlService|UserControlService)\b')) 'nenhum metodo de controle do CIM'
+        $cims = @([regex]::Matches($sec, 'Get-CimInstance -ClassName (\w+)') | ForEach-Object { $_.Groups[1].Value })
+        Assert-Eq ($cims -join ',') 'Win32_Service,Win32_DependentService,Win32_BaseService' 'tres consultas CIM de leitura no coletor de servicos'
+        Assert-Eq ([regex]::Matches($diag, 'Get-CimInstance[^\r\n]*Win32_Service').Count) 2 'Win32_Service: ainda a consulta dos nomes declarados e a leitura do vmms'
+        $sleep = 'Start-' + 'Sleep'
+        Assert-Eq ([regex]::Matches($sec, $sleep).Count) 1 'uma unica espera no coletor (a da segunda leitura)'
+        $fn = $sec.Substring($sec.IndexOf('function Invoke-AtmServiceSecondRead'), $sec.IndexOf('function Get-AtmServiceCondition') - $sec.IndexOf('function Invoke-AtmServiceSecondRead'))
+        Assert-True ($fn.Contains($sleep + ' -Milliseconds $waitMs') -and $script:AtmServiceSecondReadCapMs -eq 2000 -and $script:AtmServiceSecondReadMinMs -eq 250) 'espera so na segunda leitura, teto fixo de 2000 ms'
+        $self = [IO.File]::ReadAllText((Join-Path $testsDir 'Run-Tests.ps1'))
+        $a0 = $self.IndexOf('-----' + ' V0.4 R0 (read-only'); $a1 = $self.IndexOf('-----' + ' P4-A (dependency graph')
+        Assert-True ($a0 -gt 0 -and $a1 -gt $a0 -and -not $self.Substring($a0, $a1 - $a0).Contains($sleep)) 'area V0.4 R0 sem espera real'
+        foreach ($x in $script:AtmServiceConditions) { Assert-True ($x -cmatch '^(STOPPED|PENDING)_[A-Z_]+$') "condicao $x so de leitura (STOPPED_ ou PENDING_)" }
+    }
+    Test-Case 'V0.4 R0' 'R0: integracao ao diagnose (CLI) - seams encadeados, linha nova do relatorio com condicao, codigo, imagem e dependencias; privacidade: nenhum caminho nem conta nas linhas e detalhes novos, nem no JSON' {
+        $p = New-TestProfile 'r0-int'
+        $null = New-TestRoot -ProfileInfo $p
+        $rt = [pscustomobject]@{ Id = 'fake-r0'; DisplayName = 'F'; ContractVersion = 2; Capabilities = @('runtime'); GetServiceHints = { @([pscustomobject]@{ Name = 'R0Dep'; Role = 'vm-host'; ExpectedImage = '%SystemRoot%\System32\svchost.exe' }) } }
+        $rows = @(& $r0Row 'R0Dep' 'Stopped' ([uint32]1066) ([uint32]7) 0 0 $false $svcSys 'CORPDOM\r0-acct')
+        $deps = & $r0Deps $svcUser
+        $waits = New-Object System.Collections.Generic.List[int]
+        $procRows = @([pscustomobject]@{ ProcessId = 4; ParentProcessId = 0; Name = 'System'; CreationDate = [datetime]::UtcNow.AddHours(-2) })
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -Providers @((Get-AtmProviders)[0], $rt) -ProcessSource ({ $procRows }.GetNewClosure()) -CpuSampleMs 0 -PseudonymKey $testPseudonymKey `
+            -ServiceSource ({ param($Names) $rows }.GetNewClosure()) -ServiceDependencySource ({ param($Names) $deps }.GetNewClosure()) -ServiceWait ({ param($Ms) $waits.Add([int]$Ms) }.GetNewClosure())
+        $sf = @($d.Findings | Where-Object { $_.Kind -ceq 'Service' })
+        Assert-True ($sf.Count -eq 1 -and $sf[0].State -ceq 'STOPPED' -and (& $r0Cond $sf[0]) -ceq 'STOPPED_FAILED' -and (& $svcEv $sf[0] 'SERVICE_IMAGE')[0] -ceq 'IMAGE_MATCH' -and (& $svcEv $sf[0] 'SERVICE_DEPENDS_ON').Count -eq 4) 'seams do diagnose encadeados ate o coletor'
+        $txt = @(Show-AtmDiagnose -Result $d 6>&1 | ForEach-Object { [string]$_ })
+        $prefix = (Get-AtmText 'diag.svcSignals' 'X' 'X' 'X' 'X' 'X' 'X'); $prefix = $prefix.Substring(0, $prefix.IndexOf('X'))
+        $line = @($txt | Where-Object { $_.TrimStart().StartsWith($prefix) })
+        Assert-True ($line.Count -eq 1 -and $line[0].Contains('STOPPED_FAILED') -and $line[0].Contains('1066/7') -and $line[0].Contains('IMAGE_MATCH') -and $line[0].Contains('R0SysSvc RUNNING') -and $line[0].Contains((Get-AtmText 'diag.svcDepHidden' 'STOPPED'))) "linha nova do relatorio: $($line -join ' | ')"
+        foreach ($x in @('\', ':', 'r0-acct', 'CORPDOM', 'p2a-person', 'R0Vendor', 'r0agent', 'R0VendorSvc', 'R0UserSvc', 'r0user', 'LocalSystem')) { Assert-True (-not ($line -join "`n").Contains($x)) "linha nova sem '$x'" }
+        $newCodes = @($script:AtmServiceEvidenceCodes | Where-Object { @('SERVICE_HINT', 'SERVICE_NOT_LISTED', 'SERVICE_NOT_QUERIED', 'SERVICE_STATE', 'SERVICE_STATE_UNREADABLE', 'SERVICE_START_MODE', 'SERVICE_START_MODE_UNREADABLE', 'SERVICE_DELAYED_AUTO_START', 'SERVICE_DELAYED_AUTO_START_UNREADABLE', 'SERVICE_ACCOUNT_KIND', 'SERVICE_ACCOUNT', 'SERVICE_ACCOUNT_UNREADABLE', 'SERVICE_EXECUTABLE', 'SERVICE_EXECUTABLE_NAME', 'SERVICE_EXECUTABLE_UNREADABLE', 'SERVICE_PROCESS_VERIFIED', 'SERVICE_PROCESS_UNVERIFIED', 'SERVICE_DUPLICATE_ROW') -cnotcontains $_ })
+        $det = @($sf[0].Evidence | Where-Object { $newCodes -ccontains $_.Code } | ForEach-Object { [string]$_.Detail })
+        Assert-True ($det.Count -ge 8 -and @($det | Where-Object { $_.Contains('\') -or $_.Contains(':') -or $_.Contains('r0-acct') -or $_.Contains('CORPDOM') -or $_.Contains('R0Vendor') }).Count -eq 0) "detalhes novos sem caminho nem conta ($($det.Count))"
+        $json = ConvertTo-AtmDiagnoseJson -Result $d
+        foreach ($x in @('r0-acct', 'CORPDOM', 'p2a-person', 'R0Vendor', 'r0agent', 'R0VendorSvc', 'R0UserSvc', 'R0AbsentSvc', 'r0user', 'r0-flag')) { Assert-True (-not $json.Contains($x)) "JSON sem '$x'" }
+        Assert-True ($json.Contains('SERVICE_CONDITION') -and $json.Contains('R0SysSvc|RUNNING')) 'JSON com a condicao e a dependencia do sistema'
+        Assert-Eq $waits.Count 0 'nenhum PENDING: nenhuma espera'
+    }
+    Test-Case 'V0.4 R0' 'R0 (runner de CI, somente leitura): sinais e dependencias reais de EventLog e Winmgmt; estado e tipo de inicio identicos antes e depois; nenhum nome fora do sistema' {
+        if ($env:GITHUB_ACTIONS -ne 'true') { $script:caseSkipped = $true; $script:caseNote = 'somente em runner de CI (consulta real, somente leitura)'; return }
+        $snap = { (@(Get-CimInstance -ClassName Win32_Service -Filter "Name='EventLog' OR Name='Winmgmt'" -Property Name, State, StartMode -ErrorAction Stop | Sort-Object Name | ForEach-Object { '{0}/{1}/{2}' -f $_.Name, $_.State, $_.StartMode })) -join ',' }
+        $before = & $snap
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $q = Invoke-AtmServiceQuery -ProviderHints @(& $svcHints 'fake-ci' @((& $svcHint 'EventLog'), (& $svcHint 'Winmgmt')))
+        $sw.Stop()
+        $r = Get-AtmServiceFindings -Query $q
+        $after = & $snap
+        $f = & $svcByKey $r
+        Assert-Eq $after $before 'estado e tipo de inicio identicos antes e depois'
+        foreach ($k in @('EventLog', 'Winmgmt')) {
+            Assert-True ((& $svcEv $f[$k] 'SERVICE_EXIT_CODE').Count -eq 1 -and (& $svcEv $f[$k] 'SERVICE_ACCEPT_STOP').Count -eq 1 -and (& $svcEv $f[$k] 'SERVICE_SIGNALS_NOT_COLLECTED').Count -eq 0) "${k}: sinais lidos ($((& $svcEv $f[$k] 'SERVICE_EXIT_CODE') -join ','))"
+            Assert-True ((& $svcEv $f[$k] 'SERVICE_DEPENDENCIES_NOT_COLLECTED').Count -eq 0 -and (& $svcEv $f[$k] 'SERVICE_DEPENDENCIES_UNREADABLE').Count -eq 0) "${k}: dependencias lidas"
+        }
+        Assert-True (@((& $svcEv $f['Winmgmt'] 'SERVICE_DEPENDS_ON') | Where-Object { $_ -match '^(?i)RPCSS\|RUNNING$' }).Count -eq 1) "Winmgmt depende do RPCSS em execucao ($((& $svcEv $f['Winmgmt'] 'SERVICE_DEPENDS_ON') -join ','))"
+        $labels = @($r.Findings | ForEach-Object { (& $svcEv $_ 'SERVICE_DEPENDS_ON'); (& $svcEv $_ 'SERVICE_DEPENDENT') })
+        Assert-True (@($labels | Where-Object { $_ -notmatch '^([A-Za-z0-9_.\- ]+|\*)\|(RUNNING|STOPPED|PAUSED|PENDING|UNREADABLE|NOT_LISTED|NOT_QUERIED)$' }).Count -eq 0) 'rotulos de dependencia no formato nome|ESTADO'
+        $script:caseNote = "consulta com sinais e dependencias em $($sw.ElapsedMilliseconds) ms; $($labels.Count) dependencias ($(@($labels | Where-Object { $_.StartsWith('*|') }).Count) sem nome); propriedades $((& $svcCov $r 'service-properties').Status)"
+    }
     # ------------------------------------------------------------------ P4-A (dependency graph, ADR-0002)
     # Synthetic findings and process rows only; no gate is opened and no collector runs inside the graph.
     $gRows = { param([object[]]$R) $rr = @($R); Get-AtmProcessCollection -Source ({ $rr }.GetNewClosure()) }

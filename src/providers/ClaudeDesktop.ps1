@@ -35,6 +35,11 @@
 #    arbitrary individual name; no ServiceOwner relation (service -> VM worker process) is established or verifiable
 #    by the collectors. vmmem, vmwp, vmcompute and HCS processes are never attributed to Claude Desktop.
 #  * No version is read from the installation: the hints apply to MSIX builds since the reported 1.1.3647.
+#  * No ExpectedImage for CoworkVMService (V0.4 R0, ADR-0016 V04-D5 (b)): neither Anthropic's documentation nor the
+#    two reports above name the service's executable or its folder, so nothing is declared and the diagnose reports
+#    SERVICE_IMAGE_NOT_DECLARED. Even a known file name would be compared by name only if, as for a service that an
+#    MSIX package declares, the executable sits in the package folder (WindowsApps), whose full path the collector
+#    never keeps.
 
 Register-AtmProvider ([pscustomobject]@{
         Id                     = 'claude-desktop'
@@ -42,6 +47,6 @@ Register-AtmProvider ([pscustomobject]@{
         ContractVersion        = 2
         Capabilities           = @('runtime')
         GetProcessMatchers     = { @([pscustomobject]@{ ImageName = 'claude.exe'; CommandLineMarker = 'pzs8sxrjxfjjc' }) }
-        GetServiceHints        = { @([pscustomobject]@{ Name = 'CoworkVMService'; Role = 'cowork-vm' }) }
+        GetServiceHints        = { @([pscustomobject]@{ Name = 'CoworkVMService'; Role = 'cowork-vm'; ExpectedImage = $null }) }
         GetVirtualizationHints = { @() }
     })
