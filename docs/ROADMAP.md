@@ -16,7 +16,7 @@ its gates closed or open, and no gate opens without the maintainer's decision.
 | [V0.2.1](#v021--desktop-gui-and-live-monitoring) | Desktop GUI and live monitoring (while the window is open) | No (read-only presentation) | Implemented on `main` (P1–P6); GUI gate closed; not published |
 | [V0.3](#v03--selective-real-cleanup) | Selective real cleanup | Yes: deletes approved temporary paths only | Published (0.3.0); deletion gate closed |
 | [0.3.x](#03x--isolation-and-quarantine-of-the-own-profile) | Isolation and quarantine of the own profile (ADR-0013; after 0.3.0 is published) | Yes: moves approved temporary paths into a quarantine and back; purge deletes behind the purge gate of its own (J-ISO-1 (C)) | On `main`, isolation and purge gates closed; not published |
-| [V0.4](#v04--assisted-recovery) | Assisted recovery of services and environments; Recovery Mode for another user's profile (ADR-0013) | Yes: reversible operations, each authorized individually | Not started |
+| [V0.4](#v04--assisted-recovery) | Assisted recovery of services and environments; Recovery Mode for another user's profile (ADR-0013) | Yes: reversible operations, each authorized individually | Designed in ADR-0016 (proposed); not implemented |
 | [V0.5](#v05--preventive-monitoring) | Persistent preventive monitoring, alerts, growth trends | No (observes and alerts) | Not started |
 | [V1.0](#v10--stabilization-and-multi-agent-support) | Stabilization and extensible multi-agent support | Same limits as V0.3 and V0.4 | Not started |
 
@@ -343,7 +343,7 @@ changes, nothing outside an agent's temporary area.
 
 ## V0.4 — Assisted recovery
 
-**Status: not started.** It lands on `main` under the order rule above: dark, with its acceptance proven in CI.
+**Status: designed in [ADR-0016](adr/ADR-0016-v04-assisted-recovery.md) (proposed); not implemented.** It lands on `main` under the order rule above: dark, with its acceptance proven in CI.
 
 **Objectives.** Help recover services and agent environments that are stuck or broken, through reversible steps that
 the user authorizes one at a time.
