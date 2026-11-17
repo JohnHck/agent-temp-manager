@@ -302,7 +302,8 @@ try {
     # --- every value checked: privacy rule first, then its type ---
     $bad = New-Object System.Collections.Generic.List[object]
     foreach ($f in $fields) {
-        $vals = $(if ($f.List) { @($f.Value) } else { @(, $f.Value) })
+        # A one-value field stays whole: an array there is checked as one value, so it fails its type and is refused.
+        if ($f.List) { $vals = @($f.Value) } else { $vals = @(, $f.Value) }
         $i = 0
         foreach ($v in $vals) {
             $nm = $(if ($f.List) { "$($f.Name)[$i]" } else { $f.Name })

@@ -6531,13 +6531,14 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
         Assert-True ($r.Code -eq 2 -and $r.Text -match 'OUT_EXISTS') "-Out existente recusado ($($r.Text))"
         Assert-Eq @(Get-ChildItem -LiteralPath $d -Filter '*.REFUSED').Count 0 'nenhum arquivo REFUSED'
     }
-    Test-Case 'V5 tools' 'Resumo: plantados e recusados, cada um sozinho - um caminho, um SID, o USERNAME do runner, um e-mail e um codigo fora da lista; nenhuma saida final, so o temporario REFUSED com o nome do campo e a regra, sem o valor (nem no console)' {
+    Test-Case 'V5 tools' 'Resumo: plantados e recusados, cada um sozinho - um caminho, um SID, o USERNAME do runner, um e-mail, um codigo fora da lista e uma lista de codigos validos num campo de um valor so; nenhuma saida final, so o temporario REFUSED com o nome do campo e a regra, sem o valor (nem no console)' {
         $plants = @(
             , @('caminho', 'C:\Users\alice\AppData\Local\Temp\x', 'PATH_SEPARATOR')
             , @('sid', 'S-1-5-21-1-2-3-777', 'SID_PREFIX')
             , @('usuario', $env:USERNAME, 'ENVIRONMENT_NAME')
             , @('email', ('piloto' + '@' + 'exemplo.test'), 'AT_SIGN')
             , @('codigo', 'NOT_A_KNOWN_CODE', 'NOT_OF_TYPE_stopCode')
+            , @('lista', @('STOPPED_AFTER_REFUSED', 'STOPPED_AFTER_PARTIAL'), 'NOT_OF_TYPE_stopCode')
         )
         foreach ($p in $plants) {
             Assert-True (([string]$p[1]).Length -gt 0) "valor plantado de $($p[0])"
