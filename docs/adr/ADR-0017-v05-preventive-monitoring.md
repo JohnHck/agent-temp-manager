@@ -33,8 +33,8 @@ Its acceptance criteria (`:421-426`):
   * It uses one timer, a `NextDueUtc` per session (`src/lib/Gui.ps1:115`, `:143`, `:157`, `:185`) and a fixed list of
     intervals from 30 seconds to 15 minutes (`src/lib/GuiModel.ps1:130-134`).
   * A failed refresh never erases an earlier finding (`ADR-0014:139`).
-* **The diagnose JSON export**, behind `AtmDiagnoseExportEnabled` (`src/lib/Report.ps1:1165`). Its pseudonym key exists
-  only for the run (`src/lib/Engine.Diagnose.ps1:4511-4513`).
+* **The diagnose JSON export**, behind `AtmDiagnoseExportEnabled` (`src/lib/Report.ps1:1180`). Its pseudonym key exists
+  only for the run (`src/lib/Engine.Diagnose.ps1:4932-4934`).
 * **The automatic purge's scheduled task**, the only precedent of a scheduler entry
   (`src/lib/Engine.Isolate.ps1:54-68`, `:1701-1712`, `:1719-1728`, `:1835-1862`, `:1917-1953`). It is:
   * one per user, named after a hash of the SID;
@@ -53,7 +53,7 @@ maintainer can approve (phase M0, decisions below):
    A stable pseudonym across collections would be K2, which that record leaves "not built" and in need of its own
    evaluation.
 3. **ADR-0014 section 3:** the GUI calls only the read functions of a closed list, and a static test checks it
-   (`tests/Run-Tests.ps1:14690-14702`). A history-read function is not on that list.
+   (`tests/Run-Tests.ps1:15227-15239`). A history-read function is not on that list.
 4. **The ROADMAP itself.** "Never deletes ... anything" (`docs/ROADMAP.md:425`) and "uses bounded local storage"
    (`:422`) meet when the history is full. Section 3 states the reading and gives the alternatives (V05-D4).
 
@@ -78,12 +78,12 @@ A machine-wide view needs an elevated collection, which V0.5 does not do.
 | 4 | Size per group (provider, project, class): bytes, allocated bytes (estimate), files, partitions | partition fields `Engine.Audit.ps1:613-615`; class `:1098`, `:1147-1150` (`ACTIVE_EVIDENCE`, `RECENT`, `ORPHAN_SUSPECTED`, `LIVENESS_UNKNOWN`, `NOT_SCANNED`) | bytes, counts | **the audit's walk of every file of each agent temporary base** (`:840-870`) | No | sums per group, with a per-group "complete" flag: every partition of the group measured completely (`:623`) |
 | 5 | Age per group: hours since the newest write of the group's least recently written partition | `NewestWriteTimeUtc` (`Engine.Audit.ps1:612`) | hours | none (already read) | No | one number per group; never a time of an individual partition |
 | 6 | Flags per group: counts of partitions with reparse points, read errors, incomplete measurement | `Engine.Audit.ps1:618-623`, flag lists `:21-24` | counts | none | No | counts; never the error or reparse samples (`:621-622`) |
-| 7 | Diagnose counts (only if V05-D8 (b) is decided): services of the declared roles by state; agent sessions by state; agent processes by state; VMs by state | `Engine.Diagnose.ps1:35-41` | counts per kind and state | a diagnose run: deadline 300 s by default (`:3051`), a CPU sample of 500 ms (`:3052`), CIM queries bounded at 30 s each (`:311`, `:3132`, `:3469`) | No, for these kinds | counts; never a process id or key, a service account, a VM name or a session id |
-| 8 | Worktrees ("leftover worktrees" in the ROADMAP) | `Engine.Diagnose.ps1:1706`, `:2635-2637` | — | — | **Yes:** `AtmWorktreeDiagnosticsEnabled`. Closed, discovery is `NOT_OBSERVABLE`. | `NOT_OBSERVABLE`, never zero |
-| 9 | Open-file holders | `Engine.Diagnose.ps1:4200` | — | — | **Yes:** `AtmHandleDiagnosticsEnabled` | not collected |
+| 7 | Diagnose counts (only if V05-D8 (b) is decided): services of the declared roles by state; agent sessions by state; agent processes by state; VMs by state | `Engine.Diagnose.ps1:35-41` | counts per kind and state | a diagnose run: deadline 300 s by default (`:3067`), a CPU sample of 500 ms (`:3068`), CIM queries bounded at 30 s each (`:327`, `:3175`, `:3890`) | No, for these kinds | counts; never a process id or key, a service account, a VM name or a session id |
+| 8 | Worktrees ("leftover worktrees" in the ROADMAP) | `Engine.Diagnose.ps1:1722`, `:2651-2653` | — | — | **Yes:** `AtmWorktreeDiagnosticsEnabled`. Closed, discovery is `NOT_OBSERVABLE`. | `NOT_OBSERVABLE`, never zero |
+| 9 | Open-file holders | `Engine.Diagnose.ps1:4621` | — | — | **Yes:** `AtmHandleDiagnosticsEnabled` | not collected |
 
 **"Long-running agent VMs" are not observable as agent VMs.** No provider declares a virtualization hint, so every VM
-is `VM_UNATTRIBUTED` (`Engine.Diagnose.ps1:3746`; [ADR-0016](ADR-0016-v04-assisted-recovery.md), inventory row 3). A VM
+is `VM_UNATTRIBUTED` (`Engine.Diagnose.ps1:4167`; [ADR-0016](ADR-0016-v04-assisted-recovery.md), inventory row 3). A VM
 count says a VM ran, not that an agent's VM ran.
 
 **Cost: not measured.**
