@@ -223,8 +223,8 @@ operator's pilot (V5) and its own gate. Release record, V4 results and publicati
   and limits: [TESTING.md](TESTING.md#v3-as-a-whole).
 * V4 (privilege matrix, operator): **done** (2026-11-07, deletion gate closed). Rows not tested, and why, are recorded in
   [release/V0.3-RC.md](release/V0.3-RC.md) (section G).
-* V5 (operator pilot on one real root): designed in ADR-0015 (disposable VM); not executed. It is a prerequisite for any
-  release with the gate open.
+* V5 (operator pilot on one real root): designed in ADR-0015 (accepted; disposable VM); evidence tools in
+  `tools/v5-pilot/` (read only); not executed. It is a prerequisite for any release with the gate open.
 
 **Deliverables.**
 * Release gate enabled through a reviewed change; deletion only for paths in an explicit allowlist.

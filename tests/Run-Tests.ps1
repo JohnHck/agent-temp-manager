@@ -6233,6 +6233,412 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
             foreach ($i in $ignored) { Assert-True ($i -in @('dist/')) "arquivo ignorado inesperado: $i" }
         }
     }
+    # --- V5 tools (V5-TOOLS) ---
+    # The read-only evidence tools of the V5 pilot (tools\v5-pilot; ADR-0015, sections 6 to 8, decision V5-D7 (a)), on
+    # synthetic folders of the sandbox only. Nothing here deletes anything: a "removal" is two snapshots compared in the
+    # reverse order of their creation. The T1 logs are made by the engine's own Write-AtmCleanLogRecord
+    # (src\lib\Engine.Clean.ps1) with the fields of the records of Invoke-AtmCleanCore; only the writer is a stand-in.
+    $v5Dir = Join-Path (Split-Path -Parent $testsDir) 'tools\v5-pilot'
+    $v5Snap = Join-Path $v5Dir 'Get-AtmPilotSnapshot.ps1'
+    $v5Cmp = Join-Path $v5Dir 'Compare-AtmPilotSnapshot.ps1'
+    $v5Sum = Join-Path $v5Dir 'Get-AtmPilotSummary.ps1'
+    function Invoke-V5Tool {
+        # One tool in this process: its exit code and its console text (every stream).
+        param([string]$Tool, [hashtable]$Arguments)
+        $global:LASTEXITCODE = 0
+        $txt = (@(& $Tool @Arguments *>&1) | ForEach-Object { [string]$_ }) -join "`n"
+        return [pscustomobject]@{ Code = $LASTEXITCODE; Text = $txt }
+    }
+    function Read-V5Snapshot {
+        # The entries of one snapshot file, by relative path (one root).
+        param([string]$Path)
+        $m = @{}
+        foreach ($l in [IO.File]::ReadAllLines($Path)) {
+            $f = $l.Split("`t")
+            if ($f[0] -ceq 'E') { $m[$f[7]] = [pscustomobject]@{ Label = $f[1]; Type = $f[2]; Size = $f[3]; Write = $f[4]; Sha = $f[5]; Code = $f[6] } }
+        }
+        return $m
+    }
+    function Get-V5Times {
+        # Last write and creation times of every item under a folder; reparse points listed, never followed.
+        param([string]$Dir)
+        $out = New-Object System.Collections.Generic.List[string]
+        $stack = New-Object System.Collections.Generic.Stack[object]
+        $stack.Push((New-Object IO.DirectoryInfo($Dir)))
+        while ($stack.Count -gt 0) {
+            foreach ($e in $stack.Pop().GetFileSystemInfos()) {
+                # The item's own times (not the copy in the folder listing, which NTFS updates lazily).
+                $e.Refresh()
+                $out.Add($e.FullName + '|' + $e.LastWriteTimeUtc.Ticks + '|' + $e.CreationTimeUtc.Ticks)
+                if (($e.Attributes -band [IO.FileAttributes]::Directory) -and -not ($e.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $stack.Push($e) }
+            }
+        }
+        return (($out | Sort-Object) -join "`n")
+    }
+    function New-V5Snap {
+        param([string[]]$Roots, [string]$Out)
+        $r = Invoke-V5Tool $v5Snap @{ Root = $Roots; Out = $Out }
+        Assert-Eq $r.Code 0 "snapshot escrito ($($r.Text))"
+        return $Out
+    }
+    function Get-V5Count {
+        # One count of the compare output (console text or file).
+        param([string]$Text, [string]$Key)
+        $m = [regex]::Match($Text, '(?m)^' + [regex]::Escape($Key) + "`t([^\r\n]*)")
+        if (-not $m.Success) { throw "ASSERT: chave $Key ausente na saida do compare" }
+        return $m.Groups[1].Value
+    }
+    function New-V5T1Log {
+        # A T1 log as the engine writes it: each line by Write-AtmCleanLogRecord, with a stand-in writer (AppendLine).
+        param([string]$Path, [string]$RunId, [object[]]$Records)
+        $w = [pscustomobject]@{ Lines = (New-Object System.Collections.Generic.List[string]) }
+        $w | Add-Member -MemberType ScriptMethod -Name AppendLine -Value { param($l) $this.Lines.Add($l); return $null }
+        $st = @{ RunId = $RunId; RecSeq = 0 }
+        foreach ($rec in $Records) { $lc = Write-AtmCleanLogRecord -Log $w -State $st -Type $rec[0] -Fields $rec[1]; if ($null -ne $lc) { throw "registro de teste recusado: $lc" } }
+        [IO.File]::WriteAllText($Path, (($w.Lines -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+    }
+    function Get-V5Records {
+        # The records of Invoke-AtmCleanCore (src\lib\Engine.Clean.ps1: run-start, plan, declaration, confirmation,
+        # plan-check, then intent and result, or skip, then run-end) for one root under the B1 exception. Kind COMPLETE:
+        # the deleting run. Kind FA: a revalidation refused by new processes not inspected (F-A), before any deletion.
+        # -StoppedBy replaces the run-end code (a planted value).
+        param([string]$RunId, [string]$Kind, $StoppedBy = '__default__')
+        $op = $RunId + ':1'
+        $path = 'C:\Users\alice\AppData\Local\Temp\claude\C--Users-alice-proj\' + [guid]::NewGuid().ToString()
+        $planId = ('ab' * 32)
+        $ia = [ordered]@{ caller = 'CLI'; consoleRequiredByCaller = $true; callerFieldsVerified = $false; interactiveConsoleObserved = $true; observedBy = 'ENGINE_CONSOLE_CHECK'; identifiesRespondent = $false }
+        $recs = @(
+            , @('run-start', [ordered]@{ tool = $script:AtmVersion; user = 'PILOTVM\alice'; sid = 'S-1-5-21-1-2-3-4444'; elevated = $false; planned = 1; planId = $planId; b1Exception = $true; uninspectableProcesses = 3 })
+            , @('plan', [ordered]@{ opId = $op; path = $path; fingerprint = 'f1f2'; files = 2; dirs = 1; bytes = 4096; newestWriteUtc = '2026-11-10T08:00:00.0000000Z'; category = 'ELIGIBLE_WITH_DECLARED_RISK'; uninspectableProcesses = 3; uninspectableKeys = @('4@638000000000000000', '812@638000000000000001', '990@638000000000000002') })
+            , @('declaration', [ordered]@{ opId = $op; path = $path; fingerprint = 'f1f2'; declaredBy = 'OPERATOR'; taskCompleted = $true; contentDecision = 'NOTHING_NEEDED'; preservation = [ordered]@{ basis = 'NOTHING_NEEDED_DISCARD_ACCEPTED'; verifiedByTool = $false }; b1ResidualRiskAccepted = $true; uninspectableProcesses = 3 })
+            , @('confirmation', [ordered]@{ accepted = $true; planId = $planId; roots = 1; interaction = $ia; limitations = @($script:AtmCleanDeclarationLimitations) })
+            , @('plan-check', [ordered]@{ planId = $planId; matched = $true; changed = @() })
+        )
+        if ($Kind -ceq 'COMPLETE') {
+            $recs += , @('intent', [ordered]@{ opId = $op; path = $path; fingerprint = 'f1f2'; files = 2; dirs = 1; bytes = 4096 })
+            $recs += , @('result', [ordered]@{ opId = $op; path = $path; outcome = 'COMPLETE'; attempted = $true; completed = $true; filesDeleted = 2; dirsDeleted = 2; filesPlanned = 2; dirsPlanned = 2; abortReason = $null; failedAt = $null; verifiedGone = $true; exceptionType = $null })
+            $sb = $(if ($StoppedBy -ceq '__default__') { $null } else { $StoppedBy })
+            $recs += , @('run-end', [ordered]@{ results = 1; complete = 1; skipped = 0; stoppedBy = $sb; stoppedAtOpId = $null; notAttempted = @() })
+        } else {
+            $recs += , @('skip', [ordered]@{ opId = $op; path = $path; reasons = @('B1_EXCEPTION_NEW_UNINSPECTABLE_PROCESS (2)') })
+            $recs += , @('run-end', [ordered]@{ results = 0; complete = 0; skipped = 1; stoppedBy = 'REVALIDATION_REFUSED'; stoppedAtOpId = $op; notAttempted = @() })
+        }
+        return , $recs
+    }
+    $v5CmpKeys = @('onlyExpectedChange', 'roots', 'expectedRemovedGiven', 'expectedRemovedFound', 'expectedNewPatterns', 'removed.expected', 'removed.unexpected', 'new.expected', 'new.unexpected',
+        'changed.expected', 'changed.unexpected', 'unchanged.expected', 'unchanged.unexpected', 'rootsChanged.expected', 'rootsChanged.unexpected')
+    Test-Case 'V5 tools' 'Snapshot: arquivos, pastas aninhadas, arquivo vazio, nome com acento e com espaco; SHA-256 igual ao Get-FileHash; datas de escrita e de criacao inalteradas; juncao registrada e nunca seguida (o alvo fora da raiz nao aparece); arquivo em uso exclusivo registrado com codigo, sem conteudo; entradas e console sem caminho absoluto' {
+        $base = Join-Path $sandbox 'v5-snap'
+        $root = Join-Path $base 'root'
+        $outside = Join-Path $base 'outside'
+        foreach ($d in @((Join-Path $root 'a\b\c'), $outside)) { [void][IO.Directory]::CreateDirectory($d) }
+        $accent = 'relat' + [char]0x00F3 + 'rio a' + [char]0x00E7 + [char]0x00E3 + 'o.txt'
+        [IO.File]::WriteAllText((Join-Path $root 'top.txt'), 'top')
+        [IO.File]::WriteAllText((Join-Path $root 'a\b\c\deep.bin'), ('x' * 70000))
+        [IO.File]::WriteAllBytes((Join-Path $root 'a\vazio.txt'), [byte[]]@())
+        [IO.File]::WriteAllText((Join-Path $root "a\$accent"), 'acento')
+        [IO.File]::WriteAllText((Join-Path $root 'a\com espaco.txt'), 'espaco')
+        [IO.File]::WriteAllText((Join-Path $outside 'alvo-fora-da-raiz.txt'), 'fora')
+        New-Junction -Link (Join-Path $root 'a\juncao') -Target $outside
+        $locked = Join-Path $root 'a\exclusivo.txt'
+        [IO.File]::WriteAllText($locked, 'em uso')
+        $before = Get-V5Times $root
+        $out = Join-Path $base 'snap.txt'
+        $fs = [IO.File]::Open($locked, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+        try { $r = Invoke-V5Tool $v5Snap @{ Root = @($root); Out = $out } } finally { $fs.Dispose() }
+        Assert-Eq $r.Code 0 "snapshot escrito ($($r.Text))"
+        Assert-Eq (Get-V5Times $root) $before 'datas de escrita e de criacao inalteradas'
+        $rows = Read-V5Snapshot $out
+        foreach ($rel in @('top.txt', 'a\b\c\deep.bin', 'a\vazio.txt', "a\$accent", 'a\com espaco.txt')) {
+            $e = $rows[$rel]
+            Assert-True ($null -ne $e -and $e.Label -ceq 'R1' -and $e.Type -ceq 'FILE' -and $e.Code -ceq '-') "arquivo listado: $rel"
+            Assert-Eq $e.Sha (Get-FileHash -LiteralPath (Join-Path $root $rel) -Algorithm SHA256).Hash "SHA-256 igual ao Get-FileHash: $rel"
+            Assert-Eq $e.Size ([string](New-Object IO.FileInfo((Join-Path $root $rel))).Length) "tamanho: $rel"
+        }
+        Assert-Eq $rows['a\vazio.txt'].Size '0' 'arquivo vazio, tamanho 0'
+        foreach ($rel in @('a', 'a\b', 'a\b\c')) { Assert-True ($null -ne $rows[$rel] -and $rows[$rel].Type -ceq 'DIR' -and $rows[$rel].Sha -ceq '-') "pasta aninhada: $rel" }
+        Assert-True ($rows['a\juncao'].Type -ceq 'REPARSE_DIR' -and $rows['a\juncao'].Sha -ceq '-') 'juncao registrada como ponto de reparse'
+        $txt = [IO.File]::ReadAllText($out, [Text.Encoding]::UTF8)
+        Assert-True (@($rows.Keys | Where-Object { $_ -like 'a\juncao\*' }).Count -eq 0 -and -not $txt.Contains('alvo-fora-da-raiz')) 'juncao nunca seguida: o alvo fora da raiz nao aparece'
+        Assert-True ($rows['a\exclusivo.txt'].Code -ceq 'SHARING_VIOLATION' -and $rows['a\exclusivo.txt'].Sha -ceq '-') "arquivo em uso exclusivo: codigo e nenhum conteudo ($($rows['a\exclusivo.txt'].Code))"
+        Assert-Eq $rows.Count 10 'todas as entradas, nenhuma a mais'
+        $lines = @($txt -split "`r?`n")
+        Assert-True ($lines[0] -ceq "atm-pilot-snapshot`t1" -and @($lines | Where-Object { $_ -like "root`tR1`tPRESENT`t*" }).Count -eq 1 -and $lines -ccontains "end`t10") 'cabecalho, raiz R1 e fim com a contagem'
+        Assert-True (@($lines | Where-Object { $_ -like "E`t*" -and $_ -match ':\\' }).Count -eq 0) 'entradas so com rotulo e caminho relativo'
+        Assert-True ($r.Text -notmatch ':\\') "console sem caminho ($($r.Text))"
+    }
+    Test-Case 'V5 tools' 'Snapshot: link simbolico de arquivo registrado como ponto de reparse e nunca lido (sem privilegio para criar o link: NAO_TESTADO)' {
+        $base = Join-Path $sandbox 'v5-snap-link'
+        $root = Join-Path $base 'root'
+        $outside = Join-Path $base 'outside'
+        foreach ($d in @($root, $outside)) { [void][IO.Directory]::CreateDirectory($d) }
+        $target = Join-Path $outside 'alvo.txt'
+        [IO.File]::WriteAllText($target, 'conteudo do alvo fora da raiz')
+        try { $null = New-Item -ItemType SymbolicLink -Path (Join-Path $root 'link.txt') -Target $target -ErrorAction Stop }
+        catch { $script:caseSkipped = $true; $script:caseNote = 'link simbolico de arquivo nao criado nesta conta (sem privilegio): NAO_TESTADO'; return }
+        $out = New-V5Snap @($root) (Join-Path $base 'snap.txt')
+        $rows = Read-V5Snapshot $out
+        Assert-True ($rows['link.txt'].Type -ceq 'REPARSE_FILE' -and $rows['link.txt'].Sha -ceq '-' -and $rows['link.txt'].Size -ceq '-') 'link de arquivo: reparse, sem tamanho e sem SHA'
+        Assert-True (-not ([IO.File]::ReadAllText($out)).Contains((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash)) 'o alvo nunca e lido'
+    }
+    Test-Case 'V5 tools' 'Snapshot: recusas sem escrever nada - -Out dentro de uma raiz (tambem com outra caixa e barra final), -Out que ja existe (conteudo intacto), ponto de reparse no caminho do -Out, raizes sobrepostas' {
+        $base = Join-Path $sandbox 'v5-snap-ref'
+        $root = Join-Path $base 'root'
+        [void][IO.Directory]::CreateDirectory((Join-Path $root 'sub'))
+        $in = Join-Path $root 'sub\snap.txt'
+        $r = Invoke-V5Tool $v5Snap @{ Root = @($root); Out = $in }
+        Assert-True ($r.Code -eq 2 -and $r.Text -match 'OUT_INSIDE_ROOT' -and -not [IO.File]::Exists($in)) "-Out dentro da raiz recusado ($($r.Text))"
+        $r = Invoke-V5Tool $v5Snap @{ Root = @($root.ToUpperInvariant() + '\'); Out = $in }
+        Assert-True ($r.Code -eq 2 -and $r.Text -match 'OUT_INSIDE_ROOT' -and -not [IO.File]::Exists($in)) "outra caixa e barra final: recusado ($($r.Text))"
+        $exist = Join-Path $base 'ja-existe.txt'
+        [IO.File]::WriteAllText($exist, 'original')
+        $r = Invoke-V5Tool $v5Snap @{ Root = @($root); Out = $exist }
+        Assert-True ($r.Code -eq 2 -and $r.Text -match 'OUT_EXISTS' -and [IO.File]::ReadAllText($exist) -ceq 'original') "-Out existente recusado, intacto ($($r.Text))"
+        New-Junction -Link (Join-Path $base 'atalho') -Target (Join-Path $root 'sub')
+        $r = Invoke-V5Tool $v5Snap @{ Root = @($root); Out = (Join-Path $base 'atalho\snap2.txt') }
+        Assert-True ($r.Code -eq 2 -and $r.Text -match 'OUT_PATH_REPARSE' -and -not [IO.File]::Exists((Join-Path $root 'sub\snap2.txt'))) "reparse no caminho do -Out recusado ($($r.Text))"
+        $r = Invoke-V5Tool $v5Snap @{ Root = @($root, (Join-Path $root 'sub')); Out = (Join-Path $base 'snap3.txt') }
+        Assert-True ($r.Code -eq 2 -and $r.Text -match 'ROOTS_OVERLAP' -and -not [IO.File]::Exists((Join-Path $base 'snap3.txt'))) "raizes sobrepostas recusadas ($($r.Text))"
+    }
+    Test-Case 'V5 tools' 'Compare: sem mudanca; so o removido esperado (a pasta pai pode mudar so a data); removido sem -ExpectedRemoved e remocao esperada que nao aconteceu; novos esperados por nome exato e por prefixo de pasta; um novo inesperado; um alterado; saida sem caminho; -Out existente recusado' {
+        $base = Join-Path $sandbox 'v5-cmp'
+        $r1 = Join-Path $base 'base'; $r2 = Join-Path $base 'evid'; $s = Join-Path $base 'snaps'
+        foreach ($d in @((Join-Path $r1 'claude\C--Users-alice-proj'), $r2, $s)) { [void][IO.Directory]::CreateDirectory($d) }
+        [IO.File]::WriteAllText((Join-Path $r1 'claude\C--Users-alice-proj\outro.txt'), 'fica')
+        [IO.File]::WriteAllText((Join-Path $r2 'antigo.log'), 'log antigo')
+        $a = New-V5Snap @($r1, $r2) (Join-Path $s 'a.txt')
+        $a2 = New-V5Snap @($r1, $r2) (Join-Path $s 'a2.txt')
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $a; After = $a2 }
+        Assert-True ($r.Code -eq 0 -and (Get-V5Count $r.Text 'onlyExpectedChange') -ceq 'true' -and (Get-V5Count $r.Text 'unchanged.expected') -ceq '4' -and (Get-V5Count $r.Text 'roots') -ceq 'R1,R2') "sem mudanca: so o esperado ($($r.Text))"
+        $sess = 'claude\C--Users-alice-proj\0f0e0d0c-1111-2222-3333-444455556666'
+        [void][IO.Directory]::CreateDirectory((Join-Path $r1 "$sess\tmp"))
+        [IO.File]::WriteAllText((Join-Path $r1 "$sess\saida.txt"), 'sintetico')
+        [IO.File]::WriteAllText((Join-Path $r1 "$sess\tmp\x.txt"), 'sintetico')
+        $b = New-V5Snap @($r1, $r2) (Join-Path $s 'b.txt')
+        # The root "removed": b (with it) before a2 (taken before it existed).
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $b; After = $a2; ExpectedRemoved = "R1:$sess" }
+        Assert-True ($r.Code -eq 0 -and (Get-V5Count $r.Text 'removed.expected') -ceq '4' -and (Get-V5Count $r.Text 'removed.unexpected') -ceq '0' -and (Get-V5Count $r.Text 'changed.unexpected') -ceq '0' -and (Get-V5Count $r.Text 'expectedRemovedFound') -ceq 'true') "so o removido esperado ($($r.Text))"
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $b; After = $a2 }
+        Assert-True ($r.Code -eq 1 -and (Get-V5Count $r.Text 'onlyExpectedChange') -ceq 'false' -and (Get-V5Count $r.Text 'removed.unexpected') -ceq '4') "removido sem -ExpectedRemoved: inesperado ($($r.Text))"
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $a2; After = $b; ExpectedRemoved = "R1:$sess" }
+        Assert-True ($r.Code -eq 1 -and (Get-V5Count $r.Text 'expectedRemovedFound') -ceq 'false') "remocao esperada que nao aconteceu ($($r.Text))"
+        [IO.File]::WriteAllText((Join-Path $r2 'run6.log'), '{}')
+        [void][IO.Directory]::CreateDirectory((Join-Path $r2 'transcripts'))
+        [IO.File]::WriteAllText((Join-Path $r2 'transcripts\run6.txt'), 'transcricao')
+        $c = New-V5Snap @($r1, $r2) (Join-Path $s 'c.txt')
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $b; After = $c; ExpectedNew = @('R2:run6.log', 'R2:transcripts\') }
+        Assert-True ($r.Code -eq 0 -and (Get-V5Count $r.Text 'new.expected') -ceq '3' -and (Get-V5Count $r.Text 'new.unexpected') -ceq '0' -and (Get-V5Count $r.Text 'expectedNewPatterns') -ceq '2') "novos esperados: nome exato e prefixo de pasta ($($r.Text))"
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $b; After = $c; ExpectedNew = @('R2:\') }
+        Assert-True ($r.Code -eq 0 -and (Get-V5Count $r.Text 'new.expected') -ceq '3' -and (Get-V5Count $r.Text 'unchanged.expected') -ceq '8') "novo esperado em qualquer lugar de uma raiz ('R2:\') ($($r.Text))"
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $b; After = $c; ExpectedNew = @('R2:run6.log') }
+        Assert-True ($r.Code -eq 1 -and (Get-V5Count $r.Text 'new.unexpected') -ceq '2') "novo inesperado ($($r.Text))"
+        [IO.File]::WriteAllText((Join-Path $r1 'claude\C--Users-alice-proj\outro.txt'), 'mudou')
+        $d2 = New-V5Snap @($r1, $r2) (Join-Path $s 'd.txt')
+        $cmpOut = Join-Path $s 'cmp-cd.txt'
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $c; After = $d2; Out = $cmpOut }
+        Assert-True ($r.Code -eq 1 -and (Get-V5Count $r.Text 'changed.unexpected') -ceq '1') "alterado: inesperado ($($r.Text))"
+        $ct = [IO.File]::ReadAllText($cmpOut)
+        $kl = @($ct -split "`r?`n" | Where-Object { $_ -ne '' } | ForEach-Object { $_.Split("`t")[0] })
+        Assert-Eq ($kl -join ',') ((@('atm-pilot-compare') + $v5CmpKeys + @('end')) -join ',') 'saida: chaves conhecidas, na ordem'
+        Assert-True ($ct -notmatch ':\\' -and $ct -notmatch 'alice|claude|outro|run6|transcri' -and $r.Text -notmatch ':\\|alice|outro') 'saida (arquivo e console) sem caminho absoluto nem relativo'
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $c; After = $d2; Out = $cmpOut }
+        Assert-True ($r.Code -eq 2 -and $r.Text -match 'OUT_EXISTS' -and [IO.File]::ReadAllText($cmpOut) -ceq $ct) "-Out existente recusado ($($r.Text))"
+    }
+    Test-Case 'V5 tools' 'Compare: raiz que falta num dos snapshots (inesperada, salvo se for exatamente o -ExpectedRemoved); snapshots incompativeis (raizes, ordem dos rotulos), formato desconhecido, truncado e rotulo desconhecido recusados' {
+        $base = Join-Path $sandbox 'v5-cmp-roots'
+        $r1 = Join-Path $base 'base'; $r3 = Join-Path $base 'mais-tarde'; $s = Join-Path $base 'snaps'
+        foreach ($d in @($r1, $s)) { [void][IO.Directory]::CreateDirectory($d) }
+        [IO.File]::WriteAllText((Join-Path $r1 'f.txt'), 'f')
+        $r = Invoke-V5Tool $v5Snap @{ Root = @($r1, $r3); Out = (Join-Path $s 'e.txt') }
+        Assert-True ($r.Code -eq 0 -and $r.Text -match 'R2=MISSING') "raiz inexistente registrada como MISSING ($($r.Text))"
+        $e = Join-Path $s 'e.txt'
+        [void][IO.Directory]::CreateDirectory($r3)
+        [IO.File]::WriteAllText((Join-Path $r3 'g.txt'), 'g')
+        $f = New-V5Snap @($r1, $r3) (Join-Path $s 'f.txt')
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $e; After = $f }
+        Assert-True ($r.Code -eq 1 -and (Get-V5Count $r.Text 'rootsChanged.unexpected') -ceq '1') "raiz que aparece: inesperada ($($r.Text))"
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $f; After = $e }
+        Assert-True ($r.Code -eq 1 -and (Get-V5Count $r.Text 'rootsChanged.unexpected') -ceq '1') "raiz que falta, sem -ExpectedRemoved: inesperada ($($r.Text))"
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $f; After = $e; ExpectedRemoved = 'R2:' }
+        Assert-True ($r.Code -eq 0 -and (Get-V5Count $r.Text 'rootsChanged.expected') -ceq '1' -and (Get-V5Count $r.Text 'removed.expected') -ceq '1') "raiz que falta, exatamente o -ExpectedRemoved: esperada ($($r.Text))"
+        $g = New-V5Snap @($r1) (Join-Path $s 'g.txt')
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $f; After = $g }
+        Assert-True ($r.Code -eq 2 -and $r.Text -match 'SNAPSHOTS_INCOMPATIBLE') "raizes diferentes recusadas ($($r.Text))"
+        $h = New-V5Snap @($r3, $r1) (Join-Path $s 'h.txt')
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $f; After = $h }
+        Assert-True ($r.Code -eq 2 -and $r.Text -match 'SNAPSHOTS_INCOMPATIBLE') "rotulos em outra ordem recusados ($($r.Text))"
+        $u = Join-Path $s 'desconhecido.txt'; [IO.File]::WriteAllText($u, "outro-formato`t1`r`n")
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $f; After = $u }
+        Assert-True ($r.Code -eq 2 -and $r.Text -match 'FORMAT_UNKNOWN') "formato desconhecido recusado ($($r.Text))"
+        $all = [IO.File]::ReadAllLines($f)
+        $t = Join-Path $s 'truncado.txt'; [IO.File]::WriteAllText($t, (($all[0..($all.Count - 2)]) -join "`r`n") + "`r`n")
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $f; After = $t }
+        Assert-True ($r.Code -eq 2 -and $r.Text -match 'SNAPSHOT_TRUNCATED') "snapshot truncado recusado ($($r.Text))"
+        $r = Invoke-V5Tool $v5Cmp @{ Before = $f; After = $f; ExpectedRemoved = 'R9:x' }
+        Assert-True ($r.Code -eq 2 -and $r.Text -match 'EXPECTED_LABEL_UNKNOWN') "rotulo desconhecido recusado ($($r.Text))"
+    }
+    Test-Case 'V5 tools' 'Resumo: log T1 de COMPLETE (formato real do motor) mais o compare - tipos de registro na ordem, desfecho, consoleBy, contagens, booleanos da secao 6 (os que o log nao responde ficam null); nenhum caminho, SID, conta ou id; achado de outro arquivo da pasta nao conta' {
+        $d = Join-Path $sandbox 'v5-sum-complete'; [void][IO.Directory]::CreateDirectory($d)
+        $run = [guid]::NewGuid().ToString()
+        $log = Join-Path $d 'run6.t1.jsonl'
+        New-V5T1Log -Path $log -RunId $run -Records (Get-V5Records -RunId $run -Kind 'COMPLETE')
+        # Another file of the folder with a SID: the scanner finds it, the summary ignores findings outside its own file.
+        [IO.File]::WriteAllText((Join-Path $d 'outro.txt'), ('S-1-5-21-' + '111111111-222222222-333333333-1001'))
+        $cmpFile = Join-Path $d 'cmp.txt'
+        $cv = @{ onlyExpectedChange = 'true'; roots = 'R1,R2,R3,R4'; expectedRemovedGiven = 'true'; expectedRemovedFound = 'true'; expectedNewPatterns = '1'; 'removed.expected' = '4' }
+        [IO.File]::WriteAllText($cmpFile, ("atm-pilot-compare`t1`r`n" + (($v5CmpKeys | ForEach-Object { "$_`t" + $(if ($cv.ContainsKey($_)) { $cv[$_] } else { '0' }) }) -join "`r`n") + "`r`nend`tcompare`r`n"))
+        $out = Join-Path $d 'summary.json'
+        $r = Invoke-V5Tool $v5Sum @{ LogFile = $log; Compare = $cmpFile; PinnedSha = ('0123456789abcdef' * 3).Substring(0, 40); Out = $out }
+        Assert-True ($r.Code -eq 0 -and [IO.File]::Exists($out)) "resumo escrito ($($r.Text))"
+        Assert-Eq @(Get-ChildItem -LiteralPath $d -Filter '*.REFUSED').Count 0 'nenhum arquivo REFUSED'
+        $txt = [IO.File]::ReadAllText($out)
+        $j = $txt | ConvertFrom-Json
+        Assert-Eq (@($j.log.recordTypes) -join ',') 'run-start,plan,declaration,confirmation,plan-check,intent,result,run-end' 'tipos de registro, na ordem'
+        Assert-True ($j.log.present -eq $true -and $j.log.deletingRunOrder -eq $true -and $j.log.recSeqContiguous -eq $true -and $j.log.singleRun -eq $true -and $null -eq $j.log.fileAbsent) 'log: presente, ordem, sequencia e uma execucao'
+        Assert-True ($j.run.consoleBy -ceq 'ENGINE_CONSOLE_CHECK' -and $j.run.caller -ceq 'CLI' -and $j.run.confirmationAccepted -eq $true -and $j.run.elevated -eq $false -and $j.run.b1Exception -eq $true) 'consoleBy, caller, confirmacao, nao elevado, excecao B1'
+        Assert-True ((@($j.run.outcomes) -join ',') -ceq 'COMPLETE' -and (@($j.run.verifiedGone) -join ',') -ceq 'GONE' -and $null -eq $j.run.stoppedBy -and (@($j.run.b1ResidualRiskAccepted) -join ',') -eq 'True' -and (@($j.run.contentDecisions) -join ',') -ceq 'NOTHING_NEEDED') 'desfecho COMPLETE, verificado, sem codigo de termino; risco B1 aceito'
+        Assert-True ($j.counts.uninspectableProcesses -eq 3 -and $j.counts.filesDeleted -eq 2 -and $j.counts.dirsDeleted -eq 2 -and $j.counts.bytesDeleted -eq 4096 -and $null -eq $j.counts.newUninspectableIdentities -and $j.counts.complete -eq 1 -and $j.counts.planCheckChanged -eq 0) 'contagens'
+        Assert-True ($j.compare.given -eq $true -and $j.compare.onlyExpectedChange -eq $true -and $j.compare.'removed.expected' -eq 4 -and $j.checks.changedOutsideRoot -eq $false -and $j.checks.consoleByEngineCheck -eq $true) 'compare e booleanos respondidos'
+        Assert-True ($null -eq $j.checks.checkoutDiffersByGateLineOnly -and $null -eq $j.checks.guestClockWithinSecondsOfHost -and $null -eq $j.checks.networkDisconnectedAtDeletingRun) 'o que o log nao responde fica null, nunca inventado'
+        Assert-True ($j.pinnedSha -ceq ('0123456789abcdef' * 3).Substring(0, 40) -and $j.schema -ceq 'atm-pilot-summary-1') 'SHA fixado e esquema'
+        foreach ($x in @('alice', 'PILOTVM', 'S-1-', '\', 'C--Users', $run, ('ab' * 32), 'f1f2', '638000000000000000', '@')) { Assert-True ($txt.IndexOf($x, [StringComparison]::OrdinalIgnoreCase) -lt 0) "resumo sem '$x'" }
+    }
+    Test-Case 'V5 tools' 'Resumo: log T1 de recusa por F-A (REVALIDATION_REFUSED com B1_EXCEPTION_NEW_UNINSPECTABLE_PROCESS) e execucoes sem log (CLEAN_LOCK_BUSY e exit 6: -NoLog, o codigo e o exit mostrados no console); log ausente sem -NoLog recusado' {
+        $d = Join-Path $sandbox 'v5-sum-fa'; [void][IO.Directory]::CreateDirectory($d)
+        $run = [guid]::NewGuid().ToString()
+        $log = Join-Path $d 'run6b.t1.jsonl'
+        New-V5T1Log -Path $log -RunId $run -Records (Get-V5Records -RunId $run -Kind 'FA')
+        $out = Join-Path $d 'summary-fa.json'
+        $r = Invoke-V5Tool $v5Sum @{ LogFile = $log; Out = $out; ExitCode = '3' }
+        Assert-True ($r.Code -eq 0 -and [IO.File]::Exists($out)) "resumo da recusa por F-A ($($r.Text))"
+        $j = [IO.File]::ReadAllText($out) | ConvertFrom-Json
+        Assert-Eq (@($j.log.recordTypes) -join ',') 'run-start,plan,declaration,confirmation,plan-check,skip,run-end' 'tipos de registro'
+        Assert-True ($j.run.stoppedBy -ceq 'REVALIDATION_REFUSED' -and (@($j.run.skipReasonCodes) -join ',') -ceq 'B1_EXCEPTION_NEW_UNINSPECTABLE_PROCESS' -and $j.counts.newUninspectableIdentities -eq 2 -and $j.log.deletingRunOrder -eq $false -and @($j.run.outcomes).Count -eq 0 -and $null -eq $j.counts.filesDeleted -and $j.run.exitCode -eq 3 -and $null -eq $j.compare.onlyExpectedChange -and $null -eq $j.checks.changedOutsideRoot) 'codigo de termino, motivo, identidades novas, nada apagado, sem compare'
+        # CLEAN_LOCK_BUSY: the engine refuses the lock before any log is opened (src\lib\Engine.Clean.ps1, Invoke-AtmClean),
+        # so the run is summarized from what the console showed, and the log path given to clean is checked absent.
+        $busy = Join-Path $d 'summary-busy.json'
+        $r = Invoke-V5Tool $v5Sum @{ NoLog = $true; LogFile = (Join-Path $d 'run5-console2.t1.jsonl'); ShownCode = 'CLEAN_LOCK_BUSY'; ExitCode = '3'; Out = $busy }
+        Assert-True ($r.Code -eq 0) "resumo sem log ($($r.Text))"
+        $j = [IO.File]::ReadAllText($busy) | ConvertFrom-Json
+        Assert-True ($j.log.present -eq $false -and $j.log.fileAbsent -eq $true -and @($j.log.recordTypes).Count -eq 0 -and $j.run.shownCode -ceq 'CLEAN_LOCK_BUSY' -and $j.run.exitCode -eq 3 -and $null -eq $j.run.consoleBy -and $null -eq $j.log.deletingRunOrder) 'CLEAN_LOCK_BUSY: sem log, codigo e exit do console'
+        $r = Invoke-V5Tool $v5Sum @{ NoLog = $true; ExitCode = '6'; Out = (Join-Path $d 'summary-exit6.json') }
+        Assert-True ($r.Code -eq 0 -and ([IO.File]::ReadAllText((Join-Path $d 'summary-exit6.json')) | ConvertFrom-Json).run.exitCode -eq 6) "exit 6 sem log ($($r.Text))"
+        $r = Invoke-V5Tool $v5Sum @{ LogFile = (Join-Path $d 'nao-existe.jsonl'); Out = (Join-Path $d 'summary-x.json') }
+        Assert-True ($r.Code -eq 2 -and $r.Text -match 'LOG_MISSING' -and -not [IO.File]::Exists((Join-Path $d 'summary-x.json'))) "log ausente sem -NoLog: recusado ($($r.Text))"
+        $r = Invoke-V5Tool $v5Sum @{ NoLog = $true; Out = (Join-Path $d 'summary-y.json') }
+        Assert-True ($r.Code -eq 2 -and $r.Text -match 'NOLOG_NEEDS_CODE') "-NoLog sem codigo: recusado ($($r.Text))"
+        $r = Invoke-V5Tool $v5Sum @{ LogFile = $log; Out = $out }
+        Assert-True ($r.Code -eq 2 -and $r.Text -match 'OUT_EXISTS') "-Out existente recusado ($($r.Text))"
+        Assert-Eq @(Get-ChildItem -LiteralPath $d -Filter '*.REFUSED').Count 0 'nenhum arquivo REFUSED'
+    }
+    Test-Case 'V5 tools' 'Resumo: plantados e recusados, cada um sozinho - um caminho, um SID, o USERNAME do runner, um e-mail e um codigo fora da lista; nenhuma saida final, so o temporario REFUSED com o nome do campo e a regra, sem o valor (nem no console)' {
+        $plants = @(
+            , @('caminho', 'C:\Users\alice\AppData\Local\Temp\x', 'PATH_SEPARATOR')
+            , @('sid', 'S-1-5-21-1-2-3-777', 'SID_PREFIX')
+            , @('usuario', $env:USERNAME, 'ENVIRONMENT_NAME')
+            , @('email', ('piloto' + '@' + 'exemplo.test'), 'AT_SIGN')
+            , @('codigo', 'NOT_A_KNOWN_CODE', 'NOT_OF_TYPE_stopCode')
+        )
+        foreach ($p in $plants) {
+            Assert-True (([string]$p[1]).Length -gt 0) "valor plantado de $($p[0])"
+            $d = Join-Path $sandbox ('v5-sum-plant-' + $p[0]); [void][IO.Directory]::CreateDirectory($d)
+            $run = [guid]::NewGuid().ToString()
+            $log = Join-Path $d 't1.jsonl'
+            New-V5T1Log -Path $log -RunId $run -Records (Get-V5Records -RunId $run -Kind 'COMPLETE' -StoppedBy $p[1])
+            $out = Join-Path $d 'summary.json'
+            $r = Invoke-V5Tool $v5Sum @{ LogFile = $log; Out = $out }
+            Assert-True ($r.Code -eq 3 -and -not [IO.File]::Exists($out)) "$($p[0]): recusado, nenhuma saida final ($($r.Text))"
+            $ref = @(Get-ChildItem -LiteralPath $d -Filter 'summary.json.*.REFUSED')
+            Assert-Eq $ref.Count 1 "$($p[0]): o temporario fica com REFUSED no nome"
+            $rt = [IO.File]::ReadAllText($ref[0].FullName)
+            Assert-True ($rt.Contains("field`trun.stoppedBy`t$($p[2])") -and @($rt -split "`r?`n" | Where-Object { $_ -like "field`t*" }).Count -eq 1) "$($p[0]): o campo e a regra ($($p[2]))"
+            Assert-True ($rt.IndexOf([string]$p[1], [StringComparison]::OrdinalIgnoreCase) -lt 0 -and $r.Text.IndexOf([string]$p[1], [StringComparison]::OrdinalIgnoreCase) -lt 0) "$($p[0]): o valor nao aparece no arquivo nem no console"
+        }
+        # A code typed by the operator is checked the same way.
+        $d = Join-Path $sandbox 'v5-sum-plant-shown'; [void][IO.Directory]::CreateDirectory($d)
+        $r = Invoke-V5Tool $v5Sum @{ NoLog = $true; ShownCode = 'clean lock busy'; Out = (Join-Path $d 'summary.json') }
+        Assert-True ($r.Code -eq 3 -and @(Get-ChildItem -LiteralPath $d -Filter '*.REFUSED').Count -eq 1 -and -not [IO.File]::Exists((Join-Path $d 'summary.json'))) "codigo digitado fora da lista: recusado ($($r.Text))"
+    }
+    Test-Case 'V5 tools' 'Resumo: achado do scanner de privacidade no proprio resumo (agulha privada) - fica REFUSED, sem saida final, exit 4; scanner ausente recusado antes de escrever' {
+        $d = Join-Path $sandbox 'v5-sum-scan'; [void][IO.Directory]::CreateDirectory($d)
+        $run = [guid]::NewGuid().ToString()
+        $log = Join-Path $d 't1.jsonl'
+        New-V5T1Log -Path $log -RunId $run -Records (Get-V5Records -RunId $run -Kind 'COMPLETE')
+        $needles = Join-Path $sandbox 'v5-needles.txt'
+        [IO.File]::WriteAllText($needles, "# agulha de teste`nNOTHING_NEEDED`n")
+        $out = Join-Path $d 'summary.json'
+        $r = Invoke-V5Tool $v5Sum @{ LogFile = $log; Out = $out; NeedlesFile = $needles }
+        Assert-True ($r.Code -eq 4 -and -not [IO.File]::Exists($out) -and $r.Text -match 'PRIVATE_IDENTIFIER') "achado no resumo: exit 4 ($($r.Text))"
+        $ref = @(Get-ChildItem -LiteralPath $d -Filter 'summary.json.*.REFUSED')
+        Assert-True ($ref.Count -eq 1 -and ([IO.File]::ReadAllText($ref[0].FullName)).Contains('atm-pilot-summary-1')) 'o resumo fica com o nome REFUSED (nunca apagado)'
+        $r = Invoke-V5Tool $v5Sum @{ LogFile = $log; Out = (Join-Path $d 'summary2.json'); NeedlesFile = (Join-Path $sandbox 'v5-nao-existe.txt') }
+        Assert-True ($r.Code -eq 2 -and $r.Text -match 'NEEDLES_MISSING') "arquivo de agulhas ausente: recusado ($($r.Text))"
+        $alone = Join-Path $sandbox 'v5-sem-scanner\v5-pilot'; [void][IO.Directory]::CreateDirectory($alone)
+        [IO.File]::Copy($v5Sum, (Join-Path $alone 'Get-AtmPilotSummary.ps1'))
+        $r = Invoke-V5Tool (Join-Path $alone 'Get-AtmPilotSummary.ps1') @{ LogFile = $log; Out = (Join-Path $d 'summary3.json') }
+        Assert-True ($r.Code -eq 2 -and $r.Text -match 'SCANNER_MISSING' -and @(Get-ChildItem -LiteralPath $d -Filter 'summary3.json*').Count -eq 0) "scanner ausente: recusado antes de escrever ($($r.Text))"
+    }
+    Test-Case 'V5 tools' 'Processo novo, sem o motor carregado: snapshot, compare e resumo pela linha de comando (-File), com os codigos de saida 0, 1 e 2' {
+        $shell = (Get-Process -Id $PID).Path
+        $base = Join-Path $sandbox 'v5-child'; $root = Join-Path $base 'root'; [void][IO.Directory]::CreateDirectory($root)
+        [IO.File]::WriteAllText((Join-Path $root 'a.txt'), 'a')
+        $run = { param([string]$Tool, [string]$ArgLine) Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Tool`" " + $ArgLine) -TimeoutSec 180 }
+        $s1 = Join-Path $base 's1.txt'; $s2 = Join-Path $base 's2.txt'
+        $r = & $run $v5Snap "-Root `"$root`" -Out `"$s1`""
+        Assert-Eq $r.Exit 0 "snapshot ($($r.Text))"
+        [IO.File]::WriteAllText((Join-Path $root 'b.txt'), 'b')
+        $r = & $run $v5Snap "-Root `"$root`" -Out `"$s2`""
+        Assert-Eq $r.Exit 0 "segundo snapshot ($($r.Text))"
+        $r = & $run $v5Cmp "-Before `"$s1`" -After `"$s1`""
+        Assert-Eq $r.Exit 0 "compare sem mudanca ($($r.Text))"
+        $r = & $run $v5Cmp "-Before `"$s1`" -After `"$s2`""
+        Assert-Eq $r.Exit 1 "compare com mudanca inesperada ($($r.Text))"
+        $r = & $run $v5Cmp "-Before `"$s1`" -After `"$(Join-Path $base 'nao-existe.txt')`""
+        Assert-Eq $r.Exit 2 "compare recusado ($($r.Text))"
+        $r = & $run $v5Sum "-NoLog -ExitCode 6 -Out `"$(Join-Path $base 'summary.json')`""
+        Assert-True ($r.Exit -eq 0 -and [IO.File]::Exists((Join-Path $base 'summary.json'))) "resumo ($($r.Text))"
+    }
+    Test-Case 'V5 tools' 'Estatico: as tres ferramentas nao atribuem trava, nao citam seam, lock nem Invoke-AtmClean, nao chamam funcao de src\lib, nao apagam, movem nem escrevem fora do -Out (um unico arquivo novo por ferramenta, uma unica troca de nome, a do resumo), sem redirecionamento e sem rede; StrictMode, Stop e codigos de saida no cabecalho' {
+        $libFns = @(Get-ChildItem -LiteralPath (Join-Path $srcDir 'lib') -Filter '*.ps1' | ForEach-Object { [regex]::Matches([IO.File]::ReadAllText($_.FullName), '(?m)^\s*function\s+([A-Za-z]+-[A-Za-z0-9]+)') | ForEach-Object { $_.Groups[1].Value } } | Sort-Object -Unique)
+        Assert-True ($libFns.Count -gt 50 -and $libFns -contains 'Invoke-AtmClean' -and $libFns -contains 'Write-AtmCleanLogRecord') "funcoes do motor lidas ($($libFns.Count))"
+        $forbidden = @('AtmRealDeletionEnabled', 'AtmGuiEnabled', 'AtmIsolationEnabled', 'AtmQuarantinePurgeEnabled', 'AtmDiagnoseExportEnabled', 'AtmWorktreeDiagnosticsEnabled', 'AtmHandleDiagnosticsEnabled',
+            'AtmCleanConsoleSource', 'DeleteTreeImpl', 'PathPresenceImpl', 'LogWriter', 'AtmRuntimeEvidenceSources', 'AtmIsolationQuarantineRoot', 'AtmCleanLockName', 'AgentTempManager.', 'AtmCleanLock',
+            'Invoke-AtmClean', 'Initialize-AtmNative', 'Engine.', 'src\lib', 'Native.cs', 'Add-Type', 'Import-Module',
+            'Remove-Item', 'Move-Item', 'Rename-Item', 'Copy-Item', 'Clear-Content', 'Set-Content', 'Add-Content', 'Out-File', 'New-Item', 'Set-ItemProperty', 'Set-Acl', 'Set-Date', 'Tee-Object', 'Export-',
+            'File]::Delete', 'Directory]::Delete', '.Delete(', 'File]::Copy', '.CopyTo(', '.MoveTo(', 'Directory]::Move', 'File]::Replace', 'File]::WriteAll', 'File]::AppendAll', 'File]::Create(', 'File]::Open(',
+            'CreateDirectory', 'SetLastWriteTime', 'SetCreationTime', 'SetLastAccessTime', 'LastWriteTime =', 'LastWriteTimeUtc =', 'SetAttributes', 'Attributes =',
+            'Start-Process', 'Invoke-Expression', 'Invoke-WebRequest', 'Invoke-RestMethod', 'WebClient', 'Net.Http', 'Net.Sockets', 'Test-NetConnection', 'Start-BitsTransfer', 'Register-ScheduledTask', 'Invoke-Command')
+        foreach ($tool in @($v5Snap, $v5Cmp, $v5Sum)) {
+            $name = Split-Path -Leaf $tool
+            $t = [IO.File]::ReadAllText($tool)
+            foreach ($x in $forbidden) { Assert-True ($t.IndexOf($x, [StringComparison]::OrdinalIgnoreCase) -lt 0) "${name}: sem '$x'" }
+            foreach ($fn in $libFns) { Assert-True (-not [regex]::IsMatch($t, '(?i)(?<![A-Za-z0-9-])' + [regex]::Escape($fn) + '(?![A-Za-z0-9-])')) "${name}: nao chama $fn" }
+            Assert-True (-not [regex]::IsMatch($t, 'FileMode\]::(Create|OpenOrCreate|Append|Truncate)\b') -and -not $t.Contains('FileAccess]::ReadWrite')) "${name}: nenhum arquivo aberto para escrita alem do novo"
+            Assert-Eq ([regex]::Matches($t, 'FileMode\]::CreateNew').Count) 1 "${name}: um unico ponto de escrita, um arquivo NOVO"
+            Assert-Eq ([regex]::Matches($t, 'FileAccess\]::Write\b').Count) 1 "${name}: um unico acesso de escrita"
+            Assert-Eq ([regex]::Matches($t, [regex]::Escape('[IO.File]::Move(')).Count) $(if ($name -ceq 'Get-AtmPilotSummary.ps1') { 1 } else { 0 }) "${name}: troca de nome so a do resumo (temporario REFUSED -> -Out)"
+            Assert-True ($t.Contains('Set-StrictMode -Version 2.0') -and $t.Contains("`$ErrorActionPreference = 'Stop'") -and $t.Contains('.EXITCODES') -and $t.Contains('  0  ') -and $t.Contains('  2  ')) "${name}: StrictMode, Stop e codigos de saida no cabecalho"
+            $tk = $null; $pe = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile($tool, [ref]$tk, [ref]$pe)
+            Assert-Eq @($pe).Count 0 "${name}: sem erro de sintaxe"
+            Assert-Eq @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.FileRedirectionAst] }, $true)).Count 0 "${name}: sem redirecionamento para arquivo"
+        }
+        $sumText = [IO.File]::ReadAllText($v5Sum)
+        Assert-True ($sumText.Contains('[IO.File]::Move($tmp, $outFull)') -and $sumText.IndexOf('[IO.File]::Move($tmp, $outFull)') -gt $sumText.IndexOf('if ($hits.Count -gt 0)')) 'resumo: o nome final so depois do scanner'
+    }
+    Test-Case 'V5 tools' 'Pacote: tools\v5-pilot entra no pacote (a pasta tools e copiada e nenhuma entrada de $ciOnly e dela), com exatamente as tres ferramentas, e o scanner de privacidade passa nelas' {
+        $repo = Split-Path -Parent $testsDir
+        $br = [IO.File]::ReadAllText((Join-Path $repo 'tools\Build-Release.ps1'))
+        Assert-True ($br.Contains("foreach (`$rel in @('src', 'install', 'docs', 'tests', 'tools'))")) 'build: a pasta tools inteira vai para o stage'
+        $ci = @([regex]::Matches($br, "\`$ciOnly\s*\+?=\s*(?:@\()?'([^']+)'") | ForEach-Object { $_.Groups[1].Value })
+        Assert-True ($ci.Count -ge 2 -and @($ci | Where-Object { $_ -like '*v5-pilot*' -or $_ -like '*AtmPilot*' }).Count -eq 0) "build: nenhuma ferramenta do piloto em `$ciOnly ($($ci -join ', '))"
+        Assert-Eq ((@(Get-ChildItem -LiteralPath $v5Dir -Force | ForEach-Object { $_.Name }) | Sort-Object) -join ',') 'Compare-AtmPilotSnapshot.ps1,Get-AtmPilotSnapshot.ps1,Get-AtmPilotSummary.ps1' 'tools\v5-pilot: exatamente as tres ferramentas'
+        $copy = Join-Path $sandbox 'v5-package\tools\v5-pilot'; [void][IO.Directory]::CreateDirectory($copy)
+        foreach ($f in @(Get-ChildItem -LiteralPath $v5Dir -File)) { [IO.File]::Copy($f.FullName, (Join-Path $copy $f.Name)) }
+        $hits = @(& (Join-Path $repo 'tools\Test-AtmPrivacy.ps1') -Path (Join-Path $sandbox 'v5-package') -NeedlesFile $env:ATM_PRIVATE_NEEDLES -WarningAction SilentlyContinue)
+        Assert-Eq $hits.Count 0 (($hits | ForEach-Object { "$($_.File):$($_.Line) $($_.Kind)" }) -join '; ')
+    }
+    # --- end V5 tools ---
     Test-Case 'Configuracao' 'Regras locais opcionais; sem regra nem evidencia o projeto e "nao identificado"' {
         $cd = Join-Path $sandbox 'cfg'; [void][IO.Directory]::CreateDirectory($cd)
         Copy-Item (Join-Path $cfgDir 'projects.json') $cd

@@ -41,6 +41,7 @@ pwsh       -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1       
 | Clean environment | Windows Sandbox configuration generator (valid `.wsb`, networking disabled, release read-only); the in-sandbox script itself needs an administrator-enabled Windows Sandbox or VM (`NAO_TESTADO` on this machine) |
 | Scale | 200,000 files in one root, bounded managed memory |
 | Privacy | scanner self-test with planted data; working tree and Git index free of SIDs, e-mails, user paths, tokens, machine/user names and private identifiers; only `dist/` ignored |
+| V5 tools | the read-only evidence tools of the V5 pilot (`tools/v5-pilot/`, ADR-0015): snapshot, compare and summary on synthetic sandbox folders and T1 logs (see [V5 pilot evidence tools](#v5-pilot-evidence-tools-in-the-suite-v5-tools)) |
 | Portability | one user; several users (audited / inaccessible / hive not loaded / no Claude Code); profile on another drive letter (`subst`); no Claude Code; empty TEMP and empty root; unidentified projects and session-based identification with collision handling; Unicode, spaces, apostrophe, `&`, `#`, parentheses in profile and install paths; per-profile TEMP expansion (redirected, other drive, unresolvable variable) |
 
 ## Privilege matrix
@@ -601,6 +602,79 @@ the V2 one; what differs:
 * **Not tested here.** The CLI and the TUI past the gates (opening them there would mean changing the installed copy);
   isolation without the B1 exception in leg A (a standard user's coverage is incomplete); UAC prompts and filtered
   tokens (the runners have UAC disabled).
+
+## V5 pilot evidence tools in the suite (V5-TOOLS)
+
+The three read-only tools of the V5 pilot ([ADR-0015](adr/ADR-0015-v5-pilot-disposable-vm.md), section 6 and its
+implementation record), tested in the suite's area `V5 tools`. The pilot itself is not run anywhere, and no gate is
+opened. The cases use synthetic folders of the suite's sandbox only. Nothing in them deletes anything: a removal is two
+snapshots compared in the reverse order of their creation. The T1 logs are written by the engine's own
+`Write-AtmCleanLogRecord`, with the fields of the records of `Invoke-AtmCleanCore` (`src/lib/Engine.Clean.ps1`). Only
+the writer is a stand-in, so the format is the one the engine writes.
+
+* **Snapshot** (`Get-AtmPilotSnapshot.ps1`):
+  * covers files, nested folders, an empty file, a name with accents and one with a space, a junction to a folder
+    outside the root, and a file held open with exclusive sharing;
+  * the SHA-256 matches `Get-FileHash`, and the size matches the file's;
+  * last write and creation times are unchanged after the snapshot. The last access time follows the volume's policy
+    and is not asserted;
+  * the junction is recorded as `REPARSE_DIR` and never followed: nothing of its target appears;
+  * the locked file gets `SHARING_VIOLATION` and no content;
+  * entries and the console carry no absolute path.
+* **Snapshot refusals**, each with nothing written:
+  * `-Out` inside a root, also when the root is given in another letter case with a trailing backslash;
+  * an `-Out` that already exists (its content is unchanged);
+  * a junction on the path of `-Out`;
+  * overlapping roots.
+* **Symbolic link to a file:** recorded as `REPARSE_FILE`, with no size and no hash; the target is never read. Without
+  the privilege to create the link: `NAO_TESTADO`.
+* **Compare** (`Compare-AtmPilotSnapshot.ps1`):
+  * no change;
+  * only the expected removal (the parent folder may change its last write time only);
+  * a removal without `-ExpectedRemoved`, and an expected removal that did not happen;
+  * new items expected by exact name, by folder prefix and as a whole root (`R2:\`);
+  * an unexpected new item;
+  * a changed file;
+  * the output keys in order, with no absolute or relative path in the file or on the console;
+  * an existing `-Out` refused.
+* **Compare roots and refusals:**
+  * a root missing in one snapshot is unexpected, except when it is exactly `-ExpectedRemoved` (`R2:`);
+  * snapshots of other roots, or with the labels in another order, are refused;
+  * an unknown format, a truncated snapshot and an unknown label are refused.
+* **Summary** (`Get-AtmPilotSummary.ps1`):
+  * **The deleting run.** A `COMPLETE` log plus a compare output gives: the record types in order; `consoleBy`; the
+    outcome; the counts; the yes/no answers of ADR-0015, section 6; and `null` for what the log cannot answer.
+  * **Nothing private leaks** into the summary: no path, SID, account, run id, plan id or process identity. A finding in
+    another file of the same folder does not count.
+  * **An F-A refusal.** `REVALIDATION_REFUSED` with `B1_EXCEPTION_NEW_UNINSPECTABLE_PROCESS (2)` gives 2 new identities.
+  * **Runs with no log** use `-NoLog`:
+    * `CLEAN_LOCK_BUSY`: the engine refuses the lock before any log is opened, so the code and exit code come from the
+      console, and the absence of the log file is checked;
+    * exit `6`.
+  * **Parameter refusals:** a missing log without `-NoLog`; `-NoLog` with no code; an existing `-Out`.
+* **Summary, planted values**, each one alone: a path, a SID, the runner's `USERNAME`, an e-mail and a code outside the
+  list.
+  * Each gives exit `3`, no final output, and one `.REFUSED` file naming the field and the rule broken.
+  * The value appears neither in that file nor on the console.
+  * A code typed by the operator outside the list is refused the same way.
+* **Summary and the privacy scanner:**
+  * a private needle found in the summary: exit `4`, the summary kept under its `.REFUSED` name, no final output;
+  * a missing needles file and a missing scanner are refused before anything is written.
+* **New process:** snapshot, compare and summary run from the command line (`-File`), with no engine loaded, and give
+  exit codes `0`, `1` and `2`.
+* **Static:** the three tools contain no gate, test seam, lock name or `Invoke-AtmClean`, and call no function defined in
+  `src/lib`. They use no cmdlet or method that deletes, moves, copies or writes:
+  * one new file per tool (`CreateNew`);
+  * one rename, the summary's, after the scanner;
+  * no file redirection (checked on the parsed syntax tree);
+  * no network.
+
+  `Set-StrictMode`, `Stop` and the exit codes are in each header.
+* **Package:** `Build-Release.ps1` copies the whole `tools` folder, and no `$ciOnly` entry is a pilot tool, so
+  `tools/v5-pilot/` ships as read-only operator tools. The folder holds exactly the three tools, and the privacy
+  scanner finds nothing in them. The `build package` job runs the same scanner on the real staged package.
+* **Not tested here:** a real pilot root, a real Claude Code session, a real console, UAC, and the operator's VM (they
+  are the pilot itself, ADR-0015); a file symbolic link where the account cannot create one.
 
 ## Future: isolation, quarantine and Recovery Mode (0.3.x and V0.4)
 

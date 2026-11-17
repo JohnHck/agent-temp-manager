@@ -1,8 +1,9 @@
 # ADR-0015: V5 pilot of real deletion in a disposable VM
 
-Status: PROPOSED. The maintainer's decision D-C (2026-11-16) sets the class of environment: a disposable VM, with the
-deletion gate open only inside it. Everything else in this record is a design waiting for the maintainer: V5-D1 to
-V5-D8 are open. Nothing is executed, created, enabled or downloaded, and no gate is opened anywhere.
+Status: ACCEPTED (V5-D1 to V5-D8 approved as recommended, 2026-11-17); pilot not executed. The guest's licence (V5-D2)
+stays the maintainer's choice when the VM is created. The class of environment comes from the maintainer's decision D-C
+(2026-11-16): a disposable VM, with the deletion gate open only inside it. The evidence tools of V5-D7 (a) are in
+`tools/v5-pilot/` (implementation record at the end). No gate is opened anywhere.
 Date: 2026-11-17
 Phase: V0.3, validation stage V5 (the operator's pilot on one real root)
 
@@ -340,3 +341,150 @@ Public documentation read for this record (2026-11-17):
 * GitHub-hosted runners (a new VM per job; Windows runs as administrator with UAC disabled):
   https://docs.github.com/en/actions/reference/runners/github-hosted-runners
 * Claude Code environment variables (`CLAUDE_CODE_TMPDIR`): https://code.claude.com/docs/en/env-vars
+
+## Implementation record: V5-TOOLS (2026-11-17)
+
+**Context.** The maintainer approved V5-D1 to V5-D8 as recommended on 2026-11-17. The headings above that say
+"proposed" and the "not decided" note of section 8 are kept as written that day. V5-D7 (a) asked for reviewed scripts in
+the repository, written and tested before the pilot.
+
+**What was added.** Three scripts in `tools/v5-pilot/`. The pilot is not executed, and no gate is opened anywhere.
+
+**What all three share:**
+
+* Each reads only. It writes nothing but its `-Out` (and, for the summary, the temporary file next to it), and never
+  deletes, moves or overwrites.
+* None loads the engine or its native library, names a gate, seam or lock, or uses the network.
+* Each sets `Set-StrictMode` and `$ErrorActionPreference = 'Stop'`, documents its exit codes in its header, and runs on
+  Windows PowerShell 5.1 and PowerShell 7.
+* Run them from a PowerShell console with `& <script>`. An array such as `-Root $a, $b` does not pass through
+  `powershell -File`.
+
+**`Get-AtmPilotSnapshot.ps1 -Root <folder[]> -Out <new file>`**
+
+* The roots are labelled `R1`, `R2`, ... in the order given. For each item it records the label, the relative path, the
+  type (`FILE`, `DIR`, `REPARSE_FILE`, `REPARSE_DIR`), the size, the last write time (UTC) and a file's SHA-256.
+* Files are read with full sharing.
+* Times and sizes come from each item itself, not from the folder listing. NTFS updates the listing's copy lazily, and
+  in testing two snapshots with nothing changed between them differed.
+* Reparse points are recorded and never followed.
+* An unreadable item gets a code (`ACCESS_DENIED`, `SHARING_VIOLATION`, ...) and no content.
+* A root that does not exist is recorded as `MISSING`.
+* The absolute paths of the roots appear only in the header. The console shows counts only.
+* **Refusals**, with nothing written:
+  * `-Out` inside a root (paths compared after resolving each existing component to its name on disk);
+  * a reparse point on the path of `-Out` or of a root;
+  * an existing `-Out`;
+  * overlapping roots.
+* **Exit codes:** `0` written; `2` refused; `3` failure.
+
+**`Compare-AtmPilotSnapshot.ps1 -Before <file> -After <file> [-ExpectedRemoved '<label>:<relative>'] [-ExpectedNew '<label>:<relative>'[]] [-Out <new file>]`**
+
+* **Output:** `onlyExpectedChange`, then removed, new, changed and unchanged items and root-level changes, each counted
+  as expected and unexpected. It holds no path, absolute or relative, on the console or in `-Out`, because folder names
+  under a base can hold a user's path.
+* **`-ExpectedRemoved`** covers that item and everything below it; `'<label>:'` alone is the whole root.
+* **`-ExpectedNew`** takes an exact name, or a folder prefix ending in `\` (`'<label>:\'` is anything in that root). An
+  item it matches may also change, as a growing log or transcript does.
+* **A folder whose only change is its last write time** is expected when it is the direct parent of the expected
+  removal or of an expected new item. Windows changes that time when an entry is added or removed.
+* **A root present in one snapshot and missing in the other** is unexpected, unless it is exactly `-ExpectedRemoved`.
+* **Refusals:** an incomplete or unknown snapshot, snapshots of different roots or with the labels in another order, an
+  unknown label, and an existing `-Out`.
+* **Exit codes:** `0` only the expected change; `1` another change, or the expected removal did not happen; `2` refused;
+  `3` failure.
+
+**`Get-AtmPilotSummary.ps1 (-LogFile <T1> | -NoLog [-LogFile <path given to clean>]) [-ShownCode <code>] [-ExitCode <n>] [-Compare <compare -Out>] [-PinnedSha <40 hex>] -Out <new file> [-NeedlesFile <file>]`**
+
+* **Fields.** Each has a fixed type: a code from a closed list, a non-negative integer, a yes/no, or the SHA. They are:
+  * `log`:
+    * `present`;
+    * `fileAbsent`, with `-NoLog`;
+    * `recordTypes`, in order;
+    * `deletingRunOrder` (`run-start` ... `run-end` as in V5-P4);
+    * `recSeqContiguous`;
+    * `singleRun`.
+  * `run`:
+    * `shownCode` and `exitCode` (typed by the operator);
+    * `elevated`, `b1Exception` and `planned`;
+    * `planCategories`;
+    * `consoleBy` and `caller`;
+    * `confirmationAccepted`, `refusalStep` and `refusalCode`;
+    * `b1ResidualRiskAccepted` and `contentDecisions`;
+    * `planCheckMatched`;
+    * `skipReasonCodes` (the leading code of each reason only);
+    * `outcomes` and `verifiedGone`;
+    * `stoppedBy`.
+  * `counts`:
+    * `uninspectableProcesses`;
+    * `newUninspectableIdentities`: the N of `B1_EXCEPTION_NEW_UNINSPECTABLE_PROCESS (N)`. It is `null` for
+      `PLAN_CHANGED_BEFORE_EXECUTION`, whose log record has no reason codes;
+    * `planCheckChanged`;
+    * `filesDeleted` and `dirsDeleted`;
+    * `bytesDeleted`, the bytes of the intents of `COMPLETE` roots;
+    * `results`, `complete` and `skipped`.
+  * `compare`: `onlyExpectedChange`, `expectedRemovedGiven`, `expectedRemovedFound` and the counts.
+  * `checks`:
+    * `changedOutsideRoot` and `consoleByEngineCheck`, from the log and the compare;
+    * `checkoutDiffersByGateLineOnly`, `guestClockWithinSecondsOfHost` and `networkDisconnectedAtDeletingRun`. These
+      are always `null`: the operator marks them by hand.
+* **Value checks**, every value before anything is written:
+  * refused when it holds `\` or `/`, `S-1-` or `@`, or equals `USERNAME`, `COMPUTERNAME`, `USERDOMAIN` or a part of
+    `USERPROFILE`;
+  * then refused when it is not of its type.
+
+  On a refusal it writes no summary. It leaves `<Out>.<id>.REFUSED`, which holds only the field names and the rules,
+  never the values. Exit `3`.
+* **The privacy scanner.** The summary is first written as `<Out>.<id>.REFUSED`. Then `tools/Test-AtmPrivacy.ps1` scans
+  the folder of `-Out`, with `-NeedlesFile`, and only the findings in that file count. Only a clean scan renames it to
+  `-Out`; this is the one rename in these tools.
+  * A finding gives exit `4`. A scanner that cannot run, or a failed rename, gives exit `5`. Either way the file keeps
+    its REFUSED name; discarding it is the operator's.
+  * Keep `-Out` in a folder of its own: the scanner reads every file there, and one it cannot read fails the scan.
+* **Runs that write no log:** exit `6` (console not observed), `CLEAN_LOCK_BUSY` (the lock is refused before any log),
+  and a refusal before the log is opened (for example `NENHUM_CAMINHO_ELEGIVEL` in run 3). Each is summarized with
+  `-NoLog` and the code and exit code the console showed. With `-LogFile` it also records that the file is absent.
+* **Exit codes:**
+  * `0` written, and the scan is clean;
+  * `2` refused before writing (parameters, a missing or malformed log or compare file, an unknown schema, an existing
+    `-Out`, a missing scanner or needles file);
+  * `3`, `4` and `5` as above;
+  * `6` failure.
+
+**How the operator uses them in section 6.**
+
+* **Snapshots.** Put them in a `<snapshot folder>` outside the four roots:
+  `-Root <base>, <installed copy>, <pilot checkout>, <evidence folder>` for S0, S1 and S2.
+* **S0 to S1:** `-ExpectedNew 'R4:\'`, the logs and transcripts of runs 1 to 5.
+* **S1 to S2:**
+  * `-ExpectedRemoved 'R1:claude\<slug>\<root>'`;
+  * `-ExpectedNew` for the deleting run's log and transcript;
+  * `-Out` in the snapshot folder.
+* **One summary per run, each with its own `-Out`** in a summary folder of its own:
+  * runs 1 and 2: `-NoLog -LogFile $log -ExitCode 6`;
+  * run 3: `-NoLog -LogFile $log` with the code shown and its exit code, or `-LogFile $log` if a log was written;
+  * run 5, console 1: `-LogFile $log`;
+  * run 5, console 2: `-NoLog -LogFile $log2 -ShownCode CLEAN_LOCK_BUSY -ExitCode 3`;
+  * run 6: `-LogFile $log -Compare <S1 to S2 output> -PinnedSha <SHA> -ExitCode 0`.
+* **What leaves the VM:** only the summaries that got their final name. Snapshots, logs, transcripts and REFUSED files
+  stay in the VM.
+
+**Shipping.** The tools ship in the release archive. `tools/` is copied whole, and they are not on the build's CI-only
+list: they are read-only operator tools, unlike the V2/V3 harnesses, which open a gate and stay out.
+
+**Why `tests/Get-TempSnapshot.ps1` was not reused.** It loads the engine (`Engine.Audit.ps1`, `Initialize-AtmNative`)
+and records one fingerprint per root of a base. The pilot needs to say which item changed, with a hash per file, across
+roots that are not bases (the installed copy, the checkout, the evidence folder), with no engine loaded. Its
+fingerprint could not tell an expected new log from an unexpected change in the same root.
+
+**Tests.** The suite's area `V5 tools` ([TESTING.md](../TESTING.md#v5-pilot-evidence-tools-in-the-suite-v5-tools)) runs
+on synthetic folders and on T1 logs written by the engine's own record writer.
+
+**Not tested:** a real pilot root, a real console, UAC and the VM, which are the pilot itself. Also a file symbolic link
+where the account cannot create one.
+
+**Limits:**
+
+* The summary trusts the codes and exit codes the operator types, and checks only their type.
+* The compare cannot tell a write that keeps an item's size, time and hash.
+* The last access time follows the volume's policy, not the tools.
