@@ -430,6 +430,9 @@ of the first read.
 
 ## R1 implementation record (2026-11-17)
 
+The line numbers in this record are those of the files as V04-R1 adds or changes them, not those of the commit named
+in the Context section.
+
 R1 adds the recovery engine, `src/lib/Engine.Recover.ps1`, with the **eighth release gate** closed, and two commands
 that only read: `recover list` and `recover plan`. No service is opened, started, stopped or changed, in this phase,
 whether the gate is open or closed: the control seam belongs to R2, in this file only. R1 changes no finding state,
