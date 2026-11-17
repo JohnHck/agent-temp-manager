@@ -13,7 +13,7 @@ its gates closed or open, and no gate opens without the maintainer's decision.
 |---|---|---|---|
 | [V0.1](#v01--audit-preview-tui-and-internationalization) | Audit, preview, TUI, internationalization | No (real deletion disabled) | Complete (0.1.0) |
 | [V0.2](#v02--windows-runtime-diagnostics) | Windows Runtime Diagnostics, including Git worktrees | No (read-only) | Published (0.2.0); three diagnostics gates closed |
-| [V0.2.1](#v021--desktop-gui-and-live-monitoring) | Desktop GUI and live monitoring (while the window is open) | No (read-only presentation) | Not started |
+| [V0.2.1](#v021--desktop-gui-and-live-monitoring) | Desktop GUI and live monitoring (while the window is open) | No (read-only presentation) | Implemented on `main` (P1–P6); GUI gate closed; not published |
 | [V0.3](#v03--selective-real-cleanup) | Selective real cleanup | Yes: deletes approved temporary paths only | Published (0.3.0); deletion gate closed |
 | [0.3.x](#03x--isolation-and-quarantine-of-the-own-profile) | Isolation and quarantine of the own profile (ADR-0013; after 0.3.0 is published) | Yes: moves approved temporary paths into a quarantine and back; purge deletes behind the purge gate of its own (J-ISO-1 (C)) | On `main`, isolation and purge gates closed; not published |
 | [V0.4](#v04--assisted-recovery) | Assisted recovery of services and environments; Recovery Mode for another user's profile (ADR-0013) | Yes: reversible operations, each authorized individually | Not started |
@@ -157,7 +157,7 @@ writes anything (no fetch, no prune, no index refresh that changes files).
 
 ## V0.2.1 — Desktop GUI and live monitoring
 
-**Status: not started.** It lands on `main` under the order rule above: dark, with its acceptance proven in CI.
+**Status: implemented on `main` (P1–P6); GUI gate closed; not published.** It lands on `main` under the order rule above: dark, with its acceptance proven in CI.
 
 **Design:** [ADR-0014](adr/ADR-0014-desktop-gui-winforms.md). The technology is decided: WinForms on Windows
 PowerShell 5.1 / .NET Framework (maintainer decision D-B, 2026-11-16). The GUI ships behind a release gate of its own,

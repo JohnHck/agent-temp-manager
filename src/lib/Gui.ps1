@@ -25,6 +25,10 @@
 # session's NextDueUtc and runs the audit on the F5 path (never the diagnose), keeping the screen; a tick while anything
 # runs is dropped, never queued. A slow audit, an old view or a failure marks the view STALE; closing the window stops
 # and releases the ticker. No process, job, runspace or thread, and nothing is written.
+# Phase P6: languages and accessibility (ADR-0014 section 7). Every visible text and every accessible name comes from the
+# catalog, in the language chosen at start; every control has an accessible name; the tab order follows the visual one
+# (header, state, monitoring, screens, title, lists, commands); Enter presses a focused button; system colors only; the
+# fixed widths of the lists and their columns are scaled by the form's DPI.
 
 # Release gate of the desktop GUI (D-A). Closed in every distributed copy: `agent-temp gui` opens no window and loads no
 # WinForms assembly. Tests open it only in their own process memory.
@@ -110,7 +114,24 @@ function Initialize-AtmGuiSession {
         # failure (SLOW, OLD or $null), the duration of the last audit, a close in progress, and the tick counters.
         Monitor = $false; IntervalSeconds = 60; NextDueUtc = $null; Backoff = $false; StaleReason = $null; LastDurationSeconds = $null; Closing = $false
         Ticks = 0; TickRuns = 0; TicksNotDue = 0; TicksBusy = 0; TicksBackoff = 0
+        # P6: the DPI of the window (Get-AtmGuiDpi), for the fixed widths of the lists and their columns; 96 until the form
+        # exists.
+        Dpi = 96
     }
+}
+
+function Get-AtmGuiDpi {
+    # P6: the DPI of the form: DeviceDpi where the .NET of this machine has it (4.7 and later), otherwise the DpiX of a
+    # graphics object of the form, released at once. Never below 96 when unknown.
+    param($Form)
+    if ($null -ne $Form.PSObject.Properties['DeviceDpi']) {
+        $d = [int]$Form.DeviceDpi
+        if ($d -gt 0) { return $d }
+    }
+    $g = $Form.CreateGraphics()
+    try { $d = [int][math]::Round($g.DpiX) } finally { $g.Dispose() }
+    if ($d -le 0) { return 96 }
+    return $d
 }
 
 function Set-AtmGuiMonitor {
@@ -349,11 +370,13 @@ function Invoke-AtmGuiRefresh {
 }
 
 function New-AtmGuiLabel {
-    param([string]$Text, [int]$TabIndex, [string]$Name)
+    # -AccessibleName: the name a screen reader reads when it differs from the text (P6: every control has one, from the
+    # catalog; a label that starts empty is named here).
+    param([string]$Text, [int]$TabIndex, [string]$Name, [string]$AccessibleName)
     $l = New-Object -TypeName System.Windows.Forms.Label
     $l.Text = $Text
     $l.AutoSize = $true
-    $l.AccessibleName = $Text
+    $l.AccessibleName = $(if ($AccessibleName) { $AccessibleName } else { $Text })
     $l.TabIndex = $TabIndex
     if ($Name) { $l.Name = $Name }
     $l.Margin = New-Object -TypeName System.Windows.Forms.Padding -ArgumentList 8
@@ -362,8 +385,8 @@ function New-AtmGuiLabel {
 
 function New-AtmGuiListView {
     # A read-only list (ADR-0014 section 8): details view, no label editing, no check boxes. -Columns: pairs of header
-    # text and width.
-    param([string]$Name, [string]$AccessibleName, [object[]]$Columns, [int]$Width, [int]$Height, [int]$TabIndex)
+    # text and width. P6: -Width, -Height and the column widths are pixels at 96 DPI, scaled to -Dpi (Get-AtmGuiScaled).
+    param([string]$Name, [string]$AccessibleName, [object[]]$Columns, [int]$Width, [int]$Height, [int]$TabIndex, [int]$Dpi)
     $v = New-Object -TypeName System.Windows.Forms.ListView
     $v.Name = $Name
     $v.AccessibleName = $AccessibleName
@@ -373,10 +396,10 @@ function New-AtmGuiListView {
     $v.MultiSelect = $false
     $v.FullRowSelect = $true
     $v.HeaderStyle = [System.Windows.Forms.ColumnHeaderStyle]::Nonclickable
-    $v.Size = New-Object -TypeName System.Drawing.Size -ArgumentList $Width, $Height
+    $v.Size = New-Object -TypeName System.Drawing.Size -ArgumentList (Get-AtmGuiScaled -Pixels $Width -Dpi $Dpi), (Get-AtmGuiScaled -Pixels $Height -Dpi $Dpi)
     $v.TabIndex = $TabIndex
     $v.Margin = New-Object -TypeName System.Windows.Forms.Padding -ArgumentList 8
-    foreach ($c in $Columns) { $null = $v.Columns.Add([string]$c[0], [int]$c[1]) }
+    foreach ($c in $Columns) { $null = $v.Columns.Add([string]$c[0], (Get-AtmGuiScaled -Pixels ([int]$c[1]) -Dpi $Dpi)) }
     return $v
 }
 
@@ -465,7 +488,8 @@ function Show-AtmGuiScreen {
     if (-not $isDash) {
         $cols = @($vm.Columns)
         $widths = @(if ($vm.Kind -ceq 'pairs') { 260, 640 } elseif ($vm.Kind -ceq 'lines') { 900 })
-        for ($i = 0; $i -lt $cols.Count; $i++) { $null = $rows.Columns.Add([string]$cols[$i], $(if ($i -lt $widths.Count) { [int]$widths[$i] } else { 150 })) }
+        # P6: the widths are pixels at 96 DPI, scaled to the window's DPI.
+        for ($i = 0; $i -lt $cols.Count; $i++) { $null = $rows.Columns.Add([string]$cols[$i], (Get-AtmGuiScaled -Pixels $(if ($i -lt $widths.Count) { [int]$widths[$i] } else { 150 }) -Dpi ([int]$Session.Dpi))) }
         if ($vm.Kind -ceq 'table') {
             foreach ($r in @($vm.Rows)) {
                 $cells = @($r)
@@ -528,7 +552,12 @@ function Start-AtmGui {
         $form.MinimizeBox = $false
         # F5 reaches the form first, whichever control has the focus.
         $form.KeyPreview = $true
+        # P6: the fixed widths below are pixels at 96 DPI, scaled once to the DPI of this form (Get-AtmGuiScaled).
+        $guiSession.Dpi = Get-AtmGuiDpi -Form $form
+        $dpi = [int]$guiSession.Dpi
         $layout = New-Object -TypeName System.Windows.Forms.FlowLayoutPanel
+        $layout.Name = 'Layout'
+        $layout.AccessibleName = Get-AtmText 'gui.layoutName'
         $layout.FlowDirection = [System.Windows.Forms.FlowDirection]::TopDown
         $layout.AutoSize = $true
         $layout.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
@@ -546,6 +575,41 @@ function Start-AtmGui {
         $guiProgress = New-AtmGuiLabel -Text '' -TabIndex ($tab++) -Name 'Progress'
         $guiProgress.AccessibleName = Get-AtmText 'gui.progressName'
         $layout.Controls.Add($guiProgress)
+        # P5: the live monitoring (GUI-D2): a check box, off when the window opens; the interval, a fixed list that cannot
+        # be edited (60 s by default); and its status line. Nothing of it is remembered. P6: under the header and the
+        # view's state, before the screens, in the visual order and in the tab order.
+        $guiMonitorPanel = New-Object -TypeName System.Windows.Forms.FlowLayoutPanel
+        $guiMonitorPanel.Name = 'MonitorPanel'
+        $guiMonitorPanel.AccessibleName = Get-AtmText 'gui.monitorPanelName'
+        $guiMonitorPanel.FlowDirection = [System.Windows.Forms.FlowDirection]::LeftToRight
+        $guiMonitorPanel.AutoSize = $true
+        $guiMonitorPanel.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
+        $guiMonitorPanel.TabIndex = ($tab++)
+        $guiMonitor = New-Object -TypeName System.Windows.Forms.CheckBox
+        $guiMonitor.Name = 'Monitor'
+        $guiMonitor.Text = Get-AtmText 'gui.monitor.check'
+        $guiMonitor.AccessibleName = ($guiMonitor.Text -replace '&', '')
+        $guiMonitor.Checked = $false
+        $guiMonitor.AutoSize = $true
+        $guiMonitor.TabIndex = 0
+        $guiMonitor.Margin = New-Object -TypeName System.Windows.Forms.Padding -ArgumentList 8
+        $guiIntervalLabel = New-AtmGuiLabel -Text (Get-AtmText 'gui.monitor.intervalLabel') -TabIndex 1 -Name 'MonitorIntervalLabel'
+        $guiIntervalLabel.AccessibleName = ($guiIntervalLabel.Text -replace '&', '')
+        $guiInterval = New-Object -TypeName System.Windows.Forms.ComboBox
+        $guiInterval.Name = 'MonitorInterval'
+        $guiInterval.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+        $guiInterval.AccessibleName = Get-AtmText 'gui.monitor.intervalName'
+        $guiInterval.TabIndex = 2
+        $guiInterval.Width = Get-AtmGuiScaled -Pixels 110 -Dpi $dpi
+        $guiInterval.Margin = New-Object -TypeName System.Windows.Forms.Padding -ArgumentList 8
+        foreach ($sec in @(Get-AtmGuiMonitorIntervals)) { $null = $guiInterval.Items.Add((Format-AtmGuiInterval -Seconds $sec)) }
+        $guiInterval.SelectedIndex = [array]::IndexOf(@(Get-AtmGuiMonitorIntervals), [int]$guiSession.IntervalSeconds)
+        $guiMonitorStatus = New-AtmGuiLabel -Text (Get-AtmText 'gui.monitor.off') -TabIndex 3 -Name 'MonitorStatus'
+        $guiMonitorPanel.Controls.Add($guiMonitor)
+        $guiMonitorPanel.Controls.Add($guiIntervalLabel)
+        $guiMonitorPanel.Controls.Add($guiInterval)
+        $guiMonitorPanel.Controls.Add($guiMonitorStatus)
+        $layout.Controls.Add($guiMonitorPanel)
         # P3: the screens, each with a visible button (access key: its digit) and the TUI's key; the screen's title and
         # the message of the last move.
         $layout.Controls.Add((New-AtmGuiLabel -Text (Get-AtmText 'gui.navHint') -TabIndex ($tab++) -Name 'NavHint'))
@@ -557,7 +621,7 @@ function Start-AtmGui {
         $guiScreens.FlowDirection = [System.Windows.Forms.FlowDirection]::LeftToRight
         $guiScreens.AutoSize = $true
         $guiScreens.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
-        $guiScreens.MaximumSize = New-Object -TypeName System.Drawing.Size -ArgumentList 920, 0
+        $guiScreens.MaximumSize = New-Object -TypeName System.Drawing.Size -ArgumentList (Get-AtmGuiScaled -Pixels 920 -Dpi $dpi), 0
         $guiScreens.TabIndex = ($tab++)
         $btab = 0
         foreach ($m in @(Get-AtmGuiNavItemList)) {
@@ -583,7 +647,7 @@ function Start-AtmGui {
         $guiDiagRefresh.add_Click({ param($src, $ev) $null = $ev; & $guiNavKey ([string]$src.Tag) })
         $guiScreens.Controls.Add($guiDiagRefresh)
         $layout.Controls.Add($guiScreens)
-        $layout.Controls.Add((New-AtmGuiLabel -Text '' -TabIndex ($tab++) -Name 'ScreenTitle'))
+        $layout.Controls.Add((New-AtmGuiLabel -Text '' -TabIndex ($tab++) -Name 'ScreenTitle' -AccessibleName (Get-AtmText 'gui.screenTitleName')))
         $guiMessage = New-AtmGuiLabel -Text '' -TabIndex ($tab++) -Name 'Message'
         $guiMessage.AccessibleName = Get-AtmText 'gui.messageName'
         $layout.Controls.Add($guiMessage)
@@ -596,16 +660,19 @@ function Start-AtmGui {
         $guiDiagLines.AccessibleName = Get-AtmText 'gui.diagLinesName'
         $guiDiagLines.Visible = $false
         $layout.Controls.Add($guiDiagLines)
-        $layout.Controls.Add((New-AtmGuiListView -Name 'Summary' -AccessibleName (Get-AtmText 'gui.summaryName') -Columns @(@((Get-AtmText 'gui.col.group'), 200), @((Get-AtmText 'gui.col.measure'), 340)) -Width 560 -Height 250 -TabIndex ($tab++)))
+        $layout.Controls.Add((New-AtmGuiListView -Name 'Summary' -AccessibleName (Get-AtmText 'gui.summaryName') -Columns @(@((Get-AtmText 'gui.col.group'), 200), @((Get-AtmText 'gui.col.measure'), 340)) -Width 560 -Height 250 -TabIndex ($tab++) -Dpi $dpi))
         $layout.Controls.Add((New-AtmGuiLabel -Text (Get-AtmText 'dash.classes') -TabIndex ($tab++) -Name 'ClassesTitle'))
-        $layout.Controls.Add((New-AtmGuiListView -Name 'Classes' -AccessibleName (Get-AtmText 'gui.classesName') -Columns @(@((Get-AtmText 'gui.col.class'), 220), @((Get-AtmText 'gui.col.roots'), 120), @((Get-AtmText 'gui.col.mb'), 160)) -Width 560 -Height 120 -TabIndex ($tab++)))
+        $layout.Controls.Add((New-AtmGuiListView -Name 'Classes' -AccessibleName (Get-AtmText 'gui.classesName') -Columns @(@((Get-AtmText 'gui.col.class'), 220), @((Get-AtmText 'gui.col.roots'), 120), @((Get-AtmText 'gui.col.mb'), 160)) -Width 560 -Height 120 -TabIndex ($tab++) -Dpi $dpi))
         $layout.Controls.Add((New-AtmGuiLabel -Text (Get-AtmText 'dash.orphanInfo') -TabIndex ($tab++) -Name 'OrphanInfo'))
-        $layout.Controls.Add((New-AtmGuiLabel -Text '-' -TabIndex ($tab++) -Name 'AuditTime'))
+        # P6: before the first audit, the dashboard's own text for an unknown time (no literal in the window).
+        $layout.Controls.Add((New-AtmGuiLabel -Text (Get-AtmGuiDashboard -Inventory $null).AuditTime -TabIndex ($tab++) -Name 'AuditTime'))
         # The read-only list of every other screen (its columns change with the screen).
-        $guiRows = New-AtmGuiListView -Name 'Rows' -AccessibleName (Get-AtmText 'gui.rowsName' (Get-AtmText 'menu.dashboard')) -Columns @() -Width 920 -Height 360 -TabIndex ($tab++)
+        $guiRows = New-AtmGuiListView -Name 'Rows' -AccessibleName (Get-AtmText 'gui.rowsName' (Get-AtmText 'menu.dashboard')) -Columns @() -Width 920 -Height 360 -TabIndex ($tab++) -Dpi $dpi
         $guiRows.Visible = $false
         $layout.Controls.Add($guiRows)
         $buttons = New-Object -TypeName System.Windows.Forms.FlowLayoutPanel
+        $buttons.Name = 'Buttons'
+        $buttons.AccessibleName = Get-AtmText 'gui.buttonsName'
         $buttons.FlowDirection = [System.Windows.Forms.FlowDirection]::LeftToRight
         $buttons.AutoSize = $true
         $buttons.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
@@ -630,39 +697,6 @@ function Start-AtmGui {
         $buttons.Controls.Add($guiRefresh)
         $buttons.Controls.Add($close)
         $layout.Controls.Add($buttons)
-        # P5: the live monitoring (GUI-D2): a check box, off when the window opens; the interval, a fixed list that cannot
-        # be edited (60 s by default); and its status line. Nothing of it is remembered.
-        $guiMonitorPanel = New-Object -TypeName System.Windows.Forms.FlowLayoutPanel
-        $guiMonitorPanel.Name = 'MonitorPanel'
-        $guiMonitorPanel.FlowDirection = [System.Windows.Forms.FlowDirection]::LeftToRight
-        $guiMonitorPanel.AutoSize = $true
-        $guiMonitorPanel.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
-        $guiMonitorPanel.TabIndex = ($tab++)
-        $guiMonitor = New-Object -TypeName System.Windows.Forms.CheckBox
-        $guiMonitor.Name = 'Monitor'
-        $guiMonitor.Text = Get-AtmText 'gui.monitor.check'
-        $guiMonitor.AccessibleName = ($guiMonitor.Text -replace '&', '')
-        $guiMonitor.Checked = $false
-        $guiMonitor.AutoSize = $true
-        $guiMonitor.TabIndex = 0
-        $guiMonitor.Margin = New-Object -TypeName System.Windows.Forms.Padding -ArgumentList 8
-        $guiIntervalLabel = New-AtmGuiLabel -Text (Get-AtmText 'gui.monitor.intervalLabel') -TabIndex 1 -Name 'MonitorIntervalLabel'
-        $guiIntervalLabel.AccessibleName = ($guiIntervalLabel.Text -replace '&', '')
-        $guiInterval = New-Object -TypeName System.Windows.Forms.ComboBox
-        $guiInterval.Name = 'MonitorInterval'
-        $guiInterval.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
-        $guiInterval.AccessibleName = Get-AtmText 'gui.monitor.intervalName'
-        $guiInterval.TabIndex = 2
-        $guiInterval.Width = 110
-        $guiInterval.Margin = New-Object -TypeName System.Windows.Forms.Padding -ArgumentList 8
-        foreach ($sec in @(Get-AtmGuiMonitorIntervals)) { $null = $guiInterval.Items.Add((Format-AtmGuiInterval -Seconds $sec)) }
-        $guiInterval.SelectedIndex = [array]::IndexOf(@(Get-AtmGuiMonitorIntervals), [int]$guiSession.IntervalSeconds)
-        $guiMonitorStatus = New-AtmGuiLabel -Text (Get-AtmText 'gui.monitor.off') -TabIndex 3 -Name 'MonitorStatus'
-        $guiMonitorPanel.Controls.Add($guiMonitor)
-        $guiMonitorPanel.Controls.Add($guiIntervalLabel)
-        $guiMonitorPanel.Controls.Add($guiInterval)
-        $guiMonitorPanel.Controls.Add($guiMonitorStatus)
-        $layout.Controls.Add($guiMonitorPanel)
         # The one ticker of the form (ADR-0014 section 5), created here only. It only wakes the check: its period never
         # passes the chosen interval, and Invoke-AtmGuiTick decides by the session's NextDueUtc.
         $guiTicker = New-Object -TypeName System.Windows.Forms.Timer
@@ -770,7 +804,7 @@ function Start-AtmGui {
                 }
                 if ($dr -cne 'CANCELLED') { Invoke-AtmGuiNavDiag -Nav $guiSession.Nav -Diag $guiSession.Diag -Result $dr -Refresh:$isU }
                 $null = Show-AtmGuiScreen -Form $guiForm -Session $guiSession
-                if ($guiRows.Visible) { $null = $guiRows.Focus() }
+                if ($guiRows.Visible) { $guiForm.ActiveControl = $guiRows }
                 # A close requested while the diagnose ran: its result was discarded; the window closes now.
                 if ($guiSession.CloseAfterDiag) { $guiSession.CloseAfterDiag = $false; $guiForm.Close() }
                 return
@@ -788,7 +822,7 @@ function Start-AtmGui {
                     }
                 }
                 $null = Show-AtmGuiScreen -Form $guiForm -Session $guiSession
-                if ($guiRows.Visible) { $null = $guiRows.Focus() }
+                if ($guiRows.Visible) { $guiForm.ActiveControl = $guiRows }
                 # A close requested while the preview ran: the window closes now that the call has ended.
                 if ($guiSession.CloseAfterPreview) { $guiSession.CloseAfterPreview = $false; $guiForm.Close() }
             }
@@ -817,6 +851,23 @@ function Start-AtmGui {
                 # With Alt the digit is the button's access key; with Ctrl it is not a screen key.
                 if ($ev.Alt -or $ev.Control) { return }
                 $kn = [string]$ev.KeyCode
+                # P6 (GUI-ENTER-ON-BUTTON): Enter belongs to the focused control before the lists. On a button it presses
+                # the button, as Space does; on the check box or the interval it changes nothing and moves nowhere (Space
+                # toggles the box). Only elsewhere (a list) does it open the selected row.
+                if ($kn -ceq 'Return' -or $kn -ceq 'Enter') {
+                    $ac = $guiForm.ActiveControl
+                    if ($ac -is [System.Windows.Forms.Button]) {
+                        $ev.Handled = $true
+                        $ev.SuppressKeyPress = $true
+                        if ($ac.Enabled) { $ac.PerformClick() }
+                        return
+                    }
+                    if ($ac -eq $guiMonitor -or $ac -eq $guiInterval) {
+                        $ev.Handled = $true
+                        $ev.SuppressKeyPress = $true
+                        return
+                    }
+                }
                 # Keys.Return and Keys.Enter are one value; its name can be either.
                 if ($kn -cmatch '^(D|NumPad)[1-9]$' -or $kn -ceq 'P' -or $kn -ceq 'D' -or $kn -ceq 'U' -or $kn -ceq 'Return' -or $kn -ceq 'Enter' -or $kn -ceq 'Escape') {
                     $ev.Handled = $true

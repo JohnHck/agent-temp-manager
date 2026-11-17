@@ -14361,6 +14361,30 @@ try {
             foreach ($tx in $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.TypeExpressionAst] -or $x -is [System.Management.Automation.Language.TypeConstraintAst] }, $true)) {
                 if ($tx.TypeName.FullName -match '(?i)timer') { $bad.Add("${n}: tipo de timer: " + $tx.TypeName.FullName) }
             }
+            # P6 (ADR-0014 section 7): system colors only (high contrast applies), and no visible text written in the code:
+            # a Text, AccessibleName or column header set from a string literal, or a label or list made with one.
+            if ($txt -match '(?i)FromArgb|FromName\(|FromKnownColor') { $bad.Add("${n}: cor fixa: FromArgb, FromName ou FromKnownColor") }
+            foreach ($tx in $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.TypeExpressionAst] }, $true)) {
+                if ($tx.TypeName.FullName -match '(?i)^((System\.)?Drawing\.)?Color$') { $bad.Add("${n}: cor fixa: [" + $tx.TypeName.FullName + ']') }
+            }
+            $isLiteral = { param($e)
+                if ($e -is [System.Management.Automation.Language.PipelineAst] -and @($e.PipelineElements).Count -eq 1) { $e = $e.PipelineElements[0] }
+                if ($e -is [System.Management.Automation.Language.CommandExpressionAst]) { $e = $e.Expression }
+                (($e -is [System.Management.Automation.Language.StringConstantExpressionAst]) -and [string]$e.Value -ne '') -or ($e -is [System.Management.Automation.Language.ExpandableStringExpressionAst]) }
+            foreach ($as in $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left -is [System.Management.Automation.Language.MemberExpressionAst] }, $true)) {
+                $mn = $as.Left.Member.Extent.Text
+                if ($mn -match '^(?i)(ForeColor|BackColor)$' -and $as.Right.Extent.Text -notmatch '^\[System\.Drawing\.SystemColors\]::\w+$') { $bad.Add("${n}: cor fora de SystemColors: " + $as.Extent.Text) }
+                if ($mn -match '^(?i)(Text|AccessibleName|AccessibleDescription)$' -and (& $isLiteral $as.Right)) { $bad.Add("${n}: texto visivel literal: " + $as.Extent.Text) }
+            }
+            foreach ($c in $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.CommandAst] -and @('New-AtmGuiLabel', 'New-AtmGuiListView') -ccontains $x.GetCommandName() }, $true)) {
+                $el = @($c.CommandElements)
+                for ($i = 1; $i -lt $el.Count - 1; $i++) {
+                    if ($el[$i] -is [System.Management.Automation.Language.CommandParameterAst] -and @('Text', 'AccessibleName') -contains $el[$i].ParameterName -and (& $isLiteral $el[$i + 1])) { $bad.Add("${n}: texto visivel literal: " + $c.Extent.Text) }
+                }
+            }
+            foreach ($im in $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $x.Member.Extent.Text -ceq 'Add' -and $x.Expression.Extent.Text -match '\.Columns$' }, $true)) {
+                if (@($im.Arguments).Count -gt 0 -and (& $isLiteral $im.Arguments[0])) { $bad.Add("${n}: texto visivel literal: " + $im.Extent.Text) }
+            }
             # P5: the tick never runs the diagnose (GUI-D3): no function named Invoke-AtmGuiTick mentions it.
             foreach ($fd in $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -ceq 'Invoke-AtmGuiTick' }, $true)) {
                 foreach ($dn in @('Invoke-AtmGuiDiagnose', 'Invoke-AtmDiagnose', 'ConvertTo-AtmDiagnoseJson')) { if ($fd.Extent.Text.IndexOf($dn, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $bad.Add("${n}: diagnose no tick: $dn") } }
@@ -14413,7 +14437,7 @@ try {
         $o = (& cmd.exe /c "`"$cmd`" version -Lang pt-BR" 2>&1) -join "`n"
         Assert-True ($LASTEXITCODE -eq 0 -and $o -match 'GUI de desktop: DESABILITADA') "version pt-BR: saida $LASTEXITCODE"
     }
-    Test-Case 'GUI P1' 'agent-temp gui com a trava fechada: GUI_GATE_CLOSED e saida 7 nos dois idiomas, sem janela; num processo novo deste shell, nenhum System.Windows.Forms carregado depois de carregar as bibliotecas (version) nem depois do gui' {
+    Test-Case 'GUI P1' 'agent-temp gui com a trava fechada: GUI_GATE_CLOSED e saida 7 nos dois idiomas, por -Lang e por ATM_LANG (P6; -Lang vence ATM_LANG), sem janela; num processo novo deste shell, nenhum System.Windows.Forms carregado depois de carregar as bibliotecas (version) nem depois do gui' {
         $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
         $direct = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$(Join-Path $srcDir 'agent-temp.ps1')`" gui -Lang en-US") -TimeoutSec 300
         Assert-True ($direct.Exit -eq 7 -and $direct.Text.Contains('GUI_GATE_CLOSED') -and $direct.Text.Contains('No window was opened.')) "processo direto: saida $($direct.Exit) $($direct.Text)"
@@ -14433,6 +14457,17 @@ foreach ($l in @('en-US', 'pt-BR')) {
     $res['exit_' + $l] = $LASTEXITCODE
     $res['text_' + $l] = $t.Trim()
 }
+# P6: the language chosen at start by ATM_LANG (no -Lang), and -Lang over ATM_LANG.
+foreach ($l in @('en-US', 'pt-BR')) {
+    $env:ATM_LANG = $l
+    $t = (& $launcher gui *>&1 | Out-String)
+    $res['envExit_' + $l] = $LASTEXITCODE
+    $res['envText_' + $l] = $t.Trim()
+}
+$env:ATM_LANG = 'pt-BR'
+$t = (& $launcher gui -Lang en-US *>&1 | Out-String)
+$res.overExit = $LASTEXITCODE
+$res.overText = $t.Trim()
 $res.afterGui = (& $wf)
 ($res | ConvertTo-Json) | Set-Content -LiteralPath $Out -Encoding UTF8
 '@, (New-Object Text.UTF8Encoding $true))
@@ -14444,6 +14479,10 @@ $res.afterGui = (& $wf)
         Assert-Eq ([int]$j.afterVersion) 0 'carregar as bibliotecas (version) nao carrega o System.Windows.Forms'
         Assert-True ([int]$j.'exit_en-US' -eq 7 -and ([string]$j.'text_en-US').Contains('GUI_GATE_CLOSED') -and ([string]$j.'text_en-US').Contains('No window was opened.')) "gui en-US: saida $($j.'exit_en-US')"
         Assert-True ([int]$j.'exit_pt-BR' -eq 7 -and ([string]$j.'text_pt-BR').Contains('GUI_GATE_CLOSED') -and ([string]$j.'text_pt-BR').Contains('Nenhuma janela foi aberta.')) "gui pt-BR: saida $($j.'exit_pt-BR')"
+        # P6: the language at start by ATM_LANG alone, and -Lang over it.
+        Assert-True ([int]$j.'envExit_en-US' -eq 7 -and ([string]$j.'envText_en-US').Contains('GUI_GATE_CLOSED') -and ([string]$j.'envText_en-US').Contains('No window was opened.') -and -not ([string]$j.'envText_en-US').Contains('Nenhuma janela')) "ATM_LANG=en-US: saida $($j.'envExit_en-US') $($j.'envText_en-US')"
+        Assert-True ([int]$j.'envExit_pt-BR' -eq 7 -and ([string]$j.'envText_pt-BR').Contains('GUI_GATE_CLOSED') -and ([string]$j.'envText_pt-BR').Contains('Nenhuma janela foi aberta.') -and -not ([string]$j.'envText_pt-BR').Contains('No window')) "ATM_LANG=pt-BR: saida $($j.'envExit_pt-BR') $($j.'envText_pt-BR')"
+        Assert-True ([int]$j.overExit -eq 7 -and ([string]$j.overText).Contains('No window was opened.') -and -not ([string]$j.overText).Contains('Nenhuma janela')) "-Lang en-US com ATM_LANG=pt-BR: saida $($j.overExit) $($j.overText)"
         Assert-Eq ([int]$j.afterGui) 0 'gui com a trava fechada nao carrega o System.Windows.Forms'
     }
     Test-Case 'GUI P1' 'Ambiente sem janela, simulado com a trava aberta so neste processo: sem STA, sem area de trabalho interativa ou sem WinForms -> saida 8 com o codigo certo, o WinForms so e pedido depois das verificacoes, sem texto de excecao; trava fechada -> 7 sem verificar o ambiente' {
@@ -16693,6 +16732,592 @@ if ($null -eq $res.env) {
             Assert-True ([int]$j.newProcesses -eq 0 -and [int]$j.newSandbox -eq 0 -and [int]$j.newConfig -eq 0 -and [int]$j.newTemp -eq 0) "janela P5 ${lang}: nada deixado (processos $($j.newProcesses), sandbox $($j.newSandbox), configuracao $($j.newConfig), TEMP $($j.newTemp))"
         }
         $script:caseNote = 'janela real em en-US e pt-BR: UNKNOWN ao abrir, ligar, 30 s, tick, projeto, falha, F5 e diagnose com tick dentro, antes da hora, desligar, fechar com o ticker liberado'
+    }
+
+    # ------------------------------------------------------------------ V0.2.1 P6: languages, accessibility and the close e2e (ADR-0014 section 7)
+    # The gui.* values that are the same in en-US and pt-BR, declared: formats with no word of their own, units, the
+    # product's name, and the TUI's terms the window shows as the TUI does in both languages (gui.term.*).
+    $guiP6SameText = @('gui.col.mb', 'gui.diagProgress', 'gui.monitor.min', 'gui.monitor.sec', 'gui.screenButton', 'gui.title', 'gui.term.aruo', 'gui.term.flags', 'gui.term.preview', 'gui.term.root', 'gui.term.roots', 'gui.term.sid')
+    # Engine codes the window writes as they are (the class column and screens 5 to 7): data, the same in both languages.
+    $guiP6Codes = @('ACTIVE_EVIDENCE', 'RECENT', 'LIVENESS_UNKNOWN', 'ORPHAN_SUSPECTED', 'UNKNOWN')
+    # The catalog of one language as two patterns, read straight from the catalogs (no Get-AtmText, so the language
+    # active when it runs does not matter): Own matches a whole value of that language, a formatted one included (each
+    # {n} matches any text; a value with no word of its own is left out, since it would match anything); Other finds a
+    # piece of six characters or more of a value of the other language that differs, when the piece is in no value of
+    # this language.
+    $guiP6Catalog = { param([string]$Lang, [string]$OtherLang)
+        $own = $script:AtmMessages[$Lang]; $oth = $script:AtmMessages[$OtherLang]
+        $alts = New-Object System.Collections.Generic.List[string]
+        $fmts = New-Object System.Collections.Generic.List[regex]
+        foreach ($k in @($own.Keys)) {
+            $v = [string]$own[$k]
+            if ([regex]::Replace($v, '\{\d+[^}]*\}', '') -notmatch '[\p{L}\p{N}%]') {
+                # A format with no word of its own (the screen button '&{0} {1}'): kept apart, and a text matches it
+                # only when each filled part is itself a value of this catalog or data.
+                if ($v -match '\{\d') { foreach ($t in @($v, $v.Replace('&', '')) | Select-Object -Unique) { $fmts.Add((New-Object regex ('^' + ((@([regex]::Split($t, '\{\d+[^}]*\}') | ForEach-Object { [regex]::Escape($_) }) -join '(.*?)')) + '$'), 'Singleline, CultureInvariant')) } }
+                continue
+            }
+            foreach ($t in @($v, $v.Replace('&', '')) | Select-Object -Unique) { $alts.Add((@([regex]::Split($t, '\{\d+[^}]*\}') | ForEach-Object { [regex]::Escape($_) }) -join '(.*?)')) }
+        }
+        $ownAll = (@($own.Values) -join "`n").Replace('&', '')
+        $segs = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach ($k in @($oth.Keys)) {
+            if ($own.ContainsKey($k) -and [string]$own[$k] -ceq [string]$oth[$k]) { continue }
+            foreach ($p in [regex]::Split(([string]$oth[$k]).Replace('&', ''), '\{\d+[^}]*\}')) {
+                $p = $p.Trim()
+                if ($p.Length -ge 6 -and $ownAll.IndexOf($p, [StringComparison]::Ordinal) -lt 0) { [void]$segs.Add($p) }
+            }
+        }
+        $segList = @($segs | Sort-Object -Property Length -Descending)
+        @{ Own = (New-Object regex ('^(?:' + ($alts.ToArray() -join '|') + ')$'), 'Singleline, CultureInvariant')
+            Other = (New-Object regex ((@($segList | ForEach-Object { [regex]::Escape($_) }) -join '|'), 'CultureInvariant'))
+            Formats = $fmts.ToArray(); Values = $alts.Count; Pieces = $segList.Count } }
+    # Each text, line by line: a value of the case's catalog (or one of the allowed data), and nothing of the other
+    # language. Returns the problems, each with the control (or source) and the text.
+    $guiP6CheckTexts = { param($Cat, [object[]]$Items, [string[]]$Allowed)
+        $bad = New-Object System.Collections.Generic.List[string]
+        $isData = { param([string]$s) ($s.Trim().Length -eq 0) -or ($Allowed -ccontains $s.Trim()) -or ($s -match '^[\d\s.,:%/-]+$') }
+        foreach ($it in $Items) {
+            foreach ($ln in ([string]$it[1] -split "`r?`n")) {
+                if ($ln.Trim().Length -eq 0) { continue }
+                $ok = (& $isData $ln) -or $Cat.Own.IsMatch($ln)
+                if (-not $ok) {
+                    foreach ($fr in $Cat.Formats) {
+                        $fm = $fr.Match($ln)
+                        if ($ok -or -not $fm.Success) { continue }
+                        $ok = $true
+                        for ($gi = 1; $gi -lt $fm.Groups.Count; $gi++) { $gv = $fm.Groups[$gi].Value; if (-not ((& $isData $gv) -or $Cat.Own.IsMatch($gv) -or $gv -cmatch '^[A-Z0-9]$')) { $ok = $false } }
+                    }
+                }
+                if (-not $ok) { $bad.Add("$($it[0]): fora do catalogo: $ln") }
+                $m = $Cat.Other.Match($ln)
+                if ($m.Success) { $bad.Add("$($it[0]): texto do outro idioma ($($m.Value)): $ln") }
+            }
+        }
+        return , $bad.ToArray() }
+    # The texts the window can show, built without a window from the same view models, in the current language.
+    $guiP6Texts = { param($Inv, $Pv, $Views)
+        $t = New-Object System.Collections.Generic.List[object]
+        $add = { param([string]$N, $V) if ($null -ne $V -and [string]$V -ne '') { $t.Add(@($N, [string]$V)); if (([string]$V).Contains('&')) { $t.Add(@(($N + ' (nome)'), ([string]$V).Replace('&', ''))) } } }
+        $hd = Get-AtmGuiIdentityHeader -Source { [pscustomobject]@{ Name = 'TEST\gui'; Sid = 'S-1-5-21-1-2-3-9301'; IsAdmin = $false; ElevationTypeRaw = 3; IntegrityRid = 8192; SessionId = 1 } }
+        foreach ($p in @('Title', 'IdentityLine', 'ElevationLine', 'LanguageLine', 'ReadOnlyLine')) { & $add $p $hd.$p }
+        $u = New-Object DateTime(2026, 11, 1, 10, 0, 1, [DateTimeKind]::Utc)
+        foreach ($vs in @((Get-AtmGuiViewState), (Get-AtmGuiViewState -FailureType 'EXCEPTION_IOEXCEPTION'), (Get-AtmGuiViewState -Inventory $Inv -RefreshedUtc $u),
+                (Get-AtmGuiViewState -Inventory ([pscustomobject]@{ CoverageComplete = $false }) -RefreshedUtc $u), (Get-AtmGuiViewState -Inventory $Inv -FailureType 'EXCEPTION_IOEXCEPTION' -RefreshedUtc $u),
+                (Get-AtmGuiViewState -Inventory $Inv -RefreshedUtc $u -StaleReason 'SLOW' -DurationSeconds 40), (Get-AtmGuiViewState -Inventory $Inv -RefreshedUtc $u -StaleReason 'OLD'))) { & $add ('estado ' + $vs.Code) $vs.Text }
+        & $add 'monitor desligado' (Get-AtmGuiMonitorStatus -Monitor $false -IntervalSeconds 60 -NextDueUtc $null -Backoff $false)
+        & $add 'monitor ligado' (Get-AtmGuiMonitorStatus -Monitor $true -IntervalSeconds 60 -NextDueUtc $u -Backoff $false)
+        & $add 'monitor espera' (Get-AtmGuiMonitorStatus -Monitor $true -IntervalSeconds 600 -NextDueUtc $u -Backoff $true)
+        foreach ($k in @('gui.navHint', 'gui.navHintPreview', 'gui.navHintDiag', 'gui.previewNotice', 'gui.refresh', 'gui.close', 'gui.diagRefresh', 'gui.monitor.check', 'gui.monitor.intervalLabel', 'gui.monitor.intervalName',
+                'gui.progressName', 'gui.screensName', 'gui.messageName', 'gui.diagLinesName', 'gui.summaryName', 'gui.classesName', 'gui.layoutName', 'gui.monitorPanelName', 'gui.buttonsName', 'gui.screenTitleName',
+                'dash.classes', 'dash.orphanInfo', 'gui.col.group', 'gui.col.measure', 'gui.col.class', 'gui.col.roots', 'gui.col.mb', 'gui.noAudit', 'gui.previewDiscarded', 'gui.previewNotRun')) { & $add $k (Get-AtmText $k) }
+        & $add 'progresso' (Get-AtmText 'gui.progress' 50)
+        & $add 'progresso do diagnose' (Get-AtmText 'gui.diagProgress' (Get-AtmText 'tui.diag.running') 50)
+        & $add 'preview falhou' (Get-AtmText 'gui.previewFailed' 'EXCEPTION_IOEXCEPTION')
+        & $add 'raiz sumiu' (Get-AtmText 'gui.detailGone' 'C:\Users\alice\AppData\Local\Temp\claude\x')
+        & $add 'hora do audit' (Get-AtmGuiDashboard -Inventory $Inv).AuditTime
+        & $add 'hora sem audit' (Get-AtmGuiDashboard -Inventory $null).AuditTime
+        foreach ($db in @((Get-AtmGuiDashboard -Inventory $Inv), (Get-AtmGuiDashboard -Inventory $null))) { foreach ($g in @($db.Groups)) { & $add 'resumo' $g.Title; foreach ($i in @($g.Items)) { & $add ('resumo ' + $i.Id) $i.Text } } }
+        foreach ($m in @(Get-AtmGuiNavItemList)) { & $add ('botao ' + $m.Key) (Get-AtmText 'gui.screenButton' $m.Key $m.Label) }
+        foreach ($s in @(Get-AtmGuiMonitorIntervals)) { & $add 'intervalo' (Format-AtmGuiInterval -Seconds $s) }
+        $d = New-AtmGuiDiagState -View $Views['parcial']
+        $scrs = New-Object System.Collections.Generic.List[object]
+        foreach ($m in @(Get-AtmGuiNavItemList)) { $s = @{} + $m.Screen; if (-not $s.ContainsKey('Filter')) { $s['Filter'] = $null }; $scrs.Add($s) }
+        foreach ($path in @(@('2', 'Return', 'Return'), @('3', 'Return'), @('4', 'Return'), @('P', 'Return'), @('8', 'Return'))) {
+            $n = Initialize-AtmGuiNav
+            foreach ($k in $path) { $null = Invoke-AtmGuiNavKey -Nav $n -Inventory $Inv -Key $k -Busy $false -Preview $Pv -Diag $d }
+            $scrs.Add((Get-AtmGuiNavTop -Nav $n))
+            & $add 'mensagem' $n.Message
+        }
+        foreach ($s in (& $guiP4bScreens $d)) { $scrs.Add($s) }
+        foreach ($s in $scrs) {
+            $vm = Get-AtmGuiScreen -Inventory $Inv -Screen $s -Preview $Pv -Diag $d
+            & $add ('titulo ' + $s.Name) (Get-AtmText 'gui.screenTitle' $vm.Title)
+            & $add ('nome da lista ' + $s.Name) (Get-AtmText 'gui.rowsName' $vm.Title)
+            foreach ($c in @($vm.Columns)) { & $add ('coluna ' + $s.Name) $c }
+            foreach ($x in @($vm.Pre)) { & $add ('linha ' + $s.Name) $x }
+            foreach ($x in @($vm.Pairs)) { & $add ('campo ' + $s.Name) $x.Label }
+            & $add ('vazio ' + $s.Name) $vm.Empty; & $add ('nota ' + $s.Name) $vm.Note; & $add ('aviso ' + $s.Name) $vm.Notice
+        }
+        return , $t.ToArray() }
+    Test-Case 'GUI P6' 'Catalogo (sem janela): toda chave gui.* existe em en-US e pt-BR, com os mesmos marcadores {n}; nenhum valor pt-BR igual ao en-US fora da lista declarada de excecoes, e a lista e exatamente a das iguais; toda chave gui.* citada em Gui.ps1 e GuiModel.ps1 existe nos dois catalogos' {
+        $en = $script:AtmMessages['en-US']; $pt = $script:AtmMessages['pt-BR']
+        $keys = @(@($en.Keys) + @($pt.Keys) | Where-Object { $_ -like 'gui.*' } | Sort-Object -Unique)
+        Assert-True ($keys.Count -ge 70) "chaves gui.*: $($keys.Count)"
+        $ph = { param([string]$s) (@([regex]::Matches($s, '\{(\d+)') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique) -join ',') }
+        $same = New-Object System.Collections.Generic.List[string]
+        foreach ($k in $keys) {
+            Assert-True ($en.ContainsKey($k) -and $pt.ContainsKey($k) -and [string]$en[$k] -ne '' -and [string]$pt[$k] -ne '') "${k}: nos dois idiomas, nao vazia"
+            Assert-Eq (& $ph $pt[$k]) (& $ph $en[$k]) "${k}: os mesmos marcadores"
+            if ([string]$en[$k] -ceq [string]$pt[$k]) { $same.Add($k) }
+        }
+        Assert-Eq (@($same.ToArray() | Sort-Object) -join ',') (@($guiP6SameText | Sort-Object) -join ',') 'valores iguais nos dois idiomas: exatamente a lista declarada'
+        $used = New-Object System.Collections.Generic.List[string]
+        foreach ($f in @('lib\Gui.ps1', 'lib\GuiModel.ps1')) { foreach ($mm in [regex]::Matches([IO.File]::ReadAllText((Join-Path $srcDir $f)), "Get-AtmText\s+'(gui\.[^']+)'")) { $used.Add($mm.Groups[1].Value) } }
+        $missing = @($used.ToArray() | Sort-Object -Unique | Where-Object { -not ($en.ContainsKey($_) -and $pt.ContainsKey($_)) })
+        Assert-True ($used.Count -gt 50 -and $missing.Count -eq 0) "chaves gui.* citadas no codigo ($($used.Count)) sem entrada: $($missing -join ',')"
+        $script:caseNote = "$($keys.Count) chaves gui.*; excecoes de igualdade: $($guiP6SameText -join ', ')"
+    }
+    Test-Case 'GUI P6' 'Escala de DPI (sem janela): Get-AtmGuiScaled multiplica por Dpi/96 em 96, 120, 144 e 192 para todas as larguras fixas da janela; DPI desconhecido conta como 96' {
+        $widths = @(200, 340, 220, 120, 160, 260, 640, 900, 150, 560, 250, 360, 920, 110)
+        foreach ($dpi in @(96, 120, 144, 192)) {
+            foreach ($w in $widths) { Assert-Eq (Get-AtmGuiScaled -Pixels $w -Dpi $dpi) ([int][math]::Round($w * $dpi / 96.0, [MidpointRounding]::AwayFromZero)) "$w px em $dpi DPI" }
+        }
+        Assert-True ((Get-AtmGuiScaled -Pixels 260 -Dpi 96) -eq 260 -and (Get-AtmGuiScaled -Pixels 260 -Dpi 120) -eq 325 -and (Get-AtmGuiScaled -Pixels 260 -Dpi 144) -eq 390 -and (Get-AtmGuiScaled -Pixels 260 -Dpi 192) -eq 520) '260 px: 260, 325, 390, 520'
+        Assert-True ((Get-AtmGuiScaled -Pixels 150 -Dpi 120) -eq 188 -and (Get-AtmGuiScaled -Pixels 110 -Dpi 120) -eq 138) 'meio pixel arredondado para cima (150 e 110 em 120 DPI)'
+        Assert-True ((Get-AtmGuiScaled -Pixels 900 -Dpi 0) -eq 900 -and (Get-AtmGuiScaled -Pixels 900 -Dpi -1) -eq 900) 'DPI desconhecido: 96'
+        Assert-Eq ([int](Initialize-AtmGuiSession -ConfigDir $cfgDir).Dpi) 96 'sessao nova: 96 ate o formulario existir'
+    }
+    Test-Case 'GUI P6' 'Textos visiveis (sem janela), nos dois idiomas: cabecalho, estados, monitoramento, botoes, intervalos e todas as telas (titulos, colunas, linhas acima da tabela, notas, avisos e mensagens) vem do catalogo do idioma, e nada do outro idioma; o verificador recusa um texto literal e um texto do outro idioma plantados' {
+        $inv = & $guiP5Inv
+        $pv = @(& $guiP4Preview $inv)
+        $views = & $guiP4bViews
+        $n = 0
+        $old = Get-AtmLanguage
+        try {
+            foreach ($pair in @(@('en-US', 'pt-BR'), @('pt-BR', 'en-US'))) {
+                Set-AtmLanguage -Requested $pair[0]
+                $cat = & $guiP6Catalog $pair[0] $pair[1]
+                $items = & $guiP6Texts $inv $pv $views
+                $n += $items.Count
+                $bad = & $guiP6CheckTexts $cat $items $guiP6Codes
+                Assert-True ($bad.Count -eq 0) ("$($pair[0]): " + ($bad -join ' ; '))
+                Assert-True ($cat.Values -gt 1000 -and $cat.Pieces -gt 100) "$($pair[0]): padroes ($($cat.Values) valores, $($cat.Pieces) pedacos do outro idioma)"
+                # The checker itself: a literal and a text of the other language are refused.
+                $other = $script:AtmMessages[$pair[1]]['gui.readOnly']
+                $planted = & $guiP6CheckTexts $cat @(@('plantado literal', 'Refresh now'), @('plantado outro idioma', $other)) $guiP6Codes
+                Assert-True (@($planted | Where-Object { $_.StartsWith('plantado literal: fora do catalogo') }).Count -eq 1 -and @($planted | Where-Object { $_.StartsWith('plantado outro idioma') }).Count -ge 1) ("$($pair[0]): plantados recusados (" + ($planted -join ' ; ') + ')')
+            }
+        } finally { Set-AtmLanguage -Requested $old }
+        Assert-True ($n -gt 400) "textos conferidos: $n"
+        $script:caseNote = "$n textos conferidos nos dois idiomas"
+    }
+    Test-Case 'GUI P6' 'Estatico (P6): nenhum nome novo na lista fechada (23) nem cmdlet novo; os arquivos reais sem cor fixa nem texto visivel literal; toda largura de coluna e de lista pela funcao de escala; AutoScaleMode Dpi; o Enter de um botao focado aperta o botao; plantados e recusados: Color com nome, FromArgb, ForeColor e BackColor fora de SystemColors, Text, AccessibleName, rotulo e coluna com texto literal; aceitos: SystemColors e texto vazio' {
+        Assert-True ($guiAllowedEngine.Count -eq 23) "lista: 23 nomes, nenhum novo na P6 ($($guiAllowedEngine -join ','))"
+        Assert-Eq ($guiAllowedCmdlets -join ',') 'Write-Host,New-Object,Add-Type,ConvertFrom-Json' 'cmdlets: nenhum novo'
+        $gp = Join-Path $srcDir 'lib\Gui.ps1'; $mp = Join-Path $srcDir 'lib\GuiModel.ps1'
+        $gt = [IO.File]::ReadAllText($gp); $mt = [IO.File]::ReadAllText($mp)
+        Assert-Eq ((& $guiCheck @($gp, $mp)) -join ' | ') '' 'arquivos reais dentro da lista fechada, sem cor fixa nem texto literal'
+        $colLines = @(($gt -split "`r?`n") | Where-Object { $_.Contains('Columns.Add(') })
+        Assert-True ($colLines.Count -eq 2 -and @($colLines | Where-Object { -not $_.Contains('Get-AtmGuiScaled') }).Count -eq 0) "toda coluna pela funcao de escala ($($colLines.Count) lugares)"
+        Assert-True ($gt.Contains('-ArgumentList (Get-AtmGuiScaled -Pixels $Width -Dpi $Dpi), (Get-AtmGuiScaled -Pixels $Height -Dpi $Dpi)') -and $gt.Contains('(Get-AtmGuiScaled -Pixels 920 -Dpi $dpi), 0') -and $gt.Contains('$guiInterval.Width = Get-AtmGuiScaled -Pixels 110 -Dpi $dpi')) 'as larguras fixas das listas, da faixa de telas e do intervalo pela funcao de escala'
+        Assert-True ([regex]::Matches($gt, '-Dpi \$dpi\b').Count -ge 5 -and $gt.Contains('$guiSession.Dpi = Get-AtmGuiDpi -Form $form') -and $gt.Contains("`$Form.PSObject.Properties['DeviceDpi']") -and $gt.Contains('$g.Dispose()')) 'o DPI vem do formulario (DeviceDpi, senao DpiX com o objeto liberado)'
+        Assert-True ($gt.Contains('$form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi')) 'AutoScaleMode Dpi'
+        Assert-True ($gt.Contains('if ($ac -is [System.Windows.Forms.Button]) {') -and $gt.Contains('if ($ac.Enabled) { $ac.PerformClick() }') -and $gt.Contains('if ($ac -eq $guiMonitor -or $ac -eq $guiInterval) {')) 'Enter: o botao focado e apertado; na caixa e no intervalo nada muda'
+        Assert-True ([regex]::Matches($gt, '\$guiForm\.ActiveControl = \$guiRows').Count -eq 2 -and $gt.IndexOf('.Focus()', [StringComparison]::Ordinal) -lt 0) 'o foco vai para a lista pelo controle ativo do formulario'
+        # The planted ones, in a copy (the real files never change).
+        $pl = Join-Path $sandbox 'gui-planted-p6'
+        [void][IO.Directory]::CreateDirectory($pl)
+        $gc = Join-Path $pl 'Gui.ps1'
+        [IO.File]::WriteAllText($gc, $gt, (New-Object Text.UTF8Encoding $false))
+        $mc = Join-Path $pl 'GuiModel.ps1'
+        $plants = @(
+            @(("`r`nfunction Test-AtmPlanted { " + '$b = $null; $b.ForeColor = [System.Drawing.Color]::Red' + " }`r`n"), 'cor fixa: [System.Drawing.Color]'),
+            @(("`r`nfunction Test-AtmPlanted { " + '$c = [System.Drawing.Color]::FromArgb(1, 2, 3); $c' + " }`r`n"), 'cor fixa: FromArgb'),
+            @(("`r`nfunction Test-AtmPlanted { " + '$b = $null; $c = $null; $b.BackColor = $c' + " }`r`n"), 'cor fora de SystemColors'),
+            @(("`r`nfunction Test-AtmPlanted { " + '$b = $null; $b.Text = ''Refresh''' + " }`r`n"), 'texto visivel literal: $b.Text'),
+            @(("`r`nfunction Test-AtmPlanted { " + '$b = $null; $x = 1; $b.AccessibleName = "Refresh $x"' + " }`r`n"), 'texto visivel literal: $b.AccessibleName'),
+            @(("`r`nfunction Test-AtmPlanted { " + 'New-AtmGuiLabel -Text ''Refresh'' -TabIndex 0' + " }`r`n"), 'texto visivel literal: New-AtmGuiLabel'),
+            @(("`r`nfunction Test-AtmPlanted { " + '$v = $null; $null = $v.Columns.Add(''Name'', 100)' + " }`r`n"), 'texto visivel literal: $v.Columns.Add'))
+        foreach ($pp in $plants) {
+            [IO.File]::WriteAllText($mc, $mt + $pp[0], (New-Object Text.UTF8Encoding $false))
+            $pv = & $guiCheck @($gc, $mc)
+            Assert-True (@($pv | Where-Object { $_.Contains($pp[1]) }).Count -ge 1) "plantado ($($pp[1])): recusado ($($pv -join ' | '))"
+        }
+        [IO.File]::WriteAllText($mc, $mt + ("`r`nfunction Test-AtmPlanted { " + '$b = $null; $b.BackColor = [System.Drawing.SystemColors]::Control; $b.ForeColor = [System.Drawing.SystemColors]::ControlText; $b.Text = ''''' + " }`r`n"), (New-Object Text.UTF8Encoding $false))
+        Assert-Eq ((& $guiCheck @($gc, $mc)) -join ' | ') '' 'aceitos: cores do sistema e texto vazio'
+    }
+    Test-Case 'GUI P6' 'Janela real, nos dois idiomas: todo Text, AccessibleName, cabecalho de coluna e item da lista de intervalos vem do catalogo do idioma do caso (nada do outro); todo controle com AccessibleName; TabIndex unico e na ordem visual em cada conteiner, e a sequencia de SelectNextControl; tudo pelo teclado (teclas 1 a 9, P, D, U, F5, Esc, Enter numa linha, Alt+M, Alt+I com a seta, as teclas de acesso dos botoes); Enter num botao focado aperta o botao, na caixa e no intervalo nada muda, na lista abre a linha; as larguras de coluna pela funcao de escala com o DPI do runner' {
+        if ($PSVersionTable.PSEdition -ne 'Desktop') { $script:caseSkipped = $true; $script:caseNote = 'PowerShell 7: janela real NAO_TESTADO nesta fase (GUI-D7)'; return }
+        $inv = & $guiP5Inv
+        $pv = @(& $guiP4Preview $inv)
+        $cx = Join-Path $sandbox 'gui-p6-window.clixml'
+        @{ Inv = $inv; Preview = $pv; Res = $tdRes } | Export-Clixml -LiteralPath $cx -Depth 20
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $child = Join-Path $sandbox 'gui-p6-window-child.ps1'
+        [IO.File]::WriteAllText($child, @'
+param([string]$Src, [string]$Lang, [string]$Sandbox, [string]$Out, [string]$InvFile)
+$ErrorActionPreference = 'Stop'
+foreach ($lib in @('Engine.Audit.ps1', 'Engine.Clean.ps1', 'Engine.Isolate.ps1', 'Engine.Diagnose.ps1', 'Report.ps1', 'Tui.ps1', 'GuiModel.ps1', 'Gui.ps1')) { . (Join-Path $Src ('lib\' + $lib)) }
+Set-AtmLanguage -Requested $Lang
+$res = [ordered]@{ env = (Test-AtmGuiEnvironment) }
+if ($null -eq $res.env) {
+    $names = { param($p, [switch]$Top) $h = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase); foreach ($e in @(Get-ChildItem -LiteralPath $p -Recurse:(-not $Top) -Force -ErrorAction SilentlyContinue)) { [void]$h.Add($e.FullName) }; , $h }
+    $kids = { @(Get-CimInstance -ClassName Win32_Process -Filter ('ParentProcessId = {0}' -f $PID) | ForEach-Object { [int]$_.ProcessId }) }
+    $temp = [IO.Path]::GetTempPath()
+    $b1 = & $names $Sandbox; $b2 = & $names (Join-Path $Src 'config'); $b3 = & $names $temp -Top
+    $k1 = & $kids
+    $data = Import-Clixml -LiteralPath $InvFile
+    $script:guiInv = $data.Inv; $script:guiPrev = $data.Preview; $script:guiRes = $data.Res
+    $script:AtmGuiEnabled = $true
+    # An exception in an event handler ends the child with its message, instead of a modal error dialog.
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.Application]::SetUnhandledExceptionMode([System.Windows.Forms.UnhandledExceptionMode]::ThrowException)
+    $script:clk = New-Object DateTime(2026, 11, 1, 10, 0, 0, [DateTimeKind]::Utc)
+    $script:AtmGuiClockSource = { $script:clk }
+    $script:guiInvCalls = 0; $script:guiPrevCalls = 0; $script:guiDiagCalls = 0
+    $script:AtmGuiInventorySource = { param($a) $script:guiInvCalls++; & $a.ProgressCallback 50 'C:\SENTINEL-PROGRESS\base'; $script:clk = $script:clk.AddSeconds(1); $script:guiInv }
+    $script:AtmGuiPreviewSource = { param($i, $a) $null = $i; $null = $a; $script:guiPrevCalls++; $script:guiPrev }
+    $script:AtmGuiDiagnoseSource = { param($a) $script:guiDiagCalls++; & $a.InventoryArgs.ProgressCallback 50 'C:\SENTINEL-PROGRESS\base'; $script:guiRes }
+    $script:guiTexts = New-Object System.Collections.Generic.List[object]
+    $script:guiNoName = New-Object System.Collections.Generic.List[string]
+    $script:guiSnaps = New-Object System.Collections.Generic.List[object]
+    $script:guiTabBad = New-Object System.Collections.Generic.List[string]
+    $script:guiTabInfo = New-Object System.Collections.Generic.List[string]
+    $script:guiSeq = New-Object System.Collections.Generic.List[string]
+    $script:guiMn = New-Object System.Collections.Generic.List[string]
+    $script:guiWidths = [ordered]@{}
+    $script:guiError = $null; $script:guiForm = $null; $script:guiH = $null; $script:guiTickerDisposed = $false; $script:guiDpi = $null
+    $hook = { param($f, $h)
+        $script:guiForm = $f; $script:guiH = $h
+        $h.Ticker.add_Disposed({ $script:guiTickerDisposed = $true })
+        $wp = [System.Windows.Forms.Control].GetMethod('WndProc', [Reflection.BindingFlags]'NonPublic, Instance')
+        $okd = [System.Windows.Forms.Form].GetMethod('OnKeyDown', [Reflection.BindingFlags]'NonPublic, Instance')
+        $find = { param([string]$N) $f.Controls.Find($N, $true)[0] }
+        # One message as the loop delivers it: PreProcessMessage on the target first, then its window procedure.
+        $send = { param($ctl, [int]$Msg, [int]$W, [long]$L)
+            $mm = [System.Windows.Forms.Message]::Create($ctl.Handle, $Msg, [IntPtr]$W, [IntPtr]$L)
+            if (-not $ctl.PreProcessMessage([ref]$mm)) { $null = $wp.Invoke($ctl, [object[]]@($mm)) } }
+        $target = { if ($null -ne $f.ActiveControl) { $f.ActiveControl } else { $f } }
+        # A key to the focused control: key down, then key up.
+        $key = { param([int]$Vk) $t = & $target; & $send $t 0x100 $Vk 1; if (-not $t.IsDisposed) { & $send $t 0x101 $Vk 0xC0000001 } }
+        # Alt and the access key of a text (the letter after &), as Windows sends it (WM_SYSCHAR).
+        $alt = { param([string]$Text) $i = $Text.IndexOf('&'); & $send (& $target) 0x106 ([int][char]::ToLowerInvariant($Text[$i + 1])) 0x20000001 }
+        $walk = { param([string]$Where, [switch]$Pairs)
+            $todo = New-Object System.Collections.Generic.Stack[object]
+            $todo.Push($f)
+            while ($todo.Count -gt 0) {
+                $x = $todo.Pop()
+                $nm = $Where + '/' + $(if ($x.Name) { $x.Name } else { $x.GetType().Name })
+                if ([string]$x.Text) { $script:guiTexts.Add(@(($nm + ' Text'), [string]$x.Text)) }
+                if ([string]$x.AccessibleName) { $script:guiTexts.Add(@(($nm + ' AccessibleName'), [string]$x.AccessibleName)) } else { $script:guiNoName.Add($nm) }
+                if ($x -is [System.Windows.Forms.ListView]) {
+                    foreach ($col in $x.Columns) { $script:guiTexts.Add(@(($nm + ' coluna'), [string]$col.Text)) }
+                    if ($x.Name -ceq 'Summary') { foreach ($it in $x.Items) { foreach ($si in $it.SubItems) { $script:guiTexts.Add(@(($nm + ' linha'), [string]$si.Text)) } } }
+                    if ($Pairs -and $x.Name -ceq 'Rows') { foreach ($it in $x.Items) { if ([string]$it.Text) { $script:guiTexts.Add(@(($nm + ' campo'), [string]$it.Text)) } } }
+                }
+                if ($x -is [System.Windows.Forms.ComboBox]) { foreach ($ci in $x.Items) { $script:guiTexts.Add(@(($nm + ' item'), [string]$ci)) } }
+                foreach ($ch in $x.Controls) { $todo.Push($ch) }
+            } }
+        $cw = { param([string]$N) (@((& $find $N).Columns | ForEach-Object { [int]$_.Width }) -join ',') }
+        $snap = { param([string]$Step)
+            $ac = $f.ActiveControl
+            $script:guiSnaps.Add([ordered]@{ step = $Step; active = $(if ($null -ne $ac) { [string]$ac.Name } else { '' }); checked = [bool](& $find 'Monitor').Checked; combo = [string](& $find 'MonitorInterval').SelectedItem
+                    interval = [int]$h.Session.IntervalSeconds; monitor = [bool]$h.Session.Monitor; title = [string](& $find 'ScreenTitle').Text; screen = [string](Get-AtmGuiNavTop -Nav $h.Session.Nav).Name
+                    stack = [int]$h.Session.Nav.Stack.Count; invCalls = $script:guiInvCalls; prevCalls = $script:guiPrevCalls; diagCalls = $script:guiDiagCalls; dr = [string]$f.DialogResult }) }
+        try {
+            # The dashboard after the first audit: the texts, the access keys, the tab structure and sequence, the DPI.
+            & $walk 'painel'
+            $todo = New-Object System.Collections.Generic.Stack[object]
+            $todo.Push($f)
+            while ($todo.Count -gt 0) { $x = $todo.Pop(); $tx = [string]$x.Text; $ai = $tx.IndexOf('&'); if ($ai -ge 0 -and $ai + 1 -lt $tx.Length) { $script:guiMn.Add([string][char]::ToLowerInvariant($tx[$ai + 1])) }; foreach ($ch in $x.Controls) { $todo.Push($ch) } }
+            foreach ($cn in @($f, (& $find 'Layout'), (& $find 'MonitorPanel'), (& $find 'Screens'), (& $find 'Buttons'))) {
+                $cname = $(if ($cn.Name) { $cn.Name } else { 'Form' })
+                $ch = @($cn.Controls | ForEach-Object { $_ })
+                $idx = @($ch | ForEach-Object { [int]$_.TabIndex })
+                if (@($idx | Sort-Object -Unique).Count -ne $idx.Count) { $script:guiTabBad.Add("${cname}: TabIndex repetido") }
+                for ($i = 1; $i -lt $idx.Count; $i++) { if ($idx[$i] -le $idx[$i - 1]) { $script:guiTabBad.Add("${cname}: $($ch[$i].Name) fora da ordem visual") } }
+                $script:guiTabInfo.Add($cname + ': ' + (@($ch | ForEach-Object { '{0}={1}' -f $_.Name, $_.TabIndex }) -join ' '))
+            }
+            $null = $f.SelectNextControl($null, $true, $true, $true, $true)
+            $fc = $f.ActiveControl
+            for ($i = 0; $i -lt 40 -and $null -ne $f.ActiveControl; $i++) {
+                $script:guiSeq.Add([string]$f.ActiveControl.Name)
+                $null = $f.SelectNextControl($f.ActiveControl, $true, $true, $true, $true)
+                if ($f.ActiveControl -eq $fc) { break }
+            }
+            $g = $f.CreateGraphics()
+            try { $dx = [int][math]::Round($g.DpiX) } finally { $g.Dispose() }
+            $script:guiDpi = [ordered]@{ session = [int]$h.Session.Dpi; device = $(if ($null -ne $f.PSObject.Properties['DeviceDpi']) { [int]$f.DeviceDpi } else { -1 }); dpiX = $dx }
+            $script:guiWidths['Summary'] = & $cw 'Summary'; $script:guiWidths['Classes'] = & $cw 'Classes'
+            $mon = & $find 'Monitor'; $lbl = & $find 'MonitorIntervalLabel'; $rows = & $find 'Rows'; $rb = & $find 'Refresh'
+            $f.ActiveControl = (& $find 'Summary'); & $snap 'inicio'
+            # A table screen, then Enter on the check box and on the interval: nothing opens (the old Enter opened the row).
+            & $key 0x32; & $snap 'k2'
+            & $walk 'usuarios'; $script:guiWidths['users'] = & $cw 'Rows'
+            & $alt $mon.Text; & $snap 'altM'
+            & $key 0x0D; & $snap 'enterCheck'
+            & $key 0x20; & $snap 'space1'
+            & $key 0x20; & $snap 'space2'
+            & $alt $lbl.Text; & $snap 'altI'
+            & $key 0x0D; & $snap 'enterCombo'
+            & $key 0x28; & $snap 'down'
+            & $key 0x32; & $snap 'k2combo'
+            # Enter on the list opens the row: the user's roots, then a root's detail; Esc goes back.
+            $f.ActiveControl = $rows; & $key 0x0D; & $snap 'enterUser'
+            & $key 0x0D; & $snap 'enterRoot'
+            & $walk 'detalhe' -Pairs; $script:guiWidths['detail'] = & $cw 'Rows'
+            & $key 0x1B; & $snap 'esc1'
+            & $key 0x1B; & $snap 'esc2'
+            foreach ($vk in @(0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39)) { & $key $vk; & $snap ('k' + [char]$vk) }
+            & $walk 'erros'; $script:guiWidths['errors'] = & $cw 'Rows'
+            & $key 0x50; & $snap 'kP'
+            & $walk 'preview'
+            & $key 0x31; & $snap 'k1'
+            & $key 0x44; & $snap 'kD'
+            & $walk 'diagnose'
+            & $key 0x0D; & $snap 'enterDiag'
+            & $key 0x1B; & $snap 'escDiag'
+            & $key 0x55; & $snap 'kU'
+            & $alt (& $find 'DiagRefresh').Text; & $snap 'altU'
+            & $key 0x74; & $snap 'f5'
+            & $alt $rb.Text; & $snap 'altR'
+            & $alt (& $find 'Screen2').Text; & $snap 'alt2'
+            # GUI-ENTER-ON-BUTTON: Enter on the focused Refresh, by the message path and straight to the form's KeyDown
+            # (the path the fix covers), then Space: one audit each, and the screen stays.
+            $f.ActiveControl = $rb; & $key 0x0D; & $snap 'enterRefresh'
+            $f.ActiveControl = $rb; $null = $okd.Invoke($f, [object[]]@([System.Windows.Forms.KeyEventArgs]::new([System.Windows.Forms.Keys]::Return))); & $snap 'enterRefreshKeyDown'
+            $f.ActiveControl = $rb; & $key 0x20; & $snap 'spaceRefresh'
+            $f.ActiveControl = (& $find 'Screen3'); & $key 0x0D; & $snap 'enterScreen3'
+            & $key 0x1B; & $snap 'escDash'
+            & $alt (& $find 'Close').Text; & $snap 'altC'
+        } catch { $script:guiError = $_.Exception.Message + ' @' + $_.InvocationInfo.ScriptLineNumber }
+        if ($f.DialogResult -eq [System.Windows.Forms.DialogResult]::None) { $f.Close() }
+    }
+    $id = { [pscustomobject]@{ Name = 'TEST\gui'; Sid = 'S-1-5-21-1-2-3-9301'; IsAdmin = $false; ElevationTypeRaw = 3; IntegrityRid = 8192; SessionId = 1 } }
+    $o = @(Invoke-AtmGuiCommand -IdentitySource $id -OnShown $hook 6>&1)
+    $res.code = @($o | Where-Object { $_ -is [int] })[-1]
+    # ToArray, not @(): on Windows PowerShell 5.1 the array subexpression over a generic list throws.
+    $res.texts = $script:guiTexts.ToArray()
+    $res.noName = $script:guiNoName.ToArray()
+    $res.snaps = $script:guiSnaps.ToArray()
+    $res.tabBad = $script:guiTabBad.ToArray()
+    $res.tabInfo = $script:guiTabInfo.ToArray()
+    $res.seq = $script:guiSeq.ToArray()
+    $res.mnemonics = $script:guiMn.ToArray()
+    $res.dpi = $script:guiDpi
+    $res.widths = $script:guiWidths
+    $res.error = $script:guiError
+    $res.tickerDisposed = [bool]$script:guiTickerDisposed
+    $res.closing = ($null -ne $script:guiH -and [bool]$script:guiH.Session.Closing)
+    $res.monitorAfter = ($null -ne $script:guiH -and [bool]$script:guiH.Session.Monitor)
+    $res.disposed = ($null -ne $script:guiForm -and [bool]$script:guiForm.IsDisposed)
+    $k2 = & $kids
+    $res.newProcesses = @($k2 | Where-Object { $k1 -notcontains $_ }).Count
+    $a1 = & $names $Sandbox; $a2 = & $names (Join-Path $Src 'config'); $a3 = & $names $temp -Top
+    $res.newSandbox = @($a1 | Where-Object { -not $b1.Contains($_) }).Count
+    $res.newConfig = @($a2 | Where-Object { -not $b2.Contains($_) }).Count
+    $res.newTemp = @($a3 | Where-Object { -not $b3.Contains($_) }).Count
+}
+($res | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $Out -Encoding UTF8
+'@, (New-Object Text.UTF8Encoding $true))
+        $wantSeq = 'Monitor,MonitorInterval,Screen1,Screen2,Screen3,Screen4,Screen5,Screen6,Screen7,Screen8,Screen9,ScreenP,ScreenD,Summary,Classes,Refresh,Close'
+        $notes = New-Object System.Collections.Generic.List[string]
+        foreach ($lang in @('en-US', 'pt-BR')) {
+            $other = $(if ($lang -ceq 'en-US') { 'pt-BR' } else { 'en-US' })
+            $out = Join-Path $sandbox ('gui-p6-window-' + $lang + '.json')
+            $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Lang $lang -Sandbox `"$sandbox`" -Out `"$out`" -InvFile `"$cx`"") -TimeoutSec 240
+            Assert-True ($r.Exit -eq 0 -and (Test-Path -LiteralPath $out -PathType Leaf)) "janela P6 ${lang}: processo filho saida $($r.Exit) $($r.Text)"
+            $j = Get-Content -LiteralPath $out -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($null -ne $j.env) { $script:caseSkipped = $true; $script:caseNote = "runner sem janela possivel ($($j.env)): NAO_TESTADO"; return }
+            Assert-True ($null -eq $j.error -and [int]$j.code -eq 0) "janela P6 ${lang}: sem erro em nenhum passo, saida 0 ($($j.error); $($j.code))"
+            # The expected texts, built while the case's language is active.
+            $old = Get-AtmLanguage
+            try {
+                Set-AtmLanguage -Requested $lang
+                $titles = @{}
+                foreach ($m in @(Get-AtmGuiNavItemList)) { $titles[[string]$m.Key] = Get-AtmText 'gui.screenTitle' $m.Screen.Title }
+                $diagTitle = Get-AtmText 'gui.screenTitle' (Get-AtmText 'tui.diag.title')
+            } finally { Set-AtmLanguage -Requested $old }
+            $cat = & $guiP6Catalog $lang $other
+            $items = New-Object System.Collections.Generic.List[object]
+            foreach ($t in @($j.texts)) { $items.Add(@([string]$t[0], [string]$t[1])) }
+            $bad = & $guiP6CheckTexts $cat $items.ToArray() $guiP6Codes
+            Assert-True ($items.Count -gt 150 -and $bad.Count -eq 0) "janela P6 ${lang}: $($items.Count) textos; fora do catalogo do idioma ou do outro idioma: $($bad -join ' ; ')"
+            Assert-Eq (@($j.noName) -join ', ') '' "janela P6 ${lang}: todo controle com AccessibleName"
+            Assert-Eq (@($j.tabBad) -join ' ; ') '' "janela P6 ${lang}: TabIndex unico por conteiner, na ordem visual ($(@($j.tabInfo) -join ' | '))"
+            Assert-Eq (@($j.seq) -join ',') $wantSeq "janela P6 ${lang}: sequencia de tabulacao no painel"
+            $mn = @($j.mnemonics)
+            Assert-True ($mn.Count -ge 15 -and @($mn | Sort-Object -Unique).Count -eq $mn.Count) "janela P6 ${lang}: teclas de acesso unicas ($($mn -join ','))"
+            $sn = @{}; foreach ($x in @($j.snaps)) { $sn[[string]$x.step] = $x }
+            Assert-Eq (@(@($j.snaps) | ForEach-Object { $_.step }) -join ',') 'inicio,k2,altM,enterCheck,space1,space2,altI,enterCombo,down,k2combo,enterUser,enterRoot,esc1,esc2,k3,k4,k5,k6,k7,k8,k9,kP,k1,kD,enterDiag,escDiag,kU,altU,f5,altR,alt2,enterRefresh,enterRefreshKeyDown,spaceRefresh,enterScreen3,escDash,altC' "janela P6 ${lang}: todos os passos"
+            $x = $sn['k2']; Assert-True ([string]$x.screen -ceq 'users' -and [string]$x.title -ceq $titles['2'] -and [string]$x.active -ceq 'Rows' -and [int]$x.stack -eq 2) "janela P6 ${lang}: tecla 2: usuarios, foco na lista ($($x.screen); $($x.active))"
+            $x = $sn['altM']; Assert-True ([bool]$x.checked -and [bool]$x.monitor -and [string]$x.active -ceq 'Monitor' -and [int]$x.stack -eq 2) "janela P6 ${lang}: Alt+M marca a caixa e a foca ($($x.checked); $($x.active))"
+            $x = $sn['enterCheck']; Assert-True ([bool]$x.checked -and [string]$x.active -ceq 'Monitor' -and [int]$x.stack -eq 2 -and [string]$x.screen -ceq 'users' -and [int]$x.invCalls -eq 1) "janela P6 ${lang}: Enter na caixa: nada muda, nada abre ($($x.checked); $($x.stack); $($x.screen))"
+            Assert-True (-not [bool]$sn['space1'].checked -and [bool]$sn['space2'].checked -and [string]$sn['space2'].active -ceq 'Monitor' -and [int]$sn['space2'].stack -eq 2) "janela P6 ${lang}: Espaco alterna a caixa ($($sn['space1'].checked), $($sn['space2'].checked))"
+            $x = $sn['altI']; Assert-True ([string]$x.active -ceq 'MonitorInterval' -and [string]$x.combo -ceq '60 s') "janela P6 ${lang}: Alt+I foca o intervalo ($($x.active))"
+            $x = $sn['enterCombo']; Assert-True ([string]$x.active -ceq 'MonitorInterval' -and [string]$x.combo -ceq '60 s' -and [int]$x.stack -eq 2 -and [string]$x.screen -ceq 'users') "janela P6 ${lang}: Enter no intervalo: nada muda, nada abre ($($x.combo); $($x.stack))"
+            $x = $sn['down']; Assert-True ([string]$x.combo -ceq '2 min' -and [int]$x.interval -eq 120 -and [string]$x.active -ceq 'MonitorInterval') "janela P6 ${lang}: a seta troca o intervalo ($($x.combo); $($x.interval))"
+            $x = $sn['k2combo']; Assert-True ([string]$x.screen -ceq 'users' -and [string]$x.combo -ceq '2 min' -and [int]$x.interval -eq 120) "janela P6 ${lang}: a tecla 2 com o foco no intervalo vai para a tela, sem mudar o intervalo ($($x.combo))"
+            Assert-True ([string]$sn['enterUser'].screen -ceq 'roots' -and [int]$sn['enterUser'].stack -eq 3 -and [string]$sn['enterRoot'].screen -ceq 'detail' -and [int]$sn['enterRoot'].stack -eq 4) "janela P6 ${lang}: Enter na lista abre a linha (raizes do usuario, detalhe) ($($sn['enterUser'].screen); $($sn['enterRoot'].screen))"
+            Assert-True ([int]$sn['esc1'].stack -eq 3 -and [string]$sn['esc2'].screen -ceq 'users' -and [int]$sn['esc2'].stack -eq 2) "janela P6 ${lang}: Esc volta uma tela de cada vez"
+            foreach ($k in @('3', '4', '5', '6', '7', '8', '9', 'P', '1')) { Assert-Eq ([string]$sn['k' + $k].title) $titles[$k] "janela P6 ${lang}: tecla $k" }
+            Assert-True ([int]$sn['kP'].prevCalls -eq 1 -and [int]$sn['k1'].stack -eq 1) "janela P6 ${lang}: P calcula o preview uma vez; 1 volta ao painel"
+            $x = $sn['kD']; Assert-True ([string]$x.title -ceq $diagTitle -and [int]$x.diagCalls -eq 1 -and [string]$x.active -ceq 'Rows') "janela P6 ${lang}: D abre o diagnose ($($x.title); $($x.diagCalls))"
+            Assert-True ([int]$sn['enterDiag'].stack -eq ([int]$x.stack + 1) -and [string]$sn['escDiag'].title -ceq $diagTitle -and [int]$sn['escDiag'].stack -eq [int]$x.stack) "janela P6 ${lang}: Enter numa linha do diagnose abre, Esc volta ($($sn['enterDiag'].screen))"
+            Assert-True ([int]$sn['kU'].diagCalls -eq 2 -and [int]$sn['altU'].diagCalls -eq 3 -and [int]$sn['altU'].invCalls -eq 1) "janela P6 ${lang}: U e Alt+U diagnosticam de novo ($($sn['kU'].diagCalls), $($sn['altU'].diagCalls))"
+            Assert-True ([int]$sn['f5'].invCalls -eq 2 -and [int]$sn['altR'].invCalls -eq 3 -and [string]$sn['alt2'].screen -ceq 'users' -and [int]$sn['alt2'].invCalls -eq 3) "janela P6 ${lang}: F5, Alt+R (atualizar) e Alt+2 ($($sn['f5'].invCalls), $($sn['altR'].invCalls), $($sn['alt2'].screen))"
+            foreach ($p in @(@('enterRefresh', 4), @('enterRefreshKeyDown', 5), @('spaceRefresh', 6))) {
+                $x = $sn[$p[0]]
+                Assert-True ([int]$x.invCalls -eq $p[1] -and [string]$x.screen -ceq 'users' -and [int]$x.stack -eq 2) "janela P6 ${lang}: $($p[0]) no botao Atualizar focado: um audit, a tela fica ($($x.invCalls); $($x.screen); $($x.stack))"
+            }
+            Assert-True ([string]$sn['enterScreen3'].screen -ceq 'projects' -and [int]$sn['enterScreen3'].invCalls -eq 6) "janela P6 ${lang}: Enter no botao 3 focado abre os projetos ($($sn['enterScreen3'].screen))"
+            Assert-True ([int]$sn['escDash'].stack -eq 1 -and [string]$sn['altC'].dr -ceq 'Cancel' -and [int]$sn['altC'].prevCalls -eq 1 -and [int]$sn['altC'].diagCalls -eq 3) "janela P6 ${lang}: Esc ao painel, Alt+C fecha ($($sn['altC'].dr))"
+            $dpi = [int]$j.dpi.session
+            Assert-True ($dpi -gt 0 -and ($dpi -eq [int]$j.dpi.device -or ([int]$j.dpi.device -lt 0 -and $dpi -eq [int]$j.dpi.dpiX))) "janela P6 ${lang}: DPI da sessao = DPI do formulario ($dpi; DeviceDpi $($j.dpi.device); DpiX $($j.dpi.dpiX))"
+            $sc = { param([int[]]$Px) (@($Px | ForEach-Object { Get-AtmGuiScaled -Pixels $_ -Dpi $dpi }) -join ',') }
+            $uw = @(([string]$j.widths.users) -split ',')
+            Assert-True ([string]$j.widths.Summary -ceq (& $sc @(200, 340)) -and [string]$j.widths.Classes -ceq (& $sc @(220, 120, 160)) -and [string]$j.widths.detail -ceq (& $sc @(260, 640)) -and [string]$j.widths.errors -ceq (& $sc @(900)) -and $uw.Count -ge 4 -and @($uw | Where-Object { [int]$_ -ne (Get-AtmGuiScaled -Pixels 150 -Dpi $dpi) }).Count -eq 0) "janela P6 ${lang}: larguras pela funcao de escala em $dpi DPI (painel $($j.widths.Summary) e $($j.widths.Classes); usuarios $($j.widths.users); detalhe $($j.widths.detail); erros $($j.widths.errors))"
+            Assert-True ([bool]$j.tickerDisposed -and [bool]$j.closing -and -not [bool]$j.monitorAfter -and [bool]$j.disposed) "janela P6 ${lang}: fechada com o ticker liberado e o monitoramento desligado"
+            Assert-True ([int]$j.newProcesses -eq 0 -and [int]$j.newSandbox -eq 0 -and [int]$j.newConfig -eq 0 -and [int]$j.newTemp -eq 0) "janela P6 ${lang}: nada deixado (processos $($j.newProcesses), sandbox $($j.newSandbox), configuracao $($j.newConfig), TEMP $($j.newTemp))"
+            $notes.Add("${lang}: DPI $dpi (DeviceDpi $($j.dpi.device), DpiX $($j.dpi.dpiX)), $($items.Count) textos, ordem de tabulacao $(@($j.seq) -join ' > ')")
+        }
+        $script:caseNote = 'janela real: ' + ($notes -join ' | ')
+    }
+    Test-Case 'GUI P6' 'Fechamento ponta a ponta na janela real, um processo filho por caminho e idioma (Esc no painel, Form.Close(), fechar durante um audit, durante o preview, durante o diagnose e com o monitoramento ligado logo depois de um tick): saida 0, ticker liberado e nenhum tick depois, nenhum processo filho, nenhum arquivo novo no sandbox, na configuracao ou no TEMP, nenhum valor novo em HKCU\Software\AgentTemp*; o tempo total medido' {
+        if ($PSVersionTable.PSEdition -ne 'Desktop') { $script:caseSkipped = $true; $script:caseNote = 'PowerShell 7: janela real NAO_TESTADO nesta fase (GUI-D7)'; return }
+        $inv = & $guiP5Inv
+        $pv = @(& $guiP4Preview $inv)
+        $cx = Join-Path $sandbox 'gui-p6-close.clixml'
+        @{ Inv = $inv; Preview = $pv; Res = $tdRes } | Export-Clixml -LiteralPath $cx -Depth 20
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $child = Join-Path $sandbox 'gui-p6-close-child.ps1'
+        [IO.File]::WriteAllText($child, @'
+param([string]$Src, [string]$Lang, [string]$Path, [string]$Sandbox, [string]$Out, [string]$InvFile)
+$ErrorActionPreference = 'Stop'
+foreach ($lib in @('Engine.Audit.ps1', 'Engine.Clean.ps1', 'Engine.Isolate.ps1', 'Engine.Diagnose.ps1', 'Report.ps1', 'Tui.ps1', 'GuiModel.ps1', 'Gui.ps1')) { . (Join-Path $Src ('lib\' + $lib)) }
+Set-AtmLanguage -Requested $Lang
+$res = [ordered]@{ env = (Test-AtmGuiEnvironment); path = $Path }
+if ($null -eq $res.env) {
+    $names = { param($p, [switch]$Top) $h = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase); foreach ($e in @(Get-ChildItem -LiteralPath $p -Recurse:(-not $Top) -Force -ErrorAction SilentlyContinue)) { [void]$h.Add($e.FullName) }; , $h }
+    $kids = { @(Get-CimInstance -ClassName Win32_Process -Filter ('ParentProcessId = {0}' -f $PID) | ForEach-Object { [int]$_.ProcessId }) }
+    # The product's keys under HKCU\Software, read only: every key and value name with its value.
+    $reg = {
+        $set = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase)
+        $sw = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software')
+        $todo = New-Object System.Collections.Generic.Stack[object]
+        foreach ($n in @($sw.GetSubKeyNames())) { if ($n -like 'AgentTemp*') { $sk = $sw.OpenSubKey($n); if ($null -ne $sk) { $todo.Push($sk) } } }
+        $sw.Close()
+        while ($todo.Count -gt 0) {
+            $k = $todo.Pop()
+            [void]$set.Add($k.Name)
+            foreach ($v in @($k.GetValueNames())) { [void]$set.Add($k.Name + '|' + $v + '=' + [string]$k.GetValue($v)) }
+            foreach ($n in @($k.GetSubKeyNames())) { $sk = $k.OpenSubKey($n); if ($null -ne $sk) { $todo.Push($sk) } }
+            $k.Close()
+        }
+        , $set }
+    $temp = [IO.Path]::GetTempPath()
+    $b1 = & $names $Sandbox; $b2 = & $names (Join-Path $Src 'config'); $b3 = & $names $temp -Top; $b4 = & $reg
+    $k1 = & $kids
+    $data = Import-Clixml -LiteralPath $InvFile
+    $script:guiInv = $data.Inv; $script:guiPrev = $data.Preview; $script:guiRes = $data.Res
+    $script:guiPath = $Path
+    $script:AtmGuiEnabled = $true
+    # An exception in an event handler ends the child with its message, instead of a modal error dialog.
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.Application]::SetUnhandledExceptionMode([System.Windows.Forms.UnhandledExceptionMode]::ThrowException)
+    $script:clk = New-Object DateTime(2026, 11, 1, 10, 0, 0, [DateTimeKind]::Utc)
+    $script:AtmGuiClockSource = { $script:clk }
+    $script:guiInvCalls = 0; $script:guiPrevCalls = 0; $script:guiDiagCalls = 0
+    $script:guiForm = $null; $script:guiH = $null; $script:guiDuring = $null; $script:guiSourceError = $null; $script:guiError = $null
+    $script:guiTickerDisposed = $false; $script:guiTick = $null; $script:guiTickerOn = $null; $script:guiAfter = $null; $script:guiAfterClose = $null; $script:guiAfterCalls = -1
+    $closeNow = { try { $script:guiForm.Close() } catch { $script:guiSourceError = $_.Exception.GetType().Name + ': ' + $_.Exception.Message; throw }
+        $script:guiDuring = [ordered]@{ dr = [string]$script:guiForm.DialogResult; closing = [bool]$script:guiH.Session.Closing; cancel = [bool]$script:guiH.Session.CancelRequested; diagCancel = [bool]$script:guiH.Session.DiagCancelRequested; previewBusy = [bool]$script:guiH.Session.PreviewBusy } }
+    # Paths audit, preview and diag: the window is asked to close in the middle of the call of F5, P or D; the cancel of
+    # the audit and of the diagnose comes from their next callback, and is not caught here.
+    $script:AtmGuiInventorySource = { param($a)
+        $script:guiInvCalls++
+        & $a.ProgressCallback 50 'C:\SENTINEL-PROGRESS\base'
+        if ($script:guiPath -ceq 'audit' -and $script:guiInvCalls -eq 2) { & $closeNow; & $a.ProgressCallback 60 'C:\SENTINEL-PROGRESS\base' }
+        $script:clk = $script:clk.AddSeconds(1)
+        $script:guiInv }
+    $script:AtmGuiPreviewSource = { param($i, $a) $null = $i; $null = $a
+        $script:guiPrevCalls++
+        if ($script:guiPath -ceq 'preview') { & $closeNow }
+        $script:guiPrev }
+    $script:AtmGuiDiagnoseSource = { param($a)
+        $script:guiDiagCalls++
+        & $a.InventoryArgs.ProgressCallback 50 'C:\SENTINEL-PROGRESS\base'
+        if ($script:guiPath -ceq 'diag') { & $closeNow; & $a.InventoryArgs.ProgressCallback 60 'C:\SENTINEL-PROGRESS\base' }
+        $script:guiRes }
+    $hook = { param($f, $h)
+        $script:guiForm = $f; $script:guiH = $h
+        $h.Ticker.add_Disposed({ $script:guiTickerDisposed = $true })
+        $wp = [System.Windows.Forms.Control].GetMethod('WndProc', [Reflection.BindingFlags]'NonPublic, Instance')
+        $send = { param($ctl, [int]$Msg, [int]$W, [long]$L)
+            $mm = [System.Windows.Forms.Message]::Create($ctl.Handle, $Msg, [IntPtr]$W, [IntPtr]$L)
+            if (-not $ctl.PreProcessMessage([ref]$mm)) { $null = $wp.Invoke($ctl, [object[]]@($mm)) } }
+        $key = { param([int]$Vk) $t = $(if ($null -ne $f.ActiveControl) { $f.ActiveControl } else { $f }); & $send $t 0x100 $Vk 1; if (-not $t.IsDisposed) { & $send $t 0x101 $Vk 0xC0000001 } }
+        try {
+            switch ($script:guiPath) {
+                'esc' { & $key 0x1B }
+                'close' { $f.Close() }
+                'audit' { & $key 0x74 }
+                'preview' { & $key 0x50 }
+                'diag' { & $key 0x44 }
+                'monitor' {
+                    $f.Controls.Find('Monitor', $true)[0].Checked = $true
+                    $script:clk = [datetime]$h.Session.NextDueUtc
+                    $script:guiTick = [string](& $h.Tick)
+                    $script:guiTickerOn = [bool]$h.Ticker.Enabled
+                    $f.Close()
+                }
+            }
+        } catch { $script:guiError = $_.Exception.Message + ' @' + $_.InvocationInfo.ScriptLineNumber }
+        $script:guiAfter = [ordered]@{ closing = [bool]$h.Session.Closing; monitor = [bool]$h.Session.Monitor; due = ($null -ne $h.Session.NextDueUtc); dr = [string]$f.DialogResult; tickRuns = [int]$h.Session.TickRuns; invCalls = $script:guiInvCalls }
+        # A tick that still arrives after the close, an hour later, does nothing.
+        $script:clk = $script:clk.AddHours(1)
+        try { $script:guiAfterClose = [string](& $h.Tick) } catch { $script:guiError = 'depois de fechar: ' + $_.Exception.Message }
+        $script:guiAfterCalls = $script:guiInvCalls
+        if ($f.DialogResult -eq [System.Windows.Forms.DialogResult]::None) { $f.Close() }
+    }
+    $id = { [pscustomobject]@{ Name = 'TEST\gui'; Sid = 'S-1-5-21-1-2-3-9301'; IsAdmin = $false; ElevationTypeRaw = 3; IntegrityRid = 8192; SessionId = 1 } }
+    $o = @(Invoke-AtmGuiCommand -IdentitySource $id -OnShown $hook 6>&1)
+    $res.code = @($o | Where-Object { $_ -is [int] })[-1]
+    $res.error = $script:guiError
+    $res.sourceError = $script:guiSourceError
+    $res.during = $script:guiDuring
+    $res.tick = $script:guiTick
+    $res.tickerOn = $script:guiTickerOn
+    $res.after = $script:guiAfter
+    $res.afterClose = $script:guiAfterClose
+    $res.afterCalls = $script:guiAfterCalls
+    $res.tickerDisposed = [bool]$script:guiTickerDisposed
+    $res.disposed = ($null -ne $script:guiForm -and [bool]$script:guiForm.IsDisposed)
+    $s = $(if ($null -ne $script:guiH) { $script:guiH.Session } else { @{} })
+    $res.session = [ordered]@{ refreshes = [int]$s.Refreshes; cancelled = [int]$s.Cancelled; previewCalls = [int]$s.PreviewCalls; previewFailures = [int]$s.PreviewFailures; previewKept = ($null -ne $s.Preview)
+        diagCalls = [int]$s.DiagCalls; diagCancelled = [int]$s.DiagCancelled; diagFailures = [int]$s.DiagFailures; diagKept = ($null -ne $s.Diag); tickRuns = [int]$s.TickRuns; closing = [bool]$s.Closing; monitor = [bool]$s.Monitor }
+    $res.invCalls = $script:guiInvCalls; $res.prevCalls = $script:guiPrevCalls; $res.diagCalls = $script:guiDiagCalls
+    $k2 = & $kids
+    $res.newProcesses = @($k2 | Where-Object { $k1 -notcontains $_ }).Count
+    $a1 = & $names $Sandbox; $a2 = & $names (Join-Path $Src 'config'); $a3 = & $names $temp -Top; $a4 = & $reg
+    $res.newSandbox = @($a1 | Where-Object { -not $b1.Contains($_) }).Count
+    $res.newConfig = @($a2 | Where-Object { -not $b2.Contains($_) }).Count
+    $res.newTemp = @($a3 | Where-Object { -not $b3.Contains($_) }).Count
+    $res.newRegistry = @($a4 | Where-Object { -not $b4.Contains($_) }).Count
+}
+($res | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $Out -Encoding UTF8
+'@, (New-Object Text.UTF8Encoding $true))
+        $total = [Diagnostics.Stopwatch]::StartNew()
+        $times = New-Object System.Collections.Generic.List[string]
+        foreach ($lang in @('en-US', 'pt-BR')) {
+            foreach ($path in @('esc', 'close', 'audit', 'preview', 'diag', 'monitor')) {
+                $out = Join-Path $sandbox ('gui-p6-close-' + $path + '-' + $lang + '.json')
+                $one = [Diagnostics.Stopwatch]::StartNew()
+                $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Lang $lang -Path $path -Sandbox `"$sandbox`" -Out `"$out`" -InvFile `"$cx`"") -TimeoutSec 180
+                $one.Stop()
+                $times.Add(('{0}/{1} {2} ms' -f $path, $lang, $one.ElapsedMilliseconds))
+                $w = "fechamento $path ${lang}"
+                Assert-True ($r.Exit -eq 0 -and (Test-Path -LiteralPath $out -PathType Leaf)) "${w}: processo filho saida $($r.Exit) $($r.Text)"
+                $j = Get-Content -LiteralPath $out -Raw -Encoding UTF8 | ConvertFrom-Json
+                if ($null -ne $j.env) { $script:caseSkipped = $true; $script:caseNote = "runner sem janela possivel ($($j.env)): NAO_TESTADO"; return }
+                $s = $j.session
+                Assert-True ($null -eq $j.error -and $null -eq $j.sourceError -and [int]$j.code -eq 0) "${w}: sem erro, saida 0 ($($j.error); $($j.sourceError); $($j.code))"
+                Assert-True ([bool]$j.after.closing -and -not [bool]$j.after.monitor -and -not [bool]$j.after.due -and [string]$j.after.dr -ceq 'Cancel') "${w}: fechada no caminho, sem monitoramento nem hora marcada ($($j.after.closing); $($j.after.monitor); $($j.after.dr))"
+                Assert-True ([bool]$j.tickerDisposed -and [string]$j.afterClose -ceq 'SKIPPED_NOT_DUE' -and [int]$j.afterCalls -eq [int]$j.after.invCalls -and [int]$s.tickRuns -eq [int]$j.after.tickRuns -and [bool]$s.closing -and -not [bool]$s.monitor) "${w}: ticker liberado, um tick depois de fechar nao faz nada ($($j.afterClose); audits $($j.afterCalls)/$($j.after.invCalls); ticks $($s.tickRuns)/$($j.after.tickRuns))"
+                Assert-True ([bool]$j.disposed) "${w}: formulario liberado"
+                Assert-True ([int]$j.newProcesses -eq 0 -and [int]$j.newSandbox -eq 0 -and [int]$j.newConfig -eq 0 -and [int]$j.newTemp -eq 0 -and [int]$j.newRegistry -eq 0) "${w}: nada deixado (processos $($j.newProcesses), sandbox $($j.newSandbox), configuracao $($j.newConfig), TEMP $($j.newTemp), registro $($j.newRegistry))"
+                switch ($path) {
+                    { $_ -ceq 'esc' -or $_ -ceq 'close' } { Assert-True ([int]$j.invCalls -eq 1 -and [int]$s.refreshes -eq 1 -and [int]$s.cancelled -eq 0 -and [int]$j.prevCalls -eq 0 -and [int]$j.diagCalls -eq 0) "${w}: so o audit de abertura ($($j.invCalls))" }
+                    'audit' { Assert-True ([int]$j.invCalls -eq 2 -and [int]$s.refreshes -eq 1 -and [int]$s.cancelled -eq 1 -and [string]$j.during.dr -ceq 'None' -and [bool]$j.during.closing -and [bool]$j.during.cancel) "${w}: o audit em curso e cancelado no callback seguinte e a janela fecha depois dele (audits $($j.invCalls), cancelados $($s.cancelled), durante: $($j.during.dr), $($j.during.cancel))" }
+                    'preview' { Assert-True ([int]$j.prevCalls -eq 1 -and [int]$s.previewCalls -eq 1 -and [int]$s.previewFailures -eq 0 -and [bool]$s.previewKept -and [string]$j.during.dr -ceq 'None' -and [bool]$j.during.previewBusy) "${w}: o preview termina e a janela fecha depois dele (chamadas $($s.previewCalls), guardado $($s.previewKept), durante: $($j.during.dr))" }
+                    'diag' { Assert-True ([int]$j.diagCalls -eq 1 -and [int]$s.diagCalls -eq 1 -and [int]$s.diagCancelled -eq 1 -and [int]$s.diagFailures -eq 0 -and -not [bool]$s.diagKept -and [string]$j.during.dr -ceq 'None' -and [bool]$j.during.diagCancel) "${w}: o diagnose e cancelado no callback seguinte, sem resultado, e a janela fecha (cancelados $($s.diagCancelled), durante: $($j.during.dr))" }
+                    'monitor' { Assert-True ([string]$j.tick -ceq 'REFRESHED' -and [bool]$j.tickerOn -and [int]$j.invCalls -eq 2 -and [int]$s.tickRuns -eq 1 -and [int]$s.refreshes -eq 2) "${w}: um tick audita com o ticker ligado, depois fechar ($($j.tick); $($j.tickerOn); $($j.invCalls))" }
+                }
+            }
+        }
+        $total.Stop()
+        $script:caseNote = ('12 processos em {0} ms: {1}' -f $total.ElapsedMilliseconds, ($times -join ', '))
     }
 
     # ------------------------------------------------------------------ scale

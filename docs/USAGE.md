@@ -737,7 +737,7 @@ Order of a run:
    a non-interactive session) or `GUI_WINFORMS_UNAVAILABLE`. It is never relaunched in another shell;
 4. Windows Forms is loaded, and the window opens.
 
-What the window shows in this version (phases P1 to P5):
+What the window shows in this version (phases P1 to P6):
 
 * **A header:**
   * the process identity and its elevation state (elevated administrator, token elevation type, integrity level);
@@ -824,7 +824,7 @@ What the window shows in this version (phases P1 to P5):
   * The digits `1` to `9` and `P` work inside the area too, and leave it for that screen (the TUI ignores them
     there).
 
-* **The live monitoring (phase P5),** under the buttons: a check box **Live monitoring** (**Monitoramento ao vivo**,
+* **The live monitoring (phase P5),** under the header (above the screen buttons since phase P6): a check box **Live monitoring** (**Monitoramento ao vivo**,
   access key `M`), an interval list and a status line.
   * The box is off every time the window opens, and the list shows 60 s. The list has six fixed values: 30 s, 60 s,
     2 min, 5 min, 10 min and 15 min. It cannot be typed into. Nothing is remembered.
@@ -851,7 +851,27 @@ it, with **Refresh** or `F5`, or when the live monitoring is on and its interval
 * Closing the window during an audit cancels it, and the window closes.
 * `F5` audits again from any screen. On `P` or `8`, it goes back to the dashboard (the preview is discarded); on any
   other screen, the screen stays. While an audit runs, the screen keys and buttons do nothing.
-* The tab order is fixed, and every control has an accessible name.
+
+**Language and accessibility (phase P6).**
+* **Language:** chosen when the command starts, by the same rules as the CLI: `-Lang pt-BR|en-US`, then `ATM_LANG`,
+  then the Windows UI language. The window has no language switch; close it and start it again with another `-Lang`.
+  Every text in it comes from the product's catalog in that language.
+* **Keyboard:** everything works without a mouse.
+  * `Tab` follows the visual order: the monitoring box and interval, the screen buttons, the lists, then **Refresh**
+    and **Close**.
+  * Screen keys `1` to `9`, `P` and `D`; `U` inside the diagnostics area; `F5` to audit; `Esc` to go back (it closes
+    the window on the dashboard).
+  * `Enter` on a row opens it. `Enter` on a focused button presses it, as Space does. On the monitoring box `Enter`
+    does nothing; Space toggles it.
+  * Access keys (`Alt` and the underlined letter): `Alt+M` the monitoring box, `Alt+I` the interval (then the arrow
+    keys change it), `Alt+1` to `Alt+9`, `Alt+P` and `Alt+D` the screen buttons, `Alt+U` diagnose again, and the
+    underlined letter of **Refresh** and **Close** (`R` and `C` in en-US, `A` and `F` in pt-BR).
+* **Screen readers:** every control, list and group has an accessible name from the catalog; the state, status, title
+  and message lines update their name with their text.
+* **High contrast:** the window uses only the system colors, so a Windows high-contrast theme applies to all of it.
+  Nothing is told by color alone.
+* **DPI:** the window scales with the display (125% to 200%). Fixed widths, such as the list columns, are scaled by the
+  window's DPI.
 
 **What it does not do:**
 * any action over a root or a category: clean, isolate, restore, purge or open its folder. The preview only shows

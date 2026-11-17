@@ -2,9 +2,9 @@
 
 Status: ACCEPTED for the technology and the architecture (maintainer decisions D-B and D-A, 2026-11-16).
 GUI-D1 to GUI-D6 are ACCEPTED (decided by the maintainer as recommended, 2026-11-16); GUI-D7 to GUI-D11 are ACCEPTED
-(technical decisions accepted by the auditor as recommended, 2026-11-16). Implemented, with the gate closed in every
-copy: P1 (the skeleton), P2 (the dashboard), P3 (the drill-down), P4a (the preview), P4b (the diagnose area) and P5
-(the live monitoring). P6 is not implemented.
+(technical decisions accepted by the auditor as recommended, 2026-11-16). P1 to P6 implemented, gate closed: P1 (the
+skeleton), P2 (the dashboard), P3 (the drill-down), P4a (the preview), P4b (the diagnose area), P5 (the live monitoring)
+and P6 (languages, accessibility and the close end to end). The gate stays closed in every copy.
 Date: 2026-11-16
 Phase: V0.2.1, phases P1 to P6 (section 10)
 
@@ -636,3 +636,64 @@ every copy:
   * the check box, the interval label and list name, the two interval formats;
   * the three status lines;
   * the slow and old `STALE` texts.
+
+## Implementation record: P6 (V021-P6, 2026-11-17)
+
+Phase P6: section 7 (languages and accessibility) and the close end to end. It is the last phase of V0.2.1. What P6
+implements, with the gate closed in every copy:
+
+* **One catalog for every visible text.**
+  * Every `Text`, `AccessibleName`, column header, title and message comes from `I18n.ps1`. The TUI's literal terms
+    the tables used (`SID`, `Roots`, `Root`, `MB`, `A/R/U/O`, `Flags`, `Preview`) are now `gui.term.*` keys. Their
+    values are the same in both languages, as the TUI writes them. The time line before the first audit comes from the
+    dashboard's own text instead of a literal `-`.
+  * The language is chosen at start (`-Lang`, then `ATM_LANG`, then the UI culture). There is no switch inside the
+    window.
+  * The suite declares the 12 `gui.*` keys whose value is the same in both languages: formats with no word of their own,
+    units, the product's name and the `gui.term.*` keys. Any other equal value fails.
+* **Accessibility.**
+  * **Names.** Every control has an `AccessibleName` from the catalog, panels included. A label that starts empty gets
+    a name of its own (screen title, message, progress).
+  * **Tab order.** The `TabIndex` values are unique in each container and follow the visual order: header, state,
+    monitoring, screen buttons, title, table, then Refresh and Close. The monitoring controls moved from under the
+    buttons to under the header, so the visual order and the tab order agree.
+  * **Focus.** The list gets the focus by `Form.ActiveControl`, not by `Focus()`. `Focus()` depends on the window being
+    the active one.
+  * **GUI-ENTER-ON-BUTTON (the fix).** `KeyDown` used to treat `Enter` as "open the selected row" whatever had the
+    focus. Now:
+    * on a focused button, `Enter` presses the button, like Space;
+    * on the check box or the interval it changes nothing and opens nothing (Space toggles the box);
+    * on the list it opens the row, as before.
+
+    On the real message path, Windows already presses a focused button with `Enter` before `KeyDown` runs, through the
+    form's default button. The bug showed when the key reached `KeyDown` directly. The real-window case covers both
+    paths.
+  * **Color.** Only system colors or each control's default. The static check refuses `Color.FromArgb`, `FromName`,
+    `FromKnownColor`, any `[System.Drawing.Color]` type, and `ForeColor` or `BackColor` set to anything other than
+    `[System.Drawing.SystemColors]`.
+  * **DPI.**
+    * `AutoScaleMode` stays `Dpi`.
+    * Every fixed width goes through one function, `Get-AtmGuiScaled` (pixels at 96 DPI × DPI / 96, rounded half away
+      from zero). That covers the column widths, the list sizes, the width of the screen-button strip and the interval
+      list.
+    * The DPI comes from `Get-AtmGuiDpi`: `DeviceDpi` where .NET has it, otherwise the `DpiX` of a graphics object of the
+      form, released at once. It is read once per window.
+* **The static check also refuses visible literals.** A `Text`, `AccessibleName` or `AccessibleDescription` set to a
+  non-empty literal, a label or list built with a literal text or name, and a column added with a literal header all
+  fail, each with a refused plant.
+* **Close end to end** on the real window (Windows PowerShell jobs, the gate opened only in each child, dubbed
+  sources). One child per path and language:
+  * `Esc` on the dashboard;
+  * `Form.Close()`;
+  * close during an audit, which is cancelled at its next callback;
+  * close during the preview, which finishes first;
+  * close during the diagnose, which is cancelled at its next callback;
+  * close with the monitoring on, right after a tick that audited.
+
+  In every path the window closes with exit code 0. The ticker is released, and a tick an hour later does nothing. No
+  child process is left behind, no new file appears in the sandbox, the configuration or TEMP, and no new key or value
+  appears under `HKCU\Software\AgentTemp*`. The product writes nothing to the registry. On PowerShell 7, or on a runner
+  where no window can open, the case is `NOT_TESTED`.
+* **What did not change:**
+  * the closed list (23 names) and the allowed cmdlets;
+  * the engines, the TUI, the reports and the launcher.

@@ -133,6 +133,15 @@ function Get-AtmGuiMonitorIntervals {
     return @(30, 60, 120, 300, 600, 900)
 }
 
+# ------------------------------------------------------------------ P6: the scale of fixed widths by DPI
+function Get-AtmGuiScaled {
+    # A fixed size in pixels at 96 DPI (100%), at the window's -Dpi: Pixels x Dpi / 96, rounded half away from zero (the
+    # list widths and the widths of their columns, which WinForms does not scale by itself). An unknown DPI counts as 96.
+    param([int]$Pixels, [int]$Dpi)
+    if ($Dpi -le 0) { $Dpi = 96 }
+    return [int][math]::Round(($Pixels * $Dpi) / 96.0, [MidpointRounding]::AwayFromZero)
+}
+
 function Format-AtmGuiInterval {
     # An interval as the window writes it: up to a minute in seconds (30 s, 60 s), then in minutes (2 min to 15 min).
     param([int]$Seconds)
@@ -197,13 +206,13 @@ function Get-AtmGuiNavItemList {
         @{ Key = '1'; Label = (Get-AtmText 'menu.dashboard'); Screen = @{ Name = 'dashboard'; Title = (Get-AtmText 'menu.dashboard') } }
         @{ Key = '2'; Label = (Get-AtmText 'menu.users'); Screen = @{ Name = 'users'; Title = (Get-AtmText 'menu.users') } }
         @{ Key = '3'; Label = (Get-AtmText 'menu.projects'); Screen = @{ Name = 'projects'; Title = (Get-AtmText 'menu.projects') } }
-        @{ Key = '4'; Label = (Get-AtmText 'menu.roots'); Screen = @{ Name = 'roots'; Title = 'Roots' } }
+        @{ Key = '4'; Label = (Get-AtmText 'menu.roots'); Screen = @{ Name = 'roots'; Title = (Get-AtmText 'gui.term.roots') } }
         @{ Key = '5'; Label = 'ACTIVE_EVIDENCE'; Screen = @{ Name = 'roots'; Title = 'ACTIVE_EVIDENCE'; Filter = @{ Class = 'ACTIVE_EVIDENCE' } } }
         @{ Key = '6'; Label = 'RECENT'; Screen = @{ Name = 'roots'; Title = 'RECENT'; Filter = @{ Class = 'RECENT' } } }
         @{ Key = '7'; Label = 'LIVENESS_UNKNOWN'; Screen = @{ Name = 'roots'; Title = 'LIVENESS_UNKNOWN'; Filter = @{ Class = 'LIVENESS_UNKNOWN' } } }
         @{ Key = '8'; Label = (Get-AtmText 'menu.blocked'); Screen = @{ Name = 'gates'; Title = (Get-AtmText 'menu.blockedTitle'); Filter = @{ Category = 'BLOCKED' } } }
         @{ Key = '9'; Label = (Get-AtmText 'menu.errors'); Screen = @{ Name = 'errors'; Title = (Get-AtmText 'menu.errorsTitle') } }
-        @{ Key = 'P'; Label = (Get-AtmText 'menu.preview'); Screen = @{ Name = 'gates'; Title = 'Preview'; Filter = @{ Category = $null } } }
+        @{ Key = 'P'; Label = (Get-AtmText 'menu.preview'); Screen = @{ Name = 'gates'; Title = (Get-AtmText 'gui.term.preview'); Filter = @{ Category = $null } } }
         @{ Key = 'D'; Label = (Get-AtmText 'menu.diagnose'); Screen = @{ Name = 'diag'; Title = (Get-AtmText 'tui.diag.title') } }
     )
 }
@@ -235,7 +244,7 @@ function Get-AtmGuiUserTable {
         }
     }
     return [pscustomobject]@{
-        Columns = @((Get-AtmText 'col.user'), 'SID', (Get-AtmText 'col.status'), 'Roots', (Get-AtmText 'col.files'), 'MB', 'A/R/U/O')
+        Columns = @((Get-AtmText 'col.user'), (Get-AtmText 'gui.term.sid'), (Get-AtmText 'col.status'), (Get-AtmText 'gui.term.roots'), (Get-AtmText 'col.files'), (Get-AtmText 'gui.col.mb'), (Get-AtmText 'gui.term.aruo'))
         Rows = $rows.ToArray(); Items = $items.ToArray()
     }
 }
@@ -265,7 +274,7 @@ function Get-AtmGuiProjectTable {
         $items.Add([pscustomobject]@{ Kind = 'project'; Project = $grp[0].Project; Slug = $(if ($grp[0].ProjectIdentified) { $null } else { $grp[0].Slug }); Sid = $grp[0].Sid; ProfilePath = $grp[0].ProfilePath; UserName = $grp[0].UserName })
     }
     return [pscustomobject]@{
-        Columns = @((Get-AtmText 'col.project'), (Get-AtmText 'col.user'), 'Roots', (Get-AtmText 'col.files'), 'MB', (Get-AtmText 'col.newest'))
+        Columns = @((Get-AtmText 'col.project'), (Get-AtmText 'col.user'), (Get-AtmText 'gui.term.roots'), (Get-AtmText 'col.files'), (Get-AtmText 'gui.col.mb'), (Get-AtmText 'col.newest'))
         Rows = $rows.ToArray(); Items = $items.ToArray()
     }
 }
@@ -293,7 +302,7 @@ function Get-AtmGuiRootTable {
         $items.Add([pscustomobject]@{ Kind = 'root'; Partition = $p })
     }
     return [pscustomobject]@{
-        Columns = @((Get-AtmText 'col.class'), (Get-AtmText 'col.agent'), (Get-AtmText 'col.user'), (Get-AtmText 'col.project'), 'Root', 'MB', (Get-AtmText 'col.files'), (Get-AtmText 'col.newest'), 'Flags')
+        Columns = @((Get-AtmText 'col.class'), (Get-AtmText 'col.agent'), (Get-AtmText 'col.user'), (Get-AtmText 'col.project'), (Get-AtmText 'gui.term.root'), (Get-AtmText 'gui.col.mb'), (Get-AtmText 'col.files'), (Get-AtmText 'col.newest'), (Get-AtmText 'gui.term.flags'))
         Rows = $rows.ToArray(); Items = $items.ToArray()
     }
 }
@@ -322,7 +331,7 @@ function Get-AtmGuiPreviewTable {
         $items.Add([pscustomobject]@{ Kind = 'root'; Partition = $p; Gate = $r.Gate })
     }
     return [pscustomobject]@{
-        Columns = @((Get-AtmText 'col.category'), (Get-AtmText 'col.user'), 'Root', 'MB', (Get-AtmText 'col.reasonReq'))
+        Columns = @((Get-AtmText 'col.category'), (Get-AtmText 'col.user'), (Get-AtmText 'gui.term.root'), (Get-AtmText 'gui.col.mb'), (Get-AtmText 'col.reasonReq'))
         Rows = $rows.ToArray(); Items = $items.ToArray()
     }
 }
@@ -349,7 +358,7 @@ function Get-AtmGuiRootDetail {
     $pairs = New-Object System.Collections.Generic.List[object]
     # The value as the TUI writes it ('{0,-26}: {1}' formats with the current culture).
     foreach ($r in $raw) { $pairs.Add([pscustomobject]@{ Key = $r[0]; Label = (Get-AtmText $r[0]); Value = ('{0}' -f $r[1]) }) }
-    if ($Gate) { $pairs.Add([pscustomobject]@{ Key = 'preview'; Label = 'Preview'; Value = ('{0} - {1}' -f $Gate.Category, ((@($Gate.Reasons) + @($Gate.Requirements)) -join '; ')) }) }
+    if ($Gate) { $pairs.Add([pscustomobject]@{ Key = 'preview'; Label = (Get-AtmText 'gui.term.preview'); Value = ('{0} - {1}' -f $Gate.Category, ((@($Gate.Reasons) + @($Gate.Requirements)) -join '; ')) }) }
     $L = New-Object System.Collections.Generic.List[string]
     $L.Add('')
     $L.Add((Get-AtmText 'audit.evidence'))

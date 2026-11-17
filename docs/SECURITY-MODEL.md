@@ -52,7 +52,7 @@ change it; enabling deletion requires a code change in the administrator-owned, 
 released under a specific authorization. The automated suite flips it only in its own process, against its
 isolated sandbox.
 
-## Desktop GUI gate (V0.2.1 phases P1 to P5)
+## Desktop GUI gate (V0.2.1 phases P1 to P6)
 
 * **The seventh gate:** `$script:AtmGuiEnabled`, `$false` in every shipped copy (maintainer decision D-A,
   [ADR-0014](adr/ADR-0014-desktop-gui-winforms.md)). It is a single assignment in `lib\Gui.ps1`, with no option,
@@ -133,6 +133,16 @@ isolated sandbox.
   * the intervals are fixed (30 seconds to 15 minutes; GUI-D10). A slow audit makes the next one wait twice its
     duration, so the window never audits back to back; a failure keeps the result and shows only the exception code.
     The closed list and the allowed cmdlets do not change.
+* **P6, languages, accessibility and the close:**
+  * closing the window leaves nothing behind: no process, file, registry value or timer. The suite checks every close
+    path on the real window, in both languages, one child process each: `Esc` on the dashboard, `Form.Close()`, and a
+    close during an audit, during the preview, during the diagnose and with the monitoring on right after a tick. In each,
+    the exit code is 0 and the ticker is released, and a tick an hour later does nothing. No child process is left, no
+    new file appears in the sandbox, the configuration or TEMP, and no new key or value appears under
+    `HKCU\Software\AgentTemp*`. The GUI files write nothing to the registry;
+  * every visible text comes from the catalog, and only system colors are used. The static test refuses a fixed color
+    or a visible literal. Neither changes what the window may call: the closed list and the allowed cmdlets do not
+    change.
 
 ## Clean gates (all must pass, re-run immediately before each deletion)
 
