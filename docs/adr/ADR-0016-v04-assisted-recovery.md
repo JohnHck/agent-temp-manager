@@ -1,6 +1,6 @@
 # ADR-0016: Assisted recovery (V0.4)
 
-Status: ACCEPTED (V04-D1 to V04-D8 approved as recommended, 2026-11-17); R0 implemented
+Status: ACCEPTED (V04-D1 to V04-D8 decided 2026-11-17: D3 (b) elevation on demand through UAC; the others as recommended); R0 implemented
 Date: 2026-11-17
 Phase: V0.4 (phases R0 to R6 below, each a future round with its own contract and tests)
 
@@ -312,9 +312,21 @@ None is decided by this record.
 
 ## R0 implementation record (2026-11-17)
 
-The maintainer approved V04-D1 to V04-D8 as recommended on 2026-11-17. R0 is the only phase implemented. It adds no
-gate, opens none, and changes no finding state, eligibility, B1 or RECENT rule: every signal below is evidence in the
-diagnose, and none of them authorizes anything.
+The maintainer decided V04-D1 to V04-D8 on 2026-11-17. Seven are as recommended in section 8.
+
+**V04-D3 is (b), elevation on demand through UAC, not the recommended (a).** Sections 3 and 8 still show the comparison
+and the recommendation as they were proposed; this record is where the choice is written down.
+
+* **What (b) means.** The non-elevated tool relaunches the installed launcher through UAC with fixed arguments (section
+  3).
+* **Where it lands.** Phase R4 covers (b): the launcher in `install/` and `src/bin/`, with these work items:
+  * PRIV-4: prompt outcomes;
+  * PRIV-5: requester and acting identity;
+  * PRIV-7: trusted code only.
+* **R0 does not change.** It elevates nothing.
+
+R0 is the only phase implemented. It adds no gate, opens none, and changes no finding state, eligibility, B1 or RECENT
+rule: every signal below is evidence in the diagnose, and none of them authorizes anything.
 
 **What is read, and how.**
 

@@ -343,7 +343,7 @@ changes, nothing outside an agent's temporary area.
 
 ## V0.4 — Assisted recovery
 
-**Status: accepted in [ADR-0016](adr/ADR-0016-v04-assisted-recovery.md) (V04-D1 to V04-D8 approved as recommended, 2026-11-17). Phase R0 is implemented: read-only service fault signals in the diagnose, which authorize nothing. Phases R1 to R6 are not implemented, and no recovery operation exists.** It lands on `main` under the order rule above: dark, with its acceptance proven in CI.
+**Status: accepted in [ADR-0016](adr/ADR-0016-v04-assisted-recovery.md) (V04-D1 to V04-D8 decided 2026-11-17: D3 (b) elevation on demand through UAC; the others as recommended). Phase R0 is implemented: read-only service fault signals in the diagnose, which authorize nothing. Phases R1 to R6 are not implemented, and no recovery operation exists.** It lands on `main` under the order rule above: dark, with its acceptance proven in CI.
 
 **Objectives.** Help recover services and agent environments that are stuck or broken, through reversible steps that
 the user authorizes one at a time.
