@@ -20,6 +20,11 @@
 # Phase P4b: the diagnose area (D), the TUI's screens over the schema view of one diagnose result. The diagnose runs
 # only on request: D runs it when the session has no result yet, U (inside the area) runs it again; an audit keeps it.
 # The features behind the V0.2 gates are shown as disabled in this version; nothing is exported or acted on.
+# Phase P5: the live monitoring (GUI-D2, GUI-D3, GUI-D10). Off when the window opens, 60 s by default, nothing kept for
+# the next window. One ticker of the form, created in one place, only wakes a check: Invoke-AtmGuiTick decides by the
+# session's NextDueUtc and runs the audit on the F5 path (never the diagnose), keeping the screen; a tick while anything
+# runs is dropped, never queued. A slow audit, an old view or a failure marks the view STALE; closing the window stops
+# and releases the ticker. No process, job, runspace or thread, and nothing is written.
 
 # Release gate of the desktop GUI (D-A). Closed in every distributed copy: `agent-temp gui` opens no window and loads no
 # WinForms assembly. Tests open it only in their own process memory.
@@ -34,13 +39,25 @@ $script:AtmGuiExitEnvironment = 8
 # source: called with the inventory arguments (a hashtable that carries the ProgressCallback); returns an inventory or
 # throws. Preview source (P4a): called with the session's inventory and inventory arguments; returns the preview rows or
 # throws. Diagnose source (P4b): called with the diagnose arguments (InventoryArgs, which carries the ProgressCallback);
-# returns a diagnose result or throws.
+# returns a diagnose result or throws. Clock source (P5): returns the current time as a UTC [datetime]; used only for
+# "now" (the audit time, the duration of a refresh and the live monitoring's schedule).
 $script:AtmGuiApartmentSource = $null
 $script:AtmGuiDesktopSource = $null
 $script:AtmGuiAssemblyLoader = $null
 $script:AtmGuiInventorySource = $null
 $script:AtmGuiPreviewSource = $null
 $script:AtmGuiDiagnoseSource = $null
+$script:AtmGuiClockSource = $null
+
+# P5: a wake of the ticker this close to the due time counts as due (the ticker and the clock have different
+# granularity), in milliseconds.
+$script:AtmGuiTickToleranceMs = 500
+
+function Get-AtmGuiNow {
+    # The current time in UTC, from the clock seam in tests.
+    if ($null -ne $script:AtmGuiClockSource) { return [datetime](& $script:AtmGuiClockSource) }
+    return [datetime]::UtcNow
+}
 
 function Test-AtmGuiEnvironment {
     # $null when a window can be shown here, otherwise the reason code. Loads nothing and changes nothing.
@@ -88,7 +105,105 @@ function Initialize-AtmGuiSession {
         # P4b: the diagnose result (New-AtmGuiDiagState; an audit keeps it), a run in progress, a close requested during
         # it, the counters and the percentage of its inventory phase.
         Diag = $null; DiagBusy = $false; DiagCancelRequested = $false; CloseAfterDiag = $false; DiagCalls = 0; DiagFailures = 0; DiagCancelled = 0; DiagPercent = -1
+        # P5: the live monitoring, off and at 60 s when the window opens (nothing is remembered); the time the next tick
+        # may audit ($null: none), whether that time is the backoff after a slow audit, why the view is STALE besides a
+        # failure (SLOW, OLD or $null), the duration of the last audit, a close in progress, and the tick counters.
+        Monitor = $false; IntervalSeconds = 60; NextDueUtc = $null; Backoff = $false; StaleReason = $null; LastDurationSeconds = $null; Closing = $false
+        Ticks = 0; TickRuns = 0; TicksNotDue = 0; TicksBusy = 0; TicksBackoff = 0
     }
+}
+
+function Set-AtmGuiMonitor {
+    # The live monitoring's check box (GUI-D2). On: the first tick is due one interval from -Now (turning it on audits
+    # nothing). Off: nothing is due; an audit in progress ends normally; the age of the view marks nothing.
+    param([hashtable]$Session, [bool]$On, [datetime]$Now)
+    $Session.Monitor = ($On -and -not $Session.Closing)
+    $Session.Backoff = $false
+    if ($Session.Monitor) { $Session.NextDueUtc = $Now.AddSeconds([int]$Session.IntervalSeconds) }
+    else {
+        $Session.NextDueUtc = $null
+        if ($Session.StaleReason -ceq 'OLD') { $Session.StaleReason = $null }
+    }
+}
+
+function Set-AtmGuiMonitorInterval {
+    # The interval list (one of Get-AtmGuiMonitorIntervals, nothing else). With the monitoring on, the count starts again
+    # from -Now. Returns $false (and changes nothing) for any other value.
+    param([hashtable]$Session, [int]$Seconds, [datetime]$Now)
+    if (@(Get-AtmGuiMonitorIntervals) -notcontains $Seconds) { return $false }
+    $Session.IntervalSeconds = $Seconds
+    if ($Session.Monitor) {
+        $Session.NextDueUtc = $Now.AddSeconds($Seconds)
+        $Session.Backoff = $false
+    }
+    return $true
+}
+
+function Update-AtmGuiRefreshTiming {
+    # After an audit (a tick or F5), from its start and end: the duration is kept; with the monitoring on, an audit slower
+    # than half the interval marks the view STALE (SLOW) and the next tick waits max(interval, 2 x duration) from the
+    # end (the backoff); a good, fast audit clears both. A failure keeps the failure's mark and is tried again one
+    # interval later, as any tick. A cancelled or ignored audit changes nothing.
+    param([hashtable]$Session, [string]$Result, [datetime]$StartUtc, [datetime]$EndUtc)
+    if ($Result -cne 'OK' -and $Result -cne 'FAILED') { return }
+    $d = ($EndUtc - $StartUtc).TotalSeconds
+    if ($d -lt 0) { $d = 0 }
+    $Session.LastDurationSeconds = $d
+    $iv = [int]$Session.IntervalSeconds
+    $wait = $iv
+    if ($Result -ceq 'OK') {
+        if ($Session.Monitor -and $d -gt ($iv / 2)) {
+            $Session.StaleReason = 'SLOW'
+            $Session.Backoff = $true
+            $wait = [math]::Max([double]$iv, 2 * $d)
+        } else {
+            $Session.StaleReason = $null
+            $Session.Backoff = $false
+        }
+    } else { $Session.Backoff = $false }
+    if ($Session.Monitor -and -not $Session.Closing) { $Session.NextDueUtc = $EndUtc.AddSeconds($wait) }
+}
+
+function Invoke-AtmGuiTick {
+    # The one decision of the live monitoring (ADR-0014 section 5), testable without a window; the ticker's handler only
+    # calls it. -Now: the time of this wake. First the age of the view is checked (on every tick, also the skipped ones):
+    # with the monitoring on, no good audit for more than twice the interval marks it STALE (OLD). Then it returns:
+    #  SKIPPED_NOT_DUE  no time is due (off or closing), or -Now is before NextDueUtc: nothing is called;
+    #  SKIPPED_BACKOFF  -Now is before NextDueUtc set by the backoff of a slow audit: nothing is called;
+    #  SKIPPED_BUSY     an audit, the preview or a D or U run is in progress: dropped, never queued;
+    #  REFRESHED        the audit ran (Invoke-AtmGuiRefresh, the F5 path) and replaced the result;
+    #  FAILED           the audit failed: the earlier result stays, STALE with the exception code only;
+    #  CANCELLED        the window was closed during the audit (it stops at its next callback).
+    # The screen stays (unlike F5 on a preview screen): it is computed again over the new result, and a detail whose root
+    # is gone goes back to its list (P3). On a preview screen (P, 8 or a detail opened from them) the same tick computes
+    # the preview again, and its time counts in the duration; on any other screen the audit has discarded the kept
+    # preview. The kept result of D and U is never touched by a tick (GUI-D3). -Pump: the progress callback's pump;
+    # -OnStart: just before the audit, only when it runs; -OnPreviewStart: just before the preview of a preview screen.
+    param([hashtable]$Session, [datetime]$Now, [scriptblock]$Pump, [scriptblock]$OnStart, [scriptblock]$OnPreviewStart)
+    $Session.Ticks++
+    $iv = [int]$Session.IntervalSeconds
+    if ($Session.Monitor -and $null -ne $Session.Inventory -and -not $Session.FailureType -and $null -eq $Session.StaleReason -and $null -ne $Session.RefreshedUtc -and ($Now - [datetime]$Session.RefreshedUtc).TotalSeconds -gt (2 * $iv)) {
+        $Session.StaleReason = 'OLD'
+    }
+    if (-not $Session.Monitor -or $Session.Closing -or $null -eq $Session.NextDueUtc) { $Session.TicksNotDue++; return 'SKIPPED_NOT_DUE' }
+    if ($Now.AddMilliseconds($script:AtmGuiTickToleranceMs) -lt [datetime]$Session.NextDueUtc) {
+        if ($Session.Backoff) { $Session.TicksBackoff++; return 'SKIPPED_BACKOFF' }
+        $Session.TicksNotDue++
+        return 'SKIPPED_NOT_DUE'
+    }
+    if ($Session.Busy -or $Session.PreviewBusy -or $Session.DiagBusy) { $Session.TicksBusy++; return 'SKIPPED_BUSY' }
+    $onPreview = $false
+    foreach ($sc in $Session.Nav.Stack) { if ([string]$sc.Name -ceq 'gates') { $onPreview = $true } }
+    $Session.TickRuns++
+    if ($null -ne $OnStart) { & $OnStart }
+    $r = Invoke-AtmGuiRefresh -Session $Session -Pump $Pump
+    if ($r -ceq 'OK' -and $onPreview -and -not $Session.Closing) { $null = Invoke-AtmGuiPreview -Session $Session -OnStart $OnPreviewStart }
+    Update-AtmGuiRefreshTiming -Session $Session -Result $r -StartUtc $Now -EndUtc (Get-AtmGuiNow)
+    if ($r -ceq 'IGNORED') { $Session.TicksBusy++; return 'SKIPPED_BUSY' }
+    if ($r -ceq 'CANCELLED') { return 'CANCELLED' }
+    Invoke-AtmGuiNavRefreshed -Nav $Session.Nav -Inventory $Session.Inventory -PreviewDiscarded $false -Preview $Session.Preview -Diag $Session.Diag
+    if ($r -ceq 'OK') { return 'REFRESHED' }
+    return 'FAILED'
 }
 
 function Invoke-AtmGuiDiagnose {
@@ -187,7 +302,8 @@ function Invoke-AtmGuiRefresh {
     #  OK         the result replaces the earlier one;
     #  IGNORED    an audit already runs (a request during it is dropped, never queued);
     #  CANCELLED  a close request, honoured at the next callback; the earlier result stays;
-    #  FAILED     the earlier result stays, and only the exception type is kept (never its message).
+    #  FAILED     the earlier result stays, and only the exception code of its type is kept (never its message; P5: the
+    #             code, as the diagnose keeps it, ConvertTo-AtmExceptionCode).
     param([hashtable]$Session, [scriptblock]$Pump)
     if ($Session.Busy -or $Session.PreviewBusy -or $Session.DiagBusy) { $Session.Ignored++; return 'IGNORED' }
     $Session.Busy = $true
@@ -217,13 +333,13 @@ function Invoke-AtmGuiRefresh {
         $Session.Preview = $null
         $Session.PreviewFailureType = $null
         $Session.FailureType = $null
-        $Session.RefreshedUtc = [datetime]::UtcNow
+        $Session.RefreshedUtc = Get-AtmGuiNow
         $Session.Refreshes++
         return 'OK'
     } catch {
         # A cancel is known by the session's flag, never by the exception's text.
         if ($Session.CancelRequested) { $Session.Cancelled++; return 'CANCELLED' }
-        $Session.FailureType = $_.Exception.GetType().Name
+        $Session.FailureType = ConvertTo-AtmExceptionCode $_.Exception.GetType().Name
         $Session.Failures++
         return 'FAILED'
     } finally {
@@ -264,14 +380,25 @@ function New-AtmGuiListView {
     return $v
 }
 
-function Show-AtmGuiView {
-    # Puts the session's result on the form's read-only controls (found by name). Returns the state of the view.
+function Show-AtmGuiMonitor {
+    # The state line of the view and the live monitoring's status line (P5), without the lists: a skipped tick changes
+    # only these (the age of the view). Returns the state of the view.
     param($Form, [hashtable]$Session)
-    $state = Get-AtmGuiViewState -Inventory $Session.Inventory -FailureType $Session.FailureType -RefreshedUtc $Session.RefreshedUtc
-    $dash = Get-AtmGuiDashboard -Inventory $Session.Inventory
+    $state = Get-AtmGuiViewState -Inventory $Session.Inventory -FailureType $Session.FailureType -RefreshedUtc $Session.RefreshedUtc -StaleReason $Session.StaleReason -DurationSeconds $Session.LastDurationSeconds
     $stateLine = $Form.Controls.Find('StateLine', $true)[0]
     $stateLine.Text = $state.Text
     $stateLine.AccessibleName = $state.Text
+    $status = $Form.Controls.Find('MonitorStatus', $true)[0]
+    $status.Text = Get-AtmGuiMonitorStatus -Monitor ([bool]$Session.Monitor) -IntervalSeconds ([int]$Session.IntervalSeconds) -NextDueUtc $Session.NextDueUtc -Backoff ([bool]$Session.Backoff)
+    $status.AccessibleName = $status.Text
+    return $state
+}
+
+function Show-AtmGuiView {
+    # Puts the session's result on the form's read-only controls (found by name). Returns the state of the view.
+    param($Form, [hashtable]$Session)
+    $state = Show-AtmGuiMonitor -Form $Form -Session $Session
+    $dash = Get-AtmGuiDashboard -Inventory $Session.Inventory
     $summary = $Form.Controls.Find('Summary', $true)[0]
     $summary.BeginUpdate()
     $summary.Items.Clear()
@@ -376,15 +503,17 @@ function Show-AtmGuiScreen {
 
 function Start-AtmGui {
     # The window: modal and read-only, closed by its button, the window's close box or Esc on the dashboard. It audits
-    # once when shown, then again only on Refresh or F5. Returns what was shown and released. -IdentitySource: test override of the
-    # identity read. -OnShown: test hook, called with the form after the first audit (the real-window case of the suite
-    # refreshes and closes it there).
+    # once when shown, then again only on Refresh, F5 or a due tick of the live monitoring (P5, off when the window opens).
+    # Returns what was shown and released. -IdentitySource: test override of the identity read. -OnShown: test hook,
+    # called with the form after the first audit, and with the handles the suite drives the live monitoring with (the
+    # ticker, its handler and the session); the real-window cases of the suite act and close the window there.
     param([scriptblock]$IdentitySource, [scriptblock]$OnShown)
     $header = Get-AtmGuiIdentityHeader -Source $IdentitySource
     # Read by the event handlers through dynamic scoping while the window is shown (gui-prefixed names).
     $guiSession = Initialize-AtmGuiSession
-    $guiSummary = [ordered]@{ Shown = $false; Closed = $false; Disposed = $false; Title = $header.Title; Lines = @($header.IdentityLine, $header.ElevationLine, $header.LanguageLine, $header.ReadOnlyLine); State = 'UNKNOWN'; Refreshes = 0; Failures = 0; Cancelled = 0; Ignored = 0 }
+    $guiSummary = [ordered]@{ Shown = $false; Closed = $false; Disposed = $false; Title = $header.Title; Lines = @($header.IdentityLine, $header.ElevationLine, $header.LanguageLine, $header.ReadOnlyLine); State = 'UNKNOWN'; Refreshes = 0; Failures = 0; Cancelled = 0; Ignored = 0; Ticks = 0; TickRuns = 0; TickerReleased = $false }
     $guiOnShown = $OnShown
+    $guiTicker = $null
     $form = New-Object -TypeName System.Windows.Forms.Form
     $guiForm = $form
     try {
@@ -501,6 +630,44 @@ function Start-AtmGui {
         $buttons.Controls.Add($guiRefresh)
         $buttons.Controls.Add($close)
         $layout.Controls.Add($buttons)
+        # P5: the live monitoring (GUI-D2): a check box, off when the window opens; the interval, a fixed list that cannot
+        # be edited (60 s by default); and its status line. Nothing of it is remembered.
+        $guiMonitorPanel = New-Object -TypeName System.Windows.Forms.FlowLayoutPanel
+        $guiMonitorPanel.Name = 'MonitorPanel'
+        $guiMonitorPanel.FlowDirection = [System.Windows.Forms.FlowDirection]::LeftToRight
+        $guiMonitorPanel.AutoSize = $true
+        $guiMonitorPanel.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
+        $guiMonitorPanel.TabIndex = ($tab++)
+        $guiMonitor = New-Object -TypeName System.Windows.Forms.CheckBox
+        $guiMonitor.Name = 'Monitor'
+        $guiMonitor.Text = Get-AtmText 'gui.monitor.check'
+        $guiMonitor.AccessibleName = ($guiMonitor.Text -replace '&', '')
+        $guiMonitor.Checked = $false
+        $guiMonitor.AutoSize = $true
+        $guiMonitor.TabIndex = 0
+        $guiMonitor.Margin = New-Object -TypeName System.Windows.Forms.Padding -ArgumentList 8
+        $guiIntervalLabel = New-AtmGuiLabel -Text (Get-AtmText 'gui.monitor.intervalLabel') -TabIndex 1 -Name 'MonitorIntervalLabel'
+        $guiIntervalLabel.AccessibleName = ($guiIntervalLabel.Text -replace '&', '')
+        $guiInterval = New-Object -TypeName System.Windows.Forms.ComboBox
+        $guiInterval.Name = 'MonitorInterval'
+        $guiInterval.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+        $guiInterval.AccessibleName = Get-AtmText 'gui.monitor.intervalName'
+        $guiInterval.TabIndex = 2
+        $guiInterval.Width = 110
+        $guiInterval.Margin = New-Object -TypeName System.Windows.Forms.Padding -ArgumentList 8
+        foreach ($sec in @(Get-AtmGuiMonitorIntervals)) { $null = $guiInterval.Items.Add((Format-AtmGuiInterval -Seconds $sec)) }
+        $guiInterval.SelectedIndex = [array]::IndexOf(@(Get-AtmGuiMonitorIntervals), [int]$guiSession.IntervalSeconds)
+        $guiMonitorStatus = New-AtmGuiLabel -Text (Get-AtmText 'gui.monitor.off') -TabIndex 3 -Name 'MonitorStatus'
+        $guiMonitorPanel.Controls.Add($guiMonitor)
+        $guiMonitorPanel.Controls.Add($guiIntervalLabel)
+        $guiMonitorPanel.Controls.Add($guiInterval)
+        $guiMonitorPanel.Controls.Add($guiMonitorStatus)
+        $layout.Controls.Add($guiMonitorPanel)
+        # The one ticker of the form (ADR-0014 section 5), created here only. It only wakes the check: its period never
+        # passes the chosen interval, and Invoke-AtmGuiTick decides by the session's NextDueUtc.
+        $guiTicker = New-Object -TypeName System.Windows.Forms.Timer
+        $guiTicker.Interval = [int]$guiSession.IntervalSeconds * 1000
+        $guiTicker.Enabled = $false
         $form.Controls.Add($layout)
         # The progress shows a percentage and a fixed text only; the window handles its messages at each callback.
         $guiPump = {
@@ -516,8 +683,12 @@ function Start-AtmGui {
             $guiProgress.Text = Get-AtmText 'gui.progress' 0
             $rr = $null
             $hadPreview = ($null -ne $guiSession.Preview -or [bool]$guiSession.PreviewFailureType)
+            # P5: every audit is measured; with the monitoring on, the next tick counts from its end.
+            $t0 = Get-AtmGuiNow
             try { $rr = Invoke-AtmGuiRefresh -Session $guiSession -Pump $guiPump }
             finally {
+                Update-AtmGuiRefreshTiming -Session $guiSession -Result ([string]$rr) -StartUtc $t0 -EndUtc (Get-AtmGuiNow)
+                & $guiRestartTicker
                 $guiProgress.Text = ''
                 $guiRefresh.Enabled = $true
                 $guiScreens.Enabled = $true
@@ -529,6 +700,39 @@ function Start-AtmGui {
             }
             # A close requested during the audit: the audit is cancelled, then the window closes.
             if ($guiSession.CloseAfterRefresh) { $guiSession.CloseAfterRefresh = $false; $guiForm.Close() }
+        }
+        # P5: the ticker is restarted whenever the next due time is set (turning on, a new interval, the end of an audit),
+        # so a wake never falls just before that time; it runs only while the monitoring is on and the window is open.
+        $guiRestartTicker = {
+            if ($null -eq $guiTicker -or $guiSession.Closing) { return }
+            $guiTicker.Stop()
+            $guiTicker.Interval = [int]$guiSession.IntervalSeconds * 1000
+            if ($guiSession.Monitor) { $guiTicker.Start() }
+        }
+        # P5: while a tick audits, the screens and Refresh are disabled, as for F5; the progress shows a percentage only.
+        $guiTickStart = {
+            $guiRefresh.Enabled = $false
+            $guiScreens.Enabled = $false
+            $guiProgress.Text = Get-AtmText 'gui.progress' 0
+        }
+        # P5: one wake of the ticker (the suite calls it directly). Invoke-AtmGuiTick decides; only a tick that ran the
+        # audit gives the controls back and redraws the screen (a tick nested in a running audit, through the progress
+        # pump, changes nothing else). A skipped tick updates the state and status lines only (the age of the view).
+        $guiTick = {
+            $tr = Invoke-AtmGuiTick -Session $guiSession -Now (Get-AtmGuiNow) -Pump $guiPump -OnStart $guiTickStart -OnPreviewStart $guiPreviewStart
+            $guiSummary.Ticks = $guiSession.Ticks
+            $guiSummary.TickRuns = $guiSession.TickRuns
+            if ($tr -ceq 'REFRESHED' -or $tr -ceq 'FAILED' -or $tr -ceq 'CANCELLED') {
+                $guiProgress.Text = ''
+                $guiRefresh.Enabled = $true
+                $guiScreens.Enabled = $true
+                & $guiRestartTicker
+                $guiSummary.State = (Show-AtmGuiView -Form $guiForm -Session $guiSession).Code
+                # A close requested during the audit or the preview of this tick: the window closes now.
+                if ($guiSession.CloseAfterRefresh) { $guiSession.CloseAfterRefresh = $false; $guiForm.Close() }
+                elseif ($guiSession.CloseAfterPreview) { $guiSession.CloseAfterPreview = $false; $guiForm.Close() }
+            } elseif (-not $guiSession.Closing) { $null = Show-AtmGuiMonitor -Form $guiForm -Session $guiSession }
+            return $tr
         }
         # P3: a key or screen button moves through the screens (ignored while an audit runs); Esc on the dashboard closes.
         # P4a: while the preview runs, the screens and Refresh are disabled and the progress label shows a fixed text (no
@@ -590,6 +794,20 @@ function Start-AtmGui {
             }
         }
         $guiRefresh.add_Click({ & $guiDoRefresh })
+        # P5: the check box and the interval only set the due time (Set-AtmGuiMonitor, Set-AtmGuiMonitorInterval) and
+        # restart the ticker; neither audits by itself.
+        $guiMonitor.add_CheckedChanged({
+                Set-AtmGuiMonitor -Session $guiSession -On ([bool]$guiMonitor.Checked) -Now (Get-AtmGuiNow)
+                & $guiRestartTicker
+                $null = Show-AtmGuiMonitor -Form $guiForm -Session $guiSession
+            })
+        $guiInterval.add_SelectedIndexChanged({
+                $iv = @(Get-AtmGuiMonitorIntervals)
+                if ($guiInterval.SelectedIndex -ge 0 -and $guiInterval.SelectedIndex -lt $iv.Count) { $null = Set-AtmGuiMonitorInterval -Session $guiSession -Seconds ([int]$iv[$guiInterval.SelectedIndex]) -Now (Get-AtmGuiNow) }
+                & $guiRestartTicker
+                $null = Show-AtmGuiMonitor -Form $guiForm -Session $guiSession
+            })
+        $guiTicker.add_Tick({ $null = & $guiTick })
         $guiRows.add_SelectedIndexChanged({ if ($guiRows.SelectedIndices.Count -gt 0) { (Get-AtmGuiNavTop -Nav $guiSession.Nav).Sel = [int]$guiRows.SelectedIndices[0] } })
         $guiRows.add_ItemActivate({ & $guiNavKey 'Return' })
         $form.add_KeyDown({
@@ -609,6 +827,11 @@ function Start-AtmGui {
         $form.add_FormClosing({
                 param($src, $ev)
                 $null = $src
+                # P5: the live monitoring stops for good: nothing is due, the ticker is stopped and released, and a tick
+                # that still arrives does nothing.
+                $guiSession.Closing = $true
+                Set-AtmGuiMonitor -Session $guiSession -On $false -Now (Get-AtmGuiNow)
+                if (-not $guiSummary.TickerReleased) { $guiTicker.Stop(); $guiTicker.Dispose(); $guiSummary.TickerReleased = $true }
                 if ($guiSession.Busy) { $guiSession.CancelRequested = $true; $guiSession.CloseAfterRefresh = $true; $ev.Cancel = $true }
                 # P4b: the diagnose stops its inventory phase at the next callback; the window closes when the call ends.
                 elseif ($guiSession.DiagBusy) { $guiSession.DiagCancelRequested = $true; $guiSession.CloseAfterDiag = $true; $ev.Cancel = $true }
@@ -619,11 +842,12 @@ function Start-AtmGui {
                 $guiSummary.Shown = $true
                 # The first audit: opening the window is the request (as the TUI does when it starts).
                 & $guiDoRefresh
-                if ($null -ne $guiOnShown -and -not $guiForm.IsDisposed) { & $guiOnShown $this }
+                if ($null -ne $guiOnShown -and -not $guiForm.IsDisposed) { & $guiOnShown $this @{ Ticker = $guiTicker; Tick = $guiTick; Session = $guiSession } }
             })
         $null = $form.ShowDialog()
         $guiSummary.Closed = $true
     } finally {
+        if ($null -ne $guiTicker -and -not $guiSummary.TickerReleased) { $guiTicker.Stop(); $guiTicker.Dispose(); $guiSummary.TickerReleased = $true }
         $form.Dispose()
         $guiSummary.Disposed = [bool]$form.IsDisposed
         $guiSummary.Refreshes = $guiSession.Refreshes

@@ -13,7 +13,8 @@
 # (P every category, 8 the blocked paths) over the rows of the clean engine, and the Preview line of a detail opened
 # from them; the categories, reasons and requirements are the engine's, as they come. Phase P4b: the diagnose area (D),
 # the TUI's screens over the schema view of one diagnose result, with the features behind the V0.2 gates shown as
-# disabled in this version.
+# disabled in this version. Phase P5: the live monitoring's choices (the six intervals), its status line, and the state
+# of the view STALE by slowness or age besides a failure.
 
 function Get-AtmGuiIdentityHeader {
     # The process identity and its elevation state, as `version` shows them, and the language. -Source: test override
@@ -100,22 +101,53 @@ function Get-AtmGuiDashboard {
 
 function Get-AtmGuiViewState {
     # The state of the view (ADR-0014 section 5), always as a word: UNKNOWN before any audit has finished (a first audit
-    # that failed leaves nothing known: UNKNOWN, with the exception type); STALE when the last audit failed (the earlier
-    # result stays shown); PARTIAL when the engine's coverage is incomplete; CURRENT otherwise. P2 has no STALE by
-    # slowness or age: those depend on the interval of P5.
-    param($Inventory, [string]$FailureType, $RefreshedUtc)
+    # that failed leaves nothing known: UNKNOWN, with the exception code); STALE when the last audit failed (the earlier
+    # result stays shown); PARTIAL when the engine's coverage is incomplete; CURRENT otherwise. P5 (the live
+    # monitoring, GUI-D10): -StaleReason SLOW (the last audit took more than half the interval; -DurationSeconds) or
+    # OLD (no good audit for more than twice the interval) is also STALE; a failure is told first.
+    param($Inventory, [string]$FailureType, $RefreshedUtc, [string]$StaleReason, $DurationSeconds)
     $at = $(if ($null -ne $RefreshedUtc) { ([datetime]$RefreshedUtc).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture) } else { '-' })
+    $reason = $null
     if ($null -eq $Inventory) {
         $code = 'UNKNOWN'
         $text = $(if ($FailureType) { Get-AtmText 'gui.state.UNKNOWN_FAILED' $FailureType } else { Get-AtmText 'gui.state.UNKNOWN' })
     } elseif ($FailureType) {
-        $code = 'STALE'; $text = Get-AtmText 'gui.state.STALE' $at $FailureType
+        $code = 'STALE'; $reason = 'FAILED'; $text = Get-AtmText 'gui.state.STALE' $at $FailureType
+    } elseif ($StaleReason -ceq 'SLOW') {
+        $d = $(if ($null -ne $DurationSeconds) { ([double]$DurationSeconds).ToString('0.0', [Globalization.CultureInfo]::InvariantCulture) } else { '-' })
+        $code = 'STALE'; $reason = 'SLOW'; $text = Get-AtmText 'gui.state.STALE_SLOW' $at $d
+    } elseif ($StaleReason -ceq 'OLD') {
+        $code = 'STALE'; $reason = 'OLD'; $text = Get-AtmText 'gui.state.STALE_OLD' $at
     } elseif (-not $Inventory.CoverageComplete) {
         $code = 'PARTIAL'; $text = Get-AtmText 'gui.state.PARTIAL' $at
     } else {
         $code = 'CURRENT'; $text = Get-AtmText 'gui.state.CURRENT' $at
     }
-    return [pscustomobject]@{ Code = $code; FailureType = $(if ($FailureType) { $FailureType } else { $null }); RefreshedUtc = $at; Text = $text }
+    return [pscustomobject]@{ Code = $code; Reason = $reason; FailureType = $(if ($FailureType) { $FailureType } else { $null }); RefreshedUtc = $at; Text = $text }
+}
+
+# ------------------------------------------------------------------ P5: the live monitoring's choices and status
+function Get-AtmGuiMonitorIntervals {
+    # The only intervals of the live monitoring, in seconds (GUI-D10: 30 seconds to 15 minutes; GUI-D2: 60 by default).
+    # A function, not a constant: loading this file assigns no list. Unrolled: callers wrap the result in @().
+    return @(30, 60, 120, 300, 600, 900)
+}
+
+function Format-AtmGuiInterval {
+    # An interval as the window writes it: up to a minute in seconds (30 s, 60 s), then in minutes (2 min to 15 min).
+    param([int]$Seconds)
+    if ($Seconds -le 60) { return (Get-AtmText 'gui.monitor.sec' $Seconds) }
+    return (Get-AtmText 'gui.monitor.min' ([int]($Seconds / 60)))
+}
+
+function Get-AtmGuiMonitorStatus {
+    # The live monitoring's status line: off, or on with the interval and the UTC time of the next tick that may audit
+    # (after a slow audit, the later time of the backoff).
+    param([bool]$Monitor, [int]$IntervalSeconds, $NextDueUtc, [bool]$Backoff)
+    if (-not $Monitor -or $null -eq $NextDueUtc) { return (Get-AtmText 'gui.monitor.off') }
+    $next = ([datetime]$NextDueUtc).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
+    $key = $(if ($Backoff) { 'gui.monitor.onBackoff' } else { 'gui.monitor.on' })
+    return (Get-AtmText $key (Format-AtmGuiInterval -Seconds $IntervalSeconds) $next)
 }
 
 function Get-AtmGuiAutoPurgeNotice {

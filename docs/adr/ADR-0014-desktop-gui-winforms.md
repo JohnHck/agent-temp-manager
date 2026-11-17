@@ -3,8 +3,8 @@
 Status: ACCEPTED for the technology and the architecture (maintainer decisions D-B and D-A, 2026-11-16).
 GUI-D1 to GUI-D6 are ACCEPTED (decided by the maintainer as recommended, 2026-11-16); GUI-D7 to GUI-D11 are ACCEPTED
 (technical decisions accepted by the auditor as recommended, 2026-11-16). Implemented, with the gate closed in every
-copy: P1 (the skeleton), P2 (the dashboard), P3 (the drill-down), P4a (the preview) and P4b (the diagnose area). P5
-and P6 are not implemented.
+copy: P1 (the skeleton), P2 (the dashboard), P3 (the drill-down), P4a (the preview), P4b (the diagnose area) and P5
+(the live monitoring). P6 is not implemented.
 Date: 2026-11-16
 Phase: V0.2.1, phases P1 to P6 (section 10)
 
@@ -540,3 +540,89 @@ The second half of phase P4: the diagnose area. What P4b implements, with the ga
   action. The form's key handler takes `D` and `U`.
 * **Catalog:** new `gui.*` keys only, in en-US and pt-BR: the hint, the button, the progress, the label's name, the
   "disabled in this version" line, and the reasons of the two gates the catalog had no text for (export and Git).
+
+## Implementation record: P5 (V021-P5, 2026-11-16)
+
+Phase P5: the live monitoring of section 5, with GUI-D2, GUI-D3 and GUI-D10. What P5 implements, with the gate closed in
+every copy:
+
+* **Controls,** under the buttons:
+  * a check box, "Live monitoring" ("Monitoramento ao vivo"), with the access key `M`. The suite checks that it collides
+    with no other key in either language;
+  * a `DropDownList` with six fixed intervals: 30 s, 60 s, 2 min, 5 min, 10 min and 15 min. It cannot be typed into;
+  * a status line: off, or on with the interval and the UTC time of the next audit.
+
+  When the window opens, the box is off and the list shows 60 s. Nothing is remembered.
+* **One ticker,** a `System.Windows.Forms.Timer` created in one place, `Start-AtmGui`.
+  * **What it does.** It only wakes the check: the decision is `Invoke-AtmGuiTick`, which compares the time with the
+    session's `NextDueUtc`. The ticker is restarted whenever that time is set (turning on, a new interval, the end of an
+    audit), and its period equals the interval.
+  * **Seams.** A wake up to 500 ms early counts as due (`$script:AtmGuiTickToleranceMs`). The clock is a test seam,
+    `$script:AtmGuiClockSource`, a single `$null` assignment.
+  * **Results.** The tick returns `SKIPPED_NOT_DUE`, `SKIPPED_BUSY`, `SKIPPED_BACKOFF`, `REFRESHED` or `FAILED`.
+  * **Two deviations from the round.** The tick also returns `CANCELLED` when the window is closed during its own audit.
+    It returns `SKIPPED_NOT_DUE` while the monitoring is off or the window is closing, since no time is due then.
+  * **Turning it on** runs nothing: the first audit is due one interval later. Before the first audit has finished, a
+    due tick audits normally.
+  * **Changing the interval** starts the count from that moment. Turning the monitoring off stops it, and an audit
+    already running ends normally.
+* **What a due tick runs: the `F5` audit, never the diagnose** (GUI-D3).
+  * The tick calls `Invoke-AtmGuiRefresh`. The result of `D` is kept as the same object, never marked outdated, not even
+    by a failed tick. The static test refuses any diagnose function inside a function named `Invoke-AtmGuiTick` (three
+    plants).
+  * A tick while an audit, the preview or a `D` or `U` run is in progress is dropped (`SKIPPED_BUSY`), never queued.
+    The suite fires it from inside the progress callbacks of the dubbed inventory and diagnose, and from inside the
+    dubbed preview.
+* **Navigation: the tick keeps the screen; `F5` is unchanged.**
+  * The tick keeps the navigation stack. The open screen is computed again over the new result, as P3 does after any
+    audit: a detail whose root is gone goes back to its list with the catalog text, and the roots of a user or project
+    that is gone are an empty list.
+  * `F5` keeps its P4a behavior: from `P`, `8` or a detail opened from them it goes back to the dashboard (the preview
+    is discarded), and from any other screen the screen stays. The round assumed that `F5` always goes back to the
+    dashboard. The code never did; this phase does not change it, and records the difference here.
+* **The preview in the tick.**
+  * On a preview screen (the stack holds `P` or `8`), the same tick runs the preview again over the new result. Its time
+    counts in the duration, so a slow preview makes the cycle slow.
+  * On any other screen, the audit discards the kept preview, which runs again the next time `P` or `8` is opened. A
+    failed audit keeps it, as in P4a.
+* **States and limits** (GUI-D10):
+  * **Slow:** an audit (with its preview) longer than half the interval marks the view `STALE`, with its duration. The
+    next tick then waits max(interval, 2 x duration) from the end of that audit; earlier ticks return
+    `SKIPPED_BACKOFF`, and the status line shows the later time.
+  * **Old:** more than twice the interval with no good audit marks the view `STALE` (old), with the time of the audit
+    shown. This happens only while the monitoring is on, and is evaluated on every tick, skipped ones included.
+  * **Failure:** the result and its lines stay, and the view is `STALE` with the exception code only. The audit now
+    keeps `ConvertTo-AtmExceptionCode` of the type, as the diagnose does, instead of the type name; the P2 pins were
+    updated. The next due tick tries again.
+  * **Recovery:** a good, fast audit clears the slow and old marks and the backoff.
+  * **When the marks apply:** both apply only while the monitoring is on. An `F5` with it off is measured, never
+    marked slow.
+* **Memory.** The session keeps one result: the last good one, which a failed audit leaves in place.
+  * The suite runs 20 due ticks. Each audit returns a new dubbed inventory with 1 MB of ballast, and managed memory is
+    read with `[GC]::GetTotalMemory($true)` after the first audit and after the twentieth.
+  * The first inventory must be collected; a weak reference checks it.
+  * Local measurement (Windows PowerShell 5.1, x64): growth from the first to the twentieth audit 0.02 to 0.05 MB, and
+    the first inventory collected.
+  * The declared limit is 8 MB of growth. Keeping every result would grow by at least 19 MB from the ballast alone.
+  * The runners' numbers are recorded below after the first CI run.
+* **Close.** `FormClosing` marks the session as closing, turns the monitoring off, and stops and releases the ticker. The
+  `finally` block of `Start-AtmGui` does the same if the form never closed. A tick that arrives after that does nothing
+  (`SKIPPED_NOT_DUE`), and the real-window case checks it.
+* **What did not change:**
+  * the closed list (23 names) and the allowed cmdlets;
+  * the engines, the TUI, the reports and the launcher.
+
+  The static test now counts exactly one timer creation in the GUI files, in `Start-AtmGui`. The word "timer" appears
+  nowhere else in them. It refuses `System.Timers`, `System.Threading.Timer`, `Register-ObjectEvent`, `Start-Job`,
+  `Start-ThreadJob` and `runspacefactory`. The earlier phases' checks for no timer now read the files without the one
+  creation.
+* **CI times.** The suite grew with the GUI phases, so the job limits change:
+  * `test`: 30 to 40 minutes;
+  * `test ARM64 (powershell)`: 30 to 45;
+  * `test ARM64 (pwsh, subset)`: 40 to 55.
+
+  The check names do not change.
+* **Catalog:** new `gui.*` keys only, in en-US and pt-BR:
+  * the check box, the interval label and list name, the two interval formats;
+  * the three status lines;
+  * the slow and old `STALE` texts.

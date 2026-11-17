@@ -3032,7 +3032,7 @@ exit 0
     }
 
     # ------------------------------------------------------------------ read-only guarantee
-    Test-Case 'Somente leitura' 'audit + preview e uma sessao da GUI (V0.2.1 P2 a P4b, sem janela) com tres auditorias dubladas, navegacao pelas telas entre elas, o preview real (P e 8) e o diagnose real (D e cada tela da area) nao alteram nada no sandbox' {
+    Test-Case 'Somente leitura' 'audit + preview e uma sessao da GUI (V0.2.1 P2 a P5, sem janela) com tres auditorias dubladas, navegacao pelas telas entre elas, o preview real (P e 8), o diagnose real (D e cada tela da area) e o monitoramento ao vivo ligado com dois ticks do inventario real nao alteram nada no sandbox' {
         $p = New-TestProfile 'ro'
         1..3 | ForEach-Object { $null = New-TestRoot -ProfileInfo $p }
         # NTFS updates directory timestamps lazily after recent creations: wait until the tree is stable.
@@ -3111,7 +3111,22 @@ exit 0
                 $null = Invoke-AtmGuiNavKey -Nav $gs.Nav -Inventory $gs.Inventory -Key 'Escape' -Busy $false -Diag $gs.Diag
             }
             Assert-True ((Get-AtmGuiNavTop -Nav $gs.Nav).Name -ceq 'diag' -and $gs.DiagCalls -eq 1) "sessao da GUI: de volta a area, nenhum diagnose a mais ($nScreens telas)"
-            Assert-Eq $gs.SourceCalls 3 'sessao da GUI: tres auditorias, nenhuma a mais'
+            # V0.2.1 P5: the live monitoring on and two due ticks with the real inventory (only the clock is dubbed): two
+            # audits, the area's screen stays, the diagnose is not called again.
+            $savedGuiClock = $script:AtmGuiClockSource
+            try {
+                $script:guiRoClk = New-Object DateTime(2026, 11, 1, 10, 0, 0, [DateTimeKind]::Utc)
+                $script:AtmGuiClockSource = { $script:guiRoClk }
+                Set-AtmGuiMonitor -Session $gs -On $true -Now $script:guiRoClk
+                $trs = New-Object System.Collections.Generic.List[string]
+                foreach ($n in 1..2) {
+                    $script:guiRoClk = [datetime]$gs.NextDueUtc
+                    $trs.Add((Invoke-AtmGuiTick -Session $gs -Now $script:guiRoClk -Pump { }))
+                }
+                Assert-True (($trs.ToArray() -join ',') -ceq 'REFRESHED,REFRESHED' -and (Get-AtmGuiNavTop -Nav $gs.Nav).Name -ceq 'diag' -and $gs.DiagCalls -eq 1 -and $null -eq $gs.FailureType) "sessao da GUI: dois ticks do monitoramento, dois audits; a area fica; nenhum diagnose ($($trs.ToArray() -join ','); $($gs.FailureType))"
+                Set-AtmGuiMonitor -Session $gs -On $false -Now $script:guiRoClk
+            } finally { $script:AtmGuiClockSource = $savedGuiClock }
+            Assert-Eq $gs.SourceCalls 5 'sessao da GUI: cinco auditorias (tres pedidas e duas do monitoramento), nenhuma a mais'
         } finally { $script:AtmGuiInventorySource = $savedGuiSource }
         $after = Get-TreeListing $p.ProfilePath
         $diff = @(Compare-Object ($before -split "`n") ($after -split "`n") | ForEach-Object { $_.SideIndicator + ' ' + ($_.InputObject -replace '^.*\\(Users\d+)', '$1') })
@@ -14282,7 +14297,9 @@ try {
         'AtmDeleter', 'AtmLockProbe', 'DeleteTree', 'Remove-Item', 'Move-Item', '::Delete(', '.Delete(', '::Move(', 'Set-Content', 'Add-Content', 'Out-File', 'New-Item', 'Set-ItemProperty', 'Set-Acl',
         '::WriteAll', '::AppendAll', '::Create(', '::OpenWrite(', 'CreateSubKey', 'SetValue', 'Start-Process', 'Stop-Process', 'Start-Service', 'Stop-Service', 'Set-Service', 'Restart-Service',
         'Suspend-Service', 'ScheduledTask', 'schtasks', 'Invoke-CimMethod', 'Invoke-WmiMethod', 'Set-CimInstance', 'Remove-CimInstance', 'Clipboard', 'Invoke-Expression', 'sc.exe', 'net stop', 'net start',
-        'rd /s', 'rmdir', 'del ')
+        'rd /s', 'rmdir', 'del ',
+        # P5 (V021-P5): no other timer, event subscription, job or runspace: the live monitoring has one Forms ticker.
+        'System.Timers', 'Threading.Timer', 'Register-ObjectEvent', 'Start-Job', 'Start-ThreadJob', 'runspacefactory')
     $guiOtherGates = @('AtmRealDeletionEnabled', 'AtmWorktreeDiagnosticsEnabled', 'AtmHandleDiagnosticsEnabled', 'AtmDiagnoseExportEnabled', 'AtmIsolationEnabled', 'AtmQuarantinePurgeEnabled')
     # Returns the violations of the given files (empty: inside the closed list). Reads and parses only.
     $guiCheck = {
@@ -14290,6 +14307,7 @@ try {
         $bad = New-Object System.Collections.Generic.List[string]
         $parsed = New-Object System.Collections.Generic.List[object]
         $own = New-Object System.Collections.Generic.List[string]
+        $timers = New-Object System.Collections.Generic.List[string]
         foreach ($f in $Files) {
             $tok = $null; $perr = $null
             $ast = [System.Management.Automation.Language.Parser]::ParseFile($f, [ref]$tok, [ref]$perr)
@@ -14332,9 +14350,33 @@ try {
             foreach ($w in $guiForbidden) { if ($txt.IndexOf($w, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $bad.Add("${n}: nome proibido: $w") } }
             foreach ($g in $guiOtherGates) { if ($txt.Contains($g)) { $bad.Add("${n}: trava de outra funcionalidade: $g") } }
             if ($txt -match '(?i)\b(Start|Stop|Save|Suspend|Resume|Restart|Checkpoint|Remove|Set|New)-VM\b') { $bad.Add("${n}: cmdlet de VM") }
+            # P5: every New-Object of a timer type (any case) is collected, with its function; a timer type written as a
+            # type expression or constraint is refused here.
+            foreach ($c in $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+                if ($c.GetCommandName() -ne 'New-Object' -or $c.Extent.Text -notmatch '(?i)timer') { continue }
+                $fp = $c.Parent
+                while ($null -ne $fp -and -not ($fp -is [System.Management.Automation.Language.FunctionDefinitionAst])) { $fp = $fp.Parent }
+                $timers.Add("$(if ($fp) { $fp.Name } else { '-' })|$($c.Extent.Text)")
+            }
+            foreach ($tx in $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.TypeExpressionAst] -or $x -is [System.Management.Automation.Language.TypeConstraintAst] }, $true)) {
+                if ($tx.TypeName.FullName -match '(?i)timer') { $bad.Add("${n}: tipo de timer: " + $tx.TypeName.FullName) }
+            }
+            # P5: the tick never runs the diagnose (GUI-D3): no function named Invoke-AtmGuiTick mentions it.
+            foreach ($fd in $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -ceq 'Invoke-AtmGuiTick' }, $true)) {
+                foreach ($dn in @('Invoke-AtmGuiDiagnose', 'Invoke-AtmDiagnose', 'ConvertTo-AtmDiagnoseJson')) { if ($fd.Extent.Text.IndexOf($dn, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $bad.Add("${n}: diagnose no tick: $dn") } }
+            }
         }
+        # P5: exactly one timer in the GUI files, the live monitoring's System.Windows.Forms.Timer, created in Start-AtmGui.
+        if ($timers.Count -ne 1 -or $timers[0] -cne 'Start-AtmGui|New-Object -TypeName System.Windows.Forms.Timer') { $bad.Add('timer: exatamente um System.Windows.Forms.Timer, criado em Start-AtmGui (' + ($timers.ToArray() -join ' ; ') + ')') }
         return , $bad.ToArray()
     }
+    # P5 (V021-P5): the checks of P1 to P4b that no timer exists now accept only the live monitoring's one: they read the
+    # text without its single creation, so a second one, or any other timer, still fails them.
+    $guiTimerFree = { param([string]$Text)
+        $k = 'New-Object -TypeName System.Windows.Forms.Timer'
+        $i = $Text.IndexOf($k, [StringComparison]::Ordinal)
+        if ($i -lt 0) { return $Text }
+        return ($Text.Substring(0, $i) + $Text.Substring($i + $k.Length)) }
     Test-Case 'GUI P1' 'Setima trava (AtmGuiEnabled): uma unica atribuicao a $false em Gui.ps1, fechada neste processo, nenhum outro arquivo a altera; as sete travas fechadas; build, instalador, e2e, manifesto, lancador e version a conferem nos dois idiomas' {
         $seven = @(@('lib\Engine.Clean.ps1', 'AtmRealDeletionEnabled'), @('lib\Engine.Diagnose.ps1', 'AtmWorktreeDiagnosticsEnabled'), @('lib\Engine.Diagnose.ps1', 'AtmHandleDiagnosticsEnabled'), @('lib\Report.ps1', 'AtmDiagnoseExportEnabled'),
             @('lib\Engine.Isolate.ps1', 'AtmIsolationEnabled'), @('lib\Engine.Isolate.ps1', 'AtmQuarantinePurgeEnabled'), @('lib\Gui.ps1', 'AtmGuiEnabled'))
@@ -14347,7 +14389,7 @@ try {
             Assert-True (-not ([regex]::IsMatch([IO.File]::ReadAllText($f.FullName), 'AtmGuiEnabled\s*='))) "$($f.Name) nao pode alterar a trava da GUI"
         }
         $gt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1'))
-        foreach ($s in @('AtmGuiApartmentSource', 'AtmGuiDesktopSource', 'AtmGuiAssemblyLoader', 'AtmGuiInventorySource')) {
+        foreach ($s in @('AtmGuiApartmentSource', 'AtmGuiDesktopSource', 'AtmGuiAssemblyLoader', 'AtmGuiInventorySource', 'AtmGuiClockSource')) {
             Assert-True ([regex]::Matches($gt, '\$script:' + $s + '\s*=').Count -eq 1 -and $gt -match ('(?m)^\$script:' + $s + ' = \$null\r?$')) "costura ${s}: uma unica atribuicao, a `$null"
         }
         Assert-True ($script:AtmGuiExitGateClosed -eq 7 -and $script:AtmGuiExitEnvironment -eq 8) 'codigos de saida 7 e 8 (GUI-D8)'
@@ -14463,7 +14505,7 @@ $res.afterGui = (& $wf)
                 Assert-True (-not $txt.Contains($pat)) "$n chama coletor diretamente: $pat"
             }
         }
-        Assert-True (-not ([IO.File]::ReadAllText((Join-Path $lib 'Gui.ps1'))).Contains('Timer')) 'P1: nenhum timer'
+        Assert-True (-not (& $guiTimerFree ([IO.File]::ReadAllText((Join-Path $lib 'Gui.ps1')))).Contains('Timer')) 'P1: nenhum timer (desde a P5, so o do monitoramento ao vivo)'
         # Negative: each forbidden thing planted in a copy (in the sandbox) is caught; the real files never change.
         $pl = Join-Path $sandbox 'gui-planted'
         [void][IO.Directory]::CreateDirectory($pl)
@@ -14506,7 +14548,7 @@ $res.afterGui = (& $wf)
     }
     Test-Case 'GUI P2' 'Janela real (Windows PowerShell; trava aberta e fonte do inventario dublada so num processo filho): abre com o audit, mostra os numeros do dashboard e CURRENT, atualiza uma vez por F5 (um F5 durante o audit e ignorado), um pedido de fechar durante o audit o cancela e a janela fecha com 0; titulo, identidade, elevacao e idioma; nos dois idiomas; nenhum processo filho, timer ou arquivo deixado no sandbox, na configuracao ou no TEMP; sem janela possivel: NAO_TESTADO' {
         if ($PSVersionTable.PSEdition -ne 'Desktop') { $script:caseSkipped = $true; $script:caseNote = 'PowerShell 7: janela real NAO_TESTADO nesta fase (GUI-D7)'; return }
-        Assert-True (-not ([IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1'))).Contains('Timer')) 'P2: nenhum timer criado'
+        Assert-True (-not (& $guiTimerFree ([IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1')))).Contains('Timer')) 'P2: nenhum timer criado (desde a P5, so o do monitoramento ao vivo)'
         $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
         $child = Join-Path $sandbox 'gui-window-child.ps1'
         [IO.File]::WriteAllText($child, @'
@@ -14739,7 +14781,9 @@ Write-Output ('GUI-D7 edition={0} ps={1} clr={2} apartment={3} environment={4} w
             $script:AtmGuiInventorySource = { param($a) & $a.ProgressCallback 5 'C:\SENTINEL-PROGRESS\base'; throw (New-Object System.IO.IOException 'SENTINEL-FAILURE-TEXT') }
             Assert-Eq (Invoke-AtmGuiRefresh -Session $s -Pump { $script:guiPct.Add([string]$s.Percent) }) 'FAILED' 'primeiro audit: FAILED'
             $v = Get-AtmGuiViewState -Inventory $s.Inventory -FailureType $s.FailureType -RefreshedUtc $s.RefreshedUtc
-            Assert-True ($null -eq $s.Inventory -and $s.FailureType -ceq 'IOException' -and $v.Code -ceq 'UNKNOWN' -and $v.Text.Contains('IOException') -and -not $v.Text.Contains('SENTINEL')) "primeiro audit falho: UNKNOWN com o tipo, sem o texto ($($v.Text))"
+            # P5: the type is kept as its exception code (ConvertTo-AtmExceptionCode), as the diagnose keeps it.
+            $ioCode = ConvertTo-AtmExceptionCode 'IOException'
+            Assert-True ($null -eq $s.Inventory -and $s.FailureType -ceq $ioCode -and $v.Code -ceq 'UNKNOWN' -and $v.Text.Contains($ioCode) -and -not $v.Text.Contains('SENTINEL')) "primeiro audit falho: UNKNOWN com o tipo, sem o texto ($($v.Text))"
             Assert-True (@(foreach ($g in (Get-AtmGuiDashboard -Inventory $s.Inventory).Groups) { foreach ($it in $g.Items) { if ([string]$it.Value -cne 'UNKNOWN') { $it } } }).Count -eq 0) 'primeiro audit falho: nenhum numero inventado'
             # A good audit through the real engine, whose progress messages name the temporary bases.
             $script:AtmGuiInventorySource = { param($a) $m = @{} + $script:guiFailArgs; $m['ProgressCallback'] = $a['ProgressCallback']; $m['NoProgress'] = $false; Invoke-AtmInventory @m }
@@ -14750,7 +14794,7 @@ Write-Output ('GUI-D7 edition={0} ps={1} clr={2} apartment={3} environment={4} w
             Assert-Eq (Invoke-AtmGuiRefresh -Session $s -Pump { $script:guiPct.Add([string]$s.Percent) }) 'FAILED' 'falha depois do audit bom'
             $v = Get-AtmGuiViewState -Inventory $s.Inventory -FailureType $s.FailureType -RefreshedUtc $s.RefreshedUtc
             Assert-True ([object]::ReferenceEquals($good, $s.Inventory) -and $s.RefreshedUtc -eq $goodAt -and $v.Code -ceq 'STALE') 'o resultado anterior fica, marcado STALE'
-            Assert-True ($v.Text.Contains('IOException') -and -not $v.Text.Contains('SENTINEL') -and $v.Text.Contains(([datetime]$goodAt).ToString('yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture))) "STALE: o tipo e a hora do resultado mostrado, nunca o texto da excecao ($($v.Text))"
+            Assert-True ($v.Text.Contains($ioCode) -and -not $v.Text.Contains('SENTINEL') -and $v.Text.Contains(([datetime]$goodAt).ToString('yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture))) "STALE: o tipo e a hora do resultado mostrado, nunca o texto da excecao ($($v.Text))"
             Assert-True (@($script:guiPct | Where-Object { $_ -notmatch '^\d{1,3}$' }).Count -eq 0 -and $script:guiPct.Count -ge 3) "progresso: so porcentagens ($($script:guiPct -join ','))"
             $flat = (@(foreach ($key in @($s.Keys)) { if (@('Inventory', 'InventoryArgs') -notcontains $key) { [string]$s[$key] } }) + @((Get-AtmGuiDashboard -Inventory $s.Inventory).Groups | ForEach-Object { $_.Items } | ForEach-Object { $_.Text })) -join ' '
             Assert-True (-not $flat.Contains('SENTINEL') -and -not $flat.Contains($p.ProfilePath)) 'nenhuma mensagem de progresso nem texto de excecao guardado ou mostrado'
@@ -14806,11 +14850,13 @@ Write-Output ('GUI-D7 edition={0} ps={1} clr={2} apartment={3} environment={4} w
         $gt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1')); $mt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\GuiModel.ps1'))
         Assert-True ([regex]::Matches($gt, '\$script:AtmGuiInventorySource\s*=').Count -eq 1 -and $gt -match '(?m)^\$script:AtmGuiInventorySource = \$null\r?$') 'costura da fonte do inventario: uma unica atribuicao, a $null'
         foreach ($pair in @(@('Gui.ps1', $gt), @('GuiModel.ps1', $mt))) {
-            foreach ($w in @('Timer', 'TextBox', 'GetNewClosure')) { Assert-True ($pair[1].IndexOf($w, [StringComparison]::OrdinalIgnoreCase) -lt 0) "$($pair[0]) contem '$w'" }
+            foreach ($w in @('Timer', 'TextBox', 'GetNewClosure')) { Assert-True ((& $guiTimerFree $pair[1]).IndexOf($w, [StringComparison]::OrdinalIgnoreCase) -lt 0) "$($pair[0]) contem '$w'" }
         }
         Assert-True ($mt.IndexOf('System.Windows.Forms', [StringComparison]::OrdinalIgnoreCase) -lt 0) 'view models sem tipo do WinForms'
         $types = @([regex]::Matches($gt, 'New-Object -TypeName System\.Windows\.Forms\.(\w+)') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
-        Assert-Eq ($types -join ',') 'Button,FlowLayoutPanel,Form,Label,ListView,ListViewItem,Padding' 'controles: so Label, ListView e botoes, num formulario'
+        # P5 adds the live monitoring's check box, its interval list (DropDownList, never editable) and the one ticker.
+        Assert-Eq ($types -join ',') 'Button,CheckBox,ComboBox,FlowLayoutPanel,Form,Label,ListView,ListViewItem,Padding,Timer' 'controles: so Label, ListView e botoes, num formulario (e, desde a P5, a caixa e a lista do monitoramento e o timer)'
+        Assert-True ($gt.Contains('.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList') -and [regex]::Matches($gt, 'DropDownStyle').Count -eq 1) 'P5: a lista do intervalo nunca e editavel'
         Assert-True ($gt.Contains('$v.LabelEdit = $false') -and $gt.Contains('$v.CheckBoxes = $false') -and $gt.Contains('$form.KeyPreview = $true')) 'listas sem edicao nem caixas de marcar; F5 chega ao formulario'
         $ia = Get-AtmGuiInventoryArgs
         $full = { param($x) [IO.Path]::GetFullPath([string]$x) }
@@ -15060,7 +15106,7 @@ Write-Output ('GUI-D7 edition={0} ps={1} clr={2} apartment={3} environment={4} w
         $gt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1')); $mt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\GuiModel.ps1'))
         foreach ($pair in @(@('Gui.ps1', $gt), @('GuiModel.ps1', $mt))) {
             # The preview call is P4a's (its static case checks that it is the only one).
-            foreach ($w in @('Timer', 'TextBox', 'GetNewClosure', 'CancelButton', 'tui.isoHint', 'tui.moreDetail', 'Show-AtmPathDetail')) { Assert-True ($pair[1].IndexOf($w, [StringComparison]::OrdinalIgnoreCase) -lt 0) "$($pair[0]) contem '$w'" }
+            foreach ($w in @('Timer', 'TextBox', 'GetNewClosure', 'CancelButton', 'tui.isoHint', 'tui.moreDetail', 'Show-AtmPathDetail')) { Assert-True ((& $guiTimerFree $pair[1]).IndexOf($w, [StringComparison]::OrdinalIgnoreCase) -lt 0) "$($pair[0]) contem '$w'" }
         }
         # The planted call to the CLI's path drill-down, in a copy (the real files never change).
         $pl = Join-Path $sandbox 'gui-planted-p3'
@@ -15195,7 +15241,7 @@ if ($null -eq $res.env) {
             Assert-True ([bool]$j.escClosed -and [bool]$j.disposed) "janela P3 ${lang}: Esc no dashboard fechou a janela; formulario liberado"
             Assert-True ([int]$j.newProcesses -eq 0 -and [int]$j.newSandbox -eq 0 -and [int]$j.newConfig -eq 0 -and [int]$j.newTemp -eq 0) "janela P3 ${lang}: nada deixado (processos $($j.newProcesses), sandbox $($j.newSandbox), configuracao $($j.newConfig), TEMP $($j.newTemp))"
         }
-        Assert-True (-not ([IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1'))).Contains('Timer')) 'P3: nenhum timer criado'
+        Assert-True (-not (& $guiTimerFree ([IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1')))).Contains('Timer')) 'P3: nenhum timer criado (desde a P5, so o do monitoramento ao vivo)'
     }
 
     # ------------------------------------------------------------------ V0.2.1 P4a: the preview in the GUI (ADR-0014)
@@ -15381,7 +15427,7 @@ if ($null -eq $res.env) {
         if ($calls.Count -eq 1) { $up = $calls[0].Parent; while ($null -ne $up -and -not ($up -is [System.Management.Automation.Language.FunctionDefinitionAst])) { $up = $up.Parent }; if ($up) { $owner = $up.Name } }
         Assert-True ($calls.Count -eq 1 -and $owner -ceq 'Invoke-AtmGuiPreview') "uma unica chamada, em Invoke-AtmGuiPreview ($($calls.Count); $owner)"
         foreach ($pair in @(@('Gui.ps1', $gt), @('GuiModel.ps1', $mt))) {
-            foreach ($w in @('Timer', 'TextBox', 'GetNewClosure', 'CancelButton', 'Test-AtmCandidate')) { Assert-True ($pair[1].IndexOf($w, [StringComparison]::OrdinalIgnoreCase) -lt 0) "$($pair[0]) contem '$w'" }
+            foreach ($w in @('Timer', 'TextBox', 'GetNewClosure', 'CancelButton', 'Test-AtmCandidate')) { Assert-True ((& $guiTimerFree $pair[1]).IndexOf($w, [StringComparison]::OrdinalIgnoreCase) -lt 0) "$($pair[0]) contem '$w'" }
         }
         Assert-True ([regex]::Matches($gt, '\$script:AtmGuiPreviewSource\s*=').Count -eq 1 -and $gt -match '(?m)^\$script:AtmGuiPreviewSource = \$null\r?$') 'costura do preview: uma unica atribuicao, a $null'
         # The planted gate of one candidate, in a copy (the real files never change).
@@ -15900,7 +15946,7 @@ if ($null -eq $res.env) {
         Assert-Eq ((& $guiCheck @($gp, $mp)) -join ' | ') '' 'arquivos reais dentro da lista fechada'
         Assert-True ([regex]::Matches($gt, '\$script:AtmGuiDiagnoseSource\s*=').Count -eq 1 -and $gt -match '(?m)^\$script:AtmGuiDiagnoseSource = \$null\r?$') 'costura do diagnose: uma unica atribuicao, a $null'
         foreach ($pair in @(@('Gui.ps1', $gt), @('GuiModel.ps1', $mt))) {
-            foreach ($w in @('Timer', 'TextBox', 'GetNewClosure', 'CancelButton')) { Assert-True ($pair[1].IndexOf($w, [StringComparison]::OrdinalIgnoreCase) -lt 0) "$($pair[0]) contem '$w'" }
+            foreach ($w in @('Timer', 'TextBox', 'GetNewClosure', 'CancelButton')) { Assert-True ((& $guiTimerFree $pair[1]).IndexOf($w, [StringComparison]::OrdinalIgnoreCase) -lt 0) "$($pair[0]) contem '$w'" }
             Assert-True ($pair[1] -notmatch '(?i)\b(ConvertTo-Json|Out-\w+|Export-\w+)\b') "$($pair[0]): nenhum ConvertTo-Json, Out-* nem Export-*"
         }
         # The GUI's copies of the TUI's tables and of its time format, equal to the TUI's.
@@ -16075,6 +16121,575 @@ if ($null -eq $res.env) {
             Assert-True ([int]$j.newProcesses -eq 0 -and [int]$j.newSandbox -eq 0 -and [int]$j.newConfig -eq 0 -and [int]$j.newTemp -eq 0) "janela P4b ${lang}: nada deixado (processos $($j.newProcesses), sandbox $($j.newSandbox), configuracao $($j.newConfig), TEMP $($j.newTemp))"
         }
         $script:caseNote = 'janela real em en-US e pt-BR: D, Enter no resumo, Esc, worktrees com a linha de desabilitado, Esc, U chamado de novo, F5, D sem chamada nova'
+    }
+
+    # ------------------------------------------------------------------ GUI P5 (V021-P5): the live monitoring
+    # The inventory of the P5 cases: the P3 one with a complete coverage (a good audit is CURRENT).
+    $guiP5Inv = { $i = & $guiP3Multi; $i.CoverageComplete = $true; return $i }
+    # The state of the view of a session, as the window computes it.
+    $guiP5State = { param($S) Get-AtmGuiViewState -Inventory $S.Inventory -FailureType $S.FailureType -RefreshedUtc $S.RefreshedUtc -StaleReason $S.StaleReason -DurationSeconds $S.LastDurationSeconds }
+    # A UTC time as the state and status lines write it.
+    $guiP5Utc = { param($T) ([datetime]$T).ToString('yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture) }
+    # The dubbed clock (UTC) and inventory of the P5 cases: the inventory calls the progress callback (and so the pump),
+    # advances the clock by $script:p5Dur seconds (the audit's duration), then fails or returns $script:p5Inv.
+    $guiP5Sources = {
+        $script:p5Calls = 0; $script:p5Dur = 1; $script:p5Fail = $false
+        $script:p5Clk = New-Object DateTime(2026, 11, 1, 10, 0, 0, [DateTimeKind]::Utc)
+        $script:AtmGuiClockSource = { $script:p5Clk }
+        $script:AtmGuiInventorySource = { param($a)
+            $script:p5Calls++
+            & $a.ProgressCallback 50 'C:\SENTINEL-PROGRESS\base'
+            $script:p5Clk = $script:p5Clk.AddSeconds($script:p5Dur)
+            if ($script:p5Fail) { throw (New-Object System.IO.IOException 'SENTINEL-AUDIT-TEXT') }
+            $script:p5Inv } }
+    Test-Case 'GUI P5' 'Intervalos e ligar (sem janela), nos dois idiomas: so os seis valores (30 s, 60 s, 2 min, 5 min, 10 min, 15 min), 60 s ao abrir, qualquer outro recusado sem mudar nada; desligado ao abrir; ligar nao chama nada; antes da hora SKIPPED_NOT_DUE sem chamada; na hora um audit, tambem antes do primeiro audit, e CURRENT; um despertar ate 500 ms antes da hora conta; trocar o intervalo recomeca a contagem de agora; desligar para; a linha de status' {
+        $script:p5Inv = & $guiP5Inv
+        $savedInv = $script:AtmGuiInventorySource; $savedClk = $script:AtmGuiClockSource
+        $old = Get-AtmLanguage
+        try {
+            & $guiP5Sources
+            Assert-Eq (@(Get-AtmGuiMonitorIntervals) -join ',') '30,60,120,300,600,900' 'os seis intervalos, em segundos'
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                Assert-Eq (@(Get-AtmGuiMonitorIntervals | ForEach-Object { Format-AtmGuiInterval -Seconds $_ }) -join ',') '30 s,60 s,2 min,5 min,10 min,15 min' "${lang}: os rotulos da lista"
+                $off = Get-AtmGuiMonitorStatus -Monitor $false -IntervalSeconds 60 -NextDueUtc $null -Backoff $false
+                Assert-True ($off -ceq (Get-AtmText 'gui.monitor.off') -and $off.Contains($(if ($lang -ceq 'pt-BR') { 'desligado' } else { 'off' }))) "${lang}: desligado ($off)"
+                $due = New-Object DateTime(2026, 11, 1, 10, 1, 0, [DateTimeKind]::Utc)
+                $on = Get-AtmGuiMonitorStatus -Monitor $true -IntervalSeconds 120 -NextDueUtc $due -Backoff $false
+                Assert-True ($on -ceq (Get-AtmText 'gui.monitor.on' '2 min' '2026-11-01 10:01:00') -and $on.Contains('2 min') -and $on.Contains('2026-11-01 10:01:00')) "${lang}: ligado, com o intervalo e a hora UTC do proximo ($on)"
+                Assert-Eq (Get-AtmGuiMonitorStatus -Monitor $true -IntervalSeconds 120 -NextDueUtc $due -Backoff $true) (Get-AtmText 'gui.monitor.onBackoff' '2 min' '2026-11-01 10:01:00') "${lang}: ligado, na espera"
+            }
+            Set-AtmLanguage -Requested 'en-US'
+            $s = Initialize-AtmGuiSession -ConfigDir $cfgDir
+            Assert-True (-not $s.Monitor -and $s.IntervalSeconds -eq 60 -and $null -eq $s.NextDueUtc -and -not $s.Backoff -and $null -eq $s.StaleReason) 'ao abrir: desligado, 60 s, nada marcado'
+            foreach ($bad in @(0, 1, 45, 59, 61, 1800, -30)) { Assert-True (-not (Set-AtmGuiMonitorInterval -Session $s -Seconds $bad -Now $script:p5Clk) -and $s.IntervalSeconds -eq 60 -and $null -eq $s.NextDueUtc) "intervalo $bad recusado, nada muda" }
+            $t0 = $script:p5Clk
+            Assert-Eq (Invoke-AtmGuiTick -Session $s -Now $t0.AddHours(1)) 'SKIPPED_NOT_DUE' 'desligado: nada'
+            Set-AtmGuiMonitor -Session $s -On $true -Now $t0
+            Assert-True ($s.Monitor -and $script:p5Calls -eq 0 -and $s.SourceCalls -eq 0 -and [datetime]$s.NextDueUtc -eq $t0.AddSeconds(60)) 'ligar nao chama nada; a primeira vez um intervalo depois'
+            foreach ($sec in @(1, 30, 59)) { Assert-Eq (Invoke-AtmGuiTick -Session $s -Now $t0.AddSeconds($sec)) 'SKIPPED_NOT_DUE' "antes da hora (+$sec s)" }
+            Assert-Eq (Invoke-AtmGuiTick -Session $s -Now $t0.AddSeconds(60).AddMilliseconds(-600)) 'SKIPPED_NOT_DUE' 'mais de 500 ms antes da hora'
+            Assert-True ($script:p5Calls -eq 0 -and $null -eq $s.Inventory) 'nenhuma chamada antes da hora'
+            # Before the first audit, the due tick audits normally.
+            $script:p5Clk = $t0.AddSeconds(60)
+            Assert-Eq (Invoke-AtmGuiTick -Session $s -Now $script:p5Clk) 'REFRESHED' 'na hora, antes do primeiro audit: um audit'
+            $st = & $guiP5State $s
+            Assert-True ($script:p5Calls -eq 1 -and $st.Code -ceq 'CURRENT' -and $st.Text -ceq (Get-AtmText 'gui.state.CURRENT' (& $guiP5Utc $script:p5Clk)) -and [datetime]$s.NextDueUtc -eq $script:p5Clk.AddSeconds(60)) "uma chamada, CURRENT; o proximo um intervalo depois do fim ($($st.Text))"
+            # A wake up to 500 ms before the due time counts (the ticker's period equals the interval).
+            $script:p5Clk = ([datetime]$s.NextDueUtc).AddMilliseconds(-400)
+            Assert-Eq (Invoke-AtmGuiTick -Session $s -Now $script:p5Clk) 'REFRESHED' 'um despertar 400 ms antes da hora conta'
+            # A new interval starts the count again from now.
+            $t1 = $script:p5Clk.AddSeconds(10)
+            Assert-True (Set-AtmGuiMonitorInterval -Session $s -Seconds 30 -Now $t1) 'intervalo de 30 s aceito'
+            Assert-True ($s.IntervalSeconds -eq 30 -and [datetime]$s.NextDueUtc -eq $t1.AddSeconds(30)) 'trocar o intervalo recomeca a contagem de agora'
+            Assert-Eq (Invoke-AtmGuiTick -Session $s -Now $t1.AddSeconds(29)) 'SKIPPED_NOT_DUE' 'antes dos 30 s'
+            $script:p5Clk = $t1.AddSeconds(30)
+            Assert-Eq (Invoke-AtmGuiTick -Session $s -Now $script:p5Clk) 'REFRESHED' 'nos 30 s'
+            Assert-Eq $script:p5Calls 3 'tres chamadas, cada uma na hora'
+            # Off: nothing is due, nothing runs, not even an hour later; a new interval while off sets no time.
+            Set-AtmGuiMonitor -Session $s -On $false -Now $script:p5Clk
+            Assert-True (-not $s.Monitor -and $null -eq $s.NextDueUtc) 'desligar: nada marcado'
+            Assert-Eq (Invoke-AtmGuiTick -Session $s -Now $script:p5Clk.AddHours(1)) 'SKIPPED_NOT_DUE' 'desligado: nada, nem uma hora depois'
+            Assert-True ((Set-AtmGuiMonitorInterval -Session $s -Seconds 900 -Now $script:p5Clk) -and $s.IntervalSeconds -eq 900 -and $null -eq $s.NextDueUtc) 'intervalo trocado desligado: nada marcado'
+            Set-AtmGuiMonitor -Session $s -On $true -Now $script:p5Clk
+            Assert-True ([datetime]$s.NextDueUtc -eq $script:p5Clk.AddSeconds(900) -and $script:p5Calls -eq 3) 'ligar de novo: 15 min depois, nenhuma chamada'
+            Assert-True ($s.TickRuns -eq 3 -and $s.Ticks -eq 10) "contadores: $($s.Ticks) ticks, $($s.TickRuns) com audit"
+        } finally { $script:AtmGuiInventorySource = $savedInv; $script:AtmGuiClockSource = $savedClk; Set-AtmLanguage -Requested $old }
+    }
+    Test-Case 'GUI P5' 'Tick durante outra chamada (sem janela), sempre na hora: disparado de dentro do callback de progresso do inventario dublado (num audit por F5 e num audit do proprio tick), de dentro da fonte do preview dublada e de dentro do callback de progresso do diagnose dublado: SKIPPED_BUSY, nenhuma chamada a mais, nada enfileirado; depois um tick na hora audita uma vez e o seguinte nao' {
+        $script:p5Inv = & $guiP5Inv
+        $script:p5Rows = @(& $guiP4Preview $script:p5Inv)
+        $script:p5Inner = New-Object System.Collections.Generic.List[string]
+        $script:p5PrevCalls = 0; $script:p5DiagCalls = 0; $script:p5PrevTick = $true
+        $savedInv = $script:AtmGuiInventorySource; $savedClk = $script:AtmGuiClockSource; $savedPrev = $script:AtmGuiPreviewSource; $savedDiag = $script:AtmGuiDiagnoseSource
+        $old = Get-AtmLanguage
+        try {
+            Set-AtmLanguage -Requested 'en-US'
+            & $guiP5Sources
+            $s = Initialize-AtmGuiSession -ConfigDir $cfgDir
+            # The ticker's message handled at that moment (the window's pump handles its messages at each callback).
+            $inner = { $script:p5Inner.Add([string](Invoke-AtmGuiTick -Session $s -Now $script:p5Clk)) }
+            $script:AtmGuiPreviewSource = { param($i, $a) $null = $i; $null = $a; $script:p5PrevCalls++; if ($script:p5PrevTick) { & $inner }; $script:p5Rows }
+            $script:AtmGuiDiagnoseSource = { param($a) $script:p5DiagCalls++; & $a.InventoryArgs.ProgressCallback 40 'C:\SENTINEL-PROGRESS\base'; $tdRes }
+            $inn = { $script:p5Inner.ToArray() -join ',' }
+            $t0 = $script:p5Clk
+            Set-AtmGuiMonitor -Session $s -On $true -Now $t0
+            $script:p5Clk = $t0.AddSeconds(60)
+            # F5 at the due time (as the form does: the audit, then its timing).
+            $t = $script:p5Clk
+            $r = Invoke-AtmGuiRefresh -Session $s -Pump $inner
+            Update-AtmGuiRefreshTiming -Session $s -Result $r -StartUtc $t -EndUtc $script:p5Clk
+            Assert-True ($r -ceq 'OK' -and (& $inn) -ceq 'SKIPPED_BUSY' -and $script:p5Calls -eq 1) "F5: o tick de dentro do callback do inventario e SKIPPED_BUSY ($(& $inn))"
+            # A tick's own audit.
+            $script:p5Clk = [datetime]$s.NextDueUtc
+            Assert-Eq (Invoke-AtmGuiTick -Session $s -Now $script:p5Clk -Pump $inner) 'REFRESHED' 'tick com outro tick de dentro do callback'
+            Assert-True ((& $inn) -ceq 'SKIPPED_BUSY,SKIPPED_BUSY' -and $script:p5Calls -eq 2) "tick: o de dentro e SKIPPED_BUSY, uma chamada so ($(& $inn))"
+            # The preview (P).
+            Assert-Eq (Invoke-AtmGuiNavKey -Nav $s.Nav -Inventory $s.Inventory -Key 'P' -Busy $false -Preview $s.Preview) 'RENDER' 'P'
+            $script:p5Clk = [datetime]$s.NextDueUtc
+            Assert-Eq (Invoke-AtmGuiPreview -Session $s) 'OK' 'P com um tick de dentro da fonte do preview'
+            Assert-True ((& $inn) -ceq 'SKIPPED_BUSY,SKIPPED_BUSY,SKIPPED_BUSY' -and $script:p5Calls -eq 2 -and $script:p5PrevCalls -eq 1) "preview: SKIPPED_BUSY, nenhum audit ($(& $inn))"
+            # The diagnose (D).
+            Assert-Eq (Invoke-AtmGuiNavKey -Nav $s.Nav -Inventory $s.Inventory -Key 'D' -Busy $false -Preview $s.Preview -Diag $s.Diag) 'DIAG_OPEN' 'D'
+            $dr = Invoke-AtmGuiDiagnose -Session $s -Pump $inner
+            Invoke-AtmGuiNavDiag -Nav $s.Nav -Diag $s.Diag -Result $dr
+            Assert-True ($dr -ceq 'OK' -and (& $inn) -ceq 'SKIPPED_BUSY,SKIPPED_BUSY,SKIPPED_BUSY,SKIPPED_BUSY' -and $script:p5Calls -eq 2 -and $script:p5DiagCalls -eq 1) "diagnose: o tick de dentro do callback e SKIPPED_BUSY, nenhum audit ($(& $inn))"
+            Assert-True ($s.TicksBusy -eq 4 -and $s.TickRuns -eq 1) "quatro ticks descartados, um com audit ($($s.TicksBusy); $($s.TickRuns))"
+            # Nothing was queued: at the due time one tick audits once, and the next one is not due.
+            $script:p5PrevTick = $false
+            Assert-Eq (@((Invoke-AtmGuiTick -Session $s -Now $script:p5Clk), (Invoke-AtmGuiTick -Session $s -Now $script:p5Clk)) -join ',') 'REFRESHED,SKIPPED_NOT_DUE' 'na hora: um audit, depois nada'
+            Assert-True ($script:p5Calls -eq 3 -and $script:p5DiagCalls -eq 1 -and $s.Ticks -eq 7) "nada enfileirado ($($script:p5Calls) audits; $($s.Ticks) ticks)"
+        } finally { $script:AtmGuiInventorySource = $savedInv; $script:AtmGuiClockSource = $savedClk; $script:AtmGuiPreviewSource = $savedPrev; $script:AtmGuiDiagnoseSource = $savedDiag; Set-AtmLanguage -Requested $old }
+    }
+    Test-Case 'GUI P5' 'Limites (sem janela), nos dois idiomas: um audit mais lento que metade do intervalo marca STALE (lento, com a duracao) e o proximo espera max(intervalo, 2 x duracao) a partir do fim, com SKIPPED_BACKOFF antes; metade exata nao e lento; um ciclo bom e rapido limpa os dois; sem audit bom por mais de duas vezes o intervalo, STALE (antiga) com a hora, so com o monitoramento ligado, reavaliado a cada tick; uma falha mantem tudo, STALE so com o codigo da excecao, e o proximo tick tenta de novo; o F5 com o monitoramento desligado nunca fica lento' {
+        $script:p5Inv = & $guiP5Inv
+        $savedInv = $script:AtmGuiInventorySource; $savedClk = $script:AtmGuiClockSource
+        $old = Get-AtmLanguage
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                & $guiP5Sources
+                $s = Initialize-AtmGuiSession -ConfigDir $cfgDir
+                $due = { $script:p5Clk = [datetime]$s.NextDueUtc; Invoke-AtmGuiTick -Session $s -Now $script:p5Clk }
+                Set-AtmGuiMonitor -Session $s -On $true -Now $script:p5Clk
+                # Slow: 40 s, more than half of 60; the next waits max(60, 80) from the end.
+                $script:p5Dur = 40
+                Assert-Eq (& $due) 'REFRESHED' "${lang}: tick lento"
+                $end = $script:p5Clk
+                $st = & $guiP5State $s
+                Assert-True ($st.Code -ceq 'STALE' -and $st.Reason -ceq 'SLOW' -and $st.Text -ceq (Get-AtmText 'gui.state.STALE_SLOW' (& $guiP5Utc $end) '40.0') -and $s.Backoff -and [datetime]$s.NextDueUtc -eq $end.AddSeconds(80)) "${lang}: STALE lento com a duracao; o proximo 80 s depois do fim ($($st.Text))"
+                Assert-Eq (Get-AtmGuiMonitorStatus -Monitor $true -IntervalSeconds 60 -NextDueUtc $s.NextDueUtc -Backoff $s.Backoff) (Get-AtmText 'gui.monitor.onBackoff' '60 s' (& $guiP5Utc $end.AddSeconds(80))) "${lang}: a linha de status diz a espera"
+                $script:p5Dur = 1
+                foreach ($sec in @(60, 79)) { Assert-Eq (Invoke-AtmGuiTick -Session $s -Now $end.AddSeconds($sec)) 'SKIPPED_BACKOFF' "${lang}: +$sec s, na espera" }
+                Assert-True ($script:p5Calls -eq 1 -and $s.TicksBackoff -eq 2) "${lang}: nenhuma chamada na espera"
+                Assert-Eq (& $due) 'REFRESHED' "${lang}: no fim da espera"
+                $st = & $guiP5State $s
+                Assert-True ($st.Code -ceq 'CURRENT' -and -not $s.Backoff -and $null -eq $s.StaleReason -and [datetime]$s.NextDueUtc -eq $script:p5Clk.AddSeconds(60)) "${lang}: um ciclo bom e rapido limpa o lento e a espera ($($st.Code))"
+                $script:p5Dur = 30
+                Assert-Eq (& $due) 'REFRESHED' "${lang}: tick de 30 s"
+                Assert-True ($null -eq $s.StaleReason -and -not $s.Backoff -and [datetime]$s.NextDueUtc -eq $script:p5Clk.AddSeconds(60)) "${lang}: metade exata do intervalo nao e lento"
+                $script:p5Dur = 1
+                # Old: no good audit for more than twice the interval while the ticks are skipped (a D or U run).
+                $r0 = [datetime]$s.RefreshedUtc
+                $s.DiagBusy = $true
+                Assert-True ((Invoke-AtmGuiTick -Session $s -Now $r0.AddSeconds(120)) -ceq 'SKIPPED_BUSY' -and $null -eq $s.StaleReason) "${lang}: duas vezes o intervalo ainda nao e antiga"
+                Assert-True ((Invoke-AtmGuiTick -Session $s -Now $r0.AddSeconds(121)) -ceq 'SKIPPED_BUSY' -and $s.StaleReason -ceq 'OLD') "${lang}: mais de duas vezes: antiga"
+                $st = & $guiP5State $s
+                Assert-True ($st.Code -ceq 'STALE' -and $st.Reason -ceq 'OLD' -and $st.Text -ceq (Get-AtmText 'gui.state.STALE_OLD' (& $guiP5Utc $r0))) "${lang}: STALE antiga com a hora da auditoria mostrada ($($st.Text))"
+                # Off: the mark goes, and none comes, not even hours later.
+                Set-AtmGuiMonitor -Session $s -On $false -Now $r0.AddSeconds(122)
+                Assert-True ($null -eq $s.StaleReason -and (& $guiP5State $s).Code -ceq 'CURRENT') "${lang}: desligado: a marca de antiga sai"
+                Assert-True ((Invoke-AtmGuiTick -Session $s -Now $r0.AddHours(5)) -ceq 'SKIPPED_NOT_DUE' -and $null -eq $s.StaleReason) "${lang}: desligado: nenhuma marca, nem horas depois"
+                # On again: evaluated on every tick, a skipped one too.
+                Set-AtmGuiMonitor -Session $s -On $true -Now $r0.AddHours(5)
+                Assert-True ((Invoke-AtmGuiTick -Session $s -Now $r0.AddHours(5).AddSeconds(1)) -ceq 'SKIPPED_NOT_DUE' -and $s.StaleReason -ceq 'OLD') "${lang}: ligado de novo: antiga ja no tick seguinte"
+                $s.DiagBusy = $false
+                Assert-Eq (& $due) 'REFRESHED' "${lang}: o audit seguinte"
+                Assert-True ($null -eq $s.StaleReason -and (& $guiP5State $s).Code -ceq 'CURRENT') "${lang}: um audit bom limpa a antiga"
+                # Failure: the result and its time stay, STALE with the exception code only; the next tick tries again.
+                $keptInv = $s.Inventory; $keptAt = [datetime]$s.RefreshedUtc
+                $dash0 = Get-AtmGuiDashboard -Inventory $s.Inventory
+                $script:p5Fail = $true
+                Assert-Eq (& $due) 'FAILED' "${lang}: tick que falha"
+                $end = $script:p5Clk
+                $code = ConvertTo-AtmExceptionCode 'IOException'
+                $st = & $guiP5State $s
+                Assert-True ([object]::ReferenceEquals($s.Inventory, $keptInv) -and [datetime]$s.RefreshedUtc -eq $keptAt -and $s.FailureType -ceq $code -and $st.Code -ceq 'STALE' -and $st.Reason -ceq 'FAILED' -and $st.Text -ceq (Get-AtmText 'gui.state.STALE' (& $guiP5Utc $keptAt) $code)) "${lang}: falha: tudo mantido, STALE com o codigo ($($st.Text))"
+                Assert-True (-not $st.Text.Contains('SENTINEL') -and -not ([string]$s.FailureType).Contains('SENTINEL') -and -not $st.Text.Contains('IOException')) "${lang}: nunca a mensagem da excecao"
+                $dash1 = Get-AtmGuiDashboard -Inventory $s.Inventory
+                Assert-Eq (@($dash1.Groups | ForEach-Object { $_.Items | ForEach-Object { $_.Text } }) -join '|') (@($dash0.Groups | ForEach-Object { $_.Items | ForEach-Object { $_.Text } }) -join '|') "${lang}: as linhas anteriores ficam"
+                Assert-True ([datetime]$s.NextDueUtc -eq $end.AddSeconds(60) -and -not $s.Backoff -and $s.Failures -eq 1) "${lang}: o proximo tick um intervalo depois"
+                Assert-Eq (& $due) 'FAILED' "${lang}: o proximo tenta de novo e falha"
+                Assert-True ($s.StaleReason -cne 'OLD' -and (& $guiP5State $s).Reason -ceq 'FAILED' -and $s.Failures -eq 2) "${lang}: a falha e dita primeiro"
+                $script:p5Fail = $false
+                Assert-Eq (& $due) 'REFRESHED' "${lang}: e o seguinte, que funciona"
+                Assert-True ($null -eq $s.FailureType -and (& $guiP5State $s).Code -ceq 'CURRENT' -and -not [object]::ReferenceEquals($s.Inventory, $null)) "${lang}: recuperado: CURRENT"
+                # F5 with the monitoring off is measured, never slow; with it on, a slow F5 marks it and the next tick waits.
+                Set-AtmGuiMonitor -Session $s -On $false -Now $script:p5Clk
+                $script:p5Dur = 50
+                $t = $script:p5Clk; $r = Invoke-AtmGuiRefresh -Session $s; Update-AtmGuiRefreshTiming -Session $s -Result $r -StartUtc $t -EndUtc $script:p5Clk
+                Assert-True ($r -ceq 'OK' -and $s.LastDurationSeconds -eq 50 -and $null -eq $s.StaleReason -and -not $s.Backoff -and $null -eq $s.NextDueUtc) "${lang}: F5 desligado de 50 s: medido, nunca lento"
+                Set-AtmGuiMonitor -Session $s -On $true -Now $script:p5Clk
+                $t = $script:p5Clk; $r = Invoke-AtmGuiRefresh -Session $s; Update-AtmGuiRefreshTiming -Session $s -Result $r -StartUtc $t -EndUtc $script:p5Clk
+                Assert-True ($s.StaleReason -ceq 'SLOW' -and $s.Backoff -and [datetime]$s.NextDueUtc -eq $script:p5Clk.AddSeconds(100)) "${lang}: F5 ligado de 50 s: lento, o proximo tick 100 s depois do fim"
+            }
+        } finally { $script:AtmGuiInventorySource = $savedInv; $script:AtmGuiClockSource = $savedClk; Set-AtmLanguage -Requested $old }
+    }
+    Test-Case 'GUI P5' 'O que o tick faz com as telas (sem janela): o audit do F5 (Invoke-AtmGuiRefresh), nunca o diagnose: o resultado de D fica o mesmo objeto, nunca desatualizado, nem num tick que falha; a tela fica (a area do diagnose, as raizes de um projeto), um detalhe cuja raiz sumiu volta para a lista com o texto do catalogo, a lista de um usuario que sumiu fica vazia; numa tela do preview (P, 8 ou um detalhe aberto por elas) o tick calcula o preview de novo e o tempo dele conta, e em outra tela o preview guardado e descartado; o F5 de P ou 8 volta ao dashboard (P4a), o de um projeto fica' {
+        $script:p5Inv = & $guiP5Inv
+        $full = $script:p5Inv
+        $script:p5Rows = @(& $guiP4Preview $script:p5Inv)
+        $script:p5PrevCalls = 0; $script:p5PrevDur = 5; $script:p5PrevSeen = $null; $script:p5DiagCalls = 0
+        $savedInv = $script:AtmGuiInventorySource; $savedClk = $script:AtmGuiClockSource; $savedPrev = $script:AtmGuiPreviewSource; $savedDiag = $script:AtmGuiDiagnoseSource
+        $old = Get-AtmLanguage
+        try {
+            Set-AtmLanguage -Requested 'en-US'
+            & $guiP5Sources
+            # The dubbed preview takes $script:p5PrevDur seconds of the clock.
+            $script:AtmGuiPreviewSource = { param($i, $a) $null = $a; $script:p5PrevCalls++; $script:p5PrevSeen = $i; $script:p5Clk = $script:p5Clk.AddSeconds($script:p5PrevDur); $script:p5Rows }
+            $script:AtmGuiDiagnoseSource = { param($a) $script:p5DiagCalls++; & $a.InventoryArgs.ProgressCallback 40 'C:\SENTINEL-PROGRESS\base'; $tdRes }
+            $s = Initialize-AtmGuiSession -ConfigDir $cfgDir
+            $due = { $script:p5Clk = [datetime]$s.NextDueUtc; Invoke-AtmGuiTick -Session $s -Now $script:p5Clk }
+            $top = { Get-AtmGuiNavTop -Nav $s.Nav }
+            $key = { param([string]$K) Invoke-AtmGuiNavKey -Nav $s.Nav -Inventory $s.Inventory -Key $K -Busy $false -Preview $s.Preview -Diag $s.Diag }
+            # As the form's F5 does (P4a: a successful audit discards a kept preview, and its screens go back).
+            $f5 = { $had = ($null -ne $s.Preview -or [bool]$s.PreviewFailureType); $t = $script:p5Clk; $r = Invoke-AtmGuiRefresh -Session $s; Update-AtmGuiRefreshTiming -Session $s -Result $r -StartUtc $t -EndUtc $script:p5Clk; Invoke-AtmGuiNavRefreshed -Nav $s.Nav -Inventory $s.Inventory -PreviewDiscarded ($r -ceq 'OK' -and $had) -Preview $s.Preview -Diag $s.Diag; return $r }
+            Set-AtmGuiMonitor -Session $s -On $true -Now $script:p5Clk
+            Assert-Eq (& $due) 'REFRESHED' 'primeiro audit, pelo tick'
+            # D: the diagnose result; the ticks keep it, on its area too.
+            Assert-Eq (& $key 'D') 'DIAG_OPEN' 'D'
+            $dr = Invoke-AtmGuiDiagnose -Session $s
+            Invoke-AtmGuiNavDiag -Nav $s.Nav -Diag $s.Diag -Result $dr
+            $keptDiag = $s.Diag; $keptView = $s.Diag.View
+            Assert-Eq (& $due) 'REFRESHED' 'tick na area do diagnose'
+            Assert-True ((& $top).Name -ceq 'diag' -and $s.Nav.Stack.Count -eq 2 -and [object]::ReferenceEquals($s.Diag, $keptDiag) -and [object]::ReferenceEquals($s.Diag.View, $keptView) -and -not $s.Diag.Stale -and $null -eq $s.Diag.Error -and $script:p5DiagCalls -eq 1 -and $s.DiagCalls -eq 1) 'a area fica; o resultado de D e o mesmo objeto, nao desatualizado; nenhum diagnose'
+            $script:p5Fail = $true
+            Assert-Eq (& $due) 'FAILED' 'tick que falha na area'
+            $script:p5Fail = $false
+            Assert-True ([object]::ReferenceEquals($s.Diag, $keptDiag) -and -not $s.Diag.Stale -and $null -eq $s.Diag.Error -and $script:p5DiagCalls -eq 1 -and (& $top).Name -ceq 'diag') 'um tick que falha nao marca o resultado de D'
+            # The roots of a project: the screen stays, for the tick and for F5.
+            Assert-Eq (& $key 'D3') 'RENDER' '3'
+            Assert-Eq (& $key 'Return') 'RENDER' 'Enter no primeiro projeto'
+            $bn = [string](& $top).Name; $bt = [string](& $top).Title; $bc = $s.Nav.Stack.Count
+            Assert-Eq (& $due) 'REFRESHED' 'tick nas raizes de um projeto'
+            Assert-True ($bn -ceq 'roots' -and $bc -eq 3 -and [string](& $top).Name -ceq $bn -and [string](& $top).Title -ceq $bt -and $s.Nav.Stack.Count -eq $bc -and $null -eq $s.Nav.Message) "tick: a tela fica ($bn; $bt)"
+            Assert-Eq (& $f5) 'OK' 'F5 nas raizes de um projeto'
+            Assert-True ([string](& $top).Name -ceq $bn -and [string](& $top).Title -ceq $bt -and $s.Nav.Stack.Count -eq $bc) 'F5: a tela de um projeto fica'
+            # A detail whose root is gone after the tick: back to its list.
+            $null = & $key 'D4'; $null = & $key 'Return'
+            $gone = (& $top).Filter
+            Assert-Eq (& $top).Name 'detail' 'detalhe aberto'
+            $inv2 = $full.PSObject.Copy()
+            $inv2.Partitions = @($full.Partitions | Where-Object { $_.Path -ne $gone.Path })
+            $script:p5Inv = $inv2
+            Assert-Eq (& $due) 'REFRESHED' 'tick sem a raiz do detalhe'
+            Assert-True ((& $top).Name -ceq 'roots' -and $s.Nav.Stack.Count -eq 2 -and $s.Nav.Message -ceq (Get-AtmText 'gui.detailGone' $gone.Name)) "de volta a lista, com o texto do catalogo ($($s.Nav.Message))"
+            # The roots of a user who is gone after the tick: an empty list, nothing invented.
+            $script:p5Inv = $full
+            Assert-Eq (& $due) 'REFRESHED' 'tick com o inventario inteiro'
+            $null = & $key 'D2'; (& $top).Sel = 1; $null = & $key 'Return'
+            $who = (& $top).Filter
+            $inv3 = $full.PSObject.Copy()
+            $inv3.Profiles = @($full.Profiles | Where-Object { -not ($_.Sid -eq $who.Sid -and $_.ProfilePath -eq $who.ProfilePath) })
+            $inv3.Partitions = @($full.Partitions | Where-Object { -not ($_.Sid -eq $who.Sid -and $_.ProfilePath -eq $who.ProfilePath) })
+            $script:p5Inv = $inv3
+            Assert-Eq (& $due) 'REFRESHED' 'tick sem o usuario'
+            $vm = Get-AtmGuiScreen -Inventory $s.Inventory -Screen (& $top)
+            Assert-True ((& $top).Name -ceq 'roots' -and $vm.Known -and @($vm.Rows).Count -eq 0 -and (& $top).Sel -eq 0) 'usuario que sumiu: lista vazia, nada inventado'
+            $script:p5Inv = $full
+            # P: the tick computes the preview again over the new result, and the preview's time counts.
+            Assert-Eq (& $key 'P') 'RENDER' 'P'
+            Assert-Eq (Invoke-AtmGuiPreview -Session $s) 'OK' 'o preview de P'
+            $pc = $script:p5PrevCalls
+            Assert-Eq (& $due) 'REFRESHED' 'tick em P'
+            Assert-True ((& $top).Name -ceq 'gates' -and $s.Nav.Stack.Count -eq 2 -and $script:p5PrevCalls -eq ($pc + 1) -and $null -ne $s.Preview -and [object]::ReferenceEquals($script:p5PrevSeen, $s.Inventory) -and $null -eq $s.Nav.Message) "P fica; o preview de novo, sobre o resultado novo ($($script:p5PrevCalls))"
+            Assert-True ($s.LastDurationSeconds -eq 6 -and $null -eq $s.StaleReason) "o tempo do preview conta: 1 s de audit e 5 s de preview ($($s.LastDurationSeconds))"
+            Assert-Eq @((Get-AtmGuiScreen -Inventory $s.Inventory -Screen (& $top) -Preview $s.Preview).Rows).Count @($script:p5Rows).Count 'P mostra o preview novo'
+            # A detail opened from P, then 8: the same.
+            Assert-Eq (& $key 'Return') 'RENDER' 'Enter numa linha do preview'
+            Assert-Eq (& $due) 'REFRESHED' 'tick no detalhe do preview'
+            Assert-True ((& $top).Name -ceq 'detail' -and $s.Nav.Stack.Count -eq 3 -and $script:p5PrevCalls -eq ($pc + 2) -and @((Get-AtmGuiScreen -Inventory $s.Inventory -Screen (& $top) -Preview $s.Preview).Pairs | Where-Object { $_.Label -ceq 'Preview' }).Count -eq 1) 'o detalhe do preview fica, com a linha Preview'
+            Assert-Eq (& $key 'D8') 'RENDER' '8'
+            Assert-Eq (Invoke-AtmGuiPreview -Session $s) 'CACHED' '8: o preview guardado'
+            $script:p5PrevDur = 35
+            Assert-Eq (& $due) 'REFRESHED' 'tick em 8 com um preview lento'
+            Assert-True ((& $top).Name -ceq 'gates' -and $script:p5PrevCalls -eq ($pc + 3) -and $s.LastDurationSeconds -eq 36 -and $s.StaleReason -ceq 'SLOW' -and $s.Backoff) "8 fica; 36 s com o preview: lento ($($s.LastDurationSeconds))"
+            $script:p5PrevDur = 5
+            # F5 on P or 8 goes back to the dashboard (P4a), unlike the tick.
+            Assert-Eq (& $f5) 'OK' 'F5 em 8'
+            Assert-True ($s.Nav.Stack.Count -eq 1 -and $s.Nav.Message -ceq (Get-AtmText 'gui.previewDiscarded') -and $null -eq $s.Preview -and $null -eq $s.StaleReason) "F5 em 8: o dashboard, com o texto do catalogo ($($s.Nav.Message))"
+            # On any other screen the tick discards the kept preview, and the screen stays.
+            $null = & $key 'P'
+            Assert-Eq (Invoke-AtmGuiPreview -Session $s) 'OK' 'P de novo'
+            $pc = $script:p5PrevCalls
+            $null = & $key 'D2'
+            Assert-Eq (& $due) 'REFRESHED' 'tick em usuarios com o preview guardado'
+            Assert-True ((& $top).Name -ceq 'users' -and $s.Nav.Stack.Count -eq 2 -and $null -eq $s.Preview -and $script:p5PrevCalls -eq $pc -and $null -eq $s.Nav.Message) 'usuarios fica; o preview guardado foi descartado, nenhum preview'
+            Assert-True ($script:p5DiagCalls -eq 1 -and $s.DiagCalls -eq 1 -and [object]::ReferenceEquals($s.Diag, $keptDiag) -and -not $s.Diag.Stale) 'nenhum diagnose em nenhum tick; o resultado de D o mesmo'
+        } finally { $script:AtmGuiInventorySource = $savedInv; $script:AtmGuiClockSource = $savedClk; $script:AtmGuiPreviewSource = $savedPrev; $script:AtmGuiDiagnoseSource = $savedDiag; Set-AtmLanguage -Requested $old }
+    }
+    Test-Case 'GUI P5' 'Memoria (sem janela): 20 audits do monitoramento, cada um com um inventario novo (dublado, com 1 MB de lastro), medidos com [GC]::GetTotalMemory($true): a sessao guarda so o resultado atual (o primeiro inventario e coletado), e o crescimento do primeiro ao vigesimo audit fica abaixo do limite declarado' {
+        $inv = & $guiP5Inv
+        $script:p5Xml = [System.Management.Automation.PSSerializer]::Serialize($inv, 20)
+        $inv = $null
+        $script:p5Weak = $null; $script:p5N = 0
+        $savedInv = $script:AtmGuiInventorySource; $savedClk = $script:AtmGuiClockSource
+        $limit = 8MB
+        $mb = { param([long]$B) ([double]$B / 1MB).ToString('0.00', [Globalization.CultureInfo]::InvariantCulture) }
+        $m0 = 0L; $m1 = 0L; $m20 = 0L; $alive = $true
+        $rs = New-Object System.Collections.Generic.List[string]
+        try {
+            & $guiP5Sources
+            # A new object at every call (as the engine's), each holding 1 MB; a weak reference follows the first one.
+            $script:AtmGuiInventorySource = { param($a)
+                $script:p5N++
+                & $a.ProgressCallback 50 'C:\SENTINEL-PROGRESS\base'
+                $script:p5Clk = $script:p5Clk.AddSeconds(1)
+                $o = [System.Management.Automation.PSSerializer]::Deserialize($script:p5Xml)
+                $ballast = New-Object -TypeName 'byte[]' -ArgumentList 1048576
+                if ($script:p5N -eq 1) { $script:p5Weak = New-Object -TypeName WeakReference -ArgumentList (, $ballast) }
+                $o | Add-Member -NotePropertyName P5Ballast -NotePropertyValue $ballast
+                $o }
+            $s = Initialize-AtmGuiSession -ConfigDir $cfgDir
+            Set-AtmGuiMonitor -Session $s -On $true -Now $script:p5Clk
+            $m0 = [GC]::GetTotalMemory($true)
+            for ($k = 1; $k -le 20; $k++) {
+                $script:p5Clk = [datetime]$s.NextDueUtc
+                $rs.Add((Invoke-AtmGuiTick -Session $s -Now $script:p5Clk -Pump { }))
+                if ($k -eq 1) { $m1 = [GC]::GetTotalMemory($true) }
+            }
+            $m20 = [GC]::GetTotalMemory($true)
+            [GC]::Collect(); [GC]::WaitForPendingFinalizers(); [GC]::Collect()
+            $alive = [bool]$script:p5Weak.IsAlive
+            Assert-True ($null -ne $s.Inventory -and $null -ne $s.Inventory.P5Ballast) 'o resultado atual guardado'
+        } finally { $script:AtmGuiInventorySource = $savedInv; $script:AtmGuiClockSource = $savedClk; $script:p5Xml = $null }
+        Assert-True (@($rs.ToArray() | Where-Object { $_ -cne 'REFRESHED' }).Count -eq 0 -and $script:p5N -eq 20) "20 audits pelo tick ($($rs.ToArray() -join ','))"
+        Assert-True ($null -ne $script:p5Weak -and -not $alive) 'o primeiro inventario foi coletado: a sessao nao guarda os anteriores'
+        $grow = $m20 - $m1
+        Assert-True ($grow -lt $limit) "crescimento do 1o ao 20o audit: $(& $mb $grow) MB (limite $(& $mb $limit) MB)"
+        $script:caseNote = "memoria: antes $(& $mb $m0) MB, depois do 1o audit $(& $mb $m1) MB, depois do 20o $(& $mb $m20) MB; crescimento $(& $mb $grow) MB (limite $(& $mb $limit) MB); o primeiro inventario coletado"
+    }
+    Test-Case 'GUI P5' 'Estatico (P5): nenhum nome novo na lista fechada (23) nem cmdlet novo; exatamente um System.Windows.Forms.Timer, criado em Start-AtmGui, e a palavra timer em nenhum outro lugar dos dois arquivos; costura do relogio com uma unica atribuicao a $null; a funcao do tick sem nenhum nome do diagnose e com o audit do F5; o intervalo DropDownList, nenhuma caixa de texto editavel; plantados e recusados: um segundo Forms.Timer, System.Timers.Timer, System.Threading.Timer, um tipo de timer, Register-ObjectEvent, Start-Job, Start-ThreadJob, [runspacefactory] e o diagnose dentro do tick; tecla de acesso M sem colisao; chaves novas nos dois idiomas' {
+        Assert-True ($guiAllowedEngine.Count -eq 23) "lista: 23 nomes, nenhum novo na P5 ($($guiAllowedEngine -join ','))"
+        Assert-Eq ($guiAllowedCmdlets -join ',') 'Write-Host,New-Object,Add-Type,ConvertFrom-Json' 'cmdlets: nenhum novo'
+        $gp = Join-Path $srcDir 'lib\Gui.ps1'; $mp = Join-Path $srcDir 'lib\GuiModel.ps1'
+        $gt = [IO.File]::ReadAllText($gp); $mt = [IO.File]::ReadAllText($mp)
+        Assert-Eq ((& $guiCheck @($gp, $mp)) -join ' | ') '' 'arquivos reais dentro da lista fechada'
+        Assert-True ([regex]::Matches($gt, '(?i)timer').Count -eq 1 -and [regex]::Matches($mt, '(?i)timer').Count -eq 0 -and $gt.Contains('$guiTicker = New-Object -TypeName System.Windows.Forms.Timer')) 'a palavra timer so na criacao do ticker'
+        Assert-True ([regex]::Matches($gt + $mt, '\$script:AtmGuiClockSource\s*=').Count -eq 1 -and $gt -match '(?m)^\$script:AtmGuiClockSource = \$null\r?$') 'costura do relogio: uma unica atribuicao, a $null'
+        Assert-True ([regex]::Matches($gt + $mt, '\$script:AtmGuiTickToleranceMs\s*=').Count -eq 1 -and $script:AtmGuiTickToleranceMs -eq 500) 'tolerancia do despertar: 500 ms, uma atribuicao'
+        $tick = [string]${function:Invoke-AtmGuiTick}
+        foreach ($dn in @('Invoke-AtmGuiDiagnose', 'Invoke-AtmDiagnose', 'ConvertTo-AtmDiagnoseJson')) { Assert-True ($tick.IndexOf($dn, [StringComparison]::OrdinalIgnoreCase) -lt 0) "o tick nao cita $dn" }
+        Assert-True ($tick.Contains('Invoke-AtmGuiRefresh -Session $Session -Pump $Pump') -and [regex]::Matches($tick, 'Invoke-AtmGuiRefresh -Session').Count -eq 1) 'o tick audita pelo caminho do F5, uma vez'
+        Assert-True ($gt.Contains('$guiTicker.add_Tick({ $null = & $guiTick })') -and [regex]::Matches($gt, 'add_Tick\(').Count -eq 1 -and [regex]::Matches($gt, 'Invoke-AtmGuiTick -Session').Count -eq 1) 'um handler do ticker, que so chama o tick; Invoke-AtmGuiTick chamado num unico lugar'
+        Assert-True ($gt.Contains('$guiInterval.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList') -and [regex]::Matches($gt, 'System\.Windows\.Forms\.ComboBox\b').Count -eq 1 -and @([regex]::Matches($gt, 'ComboBoxStyle\]::(\w+)') | ForEach-Object { $_.Groups[1].Value } | Where-Object { $_ -cne 'DropDownList' }).Count -eq 0) 'o intervalo: uma lista DropDownList, que nao se edita'
+        foreach ($pair in @(@('Gui.ps1', $gt), @('GuiModel.ps1', $mt))) { Assert-True ($pair[1].IndexOf('TextBox', [StringComparison]::OrdinalIgnoreCase) -lt 0) "$($pair[0]): nenhuma caixa de texto" }
+        foreach ($w in @('$guiMonitor.Checked = $false', '$guiSession.Closing = $true', 'if (-not $guiSummary.TickerReleased) { $guiTicker.Stop(); $guiTicker.Dispose(); $guiSummary.TickerReleased = $true }', "if (`$null -ne `$guiTicker -and -not `$guiSummary.TickerReleased)", '& $guiOnShown $this @{ Ticker = $guiTicker; Tick = $guiTick; Session = $guiSession }')) { Assert-True ($gt.Contains($w)) "Gui.ps1: $w" }
+        # The planted ones, in a copy (the real files never change).
+        $pl = Join-Path $sandbox 'gui-planted-p5'
+        [void][IO.Directory]::CreateDirectory($pl)
+        $gc = Join-Path $pl 'Gui.ps1'
+        [IO.File]::WriteAllText($gc, $gt, (New-Object Text.UTF8Encoding $false))
+        $mc = Join-Path $pl 'GuiModel.ps1'
+        $plants = @(
+            @(("`r`nfunction Test-AtmPlanted { " + '$x = New-Object -TypeName System.Windows.Forms.Timer; $x' + " }`r`n"), 'timer: exatamente um'),
+            @(("`r`nfunction Test-AtmPlanted { " + '$x = New-Object -TypeName System.Timers.Timer; $x' + " }`r`n"), 'nome proibido: System.Timers'),
+            @(("`r`nfunction Test-AtmPlanted { " + '$x = [System.Threading.Timer]$null; $x' + " }`r`n"), 'nome proibido: Threading.Timer'),
+            @(("`r`nfunction Test-AtmPlanted { " + '$x = [System.Windows.Forms.Timer]$null; $x' + " }`r`n"), 'tipo de timer'),
+            @(("`r`nfunction Test-AtmPlanted { " + 'Register-ObjectEvent -InputObject $null -EventName Tick' + " }`r`n"), 'nome proibido: Register-ObjectEvent'),
+            @(("`r`nfunction Test-AtmPlanted { " + 'Start-Job -ScriptBlock { 1 }' + " }`r`n"), 'nome proibido: Start-Job'),
+            @(("`r`nfunction Test-AtmPlanted { " + 'Start-ThreadJob -ScriptBlock { 1 }' + " }`r`n"), 'nome proibido: Start-ThreadJob'),
+            @(("`r`nfunction Test-AtmPlanted { " + '$x = [runspacefactory]::CreateRunspace(); $x' + " }`r`n"), 'nome proibido: runspacefactory'),
+            @(("`r`nfunction Invoke-AtmGuiTick { " + 'Invoke-AtmGuiDiagnose -Session $null' + " }`r`n"), 'diagnose no tick: Invoke-AtmGuiDiagnose'),
+            @(("`r`nfunction Invoke-AtmGuiTick { " + 'Invoke-AtmDiagnose -InventoryArgs $null' + " }`r`n"), 'diagnose no tick: Invoke-AtmDiagnose'),
+            @(("`r`nfunction Invoke-AtmGuiTick { " + 'ConvertTo-AtmDiagnoseJson -Result $null' + " }`r`n"), 'diagnose no tick: ConvertTo-AtmDiagnoseJson'))
+        foreach ($pp in $plants) {
+            [IO.File]::WriteAllText($mc, $mt + $pp[0], (New-Object Text.UTF8Encoding $false))
+            $pv = & $guiCheck @($gc, $mc)
+            Assert-True (@($pv | Where-Object { $_.Contains($pp[1]) }).Count -ge 1) "plantado ($($pp[1])): recusado ($($pv -join ' | '))"
+        }
+        # The access keys of the window: the check box's M collides with no other, in either language.
+        foreach ($lang in @('en-US', 'pt-BR')) {
+            $cat = $script:AtmMessages[$lang]
+            foreach ($k in @('gui.state.STALE_SLOW', 'gui.state.STALE_OLD', 'gui.monitor.check', 'gui.monitor.intervalLabel', 'gui.monitor.intervalName', 'gui.monitor.sec', 'gui.monitor.min', 'gui.monitor.off', 'gui.monitor.on', 'gui.monitor.onBackoff')) { Assert-True ($cat.ContainsKey($k) -and $cat[$k]) "${lang}: $k" }
+            Assert-True ($cat['gui.state.STALE_SLOW'].Contains('{0}') -and $cat['gui.state.STALE_SLOW'].Contains('{1}') -and $cat['gui.state.STALE_OLD'].Contains('{0}') -and $cat['gui.monitor.on'].Contains('{0}') -and $cat['gui.monitor.on'].Contains('{1}') -and $cat['gui.monitor.onBackoff'].Contains('{1}') -and $cat['gui.state.STALE_SLOW'].StartsWith($cat['gui.state.STALE'].Substring(0, 5))) "${lang}: as marcas de cada texto"
+            $letters = New-Object System.Collections.Generic.List[string]
+            foreach ($t in @($cat['gui.refresh'], $cat['gui.close'], $cat['gui.diagRefresh'], $cat['gui.monitor.check'], $cat['gui.monitor.intervalLabel'])) { $mm = [regex]::Match([string]$t, '&(\w)'); Assert-True $mm.Success "${lang}: tecla de acesso em '$t'"; $letters.Add($mm.Groups[1].Value.ToUpperInvariant()) }
+            foreach ($it in @(Get-AtmGuiNavItemList)) { $letters.Add(([string]$it.Key).ToUpperInvariant()) }
+            Assert-Eq ([regex]::Match($cat['gui.monitor.check'], '&(\w)').Groups[1].Value.ToUpperInvariant()) 'M' "${lang}: a caixa do monitoramento tem a tecla M"
+            Assert-Eq @($letters.ToArray() | Sort-Object -Unique).Count $letters.Count "${lang}: nenhuma tecla de acesso repetida ($($letters.ToArray() -join ','))"
+            Assert-True ($cat['gui.monitor.on'].Contains($(if ($lang -ceq 'pt-BR') { 'diagn' } else { 'diagnose' }))) "${lang}: a linha de status diz que o diagnose nunca roda sozinho"
+        }
+    }
+    Test-Case 'GUI P5' 'Janela real (Windows PowerShell; trava aberta, inventario, diagnose e relogio dublados so num processo filho; o handler do ticker chamado direto): ao abrir caixa desmarcada, ticker parado, lista em 60 s e UNKNOWN; ligar: 60000 ms e nenhum audit; 30 s: 30000 ms; tick: um audit e CURRENT; um projeto aberto e o tick: a mesma tela; tick com o inventario falhando: STALE com o codigo, as linhas anteriores; tick de dentro do callback de um F5 e de dentro de um diagnose dublados: SKIPPED_BUSY; relogio antes da hora: SKIPPED_NOT_DUE sem chamada; desligar: ticker parado; fechar: ticker liberado, nenhum tick depois, saida 0; nada deixado; nos dois idiomas; sem janela possivel: NAO_TESTADO' {
+        if ($PSVersionTable.PSEdition -ne 'Desktop') { $script:caseSkipped = $true; $script:caseNote = 'PowerShell 7: janela real NAO_TESTADO nesta fase (GUI-D7)'; return }
+        $inv = & $guiP5Inv
+        $cx = Join-Path $sandbox 'gui-p5-window.clixml'
+        @{ Inv = $inv; Res = $tdRes } | Export-Clixml -LiteralPath $cx -Depth 20
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $child = Join-Path $sandbox 'gui-p5-window-child.ps1'
+        [IO.File]::WriteAllText($child, @'
+param([string]$Src, [string]$Lang, [string]$Sandbox, [string]$Out, [string]$InvFile)
+$ErrorActionPreference = 'Stop'
+foreach ($lib in @('Engine.Audit.ps1', 'Engine.Clean.ps1', 'Engine.Isolate.ps1', 'Engine.Diagnose.ps1', 'Report.ps1', 'Tui.ps1', 'GuiModel.ps1', 'Gui.ps1')) { . (Join-Path $Src ('lib\' + $lib)) }
+Set-AtmLanguage -Requested $Lang
+$res = [ordered]@{ env = (Test-AtmGuiEnvironment) }
+if ($null -eq $res.env) {
+    $names = { param($p, [switch]$Top) $h = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase); foreach ($e in @(Get-ChildItem -LiteralPath $p -Recurse:(-not $Top) -Force -ErrorAction SilentlyContinue)) { [void]$h.Add($e.FullName) }; , $h }
+    $kids = { @(Get-CimInstance -ClassName Win32_Process -Filter ('ParentProcessId = {0}' -f $PID) | ForEach-Object { [int]$_.ProcessId }) }
+    $temp = [IO.Path]::GetTempPath()
+    $b1 = & $names $Sandbox; $b2 = & $names (Join-Path $Src 'config'); $b3 = & $names $temp -Top
+    $k1 = & $kids
+    $data = Import-Clixml -LiteralPath $InvFile
+    $script:guiInv = $data.Inv
+    $script:guiRes = $data.Res
+    $script:AtmGuiEnabled = $true
+    # An exception in an event handler ends the child with its message, instead of a modal error dialog.
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.Application]::SetUnhandledExceptionMode([System.Windows.Forms.UnhandledExceptionMode]::ThrowException)
+    # The dubbed clock (UTC): each audit takes one second of it.
+    $script:clk = New-Object DateTime(2026, 11, 1, 10, 0, 0, [DateTimeKind]::Utc)
+    $script:AtmGuiClockSource = { $script:clk }
+    $script:guiInvCalls = 0; $script:guiDiagCalls = 0; $script:guiInvFail = $false; $script:guiTickInInv = $false
+    $script:guiH = $null; $script:guiAtOpen = $null; $script:guiInnerInv = $null; $script:guiInnerDiag = $null; $script:guiSourceError = $null
+    $script:AtmGuiInventorySource = { param($a)
+        $script:guiInvCalls++
+        # The window as it opens, before its first audit has finished: read from the open form.
+        if ($script:guiInvCalls -eq 1) {
+            $of = [System.Windows.Forms.Application]::OpenForms
+            if ($of.Count -gt 0) {
+                $fm = $of[0]; $cb0 = $fm.Controls.Find('MonitorInterval', $true)[0]
+                $script:guiAtOpen = [ordered]@{ state = [string]$fm.Controls.Find('StateLine', $true)[0].Text; checked = [bool]$fm.Controls.Find('Monitor', $true)[0].Checked; combo = [string]$cb0.SelectedItem; items = @($cb0.Items | ForEach-Object { [string]$_ }); style = [string]$cb0.DropDownStyle; status = [string]$fm.Controls.Find('MonitorStatus', $true)[0].Text }
+            }
+        }
+        & $a.ProgressCallback 50 'C:\SENTINEL-PROGRESS\base'
+        # A tick from inside the callback of this audit (the ticker's message handled by the progress pump).
+        if ($script:guiTickInInv) { try { $script:guiInnerInv = [string](& $script:guiH.Tick) } catch { $script:guiSourceError = 'inv: ' + $_.Exception.Message } }
+        $script:clk = $script:clk.AddSeconds(1)
+        if ($script:guiInvFail) { throw (New-Object System.IO.IOException 'SENTINEL-AUDIT-TEXT') }
+        $script:guiInv }
+    # The window turns any exception of the source into a failed diagnose, so the source records its own here.
+    $script:AtmGuiDiagnoseSource = { param($a) $script:guiDiagCalls++
+        try {
+            & $a.InventoryArgs.ProgressCallback 50 'C:\SENTINEL-PROGRESS\base'
+            # A tick from inside the diagnose: dropped.
+            $script:guiInnerDiag = [string](& $script:guiH.Tick)
+        } catch { $script:guiSourceError = 'diag: ' + $_.Exception.GetType().Name + ': ' + $_.Exception.Message }
+        $script:guiRes }
+    $script:guiSnaps = New-Object System.Collections.Generic.List[object]
+    $script:guiError = $null; $script:guiForm = $null; $script:guiTickerDisposed = $false
+    $script:guiAfterClose = $null; $script:guiCallsAfterClose = -1; $script:guiClosing = $false; $script:guiMonitorAfter = $true
+    $script:guiPre = $null
+    $hook = { param($f, $h)
+        $script:guiForm = $f
+        $script:guiH = $h
+        $h.Ticker.add_Disposed({ $script:guiTickerDisposed = $true })
+        $m = [System.Windows.Forms.Form].GetMethod('OnKeyDown', [Reflection.BindingFlags]'NonPublic, Instance')
+        $mon = $f.Controls.Find('Monitor', $true)[0]
+        $cb = $f.Controls.Find('MonitorInterval', $true)[0]
+        $first = { param($lv) if ($lv.Items.Count -eq 0) { '' } else { $it = $lv.Items[0]; (@($it.Text) + @(for ($i = 1; $i -lt $it.SubItems.Count; $i++) { $it.SubItems[$i].Text })) -join "`t" } }
+        $texts = { param($c0)
+            $t = New-Object System.Collections.Generic.List[string]
+            $todo = New-Object System.Collections.Generic.Stack[object]
+            $todo.Push($c0)
+            while ($todo.Count -gt 0) {
+                $x = $todo.Pop()
+                $t.Add([string]$x.Text)
+                if ($x -is [System.Windows.Forms.ListView]) { foreach ($col in $x.Columns) { $t.Add([string]$col.Text) }; foreach ($it in $x.Items) { foreach ($si in $it.SubItems) { $t.Add([string]$si.Text) } } }
+                foreach ($ch in $x.Controls) { $todo.Push($ch) }
+            }
+            ($t.ToArray() -join "`n") }
+        $utc = { param($T) if ($null -eq $T) { '' } else { ([datetime]$T).ToString('yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture) } }
+        $view = {
+            $rows = $f.Controls.Find('Rows', $true)[0]; $sum = $f.Controls.Find('Summary', $true)[0]
+            [ordered]@{ title = [string]$f.Controls.Find('ScreenTitle', $true)[0].Text; first = $(if ($rows.Visible) { & $first $rows } else { & $first $sum }); stack = [int]$h.Session.Nav.Stack.Count } }
+        $snap = { param([string]$Step, [string]$Tick)
+            $v = & $view
+            [ordered]@{ step = $Step; tick = $Tick; checked = [bool]$mon.Checked; enabled = [bool]$h.Ticker.Enabled; interval = [int]$h.Ticker.Interval; combo = [string]$cb.SelectedItem
+                state = [string]$f.Controls.Find('StateLine', $true)[0].Text; status = [string]$f.Controls.Find('MonitorStatus', $true)[0].Text
+                title = $v.title; first = $v.first; stack = $v.stack; pre = $script:guiPre
+                refreshed = (& $utc $h.Session.RefreshedUtc); next = (& $utc $h.Session.NextDueUtc); clock = (& $utc $script:clk)
+                invCalls = $script:guiInvCalls; diagCalls = $script:guiDiagCalls; refreshEnabled = [bool]$f.Controls.Find('Refresh', $true)[0].Enabled
+                leak = ((& $texts $f).IndexOf('SENTINEL', [StringComparison]::OrdinalIgnoreCase) -ge 0) } }
+        $due = { $script:clk = [datetime]$h.Session.NextDueUtc }
+        $key = { param([string]$K) $ka = [System.Windows.Forms.KeyEventArgs]::new([System.Windows.Forms.Keys]$K); $null = $m.Invoke($f, [object[]]@($ka)) }
+        foreach ($st in @('open', 'on', 'combo30', 'tick', 'project', 'fail', 'f5Busy', 'diagBusy', 'notDue', 'off')) {
+            try {
+                $tr = ''
+                $script:guiPre = $null
+                if ($st -ceq 'on') { $mon.Checked = $true }
+                elseif ($st -ceq 'combo30') { $cb.SelectedIndex = 0 }
+                elseif ($st -ceq 'tick') { & $due; $tr = [string](& $h.Tick) }
+                elseif ($st -ceq 'project') { & $key 'D3'; & $key 'Return'; $script:guiPre = & $view; & $due; $tr = [string](& $h.Tick) }
+                elseif ($st -ceq 'fail') { $script:guiPre = & $view; $script:guiInvFail = $true; & $due; $tr = [string](& $h.Tick); $script:guiInvFail = $false }
+                elseif ($st -ceq 'f5Busy') { & $due; $script:guiTickInInv = $true; & $key 'F5'; $script:guiTickInInv = $false; $tr = [string]$script:guiInnerInv }
+                elseif ($st -ceq 'diagBusy') { & $due; & $key 'D'; $tr = [string]$script:guiInnerDiag }
+                elseif ($st -ceq 'notDue') { $script:clk = ([datetime]$h.Session.NextDueUtc).AddSeconds(-10); $tr = [string](& $h.Tick) }
+                elseif ($st -ceq 'off') { $mon.Checked = $false }
+                $script:guiSnaps.Add((& $snap $st $tr))
+            } catch { $script:guiError = $st + ': ' + $_.Exception.Message; break }
+        }
+        $f.Close()
+        # A tick that still arrives after the close does nothing.
+        try { $script:guiAfterClose = [string](& $h.Tick) } catch { $script:guiError = 'depois de fechar: ' + $_.Exception.Message }
+        $script:guiCallsAfterClose = $script:guiInvCalls
+        $script:guiClosing = [bool]$h.Session.Closing
+        $script:guiMonitorAfter = [bool]$h.Session.Monitor
+    }
+    $id = { [pscustomobject]@{ Name = 'TEST\gui'; Sid = 'S-1-5-21-1-2-3-9301'; IsAdmin = $false; ElevationTypeRaw = 3; IntegrityRid = 8192; SessionId = 1 } }
+    $o = @(Invoke-AtmGuiCommand -IdentitySource $id -OnShown $hook 6>&1)
+    $res.code = @($o | Where-Object { $_ -is [int] })[-1]
+    # ToArray, not @(): on Windows PowerShell 5.1 the array subexpression over this generic list throws.
+    $res.snaps = $script:guiSnaps.ToArray()
+    $res.atOpen = $script:guiAtOpen
+    $res.error = $script:guiError
+    $res.sourceError = $script:guiSourceError
+    $res.tickerDisposed = [bool]$script:guiTickerDisposed
+    $res.afterClose = $script:guiAfterClose
+    $res.callsAfterClose = $script:guiCallsAfterClose
+    $res.callsAtEnd = $script:guiInvCalls
+    $res.closing = $script:guiClosing
+    $res.monitorAfter = $script:guiMonitorAfter
+    $res.disposed = ($null -ne $script:guiForm -and [bool]$script:guiForm.IsDisposed)
+    $k2 = & $kids
+    $res.newProcesses = @($k2 | Where-Object { $k1 -notcontains $_ }).Count
+    $a1 = & $names $Sandbox; $a2 = & $names (Join-Path $Src 'config'); $a3 = & $names $temp -Top
+    $res.newSandbox = @($a1 | Where-Object { -not $b1.Contains($_) }).Count
+    $res.newConfig = @($a2 | Where-Object { -not $b2.Contains($_) }).Count
+    $res.newTemp = @($a3 | Where-Object { -not $b3.Contains($_) }).Count
+}
+($res | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $Out -Encoding UTF8
+'@, (New-Object Text.UTF8Encoding $true))
+        foreach ($lang in @('en-US', 'pt-BR')) {
+            $out = Join-Path $sandbox ('gui-p5-window-' + $lang + '.json')
+            $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Lang $lang -Sandbox `"$sandbox`" -Out `"$out`" -InvFile `"$cx`"") -TimeoutSec 180
+            Assert-True ($r.Exit -eq 0 -and (Test-Path -LiteralPath $out -PathType Leaf)) "janela P5 ${lang}: processo filho saida $($r.Exit) $($r.Text)"
+            $j = Get-Content -LiteralPath $out -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($null -ne $j.env) { $script:caseSkipped = $true; $script:caseNote = "runner sem janela possivel ($($j.env)): NAO_TESTADO"; return }
+            Assert-True ($null -eq $j.error -and [int]$j.code -eq 0 -and $null -eq $j.sourceError) "janela P5 ${lang}: sem erro em nenhum passo, saida 0 ($($j.error); $($j.sourceError); $($j.code))"
+            $snaps = @($j.snaps)
+            Assert-Eq (@($snaps | ForEach-Object { $_.step }) -join ',') 'open,on,combo30,tick,project,fail,f5Busy,diagBusy,notDue,off' "janela P5 ${lang}: todos os passos"
+            $sn = @{}; foreach ($x in $snaps) { $sn[[string]$x.step] = $x }
+            $old = Get-AtmLanguage
+            try {
+                Set-AtmLanguage -Requested $lang
+                $unknown = Get-AtmText 'gui.state.UNKNOWN'
+                $offTxt = Get-AtmText 'gui.monitor.off'
+                $onTxt = { param([string]$Iv, [string]$Next) Get-AtmText 'gui.monitor.on' $Iv $Next }
+                $cur = { param([string]$At) Get-AtmText 'gui.state.CURRENT' $At }
+                $staleTxt = Get-AtmText 'gui.state.STALE' ([string]$sn['project'].refreshed) (ConvertTo-AtmExceptionCode 'IOException')
+                $dashTitle = Get-AtmText 'gui.screenTitle' (Get-AtmText 'menu.dashboard')
+                $diagTitle = Get-AtmText 'gui.screenTitle' (Get-AtmText 'tui.diag.title')
+                $labels = @(Get-AtmGuiMonitorIntervals | ForEach-Object { Format-AtmGuiInterval -Seconds $_ })
+            } finally { Set-AtmLanguage -Requested $old }
+            $ao = $j.atOpen
+            Assert-True ($null -ne $ao -and [string]$ao.state -ceq $unknown -and -not [bool]$ao.checked -and [string]$ao.combo -ceq '60 s' -and [string]$ao.style -ceq 'DropDownList' -and [string]$ao.status -ceq $offTxt -and (@($ao.items) -join ',') -ceq ($labels -join ',')) "janela P5 ${lang}: ao abrir UNKNOWN, caixa desmarcada, 60 s numa lista DropDownList dos seis valores, desligado ($($ao.state); $($ao.combo); $($ao.style))"
+            $x = $sn['open']
+            Assert-True (-not [bool]$x.checked -and -not [bool]$x.enabled -and [int]$x.interval -eq 60000 -and [string]$x.combo -ceq '60 s' -and [string]$x.state -ceq (& $cur $x.refreshed) -and [string]$x.status -ceq $offTxt -and [int]$x.invCalls -eq 1 -and [string]$x.title -ceq $dashTitle) "janela P5 ${lang}: depois do primeiro audit, ticker parado, CURRENT ($($x.state))"
+            $x = $sn['on']
+            Assert-True ([bool]$x.checked -and [bool]$x.enabled -and [int]$x.interval -eq 60000 -and [int]$x.invCalls -eq 1 -and [string]$x.next -ceq '2026-11-01 10:01:01' -and [string]$x.status -ceq (& $onTxt '60 s' $x.next)) "janela P5 ${lang}: ligar: 60000 ms, nenhum audit, o proximo em 60 s ($($x.next); $($x.status))"
+            $x = $sn['combo30']
+            Assert-True ([bool]$x.enabled -and [int]$x.interval -eq 30000 -and [string]$x.combo -ceq '30 s' -and [int]$x.invCalls -eq 1 -and [string]$x.next -ceq '2026-11-01 10:00:31' -and [string]$x.status -ceq (& $onTxt '30 s' $x.next)) "janela P5 ${lang}: 30 s: 30000 ms, a contagem de agora ($($x.next))"
+            $x = $sn['tick']
+            Assert-True ([string]$x.tick -ceq 'REFRESHED' -and [int]$x.invCalls -eq 2 -and [string]$x.refreshed -ceq '2026-11-01 10:00:32' -and [string]$x.state -ceq (& $cur $x.refreshed) -and [string]$x.next -ceq '2026-11-01 10:01:02' -and [bool]$x.enabled -and [bool]$x.refreshEnabled) "janela P5 ${lang}: tick: um audit, CURRENT, o proximo 30 s depois do fim ($($x.tick); $($x.state); $($x.next))"
+            $x = $sn['project']
+            Assert-True ([string]$x.tick -ceq 'REFRESHED' -and [int]$x.invCalls -eq 3 -and $null -ne $x.pre -and [string]$x.title -ceq [string]$x.pre.title -and [int]$x.stack -eq 3 -and [int]$x.pre.stack -eq 3 -and [string]$x.title -cne $dashTitle -and [string]$x.first -ceq [string]$x.pre.first) "janela P5 ${lang}: um projeto aberto e o tick: a mesma tela ($($x.title); $($x.stack))"
+            $x = $sn['fail']
+            Assert-True ([string]$x.tick -ceq 'FAILED' -and [int]$x.invCalls -eq 4 -and [string]$x.state -ceq $staleTxt -and [string]$x.refreshed -ceq [string]$sn['project'].refreshed -and [string]$x.title -ceq [string]$x.pre.title -and [string]$x.first -ceq [string]$x.pre.first -and [bool]$x.refreshEnabled) "janela P5 ${lang}: tick que falha: STALE com o codigo, as linhas anteriores ($($x.state))"
+            $x = $sn['f5Busy']
+            Assert-True ([string]$x.tick -ceq 'SKIPPED_BUSY' -and [int]$x.invCalls -eq 5 -and [string]$x.state -ceq (& $cur $x.refreshed)) "janela P5 ${lang}: tick de dentro do callback de um F5: SKIPPED_BUSY, um audit so ($($x.tick); $($x.invCalls))"
+            $x = $sn['diagBusy']
+            Assert-True ([string]$x.tick -ceq 'SKIPPED_BUSY' -and [int]$x.invCalls -eq 5 -and [int]$x.diagCalls -eq 1 -and [string]$x.title -ceq $diagTitle) "janela P5 ${lang}: tick de dentro do diagnose: SKIPPED_BUSY, nenhum audit ($($x.tick); $($x.invCalls); $($x.title))"
+            $x = $sn['notDue']
+            Assert-True ([string]$x.tick -ceq 'SKIPPED_NOT_DUE' -and [int]$x.invCalls -eq 5 -and [int]$x.diagCalls -eq 1 -and [string]$x.title -ceq $diagTitle) "janela P5 ${lang}: relogio antes da hora: SKIPPED_NOT_DUE, nenhuma chamada ($($x.tick))"
+            $x = $sn['off']
+            Assert-True (-not [bool]$x.checked -and -not [bool]$x.enabled -and [string]$x.status -ceq $offTxt -and [string]$x.next -ceq '' -and [int]$x.invCalls -eq 5) "janela P5 ${lang}: desligar: ticker parado ($($x.status))"
+            Assert-True (@($snaps | Where-Object { [bool]$_.leak }).Count -eq 0) "janela P5 ${lang}: nada da mensagem da excecao nem do progresso em nenhum controle"
+            Assert-True ([bool]$j.tickerDisposed -and [string]$j.afterClose -ceq 'SKIPPED_NOT_DUE' -and [int]$j.callsAfterClose -eq 5 -and [int]$j.callsAtEnd -eq 5 -and [bool]$j.closing -and -not [bool]$j.monitorAfter) "janela P5 ${lang}: fechar: ticker liberado, um tick depois nao faz nada ($($j.afterClose); $($j.tickerDisposed))"
+            Assert-True ([bool]$j.disposed) "janela P5 ${lang}: formulario liberado"
+            Assert-True ([int]$j.newProcesses -eq 0 -and [int]$j.newSandbox -eq 0 -and [int]$j.newConfig -eq 0 -and [int]$j.newTemp -eq 0) "janela P5 ${lang}: nada deixado (processos $($j.newProcesses), sandbox $($j.newSandbox), configuracao $($j.newConfig), TEMP $($j.newTemp))"
+        }
+        $script:caseNote = 'janela real em en-US e pt-BR: UNKNOWN ao abrir, ligar, 30 s, tick, projeto, falha, F5 e diagnose com tick dentro, antes da hora, desligar, fechar com o ticker liberado'
     }
 
     # ------------------------------------------------------------------ scale

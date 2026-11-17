@@ -737,7 +737,7 @@ Order of a run:
    a non-interactive session) or `GUI_WINFORMS_UNAVAILABLE`. It is never relaunched in another shell;
 4. Windows Forms is loaded, and the window opens.
 
-What the window shows in this version (phases P1 to P4b):
+What the window shows in this version (phases P1 to P5):
 
 * **A header:**
   * the process identity and its elevation state (elevated administrator, token elevation type, integrity level);
@@ -746,7 +746,9 @@ What the window shows in this version (phases P1 to P4b):
     * `UNKNOWN` before an audit has finished;
     * `CURRENT` with the UTC time of the audit;
     * `PARTIAL` when the engine's coverage is incomplete;
-    * `STALE` when the last audit failed. The earlier result stays on screen, with the exception type only.
+    * `STALE` when the last audit failed. The earlier result stays on screen, with the exception code only. With the
+      live monitoring on (phase P5), `STALE` also says why when no audit failed: the last audit was slow (its duration
+      in seconds), or no audit has succeeded for more than twice the interval (the time of the audit shown).
 * **The automatic purge notice,** under the header, while the policy of this copy has `autoPurge: true`. It is the
   same text the TUI and the reports show.
 * **The dashboard of the TUI** (menu `1`), in read-only lists:
@@ -792,7 +794,9 @@ What the window shows in this version (phases P1 to P4b):
     it runs, the window shows a fixed text, with no percentage, and the screen keys, the buttons and Refresh do
     nothing. Closing the window during the preview closes it when the preview ends.
   * The result is kept until the next audit. A new audit discards it: if a preview screen is open, the window goes
-    back to the dashboard and says so, and the next `P` or `8` computes it again. A failed audit keeps it.
+    back to the dashboard and says so, and the next `P` or `8` computes it again. A failed audit keeps it. A due
+    audit of the live monitoring (phase P5) is the exception: on a preview screen it stays there and computes the
+    preview again.
   * A failed preview shows only the exception type, and changes nothing. The next `P` or `8` tries again; nothing
     repeats by itself.
   * Before the first audit has finished, `P` and `8` show the same text as the other screens, and compute nothing.
@@ -820,14 +824,33 @@ What the window shows in this version (phases P1 to P4b):
   * The digits `1` to `9` and `P` work inside the area too, and leave it for that screen (the TUI ignores them
     there).
 
+* **The live monitoring (phase P5),** under the buttons: a check box **Live monitoring** (**Monitoramento ao vivo**,
+  access key `M`), an interval list and a status line.
+  * The box is off every time the window opens, and the list shows 60 s. The list has six fixed values: 30 s, 60 s,
+    2 min, 5 min, 10 min and 15 min. It cannot be typed into. Nothing is remembered.
+  * Turning it on runs nothing: the first audit comes one interval later. Changing the interval starts the count again
+    from that moment. Turning it off stops it; an audit already running ends normally.
+  * Each due audit is the same audit as `F5`. The open screen stays and is computed again over the new result (a detail
+    whose root is gone goes back to its list). On `P`, `8` or a detail opened from them, the preview is computed again
+    in the same audit. On any other screen, the kept preview is discarded and is computed again the next time `P` or
+    `8` is opened.
+  * **The diagnose never runs by itself.** A due audit never runs it, and the diagnostics area keeps its result.
+  * A due time that arrives while an audit, the preview or the diagnose runs is dropped, never queued.
+  * The status line says `off`, or `on` with the interval and the UTC time of the next audit.
+  * Limits: an audit that takes more than half the interval marks the view `STALE` (slow), and the next audit waits
+    twice that duration (at least one interval) after it ends. More than twice the interval with no good audit marks it
+    `STALE` (old). A failed audit keeps everything shown, marks it `STALE` with the exception code only, and the next
+    due audit tries again. A good, fast audit clears these marks.
+
 **Audits.** The window runs one audit when it opens, as the TUI does. After that, an audit runs only when you ask for
-it, with **Refresh** or `F5`. Nothing repeats by itself, and no live monitoring exists yet.
+it, with **Refresh** or `F5`, or when the live monitoring is on and its interval has passed.
 * While an audit runs:
   * the window shows only a percentage;
   * the refresh controls are disabled;
   * a second request is ignored, not queued.
 * Closing the window during an audit cancels it, and the window closes.
-* `F5` audits again from any screen. While an audit runs, the screen keys and buttons do nothing.
+* `F5` audits again from any screen. On `P` or `8`, it goes back to the dashboard (the preview is discarded); on any
+  other screen, the screen stays. While an audit runs, the screen keys and buttons do nothing.
 * The tab order is fixed, and every control has an accessible name.
 
 **What it does not do:**

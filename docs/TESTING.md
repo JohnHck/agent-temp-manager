@@ -405,9 +405,9 @@ The quarantine is a folder of the sandbox (the `AtmIsolationQuarantineRoot` seam
     action, run as registered once the installation is gone, exits non-zero with nothing created (fail closed); the
     harness then removes it.
 
-## Desktop GUI in the suite (V0.2.1 phases P1 to P4b)
+## Desktop GUI in the suite (V0.2.1 phases P1 to P5)
 
-The suite areas `GUI P1`, `GUI P2`, `GUI P3`, `GUI P4a` and `GUI P4b` cover `agent-temp gui` ([ADR-0014](adr/ADR-0014-desktop-gui-winforms.md)). None
+The suite areas `GUI P1`, `GUI P2`, `GUI P3`, `GUI P4a`, `GUI P4b` and `GUI P5` cover `agent-temp gui` ([ADR-0014](adr/ADR-0014-desktop-gui-winforms.md)). None
 of their cases opens a window in a shipped copy: the gate stays closed in every file, and the cases that go past it open
 it only in their own process memory.
 
@@ -484,7 +484,25 @@ user's roots and a detail; projects, a project's roots and a detail; coverage an
 Since P4a it also opens `P`, `8` and `P` again with the real preview engine (one call, then the kept result), opens the
 detail of a preview row, and checks the sandbox is still identical. Since P4b it also opens `D` twice with the real
 diagnose engine (one run, then the kept result), checks the worktree and handle gate lines, walks every category of the
-area with `Enter` on its first row, and checks the sandbox is still identical.
+area with `Enter` on its first row, and checks the sandbox is still identical. Since P5 it also turns the live
+monitoring on and runs two due ticks with the real inventory (only the clock is dubbed): two audits, the area's screen
+stays, no new diagnose, and the sandbox is still identical.
+
+`GUI P5`, the live monitoring. The decision of each tick is `Invoke-AtmGuiTick`, tested with no window over a dubbed
+UTC clock (`$script:AtmGuiClockSource`) and a dubbed inventory that advances the clock by the audit's duration. Since
+P5, the timer checks of P1 to P4b accept only the live monitoring's one ticker (they read the files without its single
+creation), the static check of P1 refuses any other timer, job, runspace or event subscription, and the audit failure
+pins of P2 expect the exception code.
+
+| Case | What it checks |
+|---|---|
+| Intervals and turning on | no window: only the six values (30 s to 15 min), 60 s when the window opens, any other value refused with nothing changed; off when the window opens; turning on calls nothing; `SKIPPED_NOT_DUE` before the due time with no call, also within 500 ms of it; at the due time one audit, also before the first audit, and `CURRENT`; a wake up to 500 ms early counts; a new interval starts the count from that moment; turning off stops it; the status line in en-US and pt-BR |
+| Tick during another call | no window, always at the due time: a tick fired from inside the progress callback of the dubbed inventory (during an `F5` audit and during a tick's own audit), from inside the dubbed preview source and from inside the progress callback of the dubbed diagnose returns `SKIPPED_BUSY` and calls nothing; nothing is queued: the next due tick audits once and the one after it is not due |
+| Limits | no window, both languages: an audit slower than half the interval marks `STALE` (slow, with its duration) and the next tick waits max(interval, 2 x duration) from its end, with `SKIPPED_BACKOFF` before; exactly half is not slow; a good, fast cycle clears both; more than twice the interval with no good audit marks `STALE` (old) with the time, only with the monitoring on, evaluated on every tick; a failure keeps the result and its lines, marks `STALE` with the exception code only (never the message), and the next tick tries again; `F5` with the monitoring off is never slow |
+| Screens | no window: the tick never calls the diagnose, and the result of `D` stays the same object, never outdated, even after a failed tick; the screen stays (the diagnostics area, a project's roots); a detail whose root is gone goes back to its list with the catalog text; a gone user's roots are an empty list; on `P`, `8` or a detail opened from them, the tick computes the preview again and its time counts in the duration (a slow preview makes it slow); on another screen the kept preview is discarded; `F5` on `P` or `8` goes back to the dashboard (P4a), on a project's roots it stays |
+| Memory | no window: 20 due ticks, each audit returning a new dubbed inventory with 1 MB of ballast, measured with `[GC]::GetTotalMemory($true)`; the first inventory is collected (a weak reference), and the growth from the first to the twentieth audit stays under the declared limit; the case note carries the numbers |
+| Static (P5) | no new name in the closed list (23) and no new cmdlet; exactly one `System.Windows.Forms.Timer`, created in `Start-AtmGui`, and the word timer nowhere else in the GUI files; the clock seam and the 500 ms tolerance are single assignments; `Invoke-AtmGuiTick` names no diagnose function and audits through `Invoke-AtmGuiRefresh`, the `F5` path; one ticker handler; the interval is a `DropDownList`, with no editable text field; the close stops and releases the ticker. Planted and refused, in copies: a second Forms timer, `System.Timers.Timer`, `System.Threading.Timer`, a timer type, `Register-ObjectEvent`, `Start-Job`, `Start-ThreadJob`, `[runspacefactory]`, and each diagnose function inside a function named `Invoke-AtmGuiTick`. The check box's access key `M` collides with no other, and the new keys exist in both languages |
+| Real window (P5) | Windows PowerShell only, in a job-object process with a timeout, with the inventory, the diagnose and the clock dubbed in that process only; the ticker's handler is called directly. When the window opens (read during its first audit): `UNKNOWN`, the box unchecked, the list at 60 s with the six values, `DropDownList`, off. Then: the ticker stopped; on: 60000 ms and no audit; 30 s: 30000 ms; a due tick: one audit, `CURRENT`; a project opened and a tick: the same screen; a tick with the inventory failing: `STALE` with the code and the earlier lines; a tick from inside an `F5` audit's callback and from inside a dubbed diagnose: `SKIPPED_BUSY`; the clock before the due time: `SKIPPED_NOT_DUE`, no call; off: the ticker stopped; close: the ticker released, a tick after it does nothing, exit 0. Runs in en-US and pt-BR; no child process, timer or file is left behind. `NAO_TESTADO` on PowerShell 7 and when no window can be shown |
 
 The install e2e adds the step `shipped-gui-gate`: the installed `lib\Gui.ps1` has the single `$false` assignment, both
 GUI files are in the manifest, `version` shows the gate disabled, and `agent-temp gui` exits with code 7 in en-US and

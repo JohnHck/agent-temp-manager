@@ -52,7 +52,7 @@ change it; enabling deletion requires a code change in the administrator-owned, 
 released under a specific authorization. The automated suite flips it only in its own process, against its
 isolated sandbox.
 
-## Desktop GUI gate (V0.2.1 phases P1 to P4b)
+## Desktop GUI gate (V0.2.1 phases P1 to P5)
 
 * **The seventh gate:** `$script:AtmGuiEnabled`, `$false` in every shipped copy (maintainer decision D-A,
   [ADR-0014](adr/ADR-0014-desktop-gui-winforms.md)). It is a single assignment in `lib\Gui.ps1`, with no option,
@@ -75,10 +75,10 @@ isolated sandbox.
   elevation state (PRIV-10), changes nothing and leaves no process, timer or file behind.
 * **P2, the dashboard:**
   * one audit when the window opens, then again only by an explicit request (Refresh or `F5`); nothing repeats by
-    itself;
+    itself (since P5, also when the live monitoring is turned on and its interval has passed, below);
   * the audit runs through `Invoke-AtmInventory`, with the launcher's own arguments. Its progress shows only a
     percentage and a fixed text, never the engine's message, which names temporary bases;
-  * a failed audit keeps the earlier result, marked `STALE`, with the exception type only;
+  * a failed audit keeps the earlier result, marked `STALE`, with the exception type only (since P5, its code);
   * the numbers are shown in read-only lists and labels, with no editable text field and no clipboard (GUI-D4);
   * the automatic purge notice is shown while the policy has it on (GUI-D1). The GUI lists no quarantine and offers
     no action.
@@ -120,6 +120,19 @@ isolated sandbox.
     `Out-*` or `Export-*` cmdlet is allowed;
   * a failure shows only the exception code; a close during a run stops its inventory phase, discards the result and
     closes the window once the collectors end, within the diagnose deadline.
+* **P5, the live monitoring:**
+  * off every time the window opens, turned on only by its check box, and nothing of it is remembered or written;
+  * one ticker, a `System.Windows.Forms.Timer` created in one place (`Start-AtmGui`). It exists only while the window
+    is open: it runs only while the monitoring is on, and closing the window stops and releases it, so a tick after the
+    close does nothing. No other timer, process, job, runspace, thread or event subscription: the static test refuses a
+    second timer, `System.Timers.Timer`, `System.Threading.Timer`, `Register-ObjectEvent`, `Start-Job`,
+    `Start-ThreadJob` and `[runspacefactory]`;
+  * a due tick runs the same audit as `F5` (`Invoke-AtmInventory`, on the UI thread), and the preview again on a
+    preview screen. It never runs the diagnose (GUI-D3): the static test refuses a diagnose function in the tick, and
+    the result of `D` stays unchanged. A tick while an audit, the preview or the diagnose runs is dropped, never queued;
+  * the intervals are fixed (30 seconds to 15 minutes; GUI-D10). A slow audit makes the next one wait twice its
+    duration, so the window never audits back to back; a failure keeps the result and shows only the exception code.
+    The closed list and the allowed cmdlets do not change.
 
 ## Clean gates (all must pass, re-run immediately before each deletion)
 
