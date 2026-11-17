@@ -6,7 +6,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)][string]$Command = 'tui',
-    # quarantine only: list | inspect | verify | restore | purge.
+    # quarantine: list | inspect | verify | restore | purge. recover (V0.4, with -Operation and -Service): list | plan.
     [Parameter(Position = 1)][string]$SubCommand,
     [string]$User,
     [string]$Project,
@@ -24,7 +24,7 @@ param(
     [switch]$Ascii,
     [string]$Lang,
     [int]$DeadlineSeconds = -1,
-    [string]$PseudonymKeyFile
+    [string]$PseudonymKeyFile, [string]$Operation, [string]$Service
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,7 +39,7 @@ $here = $PSScriptRoot
 # Source checkouts (neither file) load as-is. Hashes are computed with .NET and messages are printed in both
 # languages, because no code (not even the message catalog) is loaded before the check passes. A file or directory
 # that cannot be read is a problem too, reported by its relative name only (no exception text, no absolute path).
-$loadedLibs = @('lib\Engine.Audit.ps1', 'lib\I18n.ps1', 'lib\Engine.Clean.ps1', 'lib\Engine.Isolate.ps1', 'lib\Engine.Diagnose.ps1', 'lib\Report.ps1', 'lib\Tui.ps1', 'lib\GuiModel.ps1', 'lib\Gui.ps1')
+$loadedLibs = @('lib\Engine.Audit.ps1', 'lib\I18n.ps1', 'lib\Engine.Clean.ps1', 'lib\Engine.Isolate.ps1', 'lib\Engine.Diagnose.ps1', 'lib\Engine.Recover.ps1', 'lib\Report.ps1', 'lib\Tui.ps1', 'lib\GuiModel.ps1', 'lib\Gui.ps1')
 $providersDir = Join-Path $here 'providers'
 
 function Get-AtmLauncherSha256 {
@@ -228,7 +228,7 @@ $cliInvArgs['NoProgress'] = [bool]$NoProgress
 $cliInvArgs['ProgressCallback'] = { param($pct, $msg) $act = Get-AtmText 'cli.progressActivity'; if ($pct -ge 100) { Write-Progress -Activity $act -Completed } else { Write-Progress -Activity $act -Status $msg -PercentComplete $pct } }
 
 function Show-Help {
-    foreach ($k in @('help.title', 'help.blank', 'help.tui', 'help.audit', 'help.preview', 'help.diagnose', 'help.clean', 'help.clean2', 'help.isolate', 'help.isolate2', 'help.quarantine', 'help.quarantine2', 'help.quarantine3', 'help.authorize', 'help.verify', 'help.version', 'help.gui', 'help.help', 'help.blank',
+    foreach ($k in @('help.title', 'help.blank', 'help.tui', 'help.audit', 'help.preview', 'help.diagnose', 'help.clean', 'help.clean2', 'help.isolate', 'help.isolate2', 'help.quarantine', 'help.quarantine2', 'help.quarantine3', 'help.authorize', 'help.verify', 'help.version', 'help.gui', 'help.recover', 'help.recover2', 'help.help', 'help.blank',
             'help.drill', 'help.export', 'help.diagOpts', 'help.cleanOpts', 'help.cleanOpts2', 'help.cleanOpts3', 'help.cleanOpts4', 'help.tuiOpts', 'help.lang', 'help.blank', 'help.examples')) { Write-Host (Get-AtmText $k) }
     Write-Host '  agent-temp'
     Write-Host '  agent-temp audit'
@@ -469,6 +469,37 @@ try {
             Show-AtmDiscardResult -Result $authRes
             exit $(if ($authRes.Accepted) { 0 } else { 3 })
         }
+        'recover' {
+            # V0.4 R1 (docs/adr/ADR-0016): list and plan only, from a fresh read-only collection made in this process. The
+            # recovery engine is loaded here (and by version) only. With the recovery gate closed (every copy), and in this
+            # phase even past it, nothing is asked, locked, logged or written and no service is opened. The operation comes
+            # only from the catalog and the service only from the exact name a provider declares: never a path, wildcard,
+            # file or plan. One operation and one target per call. Exit 0 list or plan shown, 3 target refused, 2 usage.
+            . (Join-Path $here 'lib\Engine.Recover.ps1')
+            $recSub = $(if ($SubCommand) { $SubCommand.ToLowerInvariant() } else { '' })
+            foreach ($opt in @('User', 'Project', 'Root', 'Path', 'AllowListFile', 'IncludeOtherUsers', 'AcceptB1ResidualRisk', 'ExportJson', 'LogFile', 'RecordFile', 'Entry', 'All', 'PseudonymKeyFile')) {
+                if ($PSBoundParameters.ContainsKey($opt)) { Write-Host (Get-AtmText 'cli.recoverOptionRefused' $opt) -ForegroundColor Red; exit 2 }
+            }
+            if ($recSub -cne 'list' -and $recSub -cne 'plan') { Write-Host (Get-AtmText 'cli.recoverUsage') -ForegroundColor Red; exit 2 }
+            if ($recSub -ceq 'list' -and ($PSBoundParameters.ContainsKey('Operation') -or $PSBoundParameters.ContainsKey('Service'))) { Write-Host (Get-AtmText 'cli.recoverUsage') -ForegroundColor Red; exit 2 }
+            $recOp = $null
+            if ($recSub -ceq 'plan') {
+                $recOp = $(if ($Operation) { Get-AtmRecoveryOperation $Operation } else { $null })
+                if ($null -eq $recOp) { Write-Host (Get-AtmText 'cli.recoverOperationInvalid' (@($script:AtmRecoveryCatalog | ForEach-Object { $_.Id }) -join ', ')) -ForegroundColor Red; exit 2 }
+                # The characters of a service name the diagnose accepts (no separator, wildcard, quote or drive).
+                if (-not $Service -or $Service.Length -gt 256 -or $Service -cnotmatch '^[A-Za-z0-9_.\- ]+$') { Write-Host (Get-AtmText 'cli.recoverServiceInvalid') -ForegroundColor Red; exit 2 }
+            }
+            $recArgs = @{}
+            if ($DeadlineSeconds -ge 0) { $recArgs['DeadlineSeconds'] = $DeadlineSeconds }
+            # An unexpected failure is reported by its exception type only: its message could carry collected data.
+            try { $recColl = Get-AtmRecoverCollection @recArgs }
+            catch { Write-Host (Get-AtmText 'cli.recoverFailed' (ConvertTo-AtmExceptionCode $_.Exception.GetBaseException().GetType().Name)) -ForegroundColor Red; exit 10 }
+            if ($recSub -ceq 'list') { Show-AtmRecoverList -List (Get-AtmRecoverList -Collection $recColl); exit 0 }
+            $recPlan = Get-AtmRecoverPlan -Collection $recColl -Operation $recOp.Id -Service $Service
+            if (-not $recPlan.Declared) { Write-Host (Get-AtmText 'cli.recoverNotDeclared') -ForegroundColor Red; exit 2 }
+            Show-AtmRecoverPlan -Plan $recPlan
+            exit $(if ($recPlan.Offered) { 0 } else { 3 })
+        }
         'version' {
             Initialize-AtmNative -LibDir (Join-Path $here 'lib')
             Write-Host "agent-temp $script:AtmVersion"
@@ -478,6 +509,9 @@ try {
             Write-Host (Get-AtmText 'cli.isolation' $(if ($script:AtmIsolationEnabled) { Get-AtmText 'cli.enabled' } else { Get-AtmText 'cli.isolationDisabled' }))
             Write-Host (Get-AtmText 'cli.purge' $(if ($script:AtmQuarantinePurgeEnabled) { Get-AtmText 'cli.enabled' } else { Get-AtmText 'cli.purgeDisabled' }))
             Write-Host (Get-AtmText 'cli.gui' $(if ($script:AtmGuiEnabled) { Get-AtmText 'cli.enabled' } else { Get-AtmText 'cli.guiDisabled' }))
+            # V0.4 (ADR-0016 section 5): the eighth release gate, read from the recovery engine (loaded by version and recover).
+            . (Join-Path $here 'lib\Engine.Recover.ps1')
+            Write-Host (Get-AtmText 'cli.recovery' $(if ($script:AtmRecoveryEnabled) { Get-AtmText 'cli.enabled' } else { Get-AtmText 'cli.recoveryDisabled' }))
             # The effective quarantine policy (contract section 11.2), with its warnings (an invalid file counts as off).
             foreach ($pl in (Get-AtmQuarantinePolicyLines -Policy (Get-AtmQuarantinePolicy -ConfigDir $invArgs.ConfigDir))) { Write-Host $pl.Text -ForegroundColor $pl.Color }
             # The user's scheduled task of the automatic purge, read only (P6b).

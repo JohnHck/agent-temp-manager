@@ -1290,3 +1290,57 @@ function ConvertTo-AtmDiagnoseJson {
     }
     return ($export | ConvertTo-Json -Depth 8)
 }
+
+function Show-AtmRecoverList {
+    # recover list (V0.4 R1, ADR-0016): each declared service with the catalog operation, offered or refused with its
+    # RECOVERY_* codes, the likely elevation from the token alone, the coverage of the services query and the fixed line
+    # of what is never offered. recover changes nothing; the last line says so.
+    param($List)
+    Write-AtmHeader (Get-AtmText 'rec.listHeader')
+    Write-Host ('  ' + (Get-AtmText 'rec.coverage' $List.ServiceCoverage.Status $List.PropertiesCoverage.Status))
+    Write-Host ('  ' + (Get-AtmText ('rec.elevation.' + $List.Elevation)))
+    if (@($List.Candidates).Count -eq 0) { Write-Host ('  ' + (Get-AtmText 'rec.noCandidates')) }
+    foreach ($c in @($List.Candidates)) {
+        $by = $(if ($c.Provider) { $c.Provider } else { '-' })
+        if ($c.Offered) { Write-Host ('  ' + (Get-AtmText 'rec.rowOffered' $c.Operation $c.Target $by $c.Undo)) -ForegroundColor Green }
+        else { Write-Host ('  ' + (Get-AtmText 'rec.rowRefused' $c.Operation $c.Target $by (@($c.Codes) -join ', '))) -ForegroundColor Yellow }
+    }
+    Write-Host ('  ' + (Get-AtmText 'rec.notOffered'))
+    if (-not $List.GateOpen) { Write-Host ('  ' + (Get-AtmText 'rec.gateClosed')) -ForegroundColor Yellow }
+    Write-Host ''
+    Write-Host ('  ' + (Get-AtmText 'rec.nothingChanged')) -ForegroundColor Black -BackgroundColor Yellow
+}
+
+function Show-AtmRecoverPlan {
+    # recover plan (V0.4 R1): one operation for one target. Offered: the "before" capture (codes and values as the
+    # diagnose reduces them: no command line, no path outside a well-known program location, no account beyond the three
+    # standard service accounts), the dependencies with their states, the undo path and what it does not undo, the likely
+    # elevation and the plan id. Refused: the codes. Always "nothing was changed".
+    param($Plan)
+    $op = $Plan.Operation
+    Write-AtmHeader (Get-AtmText 'rec.planHeader' $op.Id $Plan.Target)
+    Write-Host ('  ' + (Get-AtmText $op.DescriptionKey))
+    if (@($Plan.Providers).Count -gt 0) { Write-Host ('  ' + (Get-AtmText 'rec.declaredBy' (@($Plan.Providers) -join ', '))) }
+    if (-not $Plan.Offered) {
+        Write-AtmHeader (Get-AtmText 'rec.refusedHeader')
+        foreach ($r in @($Plan.Codes)) { Write-Host ('  - ' + $r) -ForegroundColor Yellow }
+    } else {
+        $cap = $Plan.Capture
+        Write-Host ('  ' + (Get-AtmText 'rec.before'))
+        $fields = @(@('STATE', $cap.State), @('START_MODE', $cap.StartMode), @('DELAYED_AUTO_START', $cap.DelayedAutoStart), @('EXIT_CODE', $cap.ExitCode),
+            @('SERVICE_SPECIFIC_EXIT_CODE', $cap.ServiceSpecificExitCode), @('CHECKPOINT', $cap.CheckPoint), @('WAIT_HINT_MS', $cap.WaitHint), @('ACCEPT_STOP', $cap.AcceptStop),
+            @('CONDITION', $cap.Condition), @('ACCOUNT_KIND', $cap.AccountKind), @('ACCOUNT', $cap.Account), @('EXECUTABLE', $cap.Executable), @('IMAGE', $cap.Image))
+        foreach ($fv in $fields) { Write-Host ('    {0,-27} {1}' -f $fv[0], $(if ($null -ne $fv[1]) { $fv[1] } else { '-' })) }
+        foreach ($x in @($cap.DependsOn)) { Write-Host ('    {0,-27} {1}' -f 'DEPENDS_ON', $x) }
+        foreach ($x in @($cap.Dependents)) { Write-Host ('    {0,-27} {1}' -f 'DEPENDENT', $x) }
+        if (@($cap.DependsOn).Count + @($cap.Dependents).Count -eq 0) { Write-Host ('    ' + (Get-AtmText 'rec.noDependencies')) }
+        if (@($Plan.DeclaredDependencyStopped).Count -gt 0) { Write-Host ('  ' + (Get-AtmText 'rec.declaredDepStopped' (@($Plan.DeclaredDependencyStopped) -join ', '))) -ForegroundColor Yellow }
+        Write-Host ('  ' + (Get-AtmText 'rec.undo' $op.Undo))
+        Write-Host ('  ' + (Get-AtmText 'rec.notUndone'))
+        Write-Host ('  ' + (Get-AtmText ('rec.elevation.' + $Plan.Elevation)))
+        Write-Host ('  ' + (Get-AtmText 'rec.planId' $Plan.PlanId))
+    }
+    if (-not $Plan.GateOpen) { Write-Host ('  ' + (Get-AtmText 'rec.gateClosed')) -ForegroundColor Yellow }
+    Write-Host ''
+    Write-Host ('  ' + (Get-AtmText 'rec.nothingChanged')) -ForegroundColor Black -BackgroundColor Yellow
+}

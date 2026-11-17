@@ -1,6 +1,6 @@
 # ADR-0016: Assisted recovery (V0.4)
 
-Status: ACCEPTED (V04-D1 to V04-D8 decided 2026-11-17: D3 (b) elevation on demand through UAC; the others as recommended); R0 implemented
+Status: ACCEPTED (V04-D1 to V04-D8 decided 2026-11-17: D3 (b) elevation on demand through UAC; the others as recommended); R0 and R1 implemented
 Date: 2026-11-17
 Phase: V0.4 (phases R0 to R6 below, each a future round with its own contract and tests)
 
@@ -427,3 +427,141 @@ of the first read.
 * `IMAGE_MATCH` against a provider's real declaration, because no shipped provider declares one.
 
 **Outside this round:** `docs/DIAGNOSE-SCHEMA.md` lists evidence codes in prose and does not list the new ones yet.
+
+## R1 implementation record (2026-11-17)
+
+R1 adds the recovery engine, `src/lib/Engine.Recover.ps1`, with the **eighth release gate** closed, and two commands
+that only read: `recover list` and `recover plan`. No service is opened, started, stopped or changed, in this phase,
+whether the gate is open or closed: the control seam belongs to R2, in this file only. R1 changes no finding state,
+eligibility, B1 or RECENT rule, and changes neither the diagnose nor the providers.
+
+**The gate.** `$script:AtmRecoveryEnabled = $false` (`Engine.Recover.ps1:15`), its only assignment in `src/`. Like the
+seventh gate, nothing opens it but a code change in that administrator-owned, manifest-verified file. It is checked:
+
+* by the build, which refuses an archive without the eight gates each assigned once to `$false`
+  (`tools/Build-Release.ps1`);
+* by the launcher's integrity check and the installer (`lib\Engine.Recover.ps1` is in `$loadedLibs` and in
+  `AtmRequiredFiles`);
+* by the install and isolation e2e, which read the eight installed gates;
+* by `agent-temp version`, which prints `assisted recovery: DISABLED in this release (recover only lists and shows the
+  plan)`.
+
+With the gate closed, `list` and `plan` ask nothing, take no lock (the B8 mutex is not opened), write no log and no
+file. In R1 the open gate changes only the `GateOpen` field of the result: there is no path that acts on it yet.
+
+**The catalog** (`Engine.Recover.ps1:22-35`), closed in code: `REC-SVC-START` only, reversible, undone by
+`REC-SVC-STOP` (`UndoScope` `SERVICE_STATE_ONLY`). What it does not undo: `WHAT_THE_SERVICE_DID_WHILE_RUNNING`.
+`recover list` shows ending processes and operating virtual machines as not offered, on a fixed line
+(`Engine.Recover.ps1:37`).
+
+**The collection** (`Get-AtmRecoverCollection`, `Engine.Recover.ps1:80-133`) is fresh, in the process of the command,
+and read only. It reuses the diagnose's own functions:
+
+* the identity from the process's own token (`Get-AtmIdentityState`);
+* the providers' runtime hints, with the provider loop of the diagnose;
+* one services query (`Invoke-AtmServiceQuery`, with the R0 signals, the dependencies and the image comparison);
+* its findings (`Get-AtmServiceFindings`).
+
+It reads no inventory, no export, no pseudonym key and no plan of another process. It takes no process snapshot: only
+a `STOPPED` service is ever offered, so no process key is needed. The engine itself has no `Get-CimInstance`.
+
+**The criteria and the refusal codes** (`Get-AtmRecoverRefusals`, `Engine.Recover.ps1:165-217`; the closed list at
+`:40-56`). Each criterion is evaluated on its own, and every failing one is returned in ordinal order. No code means
+offered.
+
+| Code | Refused when | Line |
+|---|---|---|
+| `RECOVERY_NOT_DECLARED` | No provider declares this exact name (case-sensitive). The CLI reports it as a usage error. | `:184` |
+| `RECOVERY_ATTRIBUTION_AMBIGUOUS` | More than one provider declares it. | `:188` |
+| `RECOVERY_COVERAGE_INCOMPLETE` | The services query was not complete or partial, some provider's hints were not read, or this name was over the cap. | `:189` |
+| `RECOVERY_IMAGE_NOT_DECLARED` | No provider declares an `ExpectedImage` for it. | `:190` |
+| `RECOVERY_NOT_LISTED` | It is declared but not listed for this account. | `:191` |
+| `RECOVERY_DUPLICATE_ROW` | More than one row has this name. | `:194` |
+| `RECOVERY_PROPERTY_UNREADABLE` | Its state, start mode, delayed start, account or executable is unreadable. | `:195` |
+| `RECOVERY_SIGNALS_UNREADABLE` | A fault signal of the capture was not collected or is unreadable. | `:198` |
+| `RECOVERY_NOT_STOPPED` | Its state is not `STOPPED`. | `:200` |
+| `RECOVERY_START_MODE_DISABLED` | Its start mode is `DISABLED`; changing it would be `REC-SVC-STARTMODE`, which is not offered. | `:201` |
+| `RECOVERY_IMAGE_MISMATCH` | `SERVICE_IMAGE` is `IMAGE_MISMATCH`. | `:203` |
+| `RECOVERY_IMAGE_UNKNOWN` | `SERVICE_IMAGE` is `IMAGE_UNKNOWN`. | `:204` |
+| `RECOVERY_DEPENDENCIES_UNREADABLE` | The dependencies were not collected or not read, or a related state is `UNREADABLE` or `NOT_LISTED`. | `:205`, `:210` |
+| `RECOVERY_DEPENDENCIES_CAPPED` | A related service is over the cap (`NOT_QUERIED`). | `:206`, `:211` |
+| `RECOVERY_DEPENDENCY_STOPPED` | A service it depends on is `STOPPED` and is not itself declared. A hidden name (`*`) is never declared. | `:212` |
+
+A stopped dependency that a provider declares is allowed. The plan shows it, because the service control manager
+starts it with the service.
+
+**The plan** (`Get-AtmRecoverPlan`, `Engine.Recover.ps1:299-329`): one operation and one target per call; there is no
+list or batch form. An offered plan gives:
+
+* the "before" capture (`Get-AtmRecoverCapture`, `:219-253`): state, start mode, delayed start, exit code,
+  service-specific exit code, checkpoint, wait hint, accepts stop, condition, account kind, standard account, reduced
+  executable, image result, and both dependency directions as `name|STATE`. A value that was not read is `$null`, never
+  a default;
+* the undo path and what it does not undo;
+* the likely elevation, from the token only (`:71-78`): `LIKELY_HAS_RIGHT` for an elevated administrator,
+  `NEEDS_ELEVATION` otherwise (under V04-D3 (b), executing would ask through UAC in R4), `UNKNOWN` when the token could
+  not be read;
+* the plan id (`Get-AtmRecoverPlanId`, `:255-274`): SHA-256 of the schema `atm-recover-plan/1`, the operation, the
+  target, each declaring provider's id, role and `ExpectedImage`, and every field of the capture. Each value is
+  length-prefixed (`$null` is distinct from empty) and each list carries its count. It has no run id and no time. It
+  does not include the token: the same plan has the same id under another identity, and revalidating the token is R2's
+  work;
+* the line "Nothing was changed."
+
+A refused plan gives its codes and no plan id. Both commands end with "Nothing was changed." (pt-BR "Nada foi
+alterado."), in every case, the usage errors included.
+
+**Privacy.** The capture keeps the diagnose's reductions. The account is its kind, plus one of the three standard
+service accounts. The executable is a full path only under a well-known program location; otherwise it is the file
+name. There is never a command line. A related service that is neither declared nor a system service is `*`. The
+identity of the token is never shown.
+
+**The commands** (`src/agent-temp.ps1:472-502`; the version line at `:512-514`).
+
+| Command | Exit |
+|---|---|
+| `agent-temp recover list` | 0 |
+| `agent-temp recover plan -Operation REC-SVC-START -Service <exact declared name>` | 0 offered, 3 refused |
+| A missing or other subcommand, `-Operation` or `-Service` on `list`, an operation outside the catalog (exact spelling), a service that is not a plain name (a path, wildcard or file), or a name no provider declares | 2 |
+| Any of `-User`, `-Project`, `-Root`, `-Path`, `-AllowListFile`, `-IncludeOtherUsers`, `-AcceptB1ResidualRisk`, `-ExportJson`, `-LogFile`, `-RecordFile`, `-Entry`, `-All`, `-PseudonymKeyFile` | 2 |
+| The collection failed (reported by exception type only) | 10 |
+
+`-DeadlineSeconds` bounds the collection (default 120 s). `-Lang` selects the language. The engine is loaded only by
+`recover` and `version`. The help gains two lines in both languages.
+
+**`SERVICE_IMAGE_NOT_DECLARED`: R1's behavior, and an open question for R2.** R1 refuses a service whose providers
+declare no `ExpectedImage`, with `RECOVERY_IMAGE_NOT_DECLARED`. That is the reading consistent with V04-D5 (b). So the
+real `CoworkVMService` of the Claude Desktop provider is never offered in R1, whatever its state. This is R1's
+behavior only: how R2 treats an undeclared image is the maintainer's decision, and it is still open.
+
+**Tests:** the area `V0.4 R1` of `tests/Run-Tests.ps1`, in both shells. Providers, identities, service rows and
+dependencies are injected, as in R0.
+
+* The closed catalog, the closed codes, the not-offered line and the texts in both languages.
+* The offered case: a test provider that declares an `ExpectedImage` and a matching `STOPPED` row. It covers the
+  complete capture, dependency states, the undo, and the elevation from three tokens.
+* One case per refusal code, including the real `CoworkVMService` declaration, which gives only
+  `RECOVERY_IMAGE_NOT_DECLARED`. A further case checks that every code has its case.
+* The plan id: stable for the same input and for another token; different when any captured field, the provider or
+  the declared image changes; `$null` distinct from empty.
+* Privacy of the plan and the list: no path outside a known location, no account other than the three standard ones,
+  no command line, no hidden name.
+* The closed gate, by instrumentation: shadow functions count every prompt, lock, log, file write and CIM query, and
+  the count must be 0. The B8 mutex does not exist after `list` and `plan`, with a positive control. The sandbox is
+  unchanged. The same checks run with the gate opened in the suite's process, then closed again.
+* Static checks:
+  * one assignment of the gate;
+  * no service control API anywhere in `src/` (`Start-Service`, `Stop-Service`, `Set-Service`, `Restart-Service`,
+    `sc.exe`, `ServiceController`, `Invoke-CimMethod`, `OpenService`, `ControlService`);
+  * no call to the engine from `Engine.Diagnose.ps1`, `Tui.ps1` or `Gui*.ps1`;
+  * still two `Win32_Service` queries in the diagnose;
+  * the engine in the launcher's check, `AtmRequiredFiles`, the manifest, the build and both e2e.
+* The CLI in a new process: the exits of `list`, `plan` and the usage errors, the `version` line and the help, in both
+  languages. The runner's `CoworkVMService` state, if it exists, is compared before and after.
+
+**Not tested:**
+
+* an offered plan against a real service: no shipped provider declares an `ExpectedImage`, so the real `recover plan`
+  always refuses;
+* `LIKELY_HAS_RIGHT` and `NEEDS_ELEVATION` from a real token in the CLI, only from injected tokens;
+* exit 10 (a failed collection) through the CLI.

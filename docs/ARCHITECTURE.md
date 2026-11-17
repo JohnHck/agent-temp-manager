@@ -124,3 +124,25 @@ layering:
 * Presentation never moves anything: the CLI and the TUI only collect the exact targets and forward them, as they do
   for clean.
 * The diagnose engine stays read-only and never uses the isolation engine.
+
+## Recovery engine (V0.4 phase R1; `lib\Engine.Recover.ps1`)
+
+[ADR-0016](adr/ADR-0016-v04-assisted-recovery.md), assisted recovery of a service a provider declares. In R1 the engine
+only reads, and the eighth release gate (`AtmRecoveryEnabled`) is closed in every copy.
+
+* **Loading.** The launcher loads the engine only for `recover` and `version`. It is in the launcher's integrity
+  check, `AtmRequiredFiles` and the manifest. It depends on `Engine.Audit.ps1` and `Engine.Diagnose.ps1`. It writes
+  nothing to the terminal: `Report.ps1` presents the list and the plan (`Show-AtmRecoverList`, `Show-AtmRecoverPlan`).
+* **Collection** (`Get-AtmRecoverCollection`): fresh, in the command's own process, read only. It calls the diagnose's
+  functions for the token identity, the providers' runtime hints, one services query (`Invoke-AtmServiceQuery`, with
+  the R0 signals, dependencies and image comparison) and its findings (`Get-AtmServiceFindings`). The engine itself has
+  no CIM query, and it reads no inventory, process snapshot, export, pseudonym key or plan of another process.
+* **Criteria and plan.** `Get-AtmRecoverRefusals` applies the criteria to one declared name and returns the closed
+  `RECOVERY_*` codes. `Get-AtmRecoverList` lists every declared service. `Get-AtmRecoverPlan` gives one operation for one
+  target: the "before" capture, the undo, the likely elevation and the plan id. The catalog has one operation,
+  `REC-SVC-START`.
+* **Layering rules** (static suite tests):
+  * no service control API anywhere in `src/`. The control seam comes in phase R2, in this file only;
+  * the engine asks nothing, takes no lock, and writes no log or file;
+  * `Engine.Diagnose.ps1`, `Tui.ps1` and `Gui*.ps1` neither load nor call it. The diagnose keeps its two
+    `Win32_Service` queries.

@@ -11,7 +11,7 @@
     detection and repair; audit / preview / verify as a real standard user, who cannot write the install
     directory; uninstall (directory and PATH entry removed); then the published 0.1.0 package (GitHub Release asset,
     SHA-256 pinned) installed, updated to this package, rolled back to 0.1.0, updated again and uninstalled; then the
-    same for the published 0.1.1 package (SHA-256 pinned), with the four gates checked in the installation after
+    same for the published 0.1.1 package (SHA-256 pinned), with the eight gates checked in the installation after
     each update to this package; then the same for the published 0.2.0 package (SHA-256 pinned), which also checks
     the installed manifest version; then the same for the published 0.3.0 package (the latest published version;
     SHA-256 pinned), which also checks the four 0.3.0 gates once 0.3.0 is installed. Before the uninstall, V0.3 V2: the REAL clean of
@@ -817,7 +817,7 @@ Step 'v2-clean-leg-B-elevated' {
 }
 # 0.3.x ISO-P5a: the REAL isolation, restore and purge of roots planted by tests\e2e\Invoke-IsolateE2E.ps1 itself, against
 # this installation, in the installer's shell, with the quarantine in each account's own LocalAppData. The harness opens
-# the isolation and purge gates only in its own process memory; the installed copy stays closed (six gates and the
+# the isolation and purge gates only in its own process memory; the installed copy stays closed (eight gates and the
 # SHA-256 of every installed file checked by the harness before and after). Only its summary is kept here (codes,
 # counts and labels; the raw logs stay in the harness's run root and the manifests in the quarantine, never uploaded).
 function Read-IsoSummary([string]$File, [int]$Exit, [string]$Console) {
@@ -1038,18 +1038,18 @@ Step 'xversion-update-again-and-uninstall' {
 # V0.2 stage 2: from the published 0.1.1 (the current published version) to this package and back, after the 0.1.0
 # path above (which ends uninstalled). The 0.1.1 package is the asset of the GitHub Release v0.1.1, accepted only with
 # its published SHA-256 (pinned here) and never run before that check; a download that fails is NOT TESTED, never a
-# pass. After each update to this package the four gates of the installation are checked. Ends uninstalled.
+# pass. After each update to this package the eight gates of the installation are checked. Ends uninstalled.
 $v011Sha = 'C681761DBB019987A53CAB1C234BE28CD4BFFFDB3F3EDCAEF0A2EEA55C5885A4'
 $v011Url = 'https://github.com/JohnHck/agent-temp-manager/releases/download/v0.1.1/agent-temp-manager-0.1.1.zip'
 $v011Dir = Join-Path $env:ProgramFiles 'AgentTempManager-v011'
 $script:v011Pkg = $null
 $installedGates = {
-    $files = @{ AtmRealDeletionEnabled = 'lib\Engine.Clean.ps1'; AtmWorktreeDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmHandleDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmDiagnoseExportEnabled = 'lib\Report.ps1'; AtmIsolationEnabled = 'lib\Engine.Isolate.ps1'; AtmQuarantinePurgeEnabled = 'lib\Engine.Isolate.ps1'; AtmGuiEnabled = 'lib\Gui.ps1' }
+    $files = @{ AtmRealDeletionEnabled = 'lib\Engine.Clean.ps1'; AtmWorktreeDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmHandleDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmDiagnoseExportEnabled = 'lib\Report.ps1'; AtmIsolationEnabled = 'lib\Engine.Isolate.ps1'; AtmQuarantinePurgeEnabled = 'lib\Engine.Isolate.ps1'; AtmGuiEnabled = 'lib\Gui.ps1'; AtmRecoveryEnabled = 'lib\Engine.Recover.ps1' }
     foreach ($g in $files.Keys) {
         $t = [IO.File]::ReadAllText((Join-Path $installDir $files[$g]))
         Assert ([regex]::Matches($t, ('\$script:' + $g + '\s*=')).Count -eq 1 -and $t -match ('\$script:' + $g + ' = \$false')) "trava instalada $g nao e uma unica atribuicao a `$false"
     }
-    'seven installed gates $false'
+    'eight installed gates $false'
 }
 Step 'xversion-0.1.1-package' {
     [void][IO.Directory]::CreateDirectory($v011Dir)
@@ -1175,7 +1175,7 @@ Step 'xversion-update-again-from-0.2.0-and-uninstall' {
 # path above (which ends uninstalled); the same cycle. The 0.3.0 package is the asset of the GitHub Release v0.3.0,
 # accepted only with the SHA-256 published in that release's SHA256SUMS.txt (pinned here) and never run before that
 # check; a download that fails is NOT TESTED, never a pass. Once 0.3.0 is installed its four gates (0.3.0 has no
-# isolation engine) are checked; after each update to this package, the six. The installed manifest's version too.
+# isolation engine) are checked; after each update to this package, the eight. The installed manifest's version too.
 $v030Sha = 'A124CB71A379669168252C9714A79DE0031CCFB61BA7E0C821404C0DD7BF0CAB'
 $v030Url = 'https://github.com/JohnHck/agent-temp-manager/releases/download/v0.3.0/agent-temp-manager-0.3.0.zip'
 $v030Dir = Join-Path $env:ProgramFiles 'AgentTempManager-v030'

@@ -4556,8 +4556,8 @@ exit 0
         return $d
     }
 
-    Test-Case 'Isolamento P4' 'Seis travas: cada uma com uma unica atribuicao a $false no seu arquivo; a do expurgo (sexta) so no motor, conferida pelo build, pelo e2e da instalacao e mostrada em version; leitura independente: o expurgo so le a sua, isolar, restaurar, a gestao e os outros motores nunca a leem' {
-        foreach ($g in @(@('lib\Engine.Clean.ps1', 'AtmRealDeletionEnabled'), @('lib\Engine.Diagnose.ps1', 'AtmWorktreeDiagnosticsEnabled'), @('lib\Engine.Diagnose.ps1', 'AtmHandleDiagnosticsEnabled'), @('lib\Report.ps1', 'AtmDiagnoseExportEnabled'), @('lib\Engine.Isolate.ps1', 'AtmIsolationEnabled'), @('lib\Engine.Isolate.ps1', 'AtmQuarantinePurgeEnabled'))) {
+    Test-Case 'Isolamento P4' 'Oito travas: cada uma com uma unica atribuicao a $false no seu arquivo; a do expurgo (sexta) so no motor, conferida pelo build, pelo e2e da instalacao e mostrada em version; leitura independente: o expurgo so le a sua, isolar, restaurar, a gestao e os outros motores nunca a leem' {
+        foreach ($g in @(@('lib\Engine.Clean.ps1', 'AtmRealDeletionEnabled'), @('lib\Engine.Diagnose.ps1', 'AtmWorktreeDiagnosticsEnabled'), @('lib\Engine.Diagnose.ps1', 'AtmHandleDiagnosticsEnabled'), @('lib\Report.ps1', 'AtmDiagnoseExportEnabled'), @('lib\Engine.Isolate.ps1', 'AtmIsolationEnabled'), @('lib\Engine.Isolate.ps1', 'AtmQuarantinePurgeEnabled'), @('lib\Gui.ps1', 'AtmGuiEnabled'), @('lib\Engine.Recover.ps1', 'AtmRecoveryEnabled'))) {
             $t = [IO.File]::ReadAllText((Join-Path $srcDir $g[0]))
             Assert-True ([regex]::Matches($t, '\$script:' + $g[1] + '\s*=').Count -eq 1 -and $t -match ('(?m)^\$script:' + $g[1] + ' = \$false\r?$')) "$($g[1]): uma unica atribuicao, a `$false ($($g[0]))"
         }
@@ -4569,7 +4569,7 @@ exit 0
         $br = [IO.File]::ReadAllText((Join-Path $root 'tools\Build-Release.ps1'))
         Assert-True ($br.Contains("@(`$isoTxt, 'AtmQuarantinePurgeEnabled')") -and $br.Contains("@(`$isoTxt, 'AtmIsolationEnabled')") -and $br.Contains("@(`$repTxt, 'AtmDiagnoseExportEnabled')")) 'build recusa o pacote sem as travas fechadas, a do expurgo inclusive'
         $e2e = [IO.File]::ReadAllText((Join-Path $testsDir 'e2e\Invoke-InstallE2E.ps1'))
-        Assert-True ($e2e.Contains("AtmQuarantinePurgeEnabled = 'lib\Engine.Isolate.ps1'") -and $e2e.Contains("Step 'shipped-purge-gate'") -and $e2e.Contains('seven installed gates')) 'e2e confere as travas instaladas (seis ate a 0.3.x; sete desde a V0.2.1 P1, com a da GUI)'
+        Assert-True ($e2e.Contains("AtmQuarantinePurgeEnabled = 'lib\Engine.Isolate.ps1'") -and $e2e.Contains("Step 'shipped-purge-gate'") -and $e2e.Contains('eight installed gates')) 'e2e confere as travas instaladas (seis ate a 0.3.x; sete desde a V0.2.1 P1, com a da GUI; oito desde a V0.4 R1, com a da recuperacao)'
         $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
         Assert-True ($cli.Contains("Get-AtmText 'cli.purge' `$(if (`$script:AtmQuarantinePurgeEnabled)") -and $cli.Contains('Get-AtmQuarantinePolicyLines -Policy (Get-AtmQuarantinePolicy')) 'version mostra a trava do expurgo e a politica efetiva'
         $iso = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Isolate.ps1'))
@@ -6895,7 +6895,7 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
     Test-Case 'V5 tools' 'Estatico: as tres ferramentas nao atribuem trava, nao citam seam, lock nem Invoke-AtmClean, nao chamam funcao de src\lib, nao apagam, movem nem escrevem fora do -Out (um unico arquivo novo por ferramenta, uma unica troca de nome, a do resumo), sem redirecionamento e sem rede; StrictMode, Stop e codigos de saida no cabecalho' {
         $libFns = @(Get-ChildItem -LiteralPath (Join-Path $srcDir 'lib') -Filter '*.ps1' | ForEach-Object { [regex]::Matches([IO.File]::ReadAllText($_.FullName), '(?m)^\s*function\s+([A-Za-z]+-[A-Za-z0-9]+)') | ForEach-Object { $_.Groups[1].Value } } | Sort-Object -Unique)
         Assert-True ($libFns.Count -gt 50 -and $libFns -contains 'Invoke-AtmClean' -and $libFns -contains 'Write-AtmCleanLogRecord') "funcoes do motor lidas ($($libFns.Count))"
-        $forbidden = @('AtmRealDeletionEnabled', 'AtmGuiEnabled', 'AtmIsolationEnabled', 'AtmQuarantinePurgeEnabled', 'AtmDiagnoseExportEnabled', 'AtmWorktreeDiagnosticsEnabled', 'AtmHandleDiagnosticsEnabled',
+        $forbidden = @('AtmRealDeletionEnabled', 'AtmGuiEnabled', 'AtmIsolationEnabled', 'AtmQuarantinePurgeEnabled', 'AtmDiagnoseExportEnabled', 'AtmWorktreeDiagnosticsEnabled', 'AtmHandleDiagnosticsEnabled', 'AtmRecoveryEnabled',
             'AtmCleanConsoleSource', 'DeleteTreeImpl', 'PathPresenceImpl', 'LogWriter', 'AtmRuntimeEvidenceSources', 'AtmIsolationQuarantineRoot', 'AtmCleanLockName', 'AgentTempManager.', 'AtmCleanLock',
             'Invoke-AtmClean', 'Initialize-AtmNative', 'Engine.', 'src\lib', 'Native.cs', 'Add-Type', 'Import-Module',
             'Remove-Item', 'Move-Item', 'Rename-Item', 'Copy-Item', 'Clear-Content', 'Set-Content', 'Add-Content', 'Out-File', 'New-Item', 'Set-ItemProperty', 'Set-Acl', 'Set-Date', 'Tee-Object', 'Export-',
@@ -15345,10 +15345,10 @@ try {
         $i = $Text.IndexOf($k, [StringComparison]::Ordinal)
         if ($i -lt 0) { return $Text }
         return ($Text.Substring(0, $i) + $Text.Substring($i + $k.Length)) }
-    Test-Case 'GUI P1' 'Setima trava (AtmGuiEnabled): uma unica atribuicao a $false em Gui.ps1, fechada neste processo, nenhum outro arquivo a altera; as sete travas fechadas; build, instalador, e2e, manifesto, lancador e version a conferem nos dois idiomas' {
-        $seven = @(@('lib\Engine.Clean.ps1', 'AtmRealDeletionEnabled'), @('lib\Engine.Diagnose.ps1', 'AtmWorktreeDiagnosticsEnabled'), @('lib\Engine.Diagnose.ps1', 'AtmHandleDiagnosticsEnabled'), @('lib\Report.ps1', 'AtmDiagnoseExportEnabled'),
-            @('lib\Engine.Isolate.ps1', 'AtmIsolationEnabled'), @('lib\Engine.Isolate.ps1', 'AtmQuarantinePurgeEnabled'), @('lib\Gui.ps1', 'AtmGuiEnabled'))
-        foreach ($g in $seven) {
+    Test-Case 'GUI P1' 'Setima trava (AtmGuiEnabled): uma unica atribuicao a $false em Gui.ps1, fechada neste processo, nenhum outro arquivo a altera; as oito travas fechadas; build, instalador, e2e, manifesto, lancador e version a conferem nos dois idiomas' {
+        $eight = @(@('lib\Engine.Clean.ps1', 'AtmRealDeletionEnabled'), @('lib\Engine.Diagnose.ps1', 'AtmWorktreeDiagnosticsEnabled'), @('lib\Engine.Diagnose.ps1', 'AtmHandleDiagnosticsEnabled'), @('lib\Report.ps1', 'AtmDiagnoseExportEnabled'),
+            @('lib\Engine.Isolate.ps1', 'AtmIsolationEnabled'), @('lib\Engine.Isolate.ps1', 'AtmQuarantinePurgeEnabled'), @('lib\Gui.ps1', 'AtmGuiEnabled'), @('lib\Engine.Recover.ps1', 'AtmRecoveryEnabled'))
+        foreach ($g in $eight) {
             $t = [IO.File]::ReadAllText((Join-Path $srcDir $g[0]))
             Assert-True ([regex]::Matches($t, '\$script:' + $g[1] + '\s*=').Count -eq 1 -and $t -match ('(?m)^\$script:' + $g[1] + ' = \$false\r?$')) "$($g[1]): uma unica atribuicao, a `$false ($($g[0]))"
         }
@@ -15365,7 +15365,7 @@ try {
         $br = [IO.File]::ReadAllText((Join-Path $root 'tools\Build-Release.ps1'))
         Assert-True ($br.Contains("@(`$guiTxt, 'AtmGuiEnabled')") -and $br.Contains("& `$read 'src/lib/Gui.ps1'") -and $br.Contains("& `$read 'src/lib/GuiModel.ps1'")) 'build confere a setima trava e exige os dois arquivos no pacote'
         $e2e = [IO.File]::ReadAllText((Join-Path $root 'tests\e2e\Invoke-InstallE2E.ps1'))
-        Assert-True ($e2e.Contains("AtmGuiEnabled = 'lib\Gui.ps1'") -and $e2e.Contains("'seven installed gates `$false'") -and $e2e.Contains("Step 'shipped-gui-gate'")) 'e2e da instalacao: sete travas e o passo da GUI'
+        Assert-True ($e2e.Contains("AtmGuiEnabled = 'lib\Gui.ps1'") -and $e2e.Contains("'eight installed gates `$false'") -and $e2e.Contains("Step 'shipped-gui-gate'")) 'e2e da instalacao: oito travas e o passo da GUI'
         $launcher = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
         Assert-True ($launcher.Contains("'lib\Tui.ps1', 'lib\GuiModel.ps1', 'lib\Gui.ps1')") -and $launcher.Contains(". (Join-Path `$here 'lib\GuiModel.ps1')") -and $launcher.Contains(". (Join-Path `$here 'lib\Gui.ps1')")) 'lancador: os dois arquivos na lista da verificacao de integridade e carregados'
         foreach ($rel in @('lib\GuiModel.ps1', 'lib\Gui.ps1')) { Assert-True ($script:AtmRequiredFiles -contains $rel) "instalador exige $rel" }
@@ -18262,6 +18262,308 @@ if ($null -eq $res.env) {
         }
         $total.Stop()
         $script:caseNote = ('12 processos em {0} ms: {1}' -f $total.ElapsedMilliseconds, ($times -join ', '))
+    }
+
+    # ------------------------------------------------------------------ V0.4 R1 (assisted recovery: list and plan, gate closed, ADR-0016)
+    # The recovery engine is loaded here (the launcher loads it for recover and version only). Providers, identities,
+    # service rows and dependencies are injected: no service is opened, started, stopped or changed, no CIM query runs in
+    # this process and nothing waits (no row is PENDING, and with an injected source there is no second read). Only the
+    # CLI cases start the launcher, whose collection reads the runner's services (read only; states compared before and
+    # after). The recovery gate is loaded closed and opened in this process only by the case that checks it, which
+    # closes it again.
+    . (Join-Path $srcDir 'lib\Engine.Recover.ps1')
+    $shippedRecoveryGate = $script:AtmRecoveryEnabled
+    $r1Img = '%SystemRoot%\System32\svchost.exe'
+    $r1Prov = { param([object[]]$Hints, [string]$Id = 'test-rec') $hh = @($Hints); [pscustomobject]@{ Id = $Id; DisplayName = 'Test recovery'; ContractVersion = 2; Capabilities = @('runtime'); GetServiceHints = { $hh }.GetNewClosure() } }
+    $r1Hint = { param([string]$Name, $Image = $r1Img) [pscustomobject]@{ Name = $Name; Role = $null; ExpectedImage = $Image } }
+    # A STOPPED, MANUAL row with every fault signal (ExitCode 1077: never started); -Set overrides any property.
+    $r1Row = { param([string]$Name, [hashtable]$Set = @{})
+        $o = [ordered]@{ Name = $Name; State = 'Stopped'; StartMode = 'Manual'; DelayedAutoStart = $false; StartName = 'LocalSystem'; ProcessId = 0; PathName = $svcSys
+            ExitCode = [uint32]1077; ServiceSpecificExitCode = [uint32]0; CheckPoint = [uint32]0; WaitHint = [uint32]0; AcceptStop = $false }
+        foreach ($k in @($Set.Keys)) { $o[$k] = $Set[$k] }
+        [pscustomobject]$o }
+    $r1NoDeps = { param($Names) [pscustomobject]@{ Links = @(); Related = @(); RelatedFailed = $null; Capped = @() } }
+    $r1Deps = { param([object[]]$Links, [object[]]$Related = @(), [string[]]$Capped = @(), $RelatedFailed = $null) $ll = @($Links); $rl = @($Related); $cp = @($Capped); $rf = $RelatedFailed
+        { param($Names) [pscustomobject]@{ Links = $ll; Related = $rl; RelatedFailed = $rf; Capped = $cp } }.GetNewClosure() }
+    $r1Link = { param([string]$A, [string]$D) [pscustomobject]@{ Antecedent = $A; Dependent = $D } }
+    $r1Rel = { param([string]$Name, [string]$State, [string]$PathName) [pscustomobject]@{ Name = $Name; State = $State; PathName = $PathName } }
+    $r1SysPath = "$env:SystemRoot\System32\svchost.exe -k r1"
+    $r1Coll = { param($Providers, [object[]]$Rows, $Deps = $r1NoDeps, $Id = $diagIdUser) $rr = @($Rows)
+        Get-AtmRecoverCollection -Providers @($Providers) -IdentitySource $Id -ServiceSource ({ param($Names) $rr }.GetNewClosure()) -ServiceDependencySource $Deps }
+    $r1Plan = { param($Coll, [string]$Name = 'R') Get-AtmRecoverPlan -Collection $Coll -Operation 'REC-SVC-START' -Service $Name }
+    $r1Codes = { param($Coll, [string]$Name = 'R') (@((& $r1Plan $Coll $Name).Codes) -join ',') }
+    $r1Base = { & $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R')) }
+    Test-Case 'V0.4 R1' 'R1: catalogo fechado (so REC-SVC-START, reversivel, desfazer REC-SVC-STOP so do estado, o que roda nao se desfaz), codigos RECOVERY_ fechados, nao oferecidos fixos, trava carregada fechada, textos nos dois idiomas' {
+        Assert-Eq $shippedRecoveryGate $false 'trava da recuperacao carregada fechada'
+        Assert-Eq (@($script:AtmRecoveryCatalog | ForEach-Object { $_.Id }) -join ',') 'REC-SVC-START' 'catalogo: uma operacao'
+        $op = Get-AtmRecoveryOperation 'REC-SVC-START'
+        Assert-True ($op.Reversible -eq $true -and $op.Undo -ceq 'REC-SVC-STOP' -and $op.UndoScope -ceq 'SERVICE_STATE_ONLY' -and $op.NotUndone -ceq 'WHAT_THE_SERVICE_DID_WHILE_RUNNING' -and $op.Target -ceq 'SERVICE' -and $op.Description) 'reversivel, desfazer so do estado, nota do que nao se desfaz'
+        Assert-Eq (@($op.Captured) -join ',') 'STATE,START_MODE,DELAYED_AUTO_START,EXIT_CODE,SERVICE_SPECIFIC_EXIT_CODE,CHECKPOINT,WAIT_HINT,ACCEPT_STOP,ACCOUNT_KIND,ACCOUNT,EXECUTABLE,IMAGE,DEPENDS_ON,DEPENDENTS' 'captura antes (secao 4)'
+        foreach ($x in @('rec-svc-start', 'REC-SVC-STOP', 'REC-SVC-STARTMODE', 'REC-PROC-KILL', '', 'REC-SVC-START ')) { Assert-True ($null -eq (Get-AtmRecoveryOperation $x)) "fora do catalogo: '$x'" }
+        Assert-Eq (@($script:AtmRecoveryNotOffered) -join ',') 'PROCESS_TERMINATION,VM_OPERATION' 'nao oferecidos: encerrar processo e operar VM'
+        Assert-Eq @($script:AtmRecoveryRefusalCodes).Count 15 'quinze codigos de recusa'
+        foreach ($c in $script:AtmRecoveryRefusalCodes) { Assert-True ($c -cmatch '^RECOVERY_[A-Z_]+$') "codigo fechado: $c" }
+        Assert-Eq (@($script:AtmRecoveryElevationCodes) -join ',') 'LIKELY_HAS_RIGHT,NEEDS_ELEVATION,UNKNOWN' 'elevacao: tres codigos'
+        foreach ($l in @('en-US', 'pt-BR')) {
+            foreach ($k in @('cli.recovery', 'cli.recoveryDisabled', 'cli.recoverUsage', 'cli.recoverOperationInvalid', 'cli.recoverServiceInvalid', 'cli.recoverNotDeclared', 'cli.recoverOptionRefused', 'cli.recoverFailed', 'help.recover', 'help.recover2',
+                    'rec.listHeader', 'rec.coverage', 'rec.noCandidates', 'rec.rowOffered', 'rec.rowRefused', 'rec.notOffered', 'rec.gateClosed', 'rec.nothingChanged', 'rec.planHeader', 'rec.opSvcStart', 'rec.declaredBy', 'rec.refusedHeader', 'rec.before',
+                    'rec.noDependencies', 'rec.declaredDepStopped', 'rec.undo', 'rec.notUndone', 'rec.planId')) { Assert-True $script:AtmMessages[$l].ContainsKey($k) "$k ($l)" }
+            foreach ($e in $script:AtmRecoveryElevationCodes) { Assert-True $script:AtmMessages[$l].ContainsKey("rec.elevation.$e") "rec.elevation.$e ($l)" }
+        }
+        Assert-True ($script:AtmMessages['pt-BR']['rec.nothingChanged'] -ceq 'Nada foi alterado.' -and $script:AtmMessages['en-US']['rec.nothingChanged'] -ceq 'Nothing was changed.') 'frase "nada foi alterado" nos dois idiomas'
+    }
+    Test-Case 'V0.4 R1' 'R1: caso oferecido - provider de teste com ExpectedImage e linha STOPPED que casa; captura completa, dependencias com estados, desfazer, elevacao pelo token (usuario, administrador elevado, token ilegivel)' {
+        $deps = & $r1Deps @((& $r1Link 'SysDep' 'R'), (& $r1Link 'R' 'SysUser')) @((& $r1Rel 'SysDep' 'Running' $r1SysPath), (& $r1Rel 'SysUser' 'Stopped' $r1SysPath))
+        $c = & $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R')) $deps
+        $l = Get-AtmRecoverList -Collection $c
+        Assert-True (@($l.Candidates).Count -eq 1 -and $l.Candidates[0].Offered -and @($l.Candidates[0].Codes).Count -eq 0 -and $l.Candidates[0].Provider -ceq 'test-rec' -and $l.Candidates[0].Undo -ceq 'REC-SVC-STOP' -and -not $l.Changed -and -not $l.GateOpen) "lista: oferecido ($(@($l.Candidates[0].Codes) -join ','))"
+        $p = & $r1Plan $c
+        Assert-True ($p.Offered -and $p.Declared -and $p.Operation.Id -ceq 'REC-SVC-START' -and $p.Target -ceq 'R' -and $p.Provider -ceq 'test-rec' -and -not $p.Changed -and $p.PlanId -cmatch '^[0-9a-f]{64}$') "plano oferecido, plan id $($p.PlanId)"
+        $cap = $p.Capture
+        $want = [ordered]@{ State = 'STOPPED'; StartMode = 'MANUAL'; DelayedAutoStart = 'FALSE'; ExitCode = '1077'; ServiceSpecificExitCode = '0'; CheckPoint = '0'; WaitHint = '0'; AcceptStop = 'FALSE'; Condition = 'STOPPED_NEVER_STARTED'
+            AccountKind = 'LOCAL_SYSTEM'; Account = 'LocalSystem'; Executable = "$env:SystemRoot\System32\svchost.exe"; ExecutableForm = 'PATH'; Image = 'IMAGE_MATCH' }
+        foreach ($k in $want.Keys) { Assert-Eq ([string]$cap.$k) $want[$k] "captura: $k" }
+        Assert-Eq (@($cap.DependsOn) -join ';') 'SysDep|RUNNING' 'depende de: nome de servico do sistema e estado'
+        Assert-Eq (@($cap.Dependents) -join ';') 'SysUser|STOPPED' 'dependentes com estado (um dependente parado nao recusa)'
+        Assert-Eq $p.Elevation 'NEEDS_ELEVATION' 'usuario nao elevado: elevacao numa fase futura (UAC)'
+        Assert-Eq (& $r1Plan (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R')) $deps $diagIdAdmin)).Elevation 'LIKELY_HAS_RIGHT' 'administrador elevado: provavelmente tem o direito'
+        Assert-Eq (& $r1Plan (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R')) $deps { throw (New-Object InvalidOperationException('x')) })).Elevation 'UNKNOWN' 'token ilegivel: desconhecida'
+        $txt = (Show-AtmRecoverPlan -Plan $p 6>&1 | ForEach-Object { [string]$_ }) -join "`n"
+        foreach ($x in @('REC-SVC-START', 'REC-SVC-STOP', 'STATE', 'STOPPED_NEVER_STARTED', 'SysDep|RUNNING', 'SysUser|STOPPED', $p.PlanId, $script:AtmMessages[(Get-AtmLanguage)]['rec.nothingChanged'], $script:AtmMessages[(Get-AtmLanguage)]['rec.notUndone'])) { Assert-True $txt.Contains($x) "plano mostra '$x'" }
+        $lt = (Show-AtmRecoverList -List $l 6>&1 | ForEach-Object { [string]$_ }) -join "`n"
+        Assert-True ($lt.Contains('REC-SVC-START R (test-rec)') -and $lt.Contains($script:AtmMessages[(Get-AtmLanguage)]['rec.notOffered']) -and $lt.Contains($script:AtmMessages[(Get-AtmLanguage)]['rec.nothingChanged'])) 'lista mostra a operacao, a linha fixa dos nao oferecidos e "nada foi alterado"'
+    }
+    # Each refusal code: one case each. Build returns the collection; Name is the target; Want the exact codes (or, with
+    # Has, codes that must be present).
+    $r1Refusals = @(
+        @{ Code = 'RECOVERY_NOT_STOPPED'; Why = 'em execucao, pausado ou pendente'; Checks = {
+                foreach ($st in @('Running', 'Paused', 'Stop Pending', 'Start Pending')) { Assert-Eq (& $r1Codes (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R' @{ State = $st })))) 'RECOVERY_NOT_STOPPED' "estado $st" } } }
+        @{ Code = 'RECOVERY_START_MODE_DISABLED'; Why = 'modo de inicio desabilitado (mudar o modo nao e oferecido)'; Checks = {
+                Assert-Eq (& $r1Codes (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R' @{ StartMode = 'Disabled' })))) 'RECOVERY_START_MODE_DISABLED' 'Disabled' } }
+        @{ Code = 'RECOVERY_NOT_LISTED'; Why = 'declarado e nao listado para esta conta'; Checks = {
+                Assert-Eq (& $r1Codes (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @())) 'RECOVERY_NOT_LISTED' 'nenhuma linha' } }
+        @{ Code = 'RECOVERY_DUPLICATE_ROW'; Why = 'duas linhas para o mesmo nome'; Checks = {
+                $codes = (& $r1Codes (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R'), (& $r1Row 'R')))) -split ','
+                Assert-True ($codes -ccontains 'RECOVERY_DUPLICATE_ROW' -and $codes -ccontains 'RECOVERY_IMAGE_UNKNOWN') "duplicada ($($codes -join ','))" } }
+        @{ Code = 'RECOVERY_PROPERTY_UNREADABLE'; Why = 'modo, inicio atrasado, conta ou executavel ilegivel'; Checks = {
+                foreach ($s in @(@{ StartMode = 'weird' }, @{ DelayedAutoStart = 'x' }, @{ StartName = $null })) { Assert-Eq (& $r1Codes (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R' $s)))) 'RECOVERY_PROPERTY_UNREADABLE' "propriedade ilegivel ($(@($s.Keys) -join ','))" }
+                $codes = (& $r1Codes (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R' @{ PathName = $null })))) -split ','
+                Assert-True ($codes -ccontains 'RECOVERY_PROPERTY_UNREADABLE' -and $codes -ccontains 'RECOVERY_IMAGE_UNKNOWN') "executavel ilegivel ($($codes -join ','))" } }
+        @{ Code = 'RECOVERY_SIGNALS_UNREADABLE'; Why = 'sinal ilegivel ou linha sem sinais'; Checks = {
+                foreach ($k in @('ExitCode', 'ServiceSpecificExitCode', 'CheckPoint', 'WaitHint', 'AcceptStop')) { Assert-Eq (& $r1Codes (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R' @{ $k = 'x' })))) 'RECOVERY_SIGNALS_UNREADABLE' "$k ilegivel" }
+                Assert-Eq (& $r1Codes (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $svcRow 'R' 'Stopped' 'Manual')))) 'RECOVERY_SIGNALS_UNREADABLE' 'linha antiga sem sinais (nao coletados)' } }
+        @{ Code = 'RECOVERY_IMAGE_NOT_DECLARED'; Why = 'nenhum ExpectedImage declarado, inclusive o CoworkVMService real do Claude Desktop'; Checks = {
+                Assert-Eq (& $r1Codes (& $r1Coll (& $r1Prov @((& $r1Hint 'R' $null))) @((& $r1Row 'R')))) 'RECOVERY_IMAGE_NOT_DECLARED' 'provider sem imagem'
+                Assert-Eq (& $r1Codes (& $r1Coll (& $r1Prov @((& $r1Hint 'R' $null))) @())) 'RECOVERY_IMAGE_NOT_DECLARED,RECOVERY_NOT_LISTED' 'sem imagem e nao listado: as duas, a da imagem pelas declaracoes'
+                $cw = & $r1Coll $cdProvider @((& $r1Row 'CoworkVMService' @{ PathName = "`"C:\Program Files\WindowsApps\Claude_1.2.3.0_x64__pzs8sxrjxfjjc\cowork-svc.exe`"" }))
+                $pc = & $r1Plan $cw 'CoworkVMService'
+                Assert-True ((@($pc.Codes) -join ',') -ceq 'RECOVERY_IMAGE_NOT_DECLARED' -and $pc.Declared -and -not $pc.Offered -and $null -eq $pc.PlanId -and $null -eq $pc.Capture -and $pc.Provider -ceq 'claude-desktop') "CoworkVMService parado do provider real: so RECOVERY_IMAGE_NOT_DECLARED ($(@($pc.Codes) -join ','))" } }
+        @{ Code = 'RECOVERY_IMAGE_MISMATCH'; Why = 'outro executavel'; Checks = {
+                Assert-Eq (& $r1Codes (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R' @{ PathName = "`"$env:SystemRoot\System32\other.exe`"" })))) 'RECOVERY_IMAGE_MISMATCH' 'outro nome'
+                Assert-Eq (& $r1Codes (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R' @{ PathName = "`"$env:SystemRoot\Temp\svchost.exe`"" })))) 'RECOVERY_IMAGE_MISMATCH' 'mesmo nome, outra pasta' } }
+        @{ Code = 'RECOVERY_IMAGE_UNKNOWN'; Why = 'imagem nao comparavel'; Checks = {
+                Assert-Eq (& $r1Codes (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R' @{ PathName = 'svchost.exe -k x' })))) 'RECOVERY_IMAGE_UNKNOWN' 'so o nome do arquivo, sem caminho'
+                Assert-Eq (& $r1Codes (& $r1Coll @((& $r1Prov @((& $r1Hint 'R'))), (& $r1Prov @((& $r1Hint 'R' 'svchost.exe')))) @((& $r1Row 'R')))) 'RECOVERY_IMAGE_UNKNOWN' 'duas imagens declaradas pelo mesmo provider' } }
+        @{ Code = 'RECOVERY_ATTRIBUTION_AMBIGUOUS'; Why = 'dois providers declaram o nome'; Checks = {
+                Assert-Eq (& $r1Codes (& $r1Coll @((& $r1Prov @((& $r1Hint 'R')) 'a-one'), (& $r1Prov @((& $r1Hint 'r')) 'b-two')) @((& $r1Row 'R')))) 'RECOVERY_ATTRIBUTION_AMBIGUOUS' 'dois providers, a mesma imagem' } }
+        @{ Code = 'RECOVERY_COVERAGE_INCOMPLETE'; Why = 'consulta negada, dicas incompletas ou nome alem do teto'; Checks = {
+                $den = Get-AtmRecoverCollection -Providers @((& $r1Prov @((& $r1Hint 'R')))) -IdentitySource $diagIdUser -ServiceSource { param($Names) throw (New-Object UnauthorizedAccessException('x')) }
+                Assert-Eq (& $r1Codes $den) 'RECOVERY_COVERAGE_INCOMPLETE' 'consulta negada'
+                Assert-Eq (& $r1Codes (& $r1Coll @((& $r1Prov @((& $r1Hint 'R'))), [pscustomobject]@{ Id = 'bad'; DisplayName = 'x'; ContractVersion = 9 }) @((& $r1Row 'R')))) 'RECOVERY_COVERAGE_INCOMPLETE' 'provider com contrato invalido: dicas incompletas'
+                $many = @(0..64 | ForEach-Object { 'R{0:D2}' -f $_ })
+                $cm = & $r1Coll (& $r1Prov @($many | ForEach-Object { & $r1Hint $_ })) @($many | ForEach-Object { & $r1Row $_ })
+                Assert-True ((& $r1Codes $cm 'R64') -ceq 'RECOVERY_COVERAGE_INCOMPLETE' -and (& $r1Codes $cm 'R00') -ceq '') "nome alem do teto de 64: nao consultado ($(& $r1Codes $cm 'R64'))" } }
+        @{ Code = 'RECOVERY_DEPENDENCY_STOPPED'; Why = 'dependencia parada nao declarada (oculta ou do sistema); a declarada e permitida e mostrada'; Checks = {
+                Assert-Eq (& $r1Codes (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R')) (& $r1Deps @((& $r1Link 'Hidden1' 'R')) @((& $r1Rel 'Hidden1' 'Stopped' 'C:\Vendor\x.exe'))))) 'RECOVERY_DEPENDENCY_STOPPED' 'dependencia oculta (*) parada'
+                Assert-Eq (& $r1Codes (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R')) (& $r1Deps @((& $r1Link 'SysDep' 'R')) @((& $r1Rel 'SysDep' 'Stopped' $r1SysPath))))) 'RECOVERY_DEPENDENCY_STOPPED' 'dependencia do sistema parada'
+                $pd = & $r1Plan (& $r1Coll (& $r1Prov @((& $r1Hint 'R'), (& $r1Hint 'D2'))) @((& $r1Row 'R'), (& $r1Row 'D2')) (& $r1Deps @((& $r1Link 'D2' 'R'))))
+                Assert-True ($pd.Offered -and (@($pd.DeclaredDependencyStopped) -join ',') -ceq 'D2' -and (@($pd.Capture.DependsOn) -join ',') -ceq 'D2|STOPPED') "dependencia declarada parada: oferecido e mostrado ($(@($pd.Codes) -join ','))" } }
+        @{ Code = 'RECOVERY_DEPENDENCIES_UNREADABLE'; Why = 'nao coletadas, leitura falhou, estado ilegivel ou nao listado'; Checks = {
+                $nd = Get-AtmRecoverCollection -Providers @((& $r1Prov @((& $r1Hint 'R')))) -IdentitySource $diagIdUser -ServiceSource ({ param($Names) @((& $r1Row 'R')) }.GetNewClosure())
+                Assert-Eq (& $r1Codes $nd) 'RECOVERY_DEPENDENCIES_UNREADABLE' 'nao coletadas'
+                Assert-Eq (& $r1Codes (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R')) { param($Names) throw (New-Object InvalidOperationException('x')) })) 'RECOVERY_DEPENDENCIES_UNREADABLE' 'leitura falhou'
+                Assert-Eq (& $r1Codes (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R')) (& $r1Deps @((& $r1Link 'R' 'Gone'))))) 'RECOVERY_DEPENDENCIES_UNREADABLE' 'dependente nao listado'
+                Assert-Eq (& $r1Codes (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R')) (& $r1Deps @((& $r1Link 'SysDep' 'R')) @() @() (New-Object InvalidOperationException('x'))))) 'RECOVERY_DEPENDENCIES_UNREADABLE' 'estado dos relacionados falhou'
+                Assert-Eq (& $r1Codes (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R')) (& $r1Deps @((& $r1Link 'SysDep' 'R')) @((& $r1Rel 'SysDep' 'Weird' $r1SysPath))))) 'RECOVERY_DEPENDENCIES_UNREADABLE' 'estado ilegivel'
+                Assert-Eq (& $r1Codes (& $r1Coll (& $r1Prov @((& $r1Hint 'R'), (& $r1Hint 'D3'))) @((& $r1Row 'R')) (& $r1Deps @((& $r1Link 'D3' 'R'))))) 'RECOVERY_DEPENDENCIES_UNREADABLE' 'dependencia declarada nao listada' } }
+        @{ Code = 'RECOVERY_DEPENDENCIES_CAPPED'; Why = 'relacionado alem do teto (NOT_QUERIED)'; Checks = {
+                Assert-Eq (& $r1Codes (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R')) (& $r1Deps @((& $r1Link 'Far' 'R')) @() @('Far')))) 'RECOVERY_DEPENDENCIES_CAPPED' 'dependencia alem do teto' } }
+        @{ Code = 'RECOVERY_NOT_DECLARED'; Why = 'nome nao declarado, comparado exatamente (a CLI responde com uso errado, saida 2)'; Checks = {
+                $c = & $r1Base
+                foreach ($n in @('r', 'R ', 'Other', '*', 'R*')) { $p = & $r1Plan $c $n; Assert-True (-not $p.Declared -and (@($p.Codes) -join ',') -ceq 'RECOVERY_NOT_DECLARED' -and $null -eq $p.PlanId -and -not $p.Changed) "nao declarado: '$n'" }
+                Assert-True (@((Get-AtmRecoverList -Collection $c).Candidates | Where-Object { @($_.Codes) -ccontains 'RECOVERY_NOT_DECLARED' }).Count -eq 0) 'a lista so tem nomes declarados' } }
+    )
+    foreach ($r1Case in $r1Refusals) {
+        Test-Case 'V0.4 R1' ('R1 recusa {0}: {1}' -f $r1Case.Code, $r1Case.Why) {
+            Assert-True ($script:AtmRecoveryRefusalCodes -ccontains $r1Case.Code) "codigo do catalogo: $($r1Case.Code)"
+            & $r1Case.Checks
+        }
+    }
+    Test-Case 'V0.4 R1' 'R1: todo codigo de recusa tem um caso' {
+        Assert-Eq ((@($r1Refusals | ForEach-Object { $_.Code } | Sort-Object) -join ',')) ((@($script:AtmRecoveryRefusalCodes | Sort-Object) -join ',')) 'um caso por codigo'
+    }
+    Test-Case 'V0.4 R1' 'R1: plan id - estavel para a mesma entrada (e para outro token), diferente quando muda qualquer campo da captura, o provider ou a imagem declarada; nulo distinto de vazio' {
+        $id = { param($Coll) $p = & $r1Plan $Coll; Assert-True $p.Offered "variante oferecida ($(@($p.Codes) -join ','))"; $p.PlanId }
+        $base = & $id (& $r1Base)
+        Assert-Eq (& $id (& $r1Base)) $base 'mesma entrada, mesmo plan id'
+        Assert-Eq (& $id (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R')) $r1NoDeps $diagIdAdmin)) $base 'outro token: mesmo plan id (operacao, alvo e captura)'
+        $variants = [ordered]@{
+            StartMode = (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R' @{ StartMode = 'Auto' })))
+            Delayed   = (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R' @{ DelayedAutoStart = $true })))
+            Exit      = (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R' @{ ExitCode = [uint32]0 })))
+            Specific  = (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R' @{ ServiceSpecificExitCode = [uint32]5 })))
+            CheckPt   = (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R' @{ CheckPoint = [uint32]1 })))
+            WaitHint  = (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R' @{ WaitHint = [uint32]100 })))
+            Accept    = (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R' @{ AcceptStop = $true })))
+            Account   = (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R' @{ StartName = 'NT AUTHORITY\LocalService' })))
+            Image     = (& $r1Coll (& $r1Prov @((& $r1Hint 'R' 'svchost.exe'))) @((& $r1Row 'R')))
+            Provider  = (& $r1Coll (& $r1Prov @((& $r1Hint 'R')) 'test-rec2') @((& $r1Row 'R')))
+            DependsOn = (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R')) (& $r1Deps @((& $r1Link 'SysDep' 'R')) @((& $r1Rel 'SysDep' 'Running' $r1SysPath))))
+            DepState  = (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R')) (& $r1Deps @((& $r1Link 'SysDep' 'R')) @((& $r1Rel 'SysDep' 'Paused' $r1SysPath))))
+            Dependent = (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R')) (& $r1Deps @((& $r1Link 'R' 'SysDep')) @((& $r1Rel 'SysDep' 'Running' $r1SysPath))))
+        }
+        $seen = @{ $base = 'base' }
+        foreach ($k in $variants.Keys) {
+            $v = & $id $variants[$k]
+            Assert-True (-not $seen.ContainsKey($v)) "$k muda o plan id (igual a $($seen[$v]))"
+            $seen[$v] = $k
+        }
+        $d = (& $r1Base).DeclaredByName['R']
+        $cap = (& $r1Plan (& $r1Base)).Capture
+        $c1 = $cap.PSObject.Copy(); $c1.Account = $null
+        $c2 = $cap.PSObject.Copy(); $c2.Account = ''
+        Assert-True ((Get-AtmRecoverPlanId -Operation 'REC-SVC-START' -Target 'R' -Declared $d -Capture $c1) -cne (Get-AtmRecoverPlanId -Operation 'REC-SVC-START' -Target 'R' -Declared $d -Capture $c2)) 'valor nulo distinto de vazio'
+        Assert-True ((Get-AtmRecoverPlanId -Operation 'REC-SVC-START' -Target 'R' -Declared $d -Capture $cap) -cne (Get-AtmRecoverPlanId -Operation 'REC-SVC-START' -Target 'R2' -Declared $d -Capture $cap)) 'outro alvo, outro plan id'
+    }
+    Test-Case 'V0.4 R1' 'R1: privacidade do plano e da lista - nenhum caminho fora do local conhecido, nenhuma conta alem das tres padrao, nenhuma linha de comando nem nome oculto; identidade do token nunca mostrada' {
+        $userExe = $svcUser + '\AppData\Local\Vendor\svc.exe'
+        $row = & $r1Row 'R' @{ StartName = 'CORPDOM\r1-acct'; PathName = "`"$userExe`" --token=r1-secret" }
+        $deps = & $r1Deps @((& $r1Link 'SecretDep' 'R')) @((& $r1Rel 'SecretDep' 'Running' "`"$svcUser\x\secretdep.exe`" -k r1-secret"))
+        $c = & $r1Coll (& $r1Prov @((& $r1Hint 'R' 'svc.exe'))) @($row) $deps
+        $p = & $r1Plan $c
+        Assert-True ($p.Offered -and $p.Capture.Executable -ceq 'svc.exe' -and $p.Capture.ExecutableForm -ceq 'NAME' -and $p.Capture.AccountKind -ceq 'USER' -and $null -eq $p.Capture.Account -and (@($p.Capture.DependsOn) -join ',') -ceq '*|RUNNING') "fora do local conhecido: so o nome; conta de usuario: so o tipo; dependencia oculta ($(@($p.Codes) -join ','))"
+        $txt = ((Show-AtmRecoverPlan -Plan $p 6>&1 | ForEach-Object { [string]$_ }) + (Show-AtmRecoverList -List (Get-AtmRecoverList -Collection $c) 6>&1 | ForEach-Object { [string]$_ })) -join "`n"
+        $all = $txt + "`n" + ((@($p.Capture.PSObject.Properties | ForEach-Object { [string]($_.Value -join ' ') })) -join "`n")
+        foreach ($x in @('r1-acct', 'CORPDOM', 'p2a-person', '--token', 'r1-secret', 'SecretDep', 'secretdep', 'alice', 'S-1-5-21', '\AppData\')) { Assert-True (-not $all.Contains($x)) "plano e lista sem '$x'" }
+        foreach ($acct in @('LocalSystem', 'NT AUTHORITY\LocalService', 'NT AUTHORITY\NetworkService')) { Assert-Eq (& $r1Plan (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R' @{ StartName = $acct })))).Capture.Account $acct "conta padrao mostrada: $acct" }
+        Assert-True ($null -eq (& $r1Plan (& $r1Coll (& $r1Prov @((& $r1Hint 'R'))) @((& $r1Row 'R' @{ StartName = 'NT SERVICE\r1svc' })))).Capture.Account) 'conta virtual: so o tipo'
+    }
+    Test-Case 'V0.4 R1' 'R1: trava fechada (e aberta neste processo) - list e plan nao perguntam, nao abrem o mutex B8, nao chamam log, escrita de arquivo nem consulta CIM; nada gravado no sandbox (por instrumentacao)' {
+        $calls = New-Object System.Collections.Generic.List[string]
+        function Read-Host { $calls.Add('Read-Host'); 'x' }
+        function Invoke-AtmUnderSharedLock { $calls.Add('Invoke-AtmUnderSharedLock') }
+        function Open-AtmCleanLog { $calls.Add('Open-AtmCleanLog') }
+        function New-AtmPinnedTextFile { $calls.Add('New-AtmPinnedTextFile') }
+        function Write-AtmNewTextFile { $calls.Add('Write-AtmNewTextFile') }
+        function Write-AtmCleanLogRecord { $calls.Add('Write-AtmCleanLogRecord') }
+        function Set-Content { $calls.Add('Set-Content') }
+        function Add-Content { $calls.Add('Add-Content') }
+        function Out-File { $calls.Add('Out-File') }
+        function New-Item { $calls.Add('New-Item') }
+        function Get-CimInstance { $calls.Add('Get-CimInstance'); @() }
+        $prevLock = $script:AtmCleanLockName
+        $lockName = 'Global\AgentTempManager.Test.R1.' + [guid]::NewGuid().ToString('N')
+        $script:AtmCleanLockName = $lockName
+        $before = @(Get-ChildItem -LiteralPath $sandbox -Force | ForEach-Object { '{0}|{1}' -f $_.Name, $_.LastWriteTimeUtc.Ticks }) -join ';'
+        try {
+            foreach ($open in @($false, $true)) {
+                $script:AtmRecoveryEnabled = $open
+                $c = & $r1Base
+                $l = Get-AtmRecoverList -Collection $c
+                $p = & $r1Plan $c
+                $q = & $r1Plan $c 'Other'
+                $null = Show-AtmRecoverList -List $l 6>&1
+                $null = Show-AtmRecoverPlan -Plan $p 6>&1
+                Assert-True ($l.GateOpen -eq $open -and $p.GateOpen -eq $open -and -not $l.Changed -and -not $p.Changed -and -not $q.Changed) "trava $open refletida, nada alterado"
+            }
+            $m = $null
+            Assert-True (-not [Threading.Mutex]::TryOpenExisting($lockName, [ref]$m)) 'mutex B8 nao existe depois de list e plan'
+            Assert-Eq ($calls -join ',') '' 'nada perguntado, travado, registrado, gravado nem consultado'
+            $ctl = New-Object Threading.Mutex($false, $lockName)
+            try { $m2 = $null; Assert-True ([Threading.Mutex]::TryOpenExisting($lockName, [ref]$m2)) 'controle positivo: o mutex criado e encontrado'; if ($m2) { $m2.Dispose() } } finally { $ctl.Dispose() }
+        } finally { $script:AtmRecoveryEnabled = $false; $script:AtmCleanLockName = $prevLock }
+        Assert-Eq $script:AtmRecoveryEnabled $false 'trava fechada de novo'
+        $after = @(Get-ChildItem -LiteralPath $sandbox -Force | ForEach-Object { '{0}|{1}' -f $_.Name, $_.LastWriteTimeUtc.Ticks }) -join ';'
+        Assert-Eq $after $before 'sandbox inalterado'
+    }
+    Test-Case 'V0.4 R1' 'R1 (estatico): uma unica atribuicao da trava; nenhuma API de controle de servico em src; motor sem consulta CIM, escrita, log, lock, pergunta nem espera; diagnose, TUI e GUI nao chamam o motor; Win32_Service segue com duas consultas; lancador, instalador, manifesto, build e e2e com a oitava trava' {
+        $all = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Rel = $_.FullName.Substring($srcDir.Length + 1); Text = [IO.File]::ReadAllText($_.FullName) } })
+        $rec = @($all | Where-Object { $_.Rel -ceq 'lib\Engine.Recover.ps1' })[0].Text
+        Assert-True ([regex]::Matches($rec, '\$script:AtmRecoveryEnabled\s*=').Count -eq 1 -and $rec -match '(?m)^\$script:AtmRecoveryEnabled = \$false\r?$') 'uma unica atribuicao, a $false'
+        foreach ($f in $all) { if ($f.Rel -cne 'lib\Engine.Recover.ps1') { Assert-True (-not [regex]::IsMatch($f.Text, 'AtmRecoveryEnabled\s*=')) "$($f.Rel) nao altera a trava" } }
+        Assert-True (-not $rec.Contains('$env:') -and -not $rec.Contains('ConvertFrom-Json') -and -not $rec.Contains('Get-Content')) 'nenhuma variavel de ambiente, configuracao ou arquivo abre a trava'
+        foreach ($api in @('Start-Service', 'Stop-Service', 'Set-Service', 'Restart-Service', 'ServiceController', 'Invoke-CimMethod', 'OpenService', 'ControlService')) {
+            $hits = @($all | Where-Object { $_.Text.IndexOf($api, [StringComparison]::OrdinalIgnoreCase) -ge 0 } | ForEach-Object { $_.Rel })
+            Assert-Eq ($hits -join ',') '' "nenhum '$api' em src"
+        }
+        Assert-Eq (@($all | Where-Object { $_.Text -match '(?i)(?<![A-Za-z0-9_])sc\.exe' } | ForEach-Object { $_.Rel }) -join ',') '' "nenhum 'sc.exe' em src"
+        $sleep = 'Start-' + 'Sleep'
+        # The code only (comments name the diagnose functions the collection follows).
+        $recCode = [regex]::Replace([regex]::Replace($rec, '(?s)<#.*?#>', ''), '(?m)#.*$', '')
+        foreach ($pat in @('Get-CimInstance', 'Get-WmiObject', 'Read-Host', 'Write-Host', 'Invoke-AtmUnderSharedLock', 'AtmCleanLock', 'Mutex', 'Open-AtmCleanLog', 'Write-AtmCleanLogRecord', 'New-AtmPinnedTextFile', 'Write-AtmNewTextFile',
+                '[IO.File]', 'Set-Content', 'Add-Content', 'Out-File', 'New-Item', 'ConvertTo-Json', 'Read-AtmPseudonymKeyFile', 'Invoke-AtmDiagnose', 'Invoke-AtmInventory', 'Start-Process', $sleep, 'Add-Type')) { Assert-True (-not $recCode.Contains($pat)) "motor de recuperacao sem '$pat'" }
+        Assert-True ([regex]::Matches($recCode, 'Invoke-AtmServiceQuery ').Count -eq 1 -and [regex]::Matches($recCode, 'Get-AtmServiceFindings ').Count -eq 1 -and [regex]::Matches($recCode, 'Get-AtmIdentityState ').Count -eq 1) 'coleta pelas funcoes do diagnose: uma consulta de servicos, seus achados e a identidade'
+        $fns = @([regex]::Matches($rec, '(?m)^function\s+([A-Za-z]+-[A-Za-z0-9]+)') | ForEach-Object { $_.Groups[1].Value })
+        Assert-True ($fns.Count -ge 8 -and $fns -ccontains 'Get-AtmRecoverPlan') "funcoes do motor ($($fns -join ','))"
+        foreach ($f in @($all | Where-Object { $_.Rel -ceq 'lib\Engine.Diagnose.ps1' -or $_.Rel -ceq 'lib\Tui.ps1' -or $_.Name -like 'Gui*.ps1' })) {
+            foreach ($fn in $fns) { Assert-True (-not $f.Text.Contains($fn)) "$($f.Rel) nao chama $fn" }
+            Assert-True (-not $f.Text.Contains('Engine.Recover') -and -not $f.Text.Contains('AtmRecovery')) "$($f.Rel) nao carrega o motor nem le a trava"
+        }
+        $diag = @($all | Where-Object { $_.Rel -ceq 'lib\Engine.Diagnose.ps1' })[0].Text
+        Assert-Eq ([regex]::Matches($diag, 'Get-CimInstance[^\r\n]*Win32_Service').Count) 2 'Win32_Service: ainda as duas consultas do diagnose (R0)'
+        $launcher = @($all | Where-Object { $_.Rel -ceq 'agent-temp.ps1' })[0].Text
+        Assert-Eq ([regex]::Matches($launcher, [regex]::Escape(". (Join-Path `$here 'lib\Engine.Recover.ps1')")).Count) 2 'lancador carrega o motor so em recover e version'
+        Assert-True ($launcher.Contains("'lib\Engine.Diagnose.ps1', 'lib\Engine.Recover.ps1', 'lib\Report.ps1'") -and $script:AtmRequiredFiles -contains 'lib\Engine.Recover.ps1') 'motor na verificacao de integridade do lancador e obrigatorio na instalacao'
+        Assert-True ($launcher.Contains("Get-AtmText 'cli.recovery' `$(if (`$script:AtmRecoveryEnabled)") -and $launcher.Contains("'help.recover', 'help.recover2'")) 'version mostra a trava; ajuda com as duas linhas'
+        $mfDir = Join-Path $sandbox 'r1-manifest'
+        [void][IO.Directory]::CreateDirectory($mfDir)
+        Copy-AtmTree -From $srcDir -To $mfDir
+        Write-AtmManifest -Root $mfDir -Version (Get-AtmSourceVersion -SourceDir $mfDir)
+        Assert-True (@(([IO.File]::ReadAllText((Join-Path $mfDir 'manifest.json')) | ConvertFrom-Json).files | Where-Object { [string]$_.path -ceq 'lib\Engine.Recover.ps1' }).Count -eq 1) 'manifesto lista lib\Engine.Recover.ps1'
+        $root = Split-Path -Parent $testsDir
+        $br = [IO.File]::ReadAllText((Join-Path $root 'tools\Build-Release.ps1'))
+        Assert-True ($br.Contains("`$recTxt = & `$read 'src/lib/Engine.Recover.ps1'") -and $br.Contains("@(`$recTxt, 'AtmRecoveryEnabled')")) 'build recusa o pacote sem a oitava trava fechada'
+        foreach ($e in @('Invoke-InstallE2E.ps1', 'Invoke-IsolateE2E.ps1')) {
+            $t = [IO.File]::ReadAllText((Join-Path $testsDir "e2e\$e"))
+            Assert-True ($t.Contains("AtmRecoveryEnabled = 'lib\Engine.Recover.ps1'") -and $t.Contains('eight installed gates') -and -not $t.Contains('seven installed gates')) "$e confere as oito travas instaladas"
+        }
+        $self = [IO.File]::ReadAllText((Join-Path $testsDir 'Run-Tests.ps1'))
+        $a0 = $self.IndexOf('-----' + ' V0.4 R1 (assisted'); $a1 = $self.IndexOf('-----' + ' scale')
+        Assert-True ($a0 -gt 0 -and $a1 -gt $a0 -and -not $self.Substring($a0, $a1 - $a0).Contains($sleep)) 'area V0.4 R1 sem espera real'
+    }
+    Test-Case 'V0.4 R1' 'R1: CLI (processo novo deste shell) - recover list 0; plan do CoworkVMService 3 com RECOVERY_IMAGE_NOT_DECLARED; uso errado 2 (sem subcomando, operacao fora do catalogo, caminho, curinga, nome com outra grafia, opcoes recusadas); sempre "nada foi alterado"; estado do servico igual antes e depois' {
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $launch = { param([string]$CliArgs) Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$(Join-Path $srcDir 'agent-temp.ps1')`" " + $CliArgs) -TimeoutSec 300 }
+        $snap = { (@(Get-CimInstance -ClassName Win32_Service -Filter "Name='CoworkVMService'" -Property Name, State, StartMode -ErrorAction Stop | ForEach-Object { '{0}/{1}' -f $_.State, $_.StartMode })) -join ',' }
+        $svcBefore = & $snap
+        $r = & $launch 'recover list -Lang en-US'
+        Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('REC-SVC-START CoworkVMService (claude-desktop): REFUSED') -and $r.Text.Contains('RECOVERY_IMAGE_NOT_DECLARED') -and $r.Text.Contains('Not offered: ending processes and operating virtual machines') -and $r.Text.Contains('Recovery is DISABLED in this release') -and $r.Text.Contains('Nothing was changed.')) "list: saida $($r.Exit) $($r.Text)"
+        $r = & $launch 'recover plan -Operation REC-SVC-START -Service CoworkVMService -Lang en-US'
+        Assert-True ($r.Exit -eq 3 -and $r.Text.Contains('RECOVERY_IMAGE_NOT_DECLARED') -and -not $r.Text.Contains('Plan id:') -and $r.Text.Contains('Nothing was changed.')) "plan recusado: saida $($r.Exit) $($r.Text)"
+        $r = & $launch 'recover plan -Operation REC-SVC-START -Service CoworkVMService -Lang pt-BR'
+        Assert-True ($r.Exit -eq 3 -and $r.Text.Contains('RECOVERY_IMAGE_NOT_DECLARED') -and $r.Text.Contains('Nada foi alterado.')) "plan pt-BR: saida $($r.Exit)"
+        foreach ($u in @(@('recover', 'Usage: agent-temp recover list'), @('recover bogus', 'Usage:'), @('recover list -Service CoworkVMService', 'Usage:'), @('recover plan -Service CoworkVMService', 'Not an operation of the recovery catalog'),
+                @('recover plan -Operation REC-SVC-STOP -Service CoworkVMService', 'Not an operation of the recovery catalog'), @('recover plan -Operation rec-svc-start -Service CoworkVMService', 'Not an operation of the recovery catalog'),
+                @('recover plan -Operation REC-SVC-START', 'never a path, wildcard, file or plan'), @('recover plan -Operation REC-SVC-START -Service C:\x\svc.exe', 'never a path, wildcard, file or plan'),
+                @('recover plan -Operation REC-SVC-START -Service Cowork*', 'never a path, wildcard, file or plan'), @('recover plan -Operation REC-SVC-START -Service coworkvmservice', 'RECOVERY_NOT_DECLARED'),
+                @('recover plan -Operation REC-SVC-START -Service NoSuchService', 'RECOVERY_NOT_DECLARED'), @('recover list -LogFile x.log', 'recover does not take -LogFile'),
+                @('recover list -ExportJson x.json', 'recover does not take -ExportJson'), @('recover plan -Operation REC-SVC-START -Service CoworkVMService -Path C:\x', 'recover does not take -Path'))) {
+            $r = & $launch ($u[0] + ' -Lang en-US')
+            Assert-True ($r.Exit -eq 2 -and $r.Text.Contains($u[1]) -and $r.Text.Contains('Nothing was changed.')) "$($u[0]): saida $($r.Exit) $($r.Text)"
+        }
+        Assert-Eq (& $snap) $svcBefore 'estado do CoworkVMService igual antes e depois (ou ausente nos dois)'
+    }
+    Test-Case 'V0.4 R1' 'R1: version mostra a oitava trava e a ajuda as duas linhas de recover, nos dois idiomas' {
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $launch = { param([string]$CliArgs) Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$(Join-Path $srcDir 'agent-temp.ps1')`" " + $CliArgs) -TimeoutSec 300 }
+        $r = & $launch 'version -Lang en-US'
+        Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('assisted recovery: DISABLED in this release (recover only lists and shows the plan)')) "version en-US: saida $($r.Exit)"
+        $r = & $launch 'version -Lang pt-BR'
+        Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('recupera') -and $r.Text.Contains('assistida: DESABILITADA nesta vers') -and $r.Text.Contains('lista e mostra o plano)')) "version pt-BR: saida $($r.Exit)"
+        $r = & $launch 'help -Lang en-US'
+        Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('agent-temp recover  list | plan -Operation REC-SVC-START -Service <exact declared name> (V0.4).') -and $r.Text.Contains('PLAN ONLY - lists and shows the plan; recovery disabled: no service is changed.')) "help en-US: saida $($r.Exit)"
+        $r = & $launch 'help -Lang pt-BR'
+        Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('agent-temp recover  list | plan -Operation REC-SVC-START -Service <nome declarado exato> (V0.4).') -and $r.Text.Contains('SOMENTE PLANO - lista e mostra o plano')) "help pt-BR: saida $($r.Exit)"
     }
 
     # ------------------------------------------------------------------ scale

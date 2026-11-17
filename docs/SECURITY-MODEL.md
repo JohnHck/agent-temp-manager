@@ -59,9 +59,9 @@ isolated sandbox.
   environment variable or configuration file. The current list of release gates, each a single `$false` assignment:
   `AtmRealDeletionEnabled` (`Engine.Clean.ps1`), `AtmWorktreeDiagnosticsEnabled` and `AtmHandleDiagnosticsEnabled`
   (`Engine.Diagnose.ps1`), `AtmDiagnoseExportEnabled` (`Report.ps1`), `AtmIsolationEnabled` and
-  `AtmQuarantinePurgeEnabled` (`Engine.Isolate.ps1`), and `AtmGuiEnabled` (`Gui.ps1`).
+  `AtmQuarantinePurgeEnabled` (`Engine.Isolate.ps1`), `AtmGuiEnabled` (`Gui.ps1`), and `AtmRecoveryEnabled` (V0.4, below).
   * The build refuses an archive without it, and without both GUI files.
-  * The suite and the install e2e check all seven gates.
+  * The suite and the install e2e check all eight gates.
   * `version` shows it.
 * **Closed** (every copy), `agent-temp gui` prints `GUI_GATE_CLOSED` and exits with code `7`. It opens no window, and no
   Windows Forms assembly is loaded: the suite checks this in a new process, after the libraries are loaded and after
@@ -974,6 +974,42 @@ the mover; a static suite test checks it.
 * **A swap inside the tree.** The tree's own directories are not pinned (pins would block the rename). A swap inside it
   after the measurement is caught by the second measurement (`VERIFY_REPARSE_POINT_FOUND`). The reparse point moves
   with the tree and is never followed.
+
+## Recovery gate (V0.4 phase R1)
+
+* **The eighth gate:** `$script:AtmRecoveryEnabled`, `$false` in every shipped copy
+  ([ADR-0016](adr/ADR-0016-v04-assisted-recovery.md) section 5). It is a single assignment in
+  `lib\Engine.Recover.ps1`, with no option, environment variable or configuration file.
+  * The build refuses an archive without it, each of the eight gates a single `$false` assignment.
+  * The launcher's integrity check and the installer require the file.
+  * The suite, the install e2e and the isolation e2e check all eight gates.
+  * `version` shows it: `assisted recovery: DISABLED in this release (recover only lists and shows the plan)`.
+* **Closed** (every copy): `recover list` and `recover plan` collect, apply the criteria and present the list or the
+  plan, then stop. Nothing is asked, the clean lock (B8) is not taken and its mutex is not opened, and no log or file is
+  written. The suite checks this by instrumentation, with the gate closed and with it opened in its own process.
+* **No control path in R1, gate open or closed.** No service is opened with a control right, started, stopped or
+  changed. A static suite test fails on any service control API anywhere in `src/`: `Start-Service`, `Stop-Service`,
+  `Set-Service`, `Restart-Service`, `sc.exe`, `ServiceController`, `Invoke-CimMethod`, `OpenService` and
+  `ControlService`. The control seam is added in phase R2, in `Engine.Recover.ps1` only.
+* **Read only, in the command's own process.** The collection reuses the diagnose's functions: the own token, the
+  providers' hints, one `Win32_Service` query with the R0 signals, the dependencies and the image check. The engine
+  itself runs no CIM query. The diagnose, the TUI and the GUI do not load or call it, and the diagnose still has
+  exactly two `Win32_Service` queries.
+* **Narrow targets.** The operation comes only from the closed catalog (`REC-SVC-START`), compared exactly. The target is
+  only the exact name a provider declares, compared case-sensitively: never a path, wildcard, file or plan of another
+  process, and one target per call. A service is offered only when it is `STOPPED`, not `DISABLED`, listed once with
+  every property and fault signal readable, and declared by one provider whose `ExpectedImage` matches its executable.
+  Its dependencies must be read, and a stopped dependency must itself be declared. Anything else is refused with a
+  closed `RECOVERY_*` code.
+* **No declared image, no offer.** A service whose providers declare no `ExpectedImage` is refused
+  (`RECOVERY_IMAGE_NOT_DECLARED`). No shipped provider declares one, so every real plan is refused. How R2 treats an
+  undeclared image is an open decision for the maintainer.
+* **Elevation is only estimated.** It is read from the process's own token (`LIKELY_HAS_RIGHT`, `NEEDS_ELEVATION`,
+  `UNKNOWN`), never by probing the service's security, and nothing is elevated.
+* **Privacy.** The plan keeps the diagnose's reductions: the account kind plus one of the three standard service
+  accounts, the executable as a full path only under a well-known program location, never a command line, and `*` for
+  a related service that is neither declared nor a system service. The token's identity is never shown. The plan id
+  hashes the plan's inputs and leaves out the token.
 
 ## Execution policy
 

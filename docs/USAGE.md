@@ -888,6 +888,74 @@ it, with **Refresh** or `F5`, or when the live monitoring is on and its interval
 Closing it leaves no process, timer or file behind. The installed command always runs in Windows PowerShell 5.1, and
 there is no other entry point (no `bin\` script, no shortcut).
 
+## Recover (V0.4 R1, unreleased; list and plan only in every copy)
+
+Assisted recovery of a service a provider declares ([ADR-0016](adr/ADR-0016-v04-assisted-recovery.md)). The recovery
+gate is closed in every copy, and `agent-temp version` shows it: `assisted recovery: DISABLED in this release (recover
+only lists and shows the plan)`. In this phase no service is opened, started, stopped or changed, gate open or closed.
+Nothing is asked, no lock is taken, and no log or file is written.
+
+```text
+agent-temp recover list
+agent-temp recover plan -Operation REC-SVC-START -Service <exact declared name>
+```
+
+Each run makes a fresh, read-only collection in its own process: the token, the providers' service hints, and one
+services query with its fault signals, dependencies and image check (as `diagnose` reads them). `-DeadlineSeconds`
+bounds it (default 120 s).
+
+* **The catalog** has one operation, `REC-SVC-START`: start one stopped service that a provider declares. It is undone
+  by stopping the service (`REC-SVC-STOP`), which restores its state only. Whatever the service did while it ran is
+  not undone. Ending processes and operating virtual machines are not offered.
+* **`list`** shows, for each declared service, the operation, offered or refused with its `RECOVERY_*` codes. It also
+  shows the services coverage, the likely elevation and the not-offered line.
+* **`plan`** takes one operation from the catalog and one target. The target is only the exact name a provider
+  declares, compared case-sensitively: never a path, wildcard, file or plan. An offered plan shows:
+  * the "before" capture (state, start mode, fault signals, account kind, executable, image, dependencies);
+  * the undo and what it does not undo;
+  * the likely elevation, from the token only (`LIKELY_HAS_RIGHT`, `NEEDS_ELEVATION` or `UNKNOWN`);
+  * a plan id.
+
+  A refused plan shows its codes.
+* Every run ends with `Nothing was changed.`
+
+The refusal codes, closed:
+
+* `RECOVERY_NOT_DECLARED` (a usage error, exit 2);
+* `RECOVERY_ATTRIBUTION_AMBIGUOUS`, `RECOVERY_COVERAGE_INCOMPLETE`, `RECOVERY_NOT_LISTED`, `RECOVERY_DUPLICATE_ROW`;
+* `RECOVERY_PROPERTY_UNREADABLE`, `RECOVERY_SIGNALS_UNREADABLE`;
+* `RECOVERY_NOT_STOPPED`, `RECOVERY_START_MODE_DISABLED`;
+* `RECOVERY_IMAGE_NOT_DECLARED`, `RECOVERY_IMAGE_MISMATCH`, `RECOVERY_IMAGE_UNKNOWN`;
+* `RECOVERY_DEPENDENCY_STOPPED`, `RECOVERY_DEPENDENCIES_UNREADABLE`, `RECOVERY_DEPENDENCIES_CAPPED`.
+
+No shipped provider declares an expected image, so every real plan is refused, at least with
+`RECOVERY_IMAGE_NOT_DECLARED`. That includes Claude Desktop's `CoworkVMService`.
+
+Example (synthetic; the rule lines are shortened):
+
+```text
+==========
+ Recovery plan: REC-SVC-START for ExampleSvc
+==========
+  Starts one stopped service declared by a provider.
+  Declared by: example-provider
+==========
+ Refused: this operation is not offered for this service
+==========
+  - RECOVERY_IMAGE_NOT_DECLARED
+  - RECOVERY_NOT_STOPPED
+Recovery is DISABLED in this release: recover only lists and shows the plan; nothing is asked, locked or logged.
+Nothing was changed.
+```
+
+Exit codes of `recover`:
+
+* `0`: the list was shown, or a plan was offered;
+* `3`: the plan was refused;
+* `2`: a usage error (a missing or other subcommand, `-Operation` or `-Service` on `list`, an operation outside the
+  catalog, a target that is not a plain name or that no provider declares, or an option `recover` does not take);
+* `10`: the collection failed.
+
 ## Verify (installed copy)
 
 `agent-temp verify` checks every file the installation's `manifest.json` lists (SHA-256) before any product code is
@@ -916,14 +984,16 @@ Version x.y.z; 0 mismatching file(s).
 
 `0` ok (for `diagnose`, partial coverage included) · `1` unknown command · `2` invalid clean invocation, or a refused
 `-PseudonymKeyFile`, or `authorize` without `-Path`/`-RecordFile`, or `isolate` without a path or with
-`-IncludeOtherUsers` · `3` clean aborted (nothing deleted), `isolate`, `quarantine restore` or `quarantine purge` stopped
+`-IncludeOtherUsers`, or a `recover` usage error (`RECOVERY_NOT_DECLARED` included) · `3` clean aborted (nothing
+deleted), `isolate`, `quarantine restore` or `quarantine purge` stopped
 after the plan (nothing moved or purged), `quarantine schedule-autopurge` or `unschedule-autopurge` refused or not
-confirmed (nothing scheduled or removed), or, only with
+confirmed (nothing scheduled or removed), `recover plan` refused (nothing changed), or, only with
 deletion enabled (not in any published copy), stopped before completing (Clean log, above); `authorize`: nothing recorded ·
 `4` no manifest (source checkout, `verify` only) · `5` integrity mismatch (a listed file missing, altered or
 unreadable, a missing or unreadable `providers` directory, an unlisted library or provider, an unreadable or
 invalid manifest, or an installed copy without one; nothing is loaded) · `6` TUI, `authorize`, `quarantine schedule-autopurge` or `unschedule-autopurge`, or `clean` with real deletion enabled (not in any published copy) needs an interactive console · `7` `gui`: the desktop GUI gate is closed (`GUI_GATE_CLOSED`, every copy; no window) · `8` `gui`: no window can be shown here (`GUI_NOT_STA`, `GUI_NO_INTERACTIVE_DESKTOP`, `GUI_WINFORMS_UNAVAILABLE`) · `10` unexpected error,
-or a `diagnose` export refused or not written (nothing deleted because of it).
+or a `diagnose` export refused or not written (nothing deleted because of it), or a failed `recover` collection
+(nothing changed).
 
 ## Project names
 

@@ -64,7 +64,9 @@ try {
     # V0.2.1 (ADR-0014, D-A): the seventh gate, the desktop GUI's, a single assignment to $false too.
     $guiTxt = & $read 'src/lib/Gui.ps1'
     $null = & $read 'src/lib/GuiModel.ps1'
-    foreach ($g in @(@($diagTxt, 'AtmWorktreeDiagnosticsEnabled'), @($diagTxt, 'AtmHandleDiagnosticsEnabled'), @($repTxt, 'AtmDiagnoseExportEnabled'), @($isoTxt, 'AtmIsolationEnabled'), @($isoTxt, 'AtmQuarantinePurgeEnabled'), @($guiTxt, 'AtmGuiEnabled'))) {
+    # V0.4 R1 (ADR-0016 section 5): the eighth gate, assisted recovery's, a single assignment to $false too.
+    $recTxt = & $read 'src/lib/Engine.Recover.ps1'
+    foreach ($g in @(@($diagTxt, 'AtmWorktreeDiagnosticsEnabled'), @($diagTxt, 'AtmHandleDiagnosticsEnabled'), @($repTxt, 'AtmDiagnoseExportEnabled'), @($isoTxt, 'AtmIsolationEnabled'), @($isoTxt, 'AtmQuarantinePurgeEnabled'), @($guiTxt, 'AtmGuiEnabled'), @($recTxt, 'AtmRecoveryEnabled'))) {
         if ([regex]::Matches($g[0], '\$script:' + $g[1] + '\s*=').Count -ne 1 -or $g[0] -notmatch ('(?m)^\$script:' + $g[1] + ' = \$false\r?$')) { $gateOk = $false }
     }
     if (-not $gateOk -or $cleanTxt.Contains('AcceptProcessCoverageGap') -or -not $auditTxt.Contains("`$script:AtmVersion = '$version'")) {
