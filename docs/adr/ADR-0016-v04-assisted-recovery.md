@@ -41,7 +41,8 @@ All file and line references below are to commit `9c174e64439686ca1c5b07fd436aba
 **The main finding.** The diagnose engine reports **states**, not **faults**. It has no finding that says a service,
 VM, process, lock or worktree is "stuck" or "broken". Its findings are one snapshot per run, each with a closed list of
 states (`src/lib/Engine.Diagnose.ps1:34-43`). The table below lists every finding kind that comes near the round's
-examples, including the ones the code does not produce. Nothing in it is a finding the code does not produce.
+examples. A row for an example the code does not produce says so (row 10); no row presents a finding the code does not
+emit.
 
 | # | Finding (code) | Provider that produces it | Behind a closed V0.2 gate? | Evidence it carries | What is missing before it can ground an operation |
 |---|---|---|---|---|---|
