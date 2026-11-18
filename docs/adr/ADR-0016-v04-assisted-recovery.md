@@ -532,7 +532,7 @@ identity of the token is never shown.
 `-DeadlineSeconds` bounds the collection (default 120 s). `-Lang` selects the language. The engine is loaded only by
 `recover` and `version`. The help gains two lines in both languages.
 
-**`SERVICE_IMAGE_NOT_DECLARED`: R1's behavior, and an open question for R2.** R1 refuses a service whose providers
+**`SERVICE_IMAGE_NOT_DECLARED`: R1's behavior, and the decision for R2.** R1 refuses a service whose providers
 declare no `ExpectedImage`, with `RECOVERY_IMAGE_NOT_DECLARED`. That is the reading consistent with V04-D5 (b). So the
 real `CoworkVMService` of the Claude Desktop provider is never offered in R1, whatever its state. The maintainer decided
 on 2026-11-17 that this stays a refusal from R2 on; `CoworkVMService` stays refused until a provider declares its
