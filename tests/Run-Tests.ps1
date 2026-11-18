@@ -19735,7 +19735,8 @@ if ($null -eq $res.env) {
         # The suite never calls the native stop, and reaches the default stop seam only where it is shadowed.
         $self = [IO.File]::ReadAllText((Join-Path $testsDir 'Run-Tests.ps1'))
         Assert-Eq ([regex]::Matches($self, [regex]::Escape('AtmServiceStop]::' + 'Stop(')).Count) 0 'a suite nunca chama a classe nativa de parada'
-        $a0 = $self.IndexOf('-----' + ' V0.4 R3 (assisted'); $a1 = $self.IndexOf('-----' + ' scale')
+        # The R3 area ends where the next area starts (V0.4 R4; since R5). Each later area checks its own shadows.
+        $a0 = $self.IndexOf('-----' + ' V0.4 R3 (assisted'); $a1 = $self.IndexOf('-----' + ' V0.4 R4 (assisted')
         Assert-True ($a0 -gt 0 -and $a1 -gt $a0) 'area V0.4 R3 encontrada'
         $area = $self.Substring($a0, $a1 - $a0)
         Assert-True (-not $area.Contains($sleep)) 'area V0.4 R3 sem espera real'
@@ -20384,13 +20385,18 @@ if ($null -eq $res.env) {
         Assert-True (-not $unin.Contains('Initialize-AtmRecoverLogDir') -and $unin.Contains("'inst.recoverLogDirUninstallKept'") -and -not $unin.Contains('Remove-' + 'Item') -and -not $unin.Contains('Delete(')) 'o desinstalador nao a cria, nao apaga nada por si e diz que a mantem'
         foreach ($name in @('Install-AtmProduct', 'Uninstall-AtmProduct')) { Assert-True ($icFn.ContainsKey($name) -and -not $icFn[$name].Contains('AtmRecoverLogDir') -and -not $icFn[$name].Contains('CommonApplicationData')) "$name nao toca a pasta fixa" }
         Assert-Eq ([regex]::Matches($ic, 'Initialize-AtmRecoverLogDir').Count) 1 'InstallCommon: so a definicao (nenhuma chamada)'
-        # The suite: the default launcher only shadowed; the R4 area adds no stop-seam shadow (R3's count) and no real wait.
+        # The suite: the default launcher only shadowed; the R4 area adds no stop-seam shadow and no real wait.
         $self = [IO.File]::ReadAllText((Join-Path $testsDir 'Run-Tests.ps1'))
         $a0 = $self.IndexOf('-----' + ' V0.4 R4 (assisted'); $a1 = $self.IndexOf('-----' + ' scale')
         Assert-True ($a0 -gt 0 -and $a1 -gt $a0) 'area V0.4 R4 encontrada'
         $area = $self.Substring($a0, $a1 - $a0)
         Assert-True (-not $area.Contains('Start-' + 'Sleep')) 'area V0.4 R4 sem espera real'
-        Assert-True (-not $area.Contains("Remove('Service" + "StopImpl')") -and -not $area.Contains('function Invoke-AtmRecoverService' + 'StopDefault {')) 'area V0.4 R4 sem sombra nem remocao do seam de parada (contagem do R3)'
+        # The stop seam: only the R4 area itself, which ends where the V0.4 R5 area starts (the R5 static checks its own
+        # shadows). The launcher and the wait checks keep the range up to the scale area.
+        $a5 = $self.IndexOf('-----' + ' V0.4 R5 (assisted')
+        Assert-True ($a5 -gt $a0 -and $a5 -lt $a1) 'area V0.4 R5 depois da R4'
+        $own = $self.Substring($a0, $a5 - $a0)
+        Assert-True (-not $own.Contains("Remove('Service" + "StopImpl')") -and -not $own.Contains('function Invoke-AtmRecoverService' + 'StopDefault {')) 'area V0.4 R4 sem sombra nem remocao do seam de parada'
         Assert-True (($self.Substring(0, $a0) + $self.Substring($a1)).IndexOf($launchFn) -lt 0 -and -not $area.Contains($launchFn + ' -FilePath')) 'o lancador padrao nunca e chamado pela suite (so sombreado na area V0.4 R4)'
         $rmL = "Remove('Elevated" + "LauncherImpl')"; $shL = 'function ' + $launchFn + ' {'
         $withRm = 0
@@ -20579,7 +20585,7 @@ if ($null -eq $res.env) {
             }
         } finally { $script:AtmGuiRecoverSource = $savedRec; $script:AtmGuiInventorySource = $savedInv; Set-AtmLanguage -Requested $old }
     }
-    Test-Case 'V0.4 R5' 'R5: nenhuma execucao pela TUI nem pela GUI (por instrumentacao) - Invoke-AtmRecover*, o lancador, o seam de partida (o de parada pelos seus unicos chamadores), o log, o lock B8, Read-Host e CIM nunca chamados; mutex B8 ausente (controle positivo); sandbox inalterado; o caminho padrao chama a coleta do motor uma vez por entrada' {
+    Test-Case 'V0.4 R5' 'R5: nenhuma execucao pela TUI nem pela GUI (por instrumentacao) - Invoke-AtmRecover*, o lancador, o seam de servico, o log, o lock B8, Read-Host e CIM nunca chamados; mutex B8 ausente (controle positivo); sandbox inalterado; o caminho padrao chama a coleta do motor uma vez por entrada' {
         $calls = New-Object System.Collections.Generic.List[string]
         function Invoke-AtmRecover { $calls.Add('Invoke-AtmRecover') }
         function Invoke-AtmRecoverLocked { $calls.Add('Invoke-AtmRecoverLocked') }
@@ -20589,9 +20595,7 @@ if ($null -eq $res.env) {
         function Invoke-AtmRecoverOneOperation { $calls.Add('Invoke-AtmRecoverOneOperation') }
         function Invoke-AtmRecoverElevatedLaunchDefault { $calls.Add('Invoke-AtmRecoverElevatedLaunchDefault') }
         function Invoke-AtmRecoverServiceStartDefault { $calls.Add('Invoke-AtmRecoverServiceStartDefault') }
-        # The default stop seam is not shadowed here: the R3 static counts its shadows past the R3 marker. It is covered
-        # through its only callers, Invoke-AtmRecoverUndo and Invoke-AtmRecoverUndoLocked, shadowed above (the R3
-        # static proves that only Invoke-AtmRecoverUndoLocked reaches it).
+        function Invoke-AtmRecoverServiceStopDefault { $calls.Add('Invoke-AtmRecoverServiceStopDefault') }
         function Write-AtmRecoverRecord { $calls.Add('Write-AtmRecoverRecord') }
         function Open-AtmCleanLog { $calls.Add('Open-AtmCleanLog') }
         function Write-AtmCleanLogRecord { $calls.Add('Write-AtmCleanLogRecord') }
@@ -20695,6 +20699,22 @@ if ($null -eq $res.env) {
             Assert-Eq (@([regex]::Matches($pt, '\{\d\}') | ForEach-Object { $_.Value } | Sort-Object) -join ',') (@([regex]::Matches($en, '\{\d\}') | ForEach-Object { $_.Value } | Sort-Object) -join ',') "$($k): mesmos marcadores"
         }
         foreach ($l in @('en-US', 'pt-BR')) { $t = $script:AtmMessages[$l]['rec.view.cliOnly']; Assert-True ($t.Contains('T-ISO-6')) "nota so-CLI cita T-ISO-6 ($l)" }
+        # The R5 area's own shadows (the R3 and R4 counts stop where the next area starts): each default seam and the
+        # default launcher shadowed once, only in the instrumentation case, which keeps every seam injected (no seam is
+        # removed from the arguments anywhere in the area); no real wait.
+        $self = [IO.File]::ReadAllText((Join-Path $testsDir 'Run-Tests.ps1'))
+        $b0 = $self.IndexOf('-----' + ' V0.4 R5 (assisted'); $b1 = $self.IndexOf('-----' + ' scale')
+        Assert-True ($b0 -gt 0 -and $b1 -gt $b0) 'area V0.4 R5 encontrada'
+        $r5Area = $self.Substring($b0, $b1 - $b0)
+        $r5Cases = @([regex]::Split($r5Area, "(?m)^\s*Test-Case 'V0\.4 R5' ") | Select-Object -Skip 1)
+        foreach ($sn in @('ServiceStart', 'ServiceStop', 'ElevatedLaunch')) {
+            $shadow = 'function Invoke-AtmRecover' + $sn + 'Default {'
+            Assert-Eq ([regex]::Matches($r5Area, [regex]::Escape($shadow)).Count) 1 "area V0.4 R5: uma sombra de Invoke-AtmRecover$($sn)Default"
+            $holders = @($r5Cases | Where-Object { $_.Contains($shadow) })
+            Assert-True ($holders.Count -eq 1 -and $holders[0].StartsWith("'R5: nenhuma execucao")) "area V0.4 R5: Invoke-AtmRecover$($sn)Default sombreado so no caso da instrumentacao"
+        }
+        foreach ($impl in @('ServiceControl', 'ServiceStop', 'ElevatedLauncher')) { Assert-True (-not $r5Area.Contains("Remove('" + $impl + "Impl')")) "area V0.4 R5: nenhum caso retira o $($impl)Impl injetado" }
+        Assert-True (-not $r5Area.Contains('Start-' + 'Sleep')) 'area V0.4 R5 sem espera real'
     }
     Test-Case 'V0.4 R5' 'R5 (estatico): GUI dentro da lista fechada com os cinco nomes de leitura; os nomes de execucao e a trava da recuperacao plantados numa copia sao recusados; o tick nao coleta' {
         $lib = Join-Path $srcDir 'lib'

@@ -813,9 +813,8 @@ a control right, requests elevation or opens a UAC prompt.
     * the undeclared name is never listed;
     * there is one collection per entry, and none from moving, `Enter`, `Esc`, a live monitoring tick or `F5`;
     * no service name is typed, and a failure shows its code only;
-  * instrumentation: no call to `Invoke-AtmRecover*`, the launcher, the default start seam, the log, the lock, a
-    confirmation, `Read-Host` or CIM, and no B8 mutex (with positive controls). The default stop seam is covered through
-    its only callers, the shadowed undo functions;
+  * instrumentation: no call to `Invoke-AtmRecover*`, the launcher, the service seams, the log, the lock, a
+    confirmation, `Read-Host` or CIM, and no B8 mutex (with positive controls);
   * statics:
     * the GUI's closed list, with five read names, refuses the execution names, `AtmRecoveryEnabled` and a collection
       in the tick (each planted in a copy);

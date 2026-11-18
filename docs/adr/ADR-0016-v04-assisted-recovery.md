@@ -1293,9 +1293,14 @@ copy. R5 changes no engine function, finding state, eligibility, B1 or RECENT ru
 * **Old statics adjusted, none loosened:**
   * the TUI menu keys (`:14659`, `S` after `Z`);
   * the GUI navigation keys (`:16434`, `S` after `D`);
-  * the window's tab order (`:18055`, `ScreenS` after `ScreenD`).
+  * the window's tab order (`:18055`, `ScreenS` after `ScreenD`);
+  * the stop-seam counts of R3 and R4. Their scans now end where the next area starts: R3 at the R4 marker, and R4's
+    stop-seam check at the R5 marker. R4's launcher and wait checks still run to the end of the recovery areas. Before
+    R5 those scans covered the same text. The R5 area's own shadows are checked by the R5 static: each default seam and
+    the default launcher are shadowed once, only in the instrumentation case; no case removes an injected seam; and
+    there is no real wait.
 
-**Tests:** the area `V0.4 R5` of `tests/Run-Tests.ps1` (`:20413-20735`), in both shells.
+**Tests:** the area `V0.4 R5` of `tests/Run-Tests.ps1` (`:20419-20755`), in both shells.
 
 * **Setup.** The collection is injected through the R1 helpers: providers, identity, service rows and dependencies. It
   has a declared and offered service, a declared and refused one (running), and a name no provider declares. No
@@ -1315,12 +1320,8 @@ copy. R5 changes no engine function, finding state, eligibility, B1 or RECENT ru
   * `Enter`, `Esc`, a live monitoring tick and `F5` collect nothing;
   * a busy session is ignored;
   * a failure keeps only the code.
-* **Instrumentation.** No call reaches `Invoke-AtmRecover*`, the launcher, the default start seam, the log, the lock, a
+* **Instrumentation.** No call reaches `Invoke-AtmRecover*`, the launcher, the service seams, the log, the lock, a
   confirmation, `Read-Host`, CIM or `Start-Process`.
-  * The default stop seam is covered through its only callers, `Invoke-AtmRecoverUndo` and
-    `Invoke-AtmRecoverUndoLocked`, which are shadowed. The R3 static proves that only `Invoke-AtmRecoverUndoLocked`
-    reaches the seam. The seam itself is not shadowed in this area, because the R3 static counts its shadows past the
-    R3 marker.
   * There is no B8 mutex, with a positive control.
   * The sandbox is unchanged.
   * The default path calls the engine's collection, shadowed, once per entry.
