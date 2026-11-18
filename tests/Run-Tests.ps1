@@ -20579,7 +20579,7 @@ if ($null -eq $res.env) {
             }
         } finally { $script:AtmGuiRecoverSource = $savedRec; $script:AtmGuiInventorySource = $savedInv; Set-AtmLanguage -Requested $old }
     }
-    Test-Case 'V0.4 R5' 'R5: nenhuma execucao pela TUI nem pela GUI (por instrumentacao) - Invoke-AtmRecover*, o lancador, o seam de servico, o log, o lock B8, Read-Host e CIM nunca chamados; mutex B8 ausente (controle positivo); sandbox inalterado; o caminho padrao chama a coleta do motor uma vez por entrada' {
+    Test-Case 'V0.4 R5' 'R5: nenhuma execucao pela TUI nem pela GUI (por instrumentacao) - Invoke-AtmRecover*, o lancador, o seam de partida (o de parada pelos seus unicos chamadores), o log, o lock B8, Read-Host e CIM nunca chamados; mutex B8 ausente (controle positivo); sandbox inalterado; o caminho padrao chama a coleta do motor uma vez por entrada' {
         $calls = New-Object System.Collections.Generic.List[string]
         function Invoke-AtmRecover { $calls.Add('Invoke-AtmRecover') }
         function Invoke-AtmRecoverLocked { $calls.Add('Invoke-AtmRecoverLocked') }
@@ -20589,7 +20589,9 @@ if ($null -eq $res.env) {
         function Invoke-AtmRecoverOneOperation { $calls.Add('Invoke-AtmRecoverOneOperation') }
         function Invoke-AtmRecoverElevatedLaunchDefault { $calls.Add('Invoke-AtmRecoverElevatedLaunchDefault') }
         function Invoke-AtmRecoverServiceStartDefault { $calls.Add('Invoke-AtmRecoverServiceStartDefault') }
-        function Invoke-AtmRecoverServiceStopDefault { $calls.Add('Invoke-AtmRecoverServiceStopDefault') }
+        # The default stop seam is not shadowed here: the R3 static counts its shadows past the R3 marker. It is covered
+        # through its only callers, Invoke-AtmRecoverUndo and Invoke-AtmRecoverUndoLocked, shadowed above (the R3
+        # static proves that only Invoke-AtmRecoverUndoLocked reaches it).
         function Write-AtmRecoverRecord { $calls.Add('Write-AtmRecoverRecord') }
         function Open-AtmCleanLog { $calls.Add('Open-AtmCleanLog') }
         function Write-AtmCleanLogRecord { $calls.Add('Write-AtmCleanLogRecord') }

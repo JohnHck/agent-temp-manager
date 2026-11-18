@@ -1246,7 +1246,8 @@ copy. R5 changes no engine function, finding state, eligibility, B1 or RECENT ru
   * The navigation item `S` (`GuiModel.ps1:220`; its button `ScreenS` is made from the list) returns `RECOVER_OPEN`
     (`:530`). The form then calls `Invoke-AtmGuiRecover` (`Gui.ps1:329-352`):
     * one blocking call on the UI thread with the screens and Refresh disabled, as the preview does
-      (`:828-833`, `:854-867`);
+      (`:828-833`, `:854-864`). The window is then drawn by the `RENDER` branch (`:867`), which never asks for the
+      preview after `S`;
     * ignored while an audit, the preview or the diagnose runs;
     * a failure keeps the exception code only.
   * `Invoke-AtmGuiNavRecover` (`GuiModel.ps1:1166-1176`) opens the area over the dashboard with that collection in the
@@ -1294,7 +1295,7 @@ copy. R5 changes no engine function, finding state, eligibility, B1 or RECENT ru
   * the GUI navigation keys (`:16434`, `S` after `D`);
   * the window's tab order (`:18055`, `ScreenS` after `ScreenD`).
 
-**Tests:** the area `V0.4 R5` of `tests/Run-Tests.ps1` (`:20413-20733`), in both shells.
+**Tests:** the area `V0.4 R5` of `tests/Run-Tests.ps1` (`:20413-20735`), in both shells.
 
 * **Setup.** The collection is injected through the R1 helpers: providers, identity, service rows and dependencies. It
   has a declared and offered service, a declared and refused one (running), and a name no provider declares. No
@@ -1314,8 +1315,12 @@ copy. R5 changes no engine function, finding state, eligibility, B1 or RECENT ru
   * `Enter`, `Esc`, a live monitoring tick and `F5` collect nothing;
   * a busy session is ignored;
   * a failure keeps only the code.
-* **Instrumentation.** No call reaches `Invoke-AtmRecover*`, the launcher, the service seams, the log, the lock, a
+* **Instrumentation.** No call reaches `Invoke-AtmRecover*`, the launcher, the default start seam, the log, the lock, a
   confirmation, `Read-Host`, CIM or `Start-Process`.
+  * The default stop seam is covered through its only callers, `Invoke-AtmRecoverUndo` and
+    `Invoke-AtmRecoverUndoLocked`, which are shadowed. The R3 static proves that only `Invoke-AtmRecoverUndoLocked`
+    reaches the seam. The seam itself is not shadowed in this area, because the R3 static counts its shadows past the
+    R3 marker.
   * There is no B8 mutex, with a positive control.
   * The sandbox is unchanged.
   * The default path calls the engine's collection, shadowed, once per entry.

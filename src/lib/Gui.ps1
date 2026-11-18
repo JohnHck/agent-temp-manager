@@ -852,7 +852,8 @@ function Start-AtmGui {
                 return
             }
             if ($r -ceq 'RECOVER_OPEN') {
-                # V0.4 R5: S or its button: the session's function collects (each opening), then the area opens.
+                # V0.4 R5: S or its button: the session's function collects (each opening), then the area opens. The
+                # window is drawn by the RENDER branch below, which never asks for the preview after S.
                 $rr = $null
                 try { $rr = Invoke-AtmGuiRecover -Session $guiSession -OnStart $guiRecoverStart }
                 finally {
@@ -861,15 +862,12 @@ function Start-AtmGui {
                     $guiScreens.Enabled = $true
                 }
                 Invoke-AtmGuiNavRecover -Nav $guiSession.Nav -Recover $guiSession.Recover -Result $rr
-                $null = Show-AtmGuiScreen -Form $guiForm -Session $guiSession
-                if ($guiRows.Visible) { $guiForm.ActiveControl = $guiRows }
-                return
             }
             if ($r -ceq 'CLOSE') { $guiForm.Close() }
-            elseif ($r -ceq 'RENDER') {
+            elseif ($r -ceq 'RENDER' -or $r -ceq 'RECOVER_OPEN') {
                 # P4a: opening P or 8 asks for the preview; the session's function decides whether the engine is called
                 # (once per audit; never before an audit).
-                if ((Get-AtmGuiNavTop -Nav $guiSession.Nav).Name -ceq 'gates') {
+                if ($r -ceq 'RENDER' -and (Get-AtmGuiNavTop -Nav $guiSession.Nav).Name -ceq 'gates') {
                     try { $null = Invoke-AtmGuiPreview -Session $guiSession -OnStart $guiPreviewStart }
                     finally {
                         $guiProgress.Text = ''
