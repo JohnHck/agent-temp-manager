@@ -19645,7 +19645,7 @@ if ($null -eq $res.env) {
     }
     Test-Case 'V0.4 R3' 'R3 parada real pelo gerenciador de servicos (seam padrao de parada, AtmServiceStop): NAO_TESTADO' {
         $script:caseSkipped = $true
-        $script:caseNote = 'nenhum servico e parado nesta maquina nem na CI: o seam padrao de parada nunca e chamado pela suite (sombreado onde e alcancado) e a classe nativa so e compilada e conferida pelos estaticos; a parada real de um servico declarado fica para a VM do operador (R6)'
+        $script:caseNote = 'nenhum servico e parado nesta maquina pela suite: o seam padrao de parada nunca e chamado pela suite (sombreado onde e alcancado) e a classe nativa so e compilada e conferida pelos estaticos; na CI, so o harness do R6 para servicos que ele mesmo cria (install e2e); a parada de um servico declarado real fica para a VM do operador'
     }
     Test-Case 'V0.4 R3' 'R3 transicao real de pendente para RUNNING num servico do gerenciador (campos da regra do PARTIAL): NAO_TESTADO' {
         $script:caseSkipped = $true
@@ -20405,11 +20405,11 @@ if ($null -eq $res.env) {
     }
     Test-Case 'V0.4 R4' 'R4 pedido real de elevacao (lancador padrao: ShellExecuteEx com o verbo de elevacao) e o prompt do UAC: NAO_TESTADO' {
         $script:caseSkipped = $true
-        $script:caseNote = 'nenhum prompt do UAC e aberto nesta maquina nem na CI: o lancador padrao nunca e chamado pela suite (sombreado onde seria alcancado) e e conferido so pelos estaticos; o pedido real, o cancelamento (1223) e uma politica que bloqueia o UAC ficam para a VM do operador (R6)'
+        $script:caseNote = 'nenhum prompt do UAC e aberto nesta maquina nem na CI: o lancador padrao nunca e chamado pela suite (sombreado onde seria alcancado) e e conferido so pelos estaticos; o pedido real, o cancelamento (1223) e uma politica que bloqueia o UAC ficam para a VM do operador'
     }
     Test-Case 'V0.4 R4' 'R4 relancamento real do bin\agent-temp.cmd instalado numa janela elevada, a tecla e o codigo de saida devolvido ao lado que pede; UAC desligado numa maquina real: NAO_TESTADO' {
         $script:caseSkipped = $true
-        $script:caseNote = 'exige uma copia instalada, um pedido real de elevacao e uma janela nova; a suite cobre os dois lados no mesmo processo com o lancador, a identidade, a tecla e a pasta injetados; fica para a VM do operador (R6)'
+        $script:caseNote = 'exige uma copia instalada, um pedido real de elevacao e uma janela nova; a suite cobre os dois lados no mesmo processo com o lancador, a identidade, a tecla e a pasta injetados; fica para a VM do operador'
     }
     Test-Case 'V0.4 R4' 'R4 PRIV-5 verificacao real de quem pediu (o token do processo que pediu): NAO_TESTADO' {
         $script:caseSkipped = $true
@@ -20750,7 +20750,7 @@ if ($null -eq $res.env) {
     }
     Test-Case 'V0.4 R5' 'R5 janela real da GUI (S e o botao ScreenS numa sessao interativa, com a coleta real do motor) e TUI num console real com teclado: NAO_TESTADO' {
         $script:caseSkipped = $true
-        $script:caseNote = 'a suite cobre a TUI headless e a GUI pelas funcoes da sessao e do modelo de vista, com a coleta injetada (e o caminho padrao com a coleta do motor sombreada); a janela de P6 confere o botao ScreenS na ordem de tabulacao, mas ninguem pressiona S numa janela real nem coleta os servicos reais pela TUI ou pela GUI; fica para a VM do operador (R6)'
+        $script:caseNote = 'a suite cobre a TUI headless e a GUI pelas funcoes da sessao e do modelo de vista, com a coleta injetada (e o caminho padrao com a coleta do motor sombreada); a janela de P6 confere o botao ScreenS na ordem de tabulacao, mas ninguem pressiona S numa janela real nem coleta os servicos reais pela TUI ou pela GUI; fica para a VM do operador'
     }
 
     # ------------------------------------------------------------------ V0.4 R6 (assisted recovery: the real start and undo on the CI's own services, CI-only harness, ADR-0016)

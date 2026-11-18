@@ -905,7 +905,9 @@ the undo of one start (`Invoke-AtmRecoverUndo`, ADR-0016's R3 implementation rec
 that the service is still exactly as that run left it, `RUNNING`, with no dependent running, and stops that one service,
 never its dependents. Phase R4 added the two verbs that reach them, `recover start` and `recover undo` (below), and the
 elevation through UAC that they need. With the gate closed, both verbs stop before acting. Only the test suite goes past
-the gate, in its own process, with the seams and the elevated launcher injected. `REC-SVC-STOP` is never offered by
+the gate, in its own process, with the seams and the elevated launcher injected. In CI only, the R6 harness also does,
+on services it creates itself, with guard wrappers around the default seams (ADR-0016's R6 record). `REC-SVC-STOP` is
+never offered by
 `list` nor accepted by `plan`.
 
 ```text

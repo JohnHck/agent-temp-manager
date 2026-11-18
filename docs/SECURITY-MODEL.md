@@ -1020,7 +1020,8 @@ the mover; a static suite test checks it.
     `ExecuteCommand`, or the CIM control methods.
 * **The start path past the gate (R2), reached by no shipped copy.** The gate is closed. Since R4, `recover start`
   calls the path, but only past the gate. Only the suite reaches it, with the gate opened in its own process and the
-  seam injected.
+  seam injected; and, in CI only, the R6 harness (`tests/e2e/Invoke-RecoverE2E.ps1`, never shipped), with the gate
+  opened in its own process and a guard wrapper around the default seam, on services it creates itself.
   The path runs in this order:
   * AUT-2: a console observed by the engine, a new log outside every base, and the R1 criteria on a fresh collection
     (any refusal stops before anything is asked);

@@ -132,7 +132,8 @@ release gate (`AtmRecoveryEnabled`) is closed in every copy. With it closed, the
 path (R2) and the undo (R3) are in the engine too. Since R4, the verbs `recover start` and `recover undo` call them
 through `Invoke-AtmRecoverCommand`, but only past the gate: with it closed, both show the plan or the request and stop
 (exit 27). Only the test suite goes past the gate, with it opened in its own process and the seams and the elevated
-launcher injected.
+launcher injected. In CI only, the R6 harness also does, on services it creates itself, with guard wrappers around the
+default seams (ADR-0016's R6 record).
 
 * **Loading.** The launcher loads the engine only for `recover`, `version` and, since R5, `tui` and `gui` (for their
   read-only recovery area; `gui` only past its own gate, which is closed in every copy). It is in the launcher's integrity
