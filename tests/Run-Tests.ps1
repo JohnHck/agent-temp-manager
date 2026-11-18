@@ -18272,7 +18272,7 @@ if ($null -eq $res.env) {
     }
 
     # ------------------------------------------------------------------ V0.4 R1 (assisted recovery: list and plan, gate closed, ADR-0016)
-    # The recovery engine is loaded here (the launcher loads it for recover and version only). Providers, identities,
+    # The recovery engine is loaded here (the launcher loads it for recover, version, tui and gui). Providers, identities,
     # service rows and dependencies are injected: no service is opened, started, stopped or changed, no CIM query runs in
     # this process and nothing waits (no row is PENDING, and with an injected source there is no second read). Only the
     # CLI cases start the launcher, whose collection reads the runner's services (read only; states compared before and

@@ -767,8 +767,10 @@ second read are injected. No service is started, stopped or changed, and no case
 Phases R1 to R5 of [ADR-0016](adr/ADR-0016-v04-assisted-recovery.md), each tested in its own area of the suite
 (`V0.4 R1` to `V0.4 R5`), in both shells. Each phase's implementation record in the ADR lists every case and what is
 not tested. The recovery gate `AtmRecoveryEnabled` is loaded closed. A case that needs it open opens it in the suite's
-process only and closes it again. Providers, identities, service rows and dependencies are injected. No case starts,
-stops or opens a real service with a control right, requests elevation or opens a UAC prompt.
+process only and closes it again. In the in-process cases, providers, identities, service rows and dependencies are
+injected. The CLI cases of R1 and R4 run in a new process with every gate closed, and they compare the real
+`CoworkVMService` state, when the service exists, before and after. No case starts, stops or opens a real service with
+a control right, requests elevation or opens a UAC prompt.
 
 * **`V0.4 R1`: list and plan, read only.**
   * the closed catalog, refusal codes, not-offered line and texts in both languages;
@@ -819,13 +821,13 @@ stops or opens a real service with a control right, requests elevation or opens 
     * a new TUI static covers the same names;
     * each read is called only in its expected place.
 * **Not tested here:**
-  * the default start and stop seams, and a real service started or stopped (no shipped provider declares an
-    `ExpectedImage`);
-  * the real UAC prompt and relaunch, and the real verification of the requester (PRIV-5);
-  * B8 between an elevated and a non-elevated holder;
+  * the default start and stop seams: never called by the suite or the CI;
+  * a real service started or stopped, by any verb: no CI test controls a real service (R6), and no shipped provider
+    declares an `ExpectedImage`;
+  * the real UAC prompt and relaunch: never called by the suite or the CI;
+  * the real verification of the requester (PRIV-5): not implemented, by design;
+  * B8 between an elevated and a non-elevated holder: for the VM or the operator's e2e;
   * a real GUI window, or a real console, where `S` collects the real services.
-
-  These are left for the operator's VM (R6).
 
 ## Future: isolation, quarantine and Recovery Mode (0.3.x and V0.4)
 
