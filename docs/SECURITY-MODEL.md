@@ -975,7 +975,7 @@ the mover; a static suite test checks it.
   after the measurement is caught by the second measurement (`VERIFY_REPARSE_POINT_FOUND`). The reparse point moves
   with the tree and is never followed.
 
-## Recovery gate (V0.4 phase R1)
+## Recovery gate (V0.4 phases R1 and R2)
 
 * **The eighth gate:** `$script:AtmRecoveryEnabled`, `$false` in every shipped copy
   ([ADR-0016](adr/ADR-0016-v04-assisted-recovery.md) section 5). It is a single assignment in
@@ -987,10 +987,34 @@ the mover; a static suite test checks it.
 * **Closed** (every copy): `recover list` and `recover plan` collect, apply the criteria and present the list or the
   plan, then stop. Nothing is asked, the clean lock (B8) is not taken and its mutex is not opened, and no log or file is
   written. The suite checks this by instrumentation, with the gate closed and with it opened in its own process.
-* **No control path in R1, gate open or closed.** No service is opened with a control right, started, stopped or
-  changed. A static suite test fails on any service control API anywhere in `src/`: `Start-Service`, `Stop-Service`,
-  `Set-Service`, `Restart-Service`, `sc.exe`, `ServiceController`, `Invoke-CimMethod`, `OpenService` and
-  `ControlService`. The control seam is added in phase R2, in `Engine.Recover.ps1` only.
+* **One control path, behind the gate (R2).** The only service control API in `src/` is `ServiceController`. It
+  appears only in `lib\Engine.Recover.ps1`, only in the default seam `Invoke-AtmRecoverServiceStartDefault`, which calls
+  `Start()` once: the start right only, the service name only, no arguments. That seam is reached only with the gate
+  open. With it closed, `Invoke-AtmRecover` returns the plan and `RECUPERACAO_REAL_DESABILITADA`, and it asks nothing,
+  takes no lock and writes no log. A static suite test fails in any of these cases:
+  * `ServiceController` or `System.ServiceProcess` appears in any other file of `src/`, or outside that seam;
+  * there is a second `.Start(`;
+  * any other control verb appears anywhere in `src/`: `Start-Service`, `Stop-Service`, `Set-Service`,
+    `Restart-Service`, `Suspend-Service`, `Resume-Service`, `sc.exe`, `Invoke-CimMethod`, `OpenService`,
+    `ControlService` or `ChangeServiceConfig`;
+  * the engine contains a stop, pause, continue or configuration method: `.Stop(`, `.Pause(`, `.Continue(`,
+    `ExecuteCommand`, or the CIM control methods.
+* **The start path past the gate (R2), reached by no shipped copy.** The gate is closed, and no CLI verb calls the path
+  until the UAC relaunch (R4). Only the suite reaches it, with the gate opened in its own process and the seam injected.
+  The path runs in this order:
+  * AUT-2: a console observed by the engine, a new log outside every base, and the R1 criteria on a fresh collection
+    (any refusal stops before anything is asked);
+  * the clean lock (B8), without waiting;
+  * the log `atm.recoverlog/1`;
+  * the typed phrase `INICIAR SERVICO <planid8>`, bound to the plan;
+  * a revalidation just before acting: any refusal, or any changed field of the target, its providers, the token's
+    identity or its elevation, refuses;
+  * the `intent` record, flushed before the call;
+  * a bounded settle wait.
+
+  The outcomes are `COMPLETE`, `PARTIAL`, `FAILED`, `REFUSED` (access denied) or `EXCEPTION` (recorded by type only).
+  Each comes with a field-by-field diff of "before" and "after". Nothing is ever compensated or retried. The log never
+  holds the token's name or SID.
 * **Read only, in the command's own process.** The collection reuses the diagnose's functions: the own token, the
   providers' hints, one `Win32_Service` query with the R0 signals, the dependencies and the image check. The engine
   itself runs no CIM query. The diagnose, the TUI and the GUI do not load or call it, and the diagnose still has

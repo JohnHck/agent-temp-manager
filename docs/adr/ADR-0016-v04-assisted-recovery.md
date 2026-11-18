@@ -135,7 +135,8 @@ Until then, the tool shows the process and tells the person how to close the age
   * its refusal codes and their tests already exist;
   * a new fixed lock name would need its own policy and tests.
 
-  How the lock behaves between an elevated holder and a non-elevated one is tested in phase R2. V04-D6 keeps the
+  How the lock behaves between an elevated holder and a non-elevated one is tested in phase R2 (R2 left it NAO_TESTADO,
+  because it needs two tokens on one machine; see the R2 implementation record). V04-D6 keeps the
   alternative of a lock of its own.
 * **The log: a recovery log with T1's contract.** It is written by the same pinned writer (`Open-AtmCleanLog`,
   `Engine.Clean.ps1:316-344`), with its own schema `atm.recoverlog/1`:
@@ -272,6 +273,9 @@ None is decided by this record.
   * whether starting a service starts its stopped dependencies;
   * how B8 behaves between integrity levels.
 
+  (R2 left both NAO_TESTADO: its seam is always injected, and the second needs two tokens on one machine. See the R2
+  implementation record.)
+
 ## Rejected alternatives
 
 * **Recovery inside the diagnose engine:** the diagnose engine is read-only by its layering rule
@@ -399,7 +403,9 @@ of the first read.
 * **`CoworkVMService` declares none.** Neither Anthropic's documentation nor the two public reports the provider cites
   name its executable.
   * Open point for R2, for the maintainer: under V04-D5 (b) there is no image to check for this service. R2 has to say
-    how it treats `SERVICE_IMAGE_NOT_DECLARED`, and refusing is the reading consistent with (b).
+    how it treats `SERVICE_IMAGE_NOT_DECLARED`, and refusing is the reading consistent with (b). (Decided by the
+    maintainer on 2026-11-17: `SERVICE_IMAGE_NOT_DECLARED` is a refusal, and `CoworkVMService` stays refused until a
+    provider declares its executable. See the R2 implementation record.)
 
 **Where it shows.**
 
@@ -556,7 +562,9 @@ dependencies are injected, as in R0.
 * Static checks:
   * one assignment of the gate;
   * no service control API anywhere in `src/` (`Start-Service`, `Stop-Service`, `Set-Service`, `Restart-Service`,
-    `sc.exe`, `ServiceController`, `Invoke-CimMethod`, `OpenService`, `ControlService`);
+    `sc.exe`, `ServiceController`, `Invoke-CimMethod`, `OpenService`, `ControlService`) (superseded by R2:
+    `ServiceController` is now allowed only in `Engine.Recover.ps1`, only in the default seam; every other control verb
+    is still banned everywhere. See the R2 implementation record);
   * no call to the engine from `Engine.Diagnose.ps1`, `Tui.ps1` or `Gui*.ps1`;
   * still two `Win32_Service` queries in the diagnose;
   * the engine in the launcher's check, `AtmRequiredFiles`, the manifest, the build and both e2e.
@@ -697,5 +705,6 @@ rows, dependencies, the console, the confirmation, the wait and the seam are inj
 * lock B8 between an elevated and a non-elevated holder (two tokens on one machine): for the VM or the operator's e2e,
   as in the clean's B8 matrix;
 * the real timing of a pending start, so the wait runs only with injected reads and an injected wait;
+* whether a real start also starts the service's stopped declared dependencies (the plan only shows them);
 * the start of a real service, because no shipped provider declares an `ExpectedImage`;
 * any command: no CLI verb calls `Invoke-AtmRecover` until R4.

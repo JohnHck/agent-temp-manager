@@ -888,12 +888,16 @@ it, with **Refresh** or `F5`, or when the live monitoring is on and its interval
 Closing it leaves no process, timer or file behind. The installed command always runs in Windows PowerShell 5.1, and
 there is no other entry point (no `bin\` script, no shortcut).
 
-## Recover (V0.4 R1, unreleased; list and plan only in every copy)
+## Recover (V0.4 R1 and R2, unreleased; list and plan only in every copy)
 
 Assisted recovery of a service a provider declares ([ADR-0016](adr/ADR-0016-v04-assisted-recovery.md)). The recovery
 gate is closed in every copy, and `agent-temp version` shows it: `assisted recovery: DISABLED in this release (recover
-only lists and shows the plan)`. In this phase no service is opened, started, stopped or changed, gate open or closed.
-Nothing is asked, no lock is taken, and no log or file is written.
+only lists and shows the plan)`. `recover list` and `recover plan` open, start, stop or change no service, whether the
+gate is open or closed. Nothing is asked, no lock is taken, and no log or file is written.
+
+Phase R2 added the start path to the engine (`Invoke-AtmRecover`, ADR-0016's R2 implementation record), but only the
+test suite reaches it, with the gate opened in its own process and the service control seam injected. No CLI verb runs
+it: the execution verb comes with the UAC relaunch, in phase R4. What a user sees and can do is unchanged.
 
 ```text
 agent-temp recover list
