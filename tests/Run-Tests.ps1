@@ -20941,7 +20941,9 @@ if ($null -eq $res.env) {
         $inv = New-MonInv @(New-MonPart)
         try {
             $script:AtmMonitorFolderPath = $folder
-            $script:AtmMonitorClockSource = { $monT0 }.GetNewClosure()
+            # GetNewClosure copies only this case's locals: the suite's time goes into one first.
+            $t0 = $monT0
+            $script:AtmMonitorClockSource = { $t0 }.GetNewClosure()
             $script:AtmMonitorAuditSource = { param($a) $k.Audit++; $m = $null; $k.MutexSeen = [Threading.Mutex]::TryOpenExisting($mx, [ref]$m); if ($m) { $m.Dispose() }; $inv }.GetNewClosure()
             $before = Get-TreeListing $base
             $r = Invoke-AtmMonitorCollection
@@ -21121,7 +21123,9 @@ if ($null -eq $res.env) {
                     New-Junction -Link (Join-Path $folder 'j') -Target $tgt
                     $want = 'MONITOR_ROTATION_REPARSE'
                 } else {
-                    $script:AtmMonitorOwnerSource = { param($P) if ($P.EndsWith($old)) { $monForeignSid } else { (Get-Acl -LiteralPath $P).GetOwner([Security.Principal.SecurityIdentifier]).Value } }.GetNewClosure()
+                    # GetNewClosure copies only this case's locals: the foreign SID goes into one first.
+                    $foreign = $monForeignSid
+                    $script:AtmMonitorOwnerSource = { param($P) if ($P.EndsWith($old)) { $foreign } else { (Get-Acl -LiteralPath $P).GetOwner([Security.Principal.SecurityIdentifier]).Value } }.GetNewClosure()
                     $want = 'MONITOR_ROTATION_FOREIGN_OWNER'
                 }
                 $before = Get-MonNames $folder
