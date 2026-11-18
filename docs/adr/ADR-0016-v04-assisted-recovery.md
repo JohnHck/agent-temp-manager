@@ -281,8 +281,9 @@ None is decided by this record.
   (R2 left both NAO_TESTADO: its seam is always injected, and the second needs two tokens on one machine. See the R2
   implementation record.)
 
-  (R6 note, 2026-11-18: the first is measured in R6, on the CI's own test services, per runner and leg; the second
-  stays NAO_TESTADO. See the R6 implementation record.)
+  (R6 note, 2026-11-18: the first is measured in R6, on the CI's own test services, in leg B: in all six jobs of the
+  first CI run, starting a service also started its stopped declared dependency, observed through the dependent's
+  diff and the final stop. The second stays NAO_TESTADO. See the R6 implementation record.)
 
 ## Rejected alternatives
 
@@ -1445,11 +1446,11 @@ and the uninstall.
   Any other name increments a refusal counter and throws, and the case fails. The final case asserts the counter is 0.
 * **Every other service control** by the harness goes through `Invoke-OwnSc` (`:115-125`). It accepts the verbs `query`,
   `qc`, `create`, `start` and `stop` only, and only after `Assert-OwnName` (`:111-114`) accepts the name.
-* **Before and after** (`installed-before`, `installed-after`, `:322` and `:659-671`), the harness checks:
+* **Before and after** (`installed-before`, `installed-after`, `:322` and `:661-673`), the harness checks:
   * the eight installed gates, each `$false`;
   * `agent-temp verify` exits 0;
   * the SHA-256 of every installed file is unchanged.
-* **The end state.** Leg B ends with `B-final-stop` (`:641-655`). It stops every own service that is not STOPPED, by its
+* **The end state.** Leg B ends with `B-final-stop` (`:643-657`). It stops every own service that is not STOPPED, by its
   own name, dependents first, and then checks all seven are STOPPED. None is removed: they stay registered on the
   disposable runner.
 * **The package.** The harness is on the build's CI-only list (`tools/Build-Release.ps1:32`), and the refusal message
@@ -1492,8 +1493,45 @@ seam calls, nothing asked, no log and no state change.
     `UNDO_SOURCE_PROVENANCE` (the log's owner is leg A's account) and the reference codes.
   * `B-final-stop`.
 
-**Measured results.** The results per runner and leg, taken from the six CI summaries, are added to this record after
-the PR's first CI run.
+**Measured results, first CI run (2026-11-18, run 44314474877, on the first commit of V04-R6).** The six install e2e
+jobs gave the same results. Those jobs are `windows-2022`, `windows-2025` and `windows-11-arm`, each with the installer in
+`powershell` (5.1) and in `pwsh` (7.6).
+
+| Leg | Result in each of the six jobs |
+|---|---|
+| Setup (elevated) | 5 PASS. The executable compiled through 5.1 `Add-Type` is 4096 bytes. The seven services were created STOPPED, manual (`dis`: disabled), LocalSystem, with `y` depending on `x`. |
+| A (standard user) | 8 PASS and 2 NAO_TESTADO (the provenance from leg A, and B8). |
+| B (elevated) | 13 PASS, 9 FAIL and 1 NAO_TESTADO (the seam's `DEPENDENT_SERVICES_RUNNING`). |
+
+* **Leg A, measured.**
+  * The plan was offered, with elevation `NEEDS_ELEVATION` and the plan id equal to `recover plan`'s.
+  * The real start seam, through the guard, was called once and gave `ACCESS_DENIED` (Win32 5). The outcome was
+    `REFUSED`.
+  * The service was STOPPED before and after, with an empty diff, and the log held the nine records.
+  * The undo of its own log was refused before the seam: `UNDO_SOURCE_REFUSED` with
+    `UNDO_SOURCE_OUTCOME_NOT_UNDOABLE`.
+* **Leg B, the refusals before the seam, measured.** Each had zero seam calls, nothing asked, no log and no state change:
+  * `RECOVERY_NOT_DECLARED`;
+  * `RECOVERY_IMAGE_MISMATCH`;
+  * `RECOVERY_START_MODE_DISABLED`;
+  * `RECOVERY_NOT_STOPPED`, on `run`, which the harness started and stopped again;
+  * `RECOVERY_DEPENDENCY_STOPPED`, on `y` with `x` undeclared.
+* **Leg B, the provenance across legs, measured.** The undo of leg A's log was refused with `UNDO_SOURCE_REFUSED` and
+  `UNDO_SOURCE_PROVENANCE`.
+* **Leg B, the start path: two real starts, then a harness defect.** Both starts went through the guard to the default
+  seam: `start`, and `y` with `x` declared and STOPPED.
+  * The diffs held `state`, `exitCode`, `acceptStop` and `condition`, and `y`'s also held `dependsOn`.
+  * The harness compared these log names case-sensitively against PascalCase names, so both cases failed. The undos and
+    the later dependency cases then had no log to start from, and failed in cascade.
+  * The harness was fixed: it now uses the log names of `AtmRecoveryCaptureFields`. The real undo and the dependency
+    sequence are measured by the run of that fix, recorded in the V04-R6 round report.
+* **Whether the SCM starts a declared stopped dependency: yes, observed indirectly in this run.**
+  * After the start of `y`, `x` was RUNNING: `y`'s diff held `dependsOn`, and the final stop had to stop `x`.
+  * The harness had recorded the measurement only after the failing assertion, so it now records it first.
+* **Leg B, the end state, measured.** All seven services ended STOPPED. The harness stopped `y`, `x` and `start`, which
+  the failed cases had left RUNNING. None was removed.
+* **Every leg, measured.** The installed files were identical by SHA-256, `verify` gave 0, and the eight installed gates
+  were still `$false`. The guard refused no name.
 
 **Tests in the suite.** The area `V0.4 R6` of `tests/Run-Tests.ps1` (`:20756-20848`), in both shells:
 

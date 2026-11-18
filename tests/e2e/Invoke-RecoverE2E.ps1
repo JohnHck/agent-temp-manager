@@ -459,7 +459,8 @@ function Get-RecCodes($Codes) { $c = @($Codes); if ($c.Count -eq 0) { return '-'
 function Get-DiffFields($Diff) { return @(@($Diff) | ForEach-Object { [string]$_.field }) }
 # The fields a start or a stop of an inert service may change: its state, the fault signals that follow it, and the
 # 'name|STATE' labels of its dependencies (x's state, read in y's capture).
-$stateFields = @('State', 'ExitCode', 'ServiceSpecificExitCode', 'CheckPoint', 'WaitHint', 'AcceptStop', 'Condition', 'DependsOn', 'Dependents')
+# The diff's field names are the log names of AtmRecoveryCaptureFields (camelCase), compared case-sensitively.
+$stateFields = @('state', 'exitCode', 'serviceSpecificExitCode', 'checkPoint', 'waitHint', 'acceptStop', 'condition', 'dependsOn', 'dependents')
 function Assert-Completed($R, [string]$Seam, [string]$Want, [string]$What) {
     # A real run past the seam: the reference plan offered and equal to the presented one (plan id and codes), one call
     # through the guard to the default seam with OK, the outcome COMPLETE, the end state (engine and CIM), the expected
@@ -472,7 +473,7 @@ function Assert-Completed($R, [string]$Seam, [string]$Want, [string]$What) {
     Assert ([string]$res.Outcome -ceq 'COMPLETE' -and $null -ne $res.After -and [string]$res.After.State -ceq $Want) "$What`: resultado $($res.Outcome), depois $(if ($null -ne $res.After) { $res.After.State })"
     Assert ($R.CimAfter -ceq $(if ($Want -ceq 'RUNNING') { 'Running' } else { 'Stopped' })) "$What`: CIM depois $($R.CimAfter)"
     $f = @(Get-DiffFields $res.Diff)
-    Assert ($f -ccontains 'State' -and @($f | Where-Object { $stateFields -cnotcontains $_ }).Count -eq 0) "$What`: diff inesperado ($($f -join ','))"
+    Assert ($f -ccontains 'state' -and @($f | Where-Object { $stateFields -cnotcontains $_ }).Count -eq 0) "$What`: diff inesperado ($($f -join ','))"
     $recs = @(Read-E2ELog $res.LogFile)
     Assert ((Get-Types $recs) -ceq 'run-start,plan,before,confirmation,plan-check,intent,result,after,run-end') "$What`: registros do log $(Get-Types $recs)"
     $intent = @($recs | Where-Object { $_.type -eq 'intent' })[0]
@@ -568,11 +569,12 @@ if ($Leg -eq 'B') {
         Assert ((Get-OwnState $x) -ceq 'Stopped') 'x nao estava parado'
         $r = Invoke-E2ERecStart 'y' (New-RecProvider @('x', 'y')) 'REC-B-dep-y1.jsonl'
         $stoppedDep = @($r.Ref.DeclaredDependencyStopped)
-        $d = Assert-Completed $r 'TEST_SEAM' 'RUNNING' 'inicio de y'
+        # The measurement first, so it is recorded whatever the assertions below give.
         $xAfter = Get-OwnState $x
         $summary.dependency.declaredDependencyStoppedInPlan = ($stoppedDep -ccontains $x)
         $summary.dependency.scmStartedX = ($xAfter -ceq 'Running')
         $summary.dependency.xAfterStartOfY = $xAfter
+        $d = Assert-Completed $r 'TEST_SEAM' 'RUNNING' 'inicio de y'
         $ctx.Y1Log = $r.Log; $ctx.Y1RunId = [string]$r.Res.RunId
         "$d; x STOPPED and declared (the plan shows it as a stopped declared dependency: $($stoppedDep -ccontains $x)); measured: x is $xAfter after the start of y (the SCM started it: $($xAfter -ceq 'Running'))"
     }

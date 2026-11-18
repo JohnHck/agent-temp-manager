@@ -838,7 +838,13 @@ a control right, requests elevation or opens a UAC prompt.
   default seams. Leg B covers the start and its undo, the four refusals before the seam with zero seam calls, the
   dependencies, the undo of leg A's log (provenance), and ends by stopping every own service that is not stopped; none
   is removed. The eight installed gates and the SHA-256 of every installed file are compared before and after. Only a
-  summary with codes and counts is uploaded. The measured results per runner and leg are in the ADR's R6 record.
+  summary with codes and counts is uploaded. The measured results per runner and leg are in the ADR's R6 record. In
+  the first CI run, all six jobs agreed:
+  * leg A got `ACCESS_DENIED` from the real seam, with nothing changed;
+  * leg B's refusals before the seam and the provenance across legs held;
+  * the services all ended STOPPED, and the installed copy was unchanged;
+  * leg B's real start reached the seam, but the harness then failed on its own diff field names. That was fixed in
+    the same PR.
 * **Not tested here:**
   * the default start and stop seams: never called by the suite; the CI calls them only in the R6 harness, on its own
     services;
