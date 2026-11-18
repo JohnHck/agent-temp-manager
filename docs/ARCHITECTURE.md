@@ -107,6 +107,31 @@ Collection -> normalization -> evidence -> correlation -> presentation:
   state (`Get-AtmAutoPurgeTaskState`); the TUI never schedules or unschedules (T-ISO-6). The uninstall
   (`InstallCommon.ps1`) only reads the folder and warns.
 
+### The scheduler layer: two tasks (V0.5 planned, ADR-0017)
+
+The Task Scheduler will hold at most two tasks per user, both in the folder `\AgentTempManager`: the automatic purge's
+(implemented, P6b above) and the preventive monitoring's (V05-D1, **planned; nothing implemented**, gate
+`AtmMonitoringEnabled` closed in every copy). Each follows the same four steps:
+
+| Step | Automatic purge (implemented, `Engine.Isolate.ps1`) | Monitoring (planned, `Engine.Monitor.ps1`, phase M3) |
+|---|---|---|
+| Build the definition, never registered by itself | `New-AtmAutoPurgeTaskDefinition` (name from `Get-AtmAutoPurgeTaskName`, action from `Get-AtmAutoPurgeTaskAction`) | its own builder: interactive, limited, no password, one action running the future entry point `src/bin/agent-temp-monitor.ps1` |
+| Register (`TASK_CREATE`, never replace) | `Register-AtmAutoPurgeTask`, called only by `Invoke-AtmAutoPurgeSchedule`, reached only from the CLI | its own register function, reached only from the CLI's `monitor enable`, and only with the gate open (ADR-0017 section 5) |
+| Read back and check the exact match | `Get-AtmAutoPurgeTaskObject`, `Test-AtmAutoPurgeTaskMatch`, `Get-AtmAutoPurgeTaskState` | its own read and exact match. Reading whether an entry exists is allowed with the gate closed, so that a leftover is visible. |
+| Remove after the exact match | `Unregister-AtmAutoPurgeTask`, called only by `Invoke-AtmAutoPurgeUnschedule` | `monitor disable` (phase M4) |
+
+* **The scheduler connection.** Today the Task Scheduler is reached only through `Connect-AtmTaskScheduler`, in
+  `Engine.Isolate.ps1`, and a static suite test pins its callers. How the monitoring engine reaches it is an option of
+  phase M3, not decided here. The options are to move `Connect-AtmTaskScheduler` to a shared place, which also changes
+  that static test, or to give the monitoring engine its own reach through a single helper.
+* **The collector's entry point,** `src/bin/agent-temp-monitor.ps1` (future, phase M3), is the only thing the
+  monitoring task runs. It reads `AtmMonitoringEnabled` again on every run, and exits without collecting when the gate
+  is closed, for example in a copy updated after the task was registered.
+* **Presentation.** The TUI and the GUI never register, remove or run either task (T-ISO-6). In phase M5 they read the
+  monitoring history through one read function (ADR-0014 section 3).
+* **Removal.** Whether the uninstaller or the unschedule commands do more than today about the shared folder is
+  **pending V05-D9**.
+
 ### Planned layering (ADR-0013)
 
 [ADR-0013](adr/ADR-0013-isolation-quarantine-recovery-mode.md) (PARTIALLY ACCEPTED) adds a third operation next to

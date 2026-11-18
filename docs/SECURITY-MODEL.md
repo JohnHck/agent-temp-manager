@@ -878,7 +878,8 @@ credential. What a run may do is still decided only by `autoPurge = true` in the
   `quarantine unschedule-autopurge` (`Unregister-AtmAutoPurgeTask`), each the only place of its call, are reached only
   from the CLI; the scheduler is reached only through one helper (`Connect-AtmTaskScheduler`). `version`,
   `quarantine list` and the TUI only read the task's state; the TUI never schedules or unschedules (T-ISO-6), and the
-  installer never creates a task. Static suite tests check all of this.
+  installer never creates a task. Static suite tests check all of this. V0.5 plans a second task, the monitoring's
+  (below); until it is implemented, these two commands remain the only ones.
 * **The task.** One per user, `\AgentTempManager\AutoPurge-<first 16 hex digits of SHA-256(SID)>`: the name does not show
   the SID or the account. Principal: the user's SID, logon type Interactive (`InteractiveToken`: it runs only while that
   user's session is open, and no password is stored), run level Limited (never elevated). One action: Windows
@@ -920,6 +921,39 @@ credential. What a run may do is still decided only by `autoPurge = true` in the
     a console window for a moment.
   * **No run without a session.** By design the task does nothing while the user is signed out; a missed run starts at
     the next opportunity once the session is open.
+
+### Preventive monitoring: the second scheduled task (V0.5, planned)
+
+Decision V05-D1 (2026-11-17, [ADR-0017](adr/ADR-0017-v05-preventive-monitoring.md) section 2): V0.5's persistent
+collection uses a **per-user scheduled task**, like the automatic purge's: interactive, limited, with no password, and
+with no elevation needed to create it. PRIV-3 ([ELEVATION.md](ELEVATION.md)) admits these two tasks and no other.
+**Nothing of it is implemented.** The task, the commands that would register and remove it, and its gate
+`AtmMonitoringEnabled` (the ninth gate, not yet in the code; it lands `$false` in every copy) come in phases M1 to M4.
+
+* **The two tasks.**
+  * The automatic purge's (above), implemented.
+  * The monitoring's, planned: `monitor enable` (ADR-0017 section 5, phase M3) registers it, and `monitor disable`
+    (phase M4) removes it after an exact match.
+* **A deliberate difference.**
+  * `schedule-autopurge` registers its task while the purge gate is closed. A run then only plans.
+  * `monitor enable` refuses with the monitoring gate closed (`MONITORING_GATE_CLOSED`), before asking anything. With
+    the gate open, it still needs:
+    * a standard token;
+    * an installed copy;
+    * a console the engine observes;
+    * no existing entry;
+    * the plan shown;
+    * a typed phrase of its own.
+  * The collector's entry point reads the gate again on every run. A copy whose gate is closed exits without
+    collecting.
+* **The shared folder.** Both tasks live in the Task Scheduler folder `\AgentTempManager`. The declared risks of the
+  shared folder above apply to the monitoring task as well.
+* **Removal.** What happens to the folder when the product is removed or the last task is unscheduled is **pending
+  V05-D9** (the uninstaller and the shared task folder). Today the folder stays after `unschedule-autopurge`, and the
+  uninstaller only reads and warns.
+* **Never.** The monitoring task never deletes, recovers or changes the user's system or the agents' data. It never
+  elevates, and it never stores a credential. The only files it removes are the oldest files of its own history, by
+  exact name, in its pinned folder (V05-D4 (a); ADR-0017 section 3).
 
 ### Native primitives (0.3.x phase P1)
 

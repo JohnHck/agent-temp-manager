@@ -86,7 +86,12 @@ Phase: V0.2.1, phases P1 to P6 (section 10)
     recovery area: `Get-AtmRecoverCollection`, `Get-AtmRecoverList` and `Get-AtmRecoverPlan` (the recovery engine's
     collection, list and plan, all read only), and `Get-AtmRecoverListLines` and `Get-AtmRecoverPlanLines` (the
     shared formatters of the CLI's `recover list` and `recover plan` texts, in `Report.ps1`). The test's list has 28
-    names.
+    names;
+  * **future, V0.5 phase M5** ([ADR-0017](ADR-0017-v05-preventive-monitoring.md), amendment of its phase M0): **one**
+    read function for the monitoring history, provisionally named `Get-AtmMonitorHistory`. It returns the stored
+    history and the alerts computed from it when it is read, and writes nothing. The name contains none of the forbidden
+    names below. It is not implemented, so it is not in the test's list yet; phase M5 adds it, and only it. The GUI never
+    reads `AtmMonitoringEnabled`. It never registers, removes or runs the monitoring task, and it never collects.
 * **Forbidden, by name.** A static test fails if `src/lib/Gui*.ps1` mentions any of these:
   * `Invoke-AtmClean`, `Invoke-AtmIsolate`, `Invoke-AtmRestore`, `Invoke-AtmPurge`, `Invoke-AtmAutoPurgeSchedule`,
     `Invoke-AtmAutoPurgeUnschedule`, `Invoke-AtmDiscardAuthorization`, `AtmDeleter`, `AtmLockProbe`, and any other
@@ -103,7 +108,7 @@ Phase: V0.2.1, phases P1 to P6 (section 10)
     `AtmRecoverOperationTaken` and `Open-AtmCleanLog`. Executing recovery stays CLI-only (T-ISO-6), and the live
     monitoring's tick never calls the recovery collection;
   * the release-gate variables of the other features (they are read only by the engines and `version`), since V0.4
-    R5 including `AtmRecoveryEnabled`.
+    R5 including `AtmRecoveryEnabled`, and from V0.5 (ADR-0017) `AtmMonitoringEnabled` too.
 * **The existing tests stay as they are.** The TUI keeps its clean and isolate hand-over; the layering tests of
   ADR-0009 are extended to the new files, never relaxed.
 
