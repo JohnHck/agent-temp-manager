@@ -31,7 +31,9 @@ its own, `$false` in every copy, with its acceptance proven in CI. Only a decisi
   * system configuration;
   * repairing Windows.
 
-All file and line references below are to commit `9c174e64439686ca1c5b07fd436abae4d03cd755`.
+The file and line references in sections 1 to 9 are to commit `9c174e64439686ca1c5b07fd436abae4d03cd755`, the state
+of `main` this record was proposed on, before phase R0. The implementation records after them use other states: each
+one from R1 on says which, and the R0 record cites no line numbers.
 
 ## Decision (proposed)
 
@@ -45,7 +47,7 @@ emit.
 
 | # | Finding (code) | Provider that produces it | Behind a closed V0.2 gate? | Evidence it carries | What is missing before it can ground an operation |
 |---|---|---|---|---|---|
-| 1 | `Service` in state `RUNNING`, `STOPPED`, `PAUSED` or `PENDING` (`Engine.Diagnose.ps1:36`, state map `:3176`, findings `:3794-3870`) | `claude-desktop`, the single name `CoworkVMService` (`src/providers/ClaudeDesktop.ps1:50`). `claude-code` declares no service (`src/providers/ClaudeCode.ps1:143-175`). | No: the services collector runs in every copy. | `SERVICE_STATE`, `SERVICE_START_MODE`, `SERVICE_DELAYED_AUTO_START`, `SERVICE_ACCOUNT_KIND`, `SERVICE_EXECUTABLE` or `_NAME`, `SERVICE_PROCESS_VERIFIED` (`:3829-3847`) | **No fault signal:** the query reads no exit code (`:3151` lists the properties read), so a `STOPPED` service that failed looks like one that was never started. **"Stuck" is not measurable:** `PENDING` is a single reading with no duration, checkpoint or wait hint. **Weak attribution:** the name is a publicly reported one, not documented by the vendor (`ClaudeDesktop.ps1:24-26`). **No proof of absence:** a name the account cannot see is `UNKNOWN`, never absent (`:3819-3822`; the collector never produces `NOT_PRESENT`, `:3142-3143`). |
+| 1 | `Service` in state `RUNNING`, `STOPPED`, `PAUSED` or `PENDING` (`Engine.Diagnose.ps1:36`, state map `:3176`, findings `:3794-3870`) | `claude-desktop`, the single name `CoworkVMService` (`src/providers/ClaudeDesktop.ps1:50`). `claude-code` declares no service (`src/providers/ClaudeCode.ps1:143-175`). | No: the services collector runs in every copy. | `SERVICE_STATE`, `SERVICE_START_MODE`, `SERVICE_DELAYED_AUTO_START`, `SERVICE_ACCOUNT_KIND`, `SERVICE_EXECUTABLE` or `_NAME`, `SERVICE_PROCESS_VERIFIED` (`:3829-3847`) | **No fault signal (at proposal time, before R0):** the query read no exit code (`:3151` lists the properties read), so a `STOPPED` service that failed looked like one that was never started. **"Stuck" was not measurable:** `PENDING` was a single reading with no duration, checkpoint or wait hint. (Since R0 the same query also reads `ExitCode`, `ServiceSpecificExitCode`, `CheckPoint`, `WaitHint` and `AcceptStop`, and a `PENDING` service gets one second read; the result is the read-only classification `SERVICE_CONDITION`, which authorizes nothing. See the R0 implementation record.) **Weak attribution:** the name is a publicly reported one, not documented by the vendor (`ClaudeDesktop.ps1:24-26`). **No proof of absence:** a name the account cannot see is `UNKNOWN`, never absent (`:3819-3822`; the collector never produces `NOT_PRESENT`, `:3142-3143`). |
 | 2 | `Service` in state `UNKNOWN` (query denied, failed, timed out, or name not listed) | as row 1 | No | `SERVICE_NOT_QUERIED`, `SERVICE_NOT_LISTED` (`:3817-3822`) | Nothing is known, so there is nothing to act on. |
 | 3 | `VirtualMachine` in state `RUNNING`, `OFF`, `SAVED`, `PAUSED` or `PENDING` (`:37`, `:3896`, `:4058-4196`) | **None.** No provider declares a virtualization hint (`ClaudeDesktop.ps1:51` returns an empty list; `ClaudeCode.ps1` has none), so every VM is `VM_UNATTRIBUTED` (`:4167`). The Cowork VM is a Host Compute Service system, not a Hyper-V VM, and is not expected in this query (`ClaudeDesktop.ps1:33-36`). | No | `VM_ENABLED_STATE`, `VM_WORKER_VERIFIED`, attribution codes (`:4129-4167`) | **Attribution.** Without an agent attribution, a VM is someone else's VM. The `RUNS_VM` graph relation is proposed and not implemented ([ADR index](README.md), ADR-0002). |
 | 4 | `VirtualizationPlatform` `PRESENT` (`:38`, `:4194`) | none (engine) | No | hypervisor flag, namespace, `vmms` state (`:4103-4113`) | Context only. Platform features are system configuration, which V0.4 excludes. |
@@ -434,7 +436,8 @@ of the first read.
 * a real stopped service that failed;
 * `IMAGE_MATCH` against a provider's real declaration, because no shipped provider declares one.
 
-**Outside this round:** `docs/DIAGNOSE-SCHEMA.md` lists evidence codes in prose and does not list the new ones yet.
+**Outside this round:** at R0 time, `docs/DIAGNOSE-SCHEMA.md` listed evidence codes in prose and did not list the new
+ones. DOCS-SYNC-R0 (commit `3f3829f`) added them to `findings[].evidence[]`, with their values.
 
 ## R1 implementation record (2026-11-17)
 

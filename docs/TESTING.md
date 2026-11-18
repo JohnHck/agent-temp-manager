@@ -762,6 +762,71 @@ second read are injected. No service is started, stopped or changed, and no case
   * a real failed service;
   * a provider's real `ExpectedImage`, because no shipped provider declares one.
 
+## Assisted recovery in the suite (V0.4 R1 to R5)
+
+Phases R1 to R5 of [ADR-0016](adr/ADR-0016-v04-assisted-recovery.md), each tested in its own area of the suite
+(`V0.4 R1` to `V0.4 R5`), in both shells. Each phase's implementation record in the ADR lists every case and what is
+not tested. The recovery gate `AtmRecoveryEnabled` is loaded closed. A case that needs it open opens it in the suite's
+process only and closes it again. Providers, identities, service rows and dependencies are injected. No case starts,
+stops or opens a real service with a control right, requests elevation or opens a UAC prompt.
+
+* **`V0.4 R1`: list and plan, read only.**
+  * the closed catalog, refusal codes, not-offered line and texts in both languages;
+  * the offered case, with its capture, dependencies, undo and elevation from three tokens;
+  * one case per `RECOVERY_*` refusal code, with the real `CoworkVMService` declaration among them;
+  * the plan id and the privacy of the plan and the list;
+  * the closed gate by instrumentation: no prompt, lock, log, file write or CIM query, and no B8 mutex (with a positive
+    control);
+  * statics: one gate assignment and no service control API outside its allowed places. The diagnose does not call the
+    engine. Since R5, the TUI and the GUI call only its three read functions. The launcher loads the engine in exactly
+    four blocks: `recover`, `version`, `tui` and `gui`;
+  * the CLI in a new process: exit codes, `version` and the help in both languages.
+* **`V0.4 R2`: the start, past the gate, through the start seam.**
+  * the closed gate by instrumentation, with positive controls for the injected and the default seam;
+  * one case per outcome (`COMPLETE`, `PARTIAL`, `FAILED`, `REFUSED`, `EXCEPTION`), each with its diff and its records
+    in order;
+  * AUT-2 refusals, one revalidation case per captured field, and B8 busy and abandoned;
+  * the log's privacy, and `SERVICE_IMAGE_NOT_DECLARED` refused before anything is asked;
+  * statics: the start API only in the default seam, and lock, log and console only past the gate.
+* **`V0.4 R3`: the undo of one start, past the gate, through the stop seam.**
+  * `REC-SVC-STOP` stays outside the catalog;
+  * the closed gate by instrumentation;
+  * one case per outcome, and one case per source-log failure code;
+  * the criteria table, AUT-2, the revalidation, a second undo, B8 and the log's privacy;
+  * statics: the stop class in `Native.cs` asks for no other right, and only the default stop seam reaches it.
+* **`V0.4 R4`: `recover start` and `recover undo`, with UAC on demand.**
+  * the closed gate: plan or request, then exit 27, with nothing asked, locked or logged;
+  * the requester and the relaunched copy, with the elevated launcher, the requester evidence, the key and the fixed log
+    folder injected;
+  * PRIV-4 outcomes 40 to 44, PRIV-5 evidence, PRIV-9 (a second operation exits 30) and the exit code of every engine
+    result;
+  * the fixed folder's security check, and its creation by the installer (elevated only);
+  * the CLI in a new process;
+  * statics: the elevation verb appears once in `src`, in the default launcher, which only the command calls.
+* **`V0.4 R5`: the read-only view in the TUI and the GUI.**
+  * the shared formatters give the CLI's lines of `recover list` and `recover plan`, in order, in both languages:
+    offered, refused and undeclared targets, an empty list, and a forged open gate;
+  * the headless TUI and the GUI's session and view model:
+    * the area and the plans show every line and code;
+    * the undeclared name is never listed;
+    * there is one collection per entry, and none from moving, `Enter`, `Esc`, a live monitoring tick or `F5`;
+    * no service name is typed, and a failure shows its code only;
+  * instrumentation: no call to `Invoke-AtmRecover*`, the launcher, the service seams, the log, the lock, a
+    confirmation, `Read-Host` or CIM, and no B8 mutex (with positive controls);
+  * statics:
+    * the GUI's closed list, with five read names, refuses the execution names, `AtmRecoveryEnabled` and a collection
+      in the tick (each planted in a copy);
+    * a new TUI static covers the same names;
+    * each read is called only in its expected place.
+* **Not tested here:**
+  * the default start and stop seams, and a real service started or stopped (no shipped provider declares an
+    `ExpectedImage`);
+  * the real UAC prompt and relaunch, and the real verification of the requester (PRIV-5);
+  * B8 between an elevated and a non-elevated holder;
+  * a real GUI window, or a real console, where `S` collects the real services.
+
+  These are left for the operator's VM (R6).
+
 ## Future: isolation, quarantine and Recovery Mode (0.3.x and V0.4)
 
 Criteria proposed by [ADR-0013](adr/ADR-0013-isolation-quarantine-recovery-mode.md) for accepting an implementation.
