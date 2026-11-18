@@ -79,4 +79,5 @@ consumption and an explicit statement of the identity and elevation state the di
 * Resource sums over a fixture tree equal the sum of its members; `$null` counters make the sum `PARTIAL`.
 * Identity line rendered in both languages; elevation type for mocked tokens; real token on CI (elevated) and locally
   (standard user).
-* Static test: no `SeDebugPrivilege`, `AdjustTokenPrivileges`, `RunAs` or `-Verb` in the sources.
+* Static test: no `SeDebugPrivilege` or `AdjustTokenPrivileges` in `Native.cs`; the elevation verb (`runas`) only in
+  the recovery engine's default elevated launcher, behind the recovery gate (updated by ADR-0016, R4).

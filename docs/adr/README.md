@@ -25,7 +25,7 @@ record lists its own open decisions, with an id prefix of its own (`ISO-D1`...).
 | [ADR-0013](ADR-0013-isolation-quarantine-recovery-mode.md) | Isolation, quarantine and Recovery Mode | PARTIALLY ACCEPTED (maintainer decisions ISO-D1, ISO-D4, ISO-D5 on 2026-11-01; ISO-D2, ISO-D3, ISO-D6 PROPOSED; nothing implemented) | 0.3.x (own profile), V0.4 (Recovery Mode) |
 | [ADR-0014](ADR-0014-desktop-gui-winforms.md) | Desktop GUI and live monitoring in WinForms | ACCEPTED for the technology and the architecture (maintainer decisions D-B and D-A, 2026-11-16); GUI-D1 to GUI-D11 PROPOSED; nothing implemented | V0.2.1 (P1 to P6) |
 | [ADR-0015](ADR-0015-v5-pilot-disposable-vm.md) | V5 pilot of real deletion in a disposable VM | ACCEPTED (the environment class is the maintainer's decision D-C, 2026-11-16; V5-D1 to V5-D8 approved as recommended, 2026-11-17; pilot not executed) | V0.3 (V5) |
-| [ADR-0016](ADR-0016-v04-assisted-recovery.md) | Assisted recovery (V0.4) | ACCEPTED (V04-D1 to V04-D8 decided 2026-11-17: D3 (b) elevation on demand through UAC; the others as recommended); R0 implemented | V0.4 (R0 to R6) |
+| [ADR-0016](ADR-0016-v04-assisted-recovery.md) | Assisted recovery (V0.4) | ACCEPTED (V04-D1 to V04-D8 decided 2026-11-17: D3 (b) elevation on demand through UAC; the others as recommended); R0 to R4 implemented (R2 to R4 only past the recovery gate, closed in every copy) | V0.4 (R0 to R6) |
 | [ADR-0017](ADR-0017-v05-preventive-monitoring.md) | Persistent preventive monitoring (V0.5) | PROPOSED (V05-D1 to V05-D10 open; nothing implemented) | V0.5 (M0 to M6) |
 
 ## Template

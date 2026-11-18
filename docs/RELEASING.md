@@ -34,8 +34,11 @@ Output: `dist/agent-temp-manager-<version>.zip` (with `src/manifest.json`) and `
 5. Git: public author identity configured per repository (or per commit), `git gc --prune=now`, first commit
    reviewed (`git show --stat`).
 6. Repository settings: private vulnerability reporting enabled (SECURITY.md), branch protection, CI enabled.
-7. Privileges ([ELEVATION.md](ELEVATION.md)): no self-elevation and no credential handling in the code (search for
-   `RunAs`, `-Verb`, `Get-Credential`, `SecureString`); installer scripts refuse without elevation; the
+7. Privileges ([ELEVATION.md](ELEVATION.md)): no self-elevation in any shipped copy: the elevation verb (`runas`)
+   appears only once in `src/`, in the default elevated launcher of `Engine.Recover.ps1`, behind the recovery gate,
+   which is closed in every copy (the V0.4 R4 static test checks this). A release that opens the recovery gate must
+   revise this item. No credential handling (search for `Get-Credential`, `SecureString`, `savecred`); installer
+   scripts refuse without elevation; the
    [privilege matrix](TESTING.md#privilege-matrix) rows run or listed as `NAO_TESTADO` in the release notes,
    including standard user, elevated administrator and credentials-prompt elevation on Windows 10 and 11 with
    PowerShell 5.1 and 7. A release that changes privilege behaviour needs every row run.
