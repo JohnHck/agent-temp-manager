@@ -899,6 +899,12 @@ Phase R2 added the start path to the engine (`Invoke-AtmRecover`, ADR-0016's R2 
 test suite reaches it, with the gate opened in its own process and the service control seam injected. No CLI verb runs
 it: the execution verb comes with the UAC relaunch, in phase R4. What a user sees and can do is unchanged.
 
+Phase R3 added the undo of one start to the engine (`Invoke-AtmRecoverUndo`, ADR-0016's R3 implementation record). It
+reads the run's log, checks that the service is still exactly as that run left it, `RUNNING`, with no dependent
+running, and stops that one service, never its dependents. Here too, only the test suite reaches it, with the gate opened
+in its own process and the stop seam injected. There is no `recover undo` verb until phase R4, and `REC-SVC-STOP` is
+never offered by `list` nor accepted by `plan`.
+
 ```text
 agent-temp recover list
 agent-temp recover plan -Operation REC-SVC-START -Service <exact declared name>

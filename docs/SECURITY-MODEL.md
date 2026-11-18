@@ -975,7 +975,7 @@ the mover; a static suite test checks it.
   after the measurement is caught by the second measurement (`VERIFY_REPARSE_POINT_FOUND`). The reparse point moves
   with the tree and is never followed.
 
-## Recovery gate (V0.4 phases R1 and R2)
+## Recovery gate (V0.4 phases R1 to R3)
 
 * **The eighth gate:** `$script:AtmRecoveryEnabled`, `$false` in every shipped copy
   ([ADR-0016](adr/ADR-0016-v04-assisted-recovery.md) section 5). It is a single assignment in
@@ -987,16 +987,28 @@ the mover; a static suite test checks it.
 * **Closed** (every copy): `recover list` and `recover plan` collect, apply the criteria and present the list or the
   plan, then stop. Nothing is asked, the clean lock (B8) is not taken and its mutex is not opened, and no log or file is
   written. The suite checks this by instrumentation, with the gate closed and with it opened in its own process.
-* **One control path, behind the gate (R2).** The only service control API in `src/` is `ServiceController`. It
-  appears only in `lib\Engine.Recover.ps1`, only in the default seam `Invoke-AtmRecoverServiceStartDefault`, which calls
-  `Start()` once: the start right only, the service name only, no arguments. That seam is reached only with the gate
-  open. With it closed, `Invoke-AtmRecover` returns the plan and `RECUPERACAO_REAL_DESABILITADA`, and it asks nothing,
-  takes no lock and writes no log. A static suite test fails in any of these cases:
-  * `ServiceController` or `System.ServiceProcess` appears in any other file of `src/`, or outside that seam;
+* **Two control paths, behind the gate (R2 and R3).** `src/` holds two service control APIs, each in one place and
+  each reached only with the gate open:
+  * the start (R2): `ServiceController`, only in `lib\Engine.Recover.ps1`, only in the default seam
+    `Invoke-AtmRecoverServiceStartDefault`, which calls `Start()` once: the start right only, the service name only, no
+    arguments;
+  * the stop (R3, the undo of a start): `OpenSCManagerW`, `OpenServiceW` and `ControlService` by P/Invoke, only in the
+    class `AtmServiceStop` at the end of `lib\Native.cs`, called once, only by the default stop seam
+    `Invoke-AtmRecoverServiceStopDefault`. The service control manager is opened with connect access only, the
+    service with the stop right only (`SERVICE_STOP`), and one `SERVICE_CONTROL_STOP` is sent. Dependent services are
+    never enumerated, opened or stopped: while one runs, the stop fails (`DEPENDENT_SERVICES_RUNNING`). The undo never
+    uses `ServiceController.Stop()`, because that method stops every running dependent service first (ADR-0016, R3
+    implementation record, with the source).
+
+  With the gate closed, `Invoke-AtmRecover` and `Invoke-AtmRecoverUndo` return the plan and
+  `RECUPERACAO_REAL_DESABILITADA`; they ask nothing, take no lock and write no log. A static suite test fails in any of
+  these cases:
+  * `ServiceController` or `System.ServiceProcess` appears in any other file of `src/`, or outside the start seam;
   * there is a second `.Start(`;
+  * `OpenService` or `ControlService` appears anywhere in `src/` outside the stop class in `Native.cs`; the class asks
+    for another right or sends another control; or anything but the default stop seam calls it;
   * any other control verb appears anywhere in `src/`: `Start-Service`, `Stop-Service`, `Set-Service`,
-    `Restart-Service`, `Suspend-Service`, `Resume-Service`, `sc.exe`, `Invoke-CimMethod`, `OpenService`,
-    `ControlService` or `ChangeServiceConfig`;
+    `Restart-Service`, `Suspend-Service`, `Resume-Service`, `sc.exe`, `Invoke-CimMethod` or `ChangeServiceConfig`;
   * the engine contains a stop, pause, continue or configuration method: `.Stop(`, `.Pause(`, `.Continue(`,
     `ExecuteCommand`, or the CIM control methods.
 * **The start path past the gate (R2), reached by no shipped copy.** The gate is closed, and no CLI verb calls the path
@@ -1015,13 +1027,34 @@ the mover; a static suite test checks it.
   The outcomes are `COMPLETE`, `PARTIAL`, `FAILED`, `REFUSED` (access denied) or `EXCEPTION` (recorded by type only).
   Each comes with a field-by-field diff of "before" and "after". Nothing is ever compensated or retried. The log never
   holds the token's name or SID.
+* **The undo past the gate (R3), reached by no shipped copy.** `Invoke-AtmRecoverUndo` stops the service of one
+  `REC-SVC-START` run. `REC-SVC-STOP` exists only as that undo: it is never in the catalog, never offered by `recover
+  list` and never accepted by `recover plan` or `Invoke-AtmRecover`. No CLI verb calls it until R4.
+  * **Its source is untrusted data.** The caller names the run's log (`-SourceLog`) and its run id (`-RunId`, a
+    cross-check). The log is read once, through a handle that follows no reparse point: a plain absolute local path
+    with no reparse point, a regular file of at most 1 MiB, and the owner and protected DACL that the log writer gives
+    a log. Its lines must be strict JSON of one complete R2 run with the outcome `COMPLETE` or `PARTIAL`. Every failure
+    has its own closed `UNDO_SOURCE_*` code, and nothing is asked. The owner and DACL show who could have written the
+    file, not that the engine wrote it. The residual risk: a hand-made log can produce a stop plan for a running
+    declared service. It is limited by the declared target, the state that must equal the log's "after", the plan
+    shown, and the typed phrase.
+  * **It never overwrites a newer state.** The service must still be declared, with a declared image that matches. Its
+    state must equal the recorded "after", field by field. For a `PARTIAL` run that ended pending, the only accepted
+    change is the natural move to `RUNNING` (state, checkpoint, wait hint, condition, accept-stop); a service still
+    pending is refused. It must be `RUNNING` and accept a stop. Every dependent must be `STOPPED`, judged from the
+    capture with no new query; a hidden name is no exemption.
+  * The same steps as the start, in the same order, with the phrase `PARAR SERVICO <planid8>`, the source run id in its
+    own log field, a revalidation that also refuses a dependent that started, the stop seam called once with the name
+    only, and a bounded wait until `STOPPED`, back to `RUNNING`, or the limit. Nothing is compensated or retried, and an
+    undo has no undo: a second undo of the same run is refused because the state no longer matches.
 * **Read only, in the command's own process.** The collection reuses the diagnose's functions: the own token, the
   providers' hints, one `Win32_Service` query with the R0 signals, the dependencies and the image check. The engine
   itself runs no CIM query. The diagnose, the TUI and the GUI do not load or call it, and the diagnose still has
   exactly two `Win32_Service` queries.
 * **Narrow targets.** The operation comes only from the closed catalog (`REC-SVC-START`), compared exactly. The target is
   only the exact name a provider declares, compared case-sensitively: never a path, wildcard, file or plan of another
-  process, and one target per call. A service is offered only when it is `STOPPED`, not `DISABLED`, listed once with
+  process, and one target per call (the undo of R3 takes no name: its target comes from the source log and must still
+  be declared). A service is offered only when it is `STOPPED`, not `DISABLED`, listed once with
   every property and fault signal readable, and declared by one provider whose `ExpectedImage` matches its executable.
   Its dependencies must be read, and a stopped dependency must itself be declared. Anything else is refused with a
   closed `RECOVERY_*` code.

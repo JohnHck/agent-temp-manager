@@ -18488,15 +18488,16 @@ if ($null -eq $res.env) {
         $after = @(Get-ChildItem -LiteralPath $sandbox -Force | ForEach-Object { '{0}|{1}' -f $_.Name, $_.LastWriteTimeUtc.Ticks }) -join ';'
         Assert-Eq $after $before 'sandbox inalterado'
     }
-    Test-Case 'V0.4 R1' 'R1 (estatico): uma unica atribuicao da trava; nenhuma API de controle de servico em src (a do seam padrao do R2 e conferida na area V0.4 R2); motor sem consulta CIM, escrita direta, pergunta nem console proprio (lock, log e espera so depois da trava: V0.4 R2); diagnose, TUI e GUI nao chamam o motor; Win32_Service segue com duas consultas; lancador, instalador, manifesto, build e e2e com a oitava trava' {
+    Test-Case 'V0.4 R1' 'R1 (estatico): uma unica atribuicao da trava; nenhuma API de controle de servico em src (a do seam padrao do R2 e conferida na area V0.4 R2, a de parada do R3 na area V0.4 R3); motor sem consulta CIM, escrita direta, pergunta nem console proprio (lock, log e espera so depois da trava: V0.4 R2); diagnose, TUI e GUI nao chamam o motor; Win32_Service segue com duas consultas; lancador, instalador, manifesto, build e e2e com a oitava trava' {
         $all = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Rel = $_.FullName.Substring($srcDir.Length + 1); Text = [IO.File]::ReadAllText($_.FullName) } })
         $rec = @($all | Where-Object { $_.Rel -ceq 'lib\Engine.Recover.ps1' })[0].Text
         Assert-True ([regex]::Matches($rec, '\$script:AtmRecoveryEnabled\s*=').Count -eq 1 -and $rec -match '(?m)^\$script:AtmRecoveryEnabled = \$false\r?$') 'uma unica atribuicao, a $false'
         foreach ($f in $all) { if ($f.Rel -cne 'lib\Engine.Recover.ps1') { Assert-True (-not [regex]::IsMatch($f.Text, 'AtmRecoveryEnabled\s*=')) "$($f.Rel) nao altera a trava" } }
         Assert-True (-not $rec.Contains('$env:') -and -not $rec.Contains('ConvertFrom-Json') -and -not $rec.Contains('Get-Content')) 'nenhuma variavel de ambiente, configuracao ou arquivo abre a trava'
         # ServiceController: R2's default seam, in Engine.Recover.ps1 only (its placement is checked by the V0.4 R2 statics).
+        # OpenService and ControlService: R3's stop class, in Native.cs only (its placement is checked by the V0.4 R3 statics).
         foreach ($api in @('Start-Service', 'Stop-Service', 'Set-Service', 'Restart-Service', 'ServiceController', 'Invoke-CimMethod', 'OpenService', 'ControlService')) {
-            $hits = @($all | Where-Object { $_.Text.IndexOf($api, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and -not ($api -ceq 'ServiceController' -and $_.Rel -ceq 'lib\Engine.Recover.ps1') } | ForEach-Object { $_.Rel })
+            $hits = @($all | Where-Object { $_.Text.IndexOf($api, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and -not ($api -ceq 'ServiceController' -and $_.Rel -ceq 'lib\Engine.Recover.ps1') -and -not (@('OpenService', 'ControlService') -ccontains $api -and $_.Rel -ceq 'lib\Native.cs') } | ForEach-Object { $_.Rel })
             Assert-Eq ($hits -join ',') '' "nenhum '$api' em src"
         }
         Assert-Eq (@($all | Where-Object { $_.Text -match '(?i)(?<![A-Za-z0-9_])sc\.exe' } | ForEach-Object { $_.Rel }) -join ',') '' "nenhum 'sc.exe' em src"
@@ -18970,7 +18971,7 @@ if ($null -eq $res.env) {
             Assert-True ((@($res.RefusalCodes) -join ',') -ceq 'RECOVERY_IMAGE_NOT_DECLARED' -and $res.Plan.Provider -ceq 'claude-desktop' -and $op.Calls.Count -eq 0 -and $c.Presented.Count -eq 0) "CoworkVMService parado do provider real: recusado antes de perguntar ($(@($res.RefusalCodes) -join ','))"
         } finally { $script:AtmCleanLockName = $prevLock }
     }
-    Test-Case 'V0.4 R2' 'R2 (estatico): API de controle de servico so no Engine.Recover.ps1 e so no seam padrao; nenhum outro verbo de controle; lock, log, inventario, console e JSON so depois da trava; espera real so na funcao de espera; os passos na ordem; funcoes de leitura sem efeito; um seam, uma operacao, nenhum chamador fora do motor; area sem espera real' {
+    Test-Case 'V0.4 R2' 'R2 (estatico): API de controle de servico do inicio (ServiceController) so no Engine.Recover.ps1 e so no seam padrao; OpenService e ControlService so na classe de parada do Native.cs (V0.4 R3); nenhum outro verbo de controle; lock, log, inventario, console e JSON so depois da trava (no inicio e no desfazer do R3); espera real so na funcao de espera; os passos na ordem; funcoes de leitura sem efeito; um seam, uma operacao, nenhum chamador fora do motor; area sem espera real' {
         $all = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | ForEach-Object { [pscustomobject]@{ Rel = $_.FullName.Substring($srcDir.Length + 1); Text = [IO.File]::ReadAllText($_.FullName) } })
         $rec = @($all | Where-Object { $_.Rel -ceq 'lib\Engine.Recover.ps1' })[0].Text
         $strip = { param([string]$T) [regex]::Replace([regex]::Replace($T, '(?s)<#.*?#>', ''), '(?m)#.*$', '') }
@@ -18989,29 +18990,33 @@ if ($null -eq $res.env) {
             Assert-True ($in -gt 0 -and (& $count $rec $api) -eq $in) "'$api' so dentro do seam padrao ($in de $(& $count $rec $api))"
         }
         Assert-True ((& $count $recCode '.Start(') -eq 1 -and (& $count $fn[$seamFn] '.Start(') -eq 1) 'um unico .Start(), no seam padrao'
-        # No other control verb: the cmdlets and APIs nowhere in src; the methods nowhere in the engine (src uses Stop() only
-        # on its own timers and stopwatches, never on a service object, which exists only in the seam).
+        # No other control verb: the cmdlets and APIs nowhere in src (OpenService and ControlService only in R3's stop class
+        # in Native.cs, checked by the V0.4 R3 statics); the methods nowhere in the engine (src uses Stop() only on its own
+        # timers and stopwatches, never on a service object, which exists only in the seam).
         foreach ($api in @('Start-Service', 'Stop-Service', 'Set-Service', 'Restart-Service', 'Suspend-Service', 'Resume-Service', 'Invoke-CimMethod', 'OpenService', 'ControlService', 'ChangeServiceConfig')) {
-            Assert-Eq (@($all | Where-Object { $_.Text.IndexOf($api, [StringComparison]::OrdinalIgnoreCase) -ge 0 } | ForEach-Object { $_.Rel }) -join ',') '' "nenhum '$api' em src"
+            Assert-Eq (@($all | Where-Object { $_.Text.IndexOf($api, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and -not (@('OpenService', 'ControlService') -ccontains $api -and $_.Rel -ceq 'lib\Native.cs') } | ForEach-Object { $_.Rel }) -join ',') '' "nenhum '$api' em src"
         }
         Assert-Eq (@($all | Where-Object { $_.Text -match '(?i)(?<![A-Za-z0-9_])sc\.exe' } | ForEach-Object { $_.Rel }) -join ',') '' "nenhum 'sc.exe' em src"
         foreach ($verb in @('.Stop(', '.Pause(', '.Continue(', 'ExecuteCommand', 'WaitForStatus')) { Assert-Eq (& $count $rec $verb) 0 "motor sem '$verb'" }
         Assert-True (-not ($rec -match '(?i)\b(StopService|PauseService|ResumeService|ChangeStartMode|UserControlService|DeleteService)\b')) 'motor sem metodo de controle do CIM'
-        # Past-gate calls and the real wait: each only in the functions named.
+        # Past-gate calls and the real wait: each only in the functions named (R3's undo has the same steps, in its own
+        # two functions; the source's provenance check reads the process identity to compare the log's owner).
         $sleep = 'Start-' + 'Sleep'
         $placement = [ordered]@{
-            'Get-AtmEngineConsoleObservation' = @('Invoke-AtmRecover'); 'Invoke-AtmInventory' = @('Invoke-AtmRecover'); 'Test-AtmOutputPathOutsideBases' = @('Invoke-AtmRecover')
-            'Invoke-AtmUnderSharedLock' = @('Invoke-AtmRecover'); 'Invoke-AtmRecoverLocked @' = @('Invoke-AtmRecover')
-            'Open-AtmCleanLog' = @('Invoke-AtmRecoverLocked'); 'Get-AtmCurrentIdentity' = @('Invoke-AtmRecoverLocked'); 'Test-AtmTypedPhrase' = @('Invoke-AtmRecoverLocked')
-            'Write-AtmRecoverRecord -Log' = @('Invoke-AtmRecoverLocked'); ($seamFn + ' -Name') = @('Invoke-AtmRecoverLocked'); '& $ServiceControlImpl' = @('Invoke-AtmRecoverLocked')
-            'Wait-AtmRecoverSettle -Milliseconds' = @('Invoke-AtmRecoverLocked'); 'ConvertTo-Json' = @('Write-AtmRecoverRecord'); 'AppendLine' = @('Write-AtmRecoverRecord'); $sleep = @('Wait-AtmRecoverSettle')
+            'Get-AtmEngineConsoleObservation' = @('Invoke-AtmRecover', 'Invoke-AtmRecoverUndo'); 'Invoke-AtmInventory' = @('Invoke-AtmRecover', 'Invoke-AtmRecoverUndo'); 'Test-AtmOutputPathOutsideBases' = @('Invoke-AtmRecover', 'Invoke-AtmRecoverUndo')
+            'Invoke-AtmUnderSharedLock' = @('Invoke-AtmRecover', 'Invoke-AtmRecoverUndo'); 'Invoke-AtmRecoverLocked @' = @('Invoke-AtmRecover')
+            'Open-AtmCleanLog' = @('Invoke-AtmRecoverLocked', 'Invoke-AtmRecoverUndoLocked'); 'Get-AtmCurrentIdentity' = @('Invoke-AtmRecoverLocked', 'Invoke-AtmRecoverUndoLocked', 'Test-AtmRecoverSourceProvenance')
+            'Test-AtmTypedPhrase' = @('Invoke-AtmRecoverLocked', 'Invoke-AtmRecoverUndoLocked'); 'Write-AtmRecoverRecord -Log' = @('Invoke-AtmRecoverLocked', 'Invoke-AtmRecoverUndoLocked')
+            ($seamFn + ' -Name') = @('Invoke-AtmRecoverLocked'); '& $ServiceControlImpl' = @('Invoke-AtmRecoverLocked')
+            'Wait-AtmRecoverSettle -Milliseconds' = @('Invoke-AtmRecoverLocked', 'Invoke-AtmRecoverUndoLocked'); 'ConvertTo-Json' = @('Write-AtmRecoverRecord'); 'AppendLine' = @('Write-AtmRecoverRecord'); $sleep = @('Wait-AtmRecoverSettle')
         }
         foreach ($p in $placement.Keys) {
             $total = & $count $recCode $p
             $inside = 0; foreach ($a in $placement[$p]) { $inside += (& $count $fn[$a] $p) }
             Assert-True ($total -gt 0 -and $total -eq $inside) "'$p' so em $($placement[$p] -join ', ') ($inside de $total)"
         }
-        foreach ($p in @(($seamFn + ' -Name'), '& $ServiceControlImpl', 'Invoke-AtmRecoverLocked @', 'Invoke-AtmUnderSharedLock')) { Assert-Eq (& $count $recCode $p) 1 "uma unica chamada: $p" }
+        foreach ($p in @(($seamFn + ' -Name'), '& $ServiceControlImpl', 'Invoke-AtmRecoverLocked @')) { Assert-Eq (& $count $recCode $p) 1 "uma unica chamada: $p" }
+        foreach ($e in @('Invoke-AtmRecover', 'Invoke-AtmRecoverUndo')) { Assert-Eq (& $count $fn[$e] 'Invoke-AtmUnderSharedLock') 1 "uma unica chamada ao lock em $e" }
         # The gate is read first; nothing past it runs before.
         $ir = $fn['Invoke-AtmRecover']
         $g = $ir.IndexOf('if (-not $script:AtmRecoveryEnabled)')
@@ -19037,6 +19042,674 @@ if ($null -eq $res.env) {
         $self = [IO.File]::ReadAllText((Join-Path $testsDir 'Run-Tests.ps1'))
         $a0 = $self.IndexOf('-----' + ' V0.4 R2 (assisted'); $a1 = $self.IndexOf('-----' + ' scale')
         Assert-True ($a0 -gt 0 -and $a1 -gt $a0 -and -not $self.Substring($a0, $a1 - $a0).Contains($sleep)) 'area V0.4 R2 sem espera real'
+    }
+
+    # ------------------------------------------------------------------ V0.4 R3 (assisted recovery: undo of REC-SVC-START past the gate, through the stop seam, ADR-0016)
+    # The source of every undo is the log of a run of the R2 path made by the same case (New-R3Source, on the R2
+    # simulation, the gate opened only around each call). The undo's stop seam is the case's stand-in (the simulation's
+    # seam: it records the call and applies OnSeam to the row); the default stop seam is never reached (shadowed with a
+    # counter where a case checks it) and the native stop class is never called. Malformed sources are the lines of an R2
+    # log changed and written again through the log writer (Open-AtmCleanLog), so they keep the owner and protected DACL
+    # of a log; plain files check the provenance. No service is opened, started, stopped or changed, no CIM query runs and
+    # nothing waits.
+    function Reset-R3Sim {
+        # The simulation ready for an undo: counters cleared, the row as the last run left it, the stop seam's stand-in
+        # stopping the service, a new undo log path.
+        param($Sim)
+        $Sim.SeamCalls.Clear(); $Sim.Waits.Clear(); $Sim.Presented.Clear(); $Sim.OnWait.Clear()
+        $Sim.SeamResult = 'OK'; $Sim.OnSeam = @{ State = 'Stopped'; ProcessId = 0; ExitCode = [uint32]0; AcceptStop = $false; CheckPoint = [uint32]0; WaitHint = [uint32]0 }
+        $Sim.Undo = Join-Path $Sim.Dir 'undo.jsonl'
+    }
+    function New-R3Source {
+        # A run of the R2 path on the simulation (COMPLETE: RUNNING at the first read; PARTIAL: still pending at the limit,
+        # the exit code already 0), then Reset-R3Sim. Returns the run's result (RunId, PlanId, After).
+        param($Sim, [string]$Kind = 'COMPLETE')
+        if ($Kind -ceq 'PARTIAL') { $Sim.OnSeam = @{ State = 'Start Pending'; CheckPoint = [uint32]1; WaitHint = [uint32]2000; ExitCode = [uint32]0 } }
+        $r = Invoke-R2Open (Get-R2Args $Sim (New-TestCleanOperator))
+        Assert-True ($r.Outcome -ceq $Kind -and @($r.LogErrors).Count -eq 0) "execucao de origem $Kind ($($r.Aborted)$($r.StoppedBy) $($r.Outcome))"
+        Reset-R3Sim $Sim
+        return $r
+    }
+    function Invoke-R3Open {
+        param([hashtable]$Arguments)
+        $script:AtmRecoveryEnabled = $true
+        try { return (Invoke-AtmRecoverUndo @Arguments) } finally { $script:AtmRecoveryEnabled = $false }
+    }
+    function Get-R3Args {
+        param($Sim, $Source, $Operator, [hashtable]$Extra = @{})
+        $a = @{ SourceLog = $Sim.Log; RunId = [string]$Source.RunId; PlanPresenter = $Sim.Presenter; ConfirmationReader = $Operator.Reader; InventoryArgs = $Sim.IA; LogFile = $Sim.Undo
+            Interaction = @{ Caller = 'TEST'; ConsoleRequired = $true }; Providers = @($Sim.Provider); IdentitySource = $Sim.IdSource; ServiceSource = $Sim.Source
+            ServiceDependencySource = $Sim.Deps; ServiceStopImpl = $Sim.Seam; SettleWait = $Sim.Wait }
+        foreach ($k in $Extra.Keys) { $a[$k] = $Extra[$k] }
+        return $a
+    }
+    function Assert-R3NotStopped {
+        # An undo stopped before the stop seam: the code, no seam call, no wait, no outcome and no difference.
+        param($Res, $Sim, [string]$Code, [string]$Label)
+        Assert-True ($Res.Aborted -ceq $Code -and -not $Res.SeamCalled -and $null -eq $Res.Outcome -and $null -eq $Res.StoppedBy -and $Sim.SeamCalls.Count -eq 0 -and $Sim.Waits.Count -eq 0 -and @($Res.Diff).Count -eq 0 -and -not $Res.Changed) "${Label}: $($Res.Aborted) (esperado $Code), seam de parada nao chamado"
+    }
+    function New-R3Log {
+        # A source written through the log writer: the owner and protected DACL of a log, with any lines.
+        param($Sim, [string]$Name, [string[]]$Lines)
+        $p = Join-Path $Sim.Dir $Name
+        $ia = @{} + $Sim.IA; $ia['NoProgress'] = $true
+        $o = Open-AtmCleanLog -Path $p -Inventory (Invoke-AtmInventory @ia) -ProcessUserSid $me.Sid
+        Assert-True ($null -ne $o.Log) "origem montada pelo escritor ($($o.Code))"
+        try {
+            foreach ($l in @($Lines)) { $c = $o.Log.AppendLine($l); Assert-True ($null -eq $c) "linha gravada ($c)" }
+            $null = $o.Log.Close()
+        } finally { $o.Log.Dispose() }
+        return $p
+    }
+    function Get-R3Lines { param([string]$Path) $t = [IO.File]::ReadAllText($Path); return @($t.Substring(0, $t.Length - 1).Split([char]10)) }
+    function Set-R3Running {
+        # The row as a COMPLETE source left it (the recorded "after").
+        param($Sim)
+        $Sim.Row.State = 'Running'; $Sim.Row.ProcessId = 4321; $Sim.Row.ExitCode = [uint32]0; $Sim.Row.AcceptStop = $true; $Sim.Row.CheckPoint = [uint32]0; $Sim.Row.WaitHint = [uint32]0
+    }
+    $r3Types = 'run-start,plan,before,confirmation,plan-check,intent,result,after,run-end'
+    Test-Case 'V0.4 R3' 'R3: constantes fechadas - REC-SVC-STOP so como desfazer (fora do catalogo, de recover list, de recover plan e de Invoke-AtmRecover), o que nao se desfaz, codigos da origem e do desfazer, transicao do PARTIAL (state, checkPoint, waitHint, condition, acceptStop; exitCode fora), erros Win32 da parada, limite de 1 MiB; trava fechada' {
+        Assert-Eq $script:AtmRecoveryEnabled $false 'trava fechada entre os casos'
+        $u = $script:AtmRecoveryUndoOperation
+        Assert-True ($u.Id -ceq 'REC-SVC-STOP' -and $u.UndoOf -ceq 'REC-SVC-START' -and (@($u.NotUndone) -join ',') -ceq 'WHAT_THE_SERVICE_DID_WHILE_RUNNING,STATE_HELD_IN_MEMORY') 'operacao de desfazer e o que ela nao desfaz'
+        Assert-True ($null -eq (Get-AtmRecoveryOperation 'REC-SVC-STOP') -and (@($script:AtmRecoveryCatalog | ForEach-Object { $_.Id }) -join ',') -ceq 'REC-SVC-START') 'REC-SVC-STOP fora do catalogo'
+        $threw = $false
+        try { $null = Get-AtmRecoverPlan -Collection (& $r1Base) -Operation 'REC-SVC-STOP' -Service 'R' } catch { $threw = $true }
+        Assert-True $threw 'recover plan nao aceita REC-SVC-STOP'
+        Assert-True (@((Get-AtmRecoverList -Collection (& $r1Base)).Candidates | Where-Object { $_.Operation -cne 'REC-SVC-START' }).Count -eq 0) 'recover list so oferece REC-SVC-START'
+        Assert-Eq (@($script:AtmRecoveryUndoPartialTransition) -join ',') 'state,checkPoint,waitHint,condition,acceptStop' 'campos da transicao natural do PARTIAL'
+        Assert-True ($script:AtmRecoveryUndoPartialTransition -cnotcontains 'exitCode' -and $script:AtmRecoveryUndoPartialTransition -cnotcontains 'serviceSpecificExitCode') 'codigos de saida fora da transicao (sem regra de transicao no R0)'
+        Assert-Eq (@($script:AtmRecoveryUndoSourceCodes) -join ',') 'UNDO_SOURCE_UNREADABLE,UNDO_SOURCE_NOT_REGULAR,UNDO_SOURCE_TOO_LARGE,UNDO_SOURCE_PROVENANCE,UNDO_SOURCE_INVALID,UNDO_SOURCE_RUN_MISMATCH,UNDO_SOURCE_INCOMPLETE,UNDO_SOURCE_OPERATION_INVALID,UNDO_SOURCE_NOT_STARTED,UNDO_SOURCE_OUTCOME_NOT_UNDOABLE' 'codigos fechados da origem'
+        Assert-Eq (@($script:AtmRecoveryUndoRefusalCodes) -join ',') 'UNDO_STATE_CHANGED,UNDO_STILL_PENDING,UNDO_NOT_RUNNING,UNDO_ACCEPT_STOP_FALSE,UNDO_DEPENDENT_ACTIVE' 'codigos fechados do desfazer'
+        $want = @{ 5 = 'ACCESS_DENIED'; 1051 = 'DEPENDENT_SERVICES_RUNNING'; 1053 = 'SERVICE_REQUEST_TIMEOUT'; 1060 = 'SERVICE_DOES_NOT_EXIST'; 1061 = 'SERVICE_CANNOT_ACCEPT_CTRL'; 1062 = 'SERVICE_NOT_ACTIVE'; 1072 = 'SERVICE_MARKED_FOR_DELETE' }
+        Assert-Eq $script:AtmRecoveryStopWin32Codes.Count $want.Count 'sete erros Win32 da parada'
+        foreach ($k in $want.Keys) { Assert-Eq $script:AtmRecoveryStopWin32Codes[[int]$k] $want[$k] "Win32 $k" }
+        foreach ($v in $script:AtmRecoveryStopWin32Codes.Values) { Assert-True ($script:AtmRecoveryStopSeamCodes -ccontains $v) "mapeado para um codigo do seam de parada: $v" }
+        Assert-True ($script:AtmRecoveryStopSeamCodes.Count -eq 9 -and $script:AtmRecoveryStopSeamCodes[0] -ceq 'OK' -and $script:AtmRecoveryStopSeamCodes -ccontains 'SERVICE_WIN32_OTHER') 'OK, os sete e SERVICE_WIN32_OTHER'
+        Assert-Eq $script:AtmRecoveryUndoSourceMaxBytes 1048576 'origem: no maximo 1 MiB'
+        $s = New-R2Sim 'r3const'
+        if (-not $s) { return }
+        $res = Invoke-R2Open (Get-R2Args $s (New-TestCleanOperator) @{ Operation = 'REC-SVC-STOP' })
+        Assert-R2NotStarted $res $s 'RECOVERY_OPERATION_INVALID' 'Invoke-AtmRecover com REC-SVC-STOP'
+    }
+    Test-Case 'V0.4 R3' 'R3: trava fechada - le a origem, devolve o plano inverso e RECUPERACAO_REAL_DESABILITADA; nada perguntado, travado nem registrado; nenhum inventario, console, espera nem seam de parada (injetado ou padrao); controle positivo com a trava aberta neste processo' {
+        $s = New-R2Sim 'r3closed'
+        if (-not $s) { return }
+        $src = New-R3Source $s
+        $calls = New-Object System.Collections.Generic.List[string]
+        $realInv = ${function:Invoke-AtmInventory}; $realLock = ${function:Invoke-AtmUnderSharedLock}; $realLog = ${function:Open-AtmCleanLog}; $realCon = ${function:Get-AtmEngineConsoleObservation}
+        function Invoke-AtmInventory { $calls.Add('inventory'); & $realInv @args }
+        function Invoke-AtmUnderSharedLock { $calls.Add('lock'); & $realLock @args }
+        function Open-AtmCleanLog { $calls.Add('log'); & $realLog @args }
+        function Get-AtmEngineConsoleObservation { $calls.Add('console'); & $realCon @args }
+        function Invoke-AtmRecoverServiceStopDefault { $calls.Add('default-stop'); 'OK' }
+        function Invoke-AtmRecoverServiceStartDefault { $calls.Add('default-start'); 'OK' }
+        function Wait-AtmRecoverSettle { $calls.Add('wait') }
+        $prevLock = $script:AtmCleanLockName
+        $lockName = New-TestLockName
+        $script:AtmCleanLockName = $lockName
+        try {
+            $op = New-TestCleanOperator
+            $a = Get-R3Args $s $src $op
+            $res = Invoke-AtmRecoverUndo @a
+            Assert-True ($res.Aborted -ceq 'RECUPERACAO_REAL_DESABILITADA' -and -not $res.GateOpen -and $res.Plan.Offered -and $res.PlanId -cmatch '^[0-9a-f]{64}$' -and $res.PlanId -cne $src.PlanId -and $res.Plan.Operation.Id -ceq 'REC-SVC-STOP' -and $res.SourceRunId -ceq $src.RunId -and $res.SourceOutcome -ceq 'COMPLETE' -and $res.Target -ceq 'R' -and $res.Before.State -ceq 'RUNNING') "trava fechada: plano inverso e codigo de parada ($($res.Aborted))"
+            Assert-True ($null -eq $res.Phrase -and $null -eq $res.RunId -and $null -eq $res.LogFile -and -not $res.LogCreated -and -not $res.SeamCalled -and $null -eq $res.Outcome -and -not $res.Changed -and -not $res.Plan.Changed) 'sem frase, execucao, log, seam nem desfecho'
+            Assert-True ($s.Presented.Count -eq 1 -and $op.Calls.Count -eq 0 -and $s.SeamCalls.Count -eq 0 -and $s.Waits.Count -eq 0) 'plano apresentado; nada perguntado; seam injetado e espera em 0'
+            Assert-Eq ($calls -join ',') '' 'nenhum inventario, console, lock, log, seam padrao nem espera'
+            Assert-True (-not (Test-Path -LiteralPath $s.Undo)) 'nenhum log criado'
+            $m = $null
+            Assert-True (-not [Threading.Mutex]::TryOpenExisting($lockName, [ref]$m)) 'mutex B8 nao existe depois da chamada'
+            $a = Get-R3Args $s $src $op @{ RunId = [guid]::NewGuid().ToString() }
+            $res = Invoke-AtmRecoverUndo @a
+            Assert-True ($res.Aborted -ceq 'RECUPERACAO_REAL_DESABILITADA' -and (@($res.RefusalCodes) -join ',') -ceq 'UNDO_SOURCE_RUN_MISMATCH' -and $null -eq $res.PlanId -and -not $res.Plan.Offered -and $s.Presented.Count -eq 2 -and $op.Calls.Count -eq 0) "trava fechada com origem recusada: o codigo no plano ($(@($res.RefusalCodes) -join ','))"
+            Assert-Eq ($calls -join ',') '' 'origem recusada: nada alem da leitura'
+            # Positive controls, gate open in this process: the injected stop seam counts one call; without it the default
+            # stop seam (shadowed above: nothing is stopped) is reached once, after the console, the inventory, the lock and
+            # the log; the start seams are never reached.
+            $op = New-TestCleanOperator
+            $res = Invoke-R3Open (Get-R3Args $s $src $op)
+            Assert-True ($res.GateOpen -and $res.SeamCalled -and $s.SeamCalls.Count -eq 1 -and $res.Outcome -ceq 'COMPLETE' -and ($op.Calls -join ',') -ceq 'confirm|') "controle positivo: seam de parada injetado chamado uma vez ($($res.Aborted) $($res.Outcome))"
+            Assert-Eq ($calls -join ',') 'console,inventory,lock,log' 'controle positivo: console, inventario, lock e log so com a trava aberta'
+            $calls.Clear(); Set-R3Running $s
+            $a = Get-R3Args $s $src (New-TestCleanOperator) @{ LogFile = ($s.Undo + '.default') }; $a.Remove('ServiceStopImpl')
+            $res = Invoke-R3Open $a
+            Assert-True ($res.SeamCalled -and $res.SeamCode -ceq 'OK' -and $s.SeamCalls.Count -eq 1 -and $res.Outcome -ceq 'FAILED' -and $res.After.State -ceq 'RUNNING') "sem seam injetado: o padrao, nunca o injetado ($($res.SeamCode) $($res.Outcome))"
+            Assert-Eq ($calls -join ',') 'console,inventory,lock,log,default-stop' 'seam padrao de parada alcancado uma vez, so com a trava aberta; nenhum seam de inicio'
+            Assert-Eq @(Get-R2Record ($s.Undo + '.default') 'intent')[0].seam 'DEFAULT' 'intent registra o seam padrao'
+        } finally { $script:AtmRecoveryEnabled = $false; $script:AtmCleanLockName = $prevLock }
+        Assert-Eq $script:AtmRecoveryEnabled $false 'trava fechada de novo'
+    }
+    Test-Case 'V0.4 R3' 'R3: o caminho do R2 nunca alcanca o seam de parada (contador no seam padrao de parada, com controle positivo pelo desfazer)' {
+        $s = New-R2Sim 'r3r2'
+        if (-not $s) { return }
+        $stops = New-Object System.Collections.Generic.List[string]
+        function Invoke-AtmRecoverServiceStopDefault { $stops.Add('stop'); 'OK' }
+        $src = New-R3Source $s
+        Assert-True ($src.SeamCalled -and $stops.Count -eq 0) "inicio COMPLETE sem chamar o seam de parada ($($stops.Count))"
+        $a = Get-R3Args $s $src (New-TestCleanOperator); $a.Remove('ServiceStopImpl')
+        $res = Invoke-R3Open $a
+        Assert-True ($res.SeamCalled -and $stops.Count -eq 1) "controle positivo: o desfazer alcanca o seam padrao de parada (sombreado) uma vez ($($stops.Count))"
+    }
+    Test-Case 'V0.4 R3' 'R3 desfecho COMPLETE: origem COMPLETE do R2; seam de parada chamado uma vez so com o nome; STOPPED na primeira leitura; frase PARAR SERVICO ligada ao plan id do desfazer; after, diferenca campo a campo e os nove registros do log, nesta ordem, com o run id de origem em campo proprio; DACL protegida' {
+        $s = New-R2Sim 'r3complete'
+        if (-not $s) { return }
+        $src = New-R3Source $s
+        $op = New-TestCleanOperator
+        $res = Invoke-R3Open (Get-R3Args $s $src $op)
+        Assert-True ($null -eq $res.Aborted -and $null -eq $res.StoppedBy -and $res.Outcome -ceq 'COMPLETE' -and $res.SeamCode -ceq 'OK' -and $null -eq $res.ExceptionType -and $res.Changed -and @($res.LogErrors).Count -eq 0) "COMPLETE ($($res.Aborted)$($res.StoppedBy) $($res.Outcome))"
+        Assert-True ($res.Phrase -cmatch '^PARAR SERVICO [0-9A-F]{8}$' -and $res.Phrase -ceq ('PARAR SERVICO ' + $res.PlanId.Substring(0, 8).ToUpperInvariant()) -and ($op.Calls -join ',') -ceq 'confirm|' -and ($op.Phrases -join ',') -ceq $res.Phrase) "frase ligada ao plan id ($($res.Phrase))"
+        Assert-True ($res.PlanId -cne $src.PlanId -and $res.PlanId -ceq (Get-AtmRecoverUndoPlanId -Target 'R' -SourceRunId $src.RunId -Capture $res.Before)) 'plan id do desfazer: proprio, sobre a operacao, o alvo, o run id de origem e a captura'
+        Assert-True ($s.SeamCalls.Count -eq 1 -and $s.SeamCalls[0].Name -ceq 'R' -and $s.SeamCalls[0].Extra -eq 0 -and $s.SeamCalls[0].StateAtCall -ceq 'Running') 'seam de parada chamado uma vez, so com o nome do servico'
+        Assert-True ($s.Waits.Count -eq 0 -and $res.WaitedMs -eq 0 -and $res.Reads -eq 1 -and $s.Presented.Count -eq 1) "STOPPED na primeira leitura, sem pausa ($($res.Reads))"
+        Assert-True ($res.Before.State -ceq 'RUNNING' -and $res.After.State -ceq 'STOPPED' -and $res.After.AcceptStop -ceq 'FALSE' -and $res.After.Executable -ceq $res.Before.Executable) 'captura before e after'
+        $df = @($res.Diff | ForEach-Object { $_.field })
+        foreach ($fld in @('state', 'acceptStop', 'condition')) { Assert-True ($df -ccontains $fld) "diferenca campo a campo: $fld ($($df -join ','))" }
+        foreach ($fld in @('startMode', 'executable', 'image', 'account')) { Assert-True ($df -cnotcontains $fld) "campo igual fora da diferenca: $fld" }
+        $lg = Read-TestCleanLogFile $s.Undo
+        Assert-Eq (@($lg.Records | ForEach-Object { $_.type }) -join ',') $r3Types 'registros do log (secao 3), nesta ordem'
+        Assert-True (@($lg.Records | Where-Object { $_.schema -cne 'atm.recoverlog/1' -or $_.runId -cne $res.RunId }).Count -eq 0 -and $res.RunId -cne $src.RunId -and -not $lg.Bom -and $lg.EndsLf -and -not $lg.Cr) 'esquema, run id novo, UTF-8 sem BOM, LF'
+        Assert-Eq (@($lg.Records | ForEach-Object { $_.recSeq }) -join ',') '1,2,3,4,5,6,7,8,9' 'recSeq consecutivo'
+        $rec = @{}; foreach ($r in $lg.Records) { $rec[$r.type] = $r }
+        $rs = $rec['run-start']
+        Assert-True ($rs.operation -ceq 'REC-SVC-STOP' -and $rs.undoOf -ceq 'REC-SVC-START' -and $rs.target -ceq 'R' -and $rs.planId -ceq $res.PlanId -and $rs.sourceRunId -ceq $src.RunId -and $rs.sourceOutcome -ceq 'COMPLETE' -and $rs.gateOpen -eq $true) 'run-start com o run id de origem em campo proprio'
+        Assert-True ($rec['plan'].operation -ceq 'REC-SVC-STOP' -and (@($rec['plan'].notUndone) -join ',') -ceq 'WHAT_THE_SERVICE_DID_WHILE_RUNNING,STATE_HELD_IN_MEMORY' -and @($rec['plan'].acceptedTransition).Count -eq 0 -and $rec['plan'].sourceRunId -ceq $src.RunId -and $rec['plan'].provider -ceq 'test-rec') 'plan: o que nao se desfaz; nenhuma transicao aceita (origem COMPLETE)'
+        Assert-True ($rec['before'].state -ceq 'RUNNING' -and $rec['after'].state -ceq 'STOPPED') 'before e after no log'
+        Assert-True ($rec['confirmation'].accepted -eq $true -and $rec['confirmation'].planId -ceq $res.PlanId -and $rec['plan-check'].matched -eq $true -and @($rec['plan-check'].reasons).Count -eq 0 -and @($rec['plan-check'].changedFields).Count -eq 0) 'confirmation e plan-check'
+        Assert-True ($rec['intent'].operation -ceq 'REC-SVC-STOP' -and $rec['intent'].seam -ceq 'TEST_SEAM' -and $rec['intent'].sourceRunId -ceq $src.RunId -and $rec['intent'].planId -ceq $res.PlanId) 'intent antes do seam de parada'
+        Assert-True ($rec['result'].outcome -ceq 'COMPLETE' -and $rec['result'].seamCode -ceq 'OK' -and $rec['result'].reads -eq 1 -and (@($rec['result'].diff | ForEach-Object { $_.field }) -join ',') -ceq ($df -join ',')) 'result com a diferenca'
+        Assert-True ($rec['run-end'].outcome -ceq 'COMPLETE' -and $rec['run-end'].seamCalled -eq $true -and $null -eq $rec['run-end'].stoppedBy) 'run-end'
+        Assert-True ((Get-Acl -LiteralPath $s.Undo).AreAccessRulesProtected) 'DACL protegida (escritor do T1)'
+        Assert-Eq (Get-R2Types $s.Log) $r2Types 'log de origem intacto'
+    }
+    Test-Case 'V0.4 R3' 'R3 desfecho PARTIAL: ainda pendente na parada ao fim da espera (limite de 5 s); after pendente, diferenca e registros' {
+        $s = New-R2Sim 'r3partial'
+        if (-not $s) { return }
+        $src = New-R3Source $s
+        $s.OnSeam = @{ State = 'Stop Pending'; CheckPoint = [uint32]1; WaitHint = [uint32]2000 }
+        $res = Invoke-R3Open (Get-R3Args $s $src (New-TestCleanOperator))
+        Assert-True ($res.Outcome -ceq 'PARTIAL' -and $res.SeamCode -ceq 'OK' -and $null -eq $res.StoppedBy -and $res.After.State -ceq 'PENDING' -and $res.WaitedMs -ge 500 -and $res.WaitedMs -le 5000 -and $s.Waits.Count -ge 1) "PARTIAL ($($res.Outcome) $($res.After.State) $($res.WaitedMs))"
+        Assert-True (@($res.Diff | ForEach-Object { $_.field }) -ccontains 'state' -and (Get-R2Types $s.Undo) -ceq $r3Types -and @(Get-R2Record $s.Undo 'result')[0].limitMs -eq 5000) 'diferenca, nove registros e limite'
+    }
+    Test-Case 'V0.4 R3' 'R3 desfecho FAILED: de volta a RUNNING depois de uma leitura pendente; e RUNNING ate o limite sem nunca sair'  {
+        $s = New-R2Sim 'r3back'
+        if (-not $s) { return }
+        $src = New-R3Source $s
+        $s.OnSeam = @{ State = 'Stop Pending'; CheckPoint = [uint32]1; WaitHint = [uint32]2000 }
+        [void]$s.OnWait.Add(@{ State = 'Running'; CheckPoint = [uint32]0; WaitHint = [uint32]0 })
+        $res = Invoke-R3Open (Get-R3Args $s $src (New-TestCleanOperator))
+        Assert-True ($res.Outcome -ceq 'FAILED' -and $res.SeamCode -ceq 'OK' -and $res.After.State -ceq 'RUNNING' -and $res.Reads -eq 2 -and ($s.Waits -join ',') -ceq '500') "de volta a RUNNING: FAILED na segunda leitura ($($res.Outcome) $($res.Reads))"
+        $t = New-R2Sim 'r3never'
+        if (-not $t) { return }
+        $src2 = New-R3Source $t
+        $t.OnSeam = @{}
+        $res = Invoke-R3Open (Get-R3Args $t $src2 (New-TestCleanOperator))
+        Assert-True ($res.Outcome -ceq 'FAILED' -and $res.SeamCode -ceq 'OK' -and $res.After.State -ceq 'RUNNING' -and $t.Waits.Count -ge 1 -and $res.WaitedMs -ge 500 -and @($res.Diff).Count -eq 0 -and -not $res.Changed) "sempre RUNNING: espera ate o limite, FAILED ($($res.Outcome) $($res.WaitedMs))"
+        foreach ($x in @($s, $t)) { Assert-Eq (Get-R2Types $x.Undo) $r3Types 'nove registros' }
+    }
+    Test-Case 'V0.4 R3' 'R3 cada resultado do seam de parada: ACCESS_DENIED -> REFUSED; DEPENDENT_SERVICES_RUNNING e os outros erros Win32 -> FAILED sem espera; excecao -> EXCEPTION so pelo tipo; resultado fora do conjunto (inclusive um codigo do seam de inicio) -> EXCEPTION SEAM_RESULT_INVALID; after, diferenca e ordem do log em todos' {
+        $s = New-R2Sim 'r3codes'
+        if (-not $s) { return }
+        $src = New-R3Source $s
+        $s.OnSeam = @{}
+        $n = 0
+        $cases = @(@('ACCESS_DENIED', 'REFUSED', $null), @('DEPENDENT_SERVICES_RUNNING', 'FAILED', $null), @('SERVICE_REQUEST_TIMEOUT', 'FAILED', $null), @('SERVICE_DOES_NOT_EXIST', 'FAILED', $null),
+            @('SERVICE_CANNOT_ACCEPT_CTRL', 'FAILED', $null), @('SERVICE_NOT_ACTIVE', 'FAILED', $null), @('SERVICE_MARKED_FOR_DELETE', 'FAILED', $null), @('SERVICE_WIN32_OTHER', 'FAILED', $null),
+            @({ throw (New-Object InvalidOperationException('r3-exception-text')) }, 'EXCEPTION', 'InvalidOperationException'), @('BOGUS', 'EXCEPTION', 'SEAM_RESULT_INVALID'),
+            @('SERVICE_ALREADY_RUNNING', 'EXCEPTION', 'SEAM_RESULT_INVALID'), @({ 5 }, 'EXCEPTION', 'SEAM_RESULT_INVALID'))
+        foreach ($c in $cases) {
+            $n++
+            $log = $s.Undo + '.c' + $n
+            $calls0 = $s.SeamCalls.Count
+            $s.SeamResult = $c[0]
+            $res = Invoke-R3Open (Get-R3Args $s $src (New-TestCleanOperator) @{ LogFile = $log })
+            $label = $(if ($c[0] -is [scriptblock]) { 'seam ' + $c[2] } else { [string]$c[0] })
+            Assert-True ($res.Outcome -ceq $c[1] -and $res.SeamCalled -and $s.SeamCalls.Count -eq $calls0 + 1 -and $null -eq $res.StoppedBy) "${label}: $($res.Outcome) (esperado $($c[1]))"
+            if ($null -eq $c[2]) { Assert-True ($res.SeamCode -ceq $c[0] -and $null -eq $res.ExceptionType) "${label}: codigo fechado registrado" }
+            else { Assert-True ($null -eq $res.SeamCode -and $res.ExceptionType -ceq $c[2]) "${label}: so o tipo ($($res.ExceptionType))" }
+            Assert-True ($res.Reads -eq 1 -and $res.WaitedMs -eq 0 -and $s.Waits.Count -eq 0 -and $res.After.State -ceq 'RUNNING' -and @($res.Diff).Count -eq 0) "${label}: sem espera; after lido; nenhuma diferenca"
+            Assert-Eq (Get-R2Types $log) $r3Types "${label}: nove registros, nesta ordem"
+            $rr = @(Get-R2Record $log 'result')[0]
+            Assert-True ($rr.outcome -ceq $c[1] -and $rr.seamCode -ceq $res.SeamCode -and $rr.exceptionType -ceq $res.ExceptionType) "${label}: result"
+            Assert-True (-not ([IO.File]::ReadAllText($log)).Contains('r3-exception-text')) "${label}: nenhuma mensagem de excecao no log"
+        }
+    }
+    Test-Case 'V0.4 R3' 'R3 origem recusada (cada falha): inexistente, relativa, curinga, ponto de reparse no caminho, acima de 1 MiB, procedencia (arquivo comum, inclusive copia do log), JSON invalido, esquema, run id divergente (linha e -RunId), recSeq com lacuna, registro duplicado, desconhecido, chave duplicada, dado depois do JSON, linha a mais, sequencia incompleta, vazia, outra operacao, desfecho divergente -> UNDO_SOURCE_REFUSED com o codigo; nada coletado, apresentado nem perguntado; seam nao chamado; nenhum log' {
+        $s = New-R2Sim 'r3src'
+        if (-not $s) { return }
+        $src = New-R3Source $s
+        $rid = [string]$src.RunId
+        $lines = Get-R3Lines $s.Log
+        Assert-Eq $lines.Count 9 'origem com nove registros'
+        $ctr = @{ N = 0 }
+        $check = {
+            param([string]$Path, [string]$RunId, [string]$Code, [string]$Label)
+            $ctr.N++
+            $log = $s.Undo + '.s' + $ctr.N
+            $reads0 = $s.Reads
+            $op = New-TestCleanOperator
+            $res = Invoke-R3Open (Get-R3Args $s $src $op @{ SourceLog = $Path; RunId = $RunId; LogFile = $log })
+            Assert-R3NotStopped $res $s 'UNDO_SOURCE_REFUSED' $Label
+            Assert-True ((@($res.RefusalCodes) -join ',') -ceq $Code -and $null -eq $res.PlanId -and $op.Calls.Count -eq 0 -and $s.Presented.Count -eq 0 -and $s.Reads -eq $reads0 -and $null -eq $res.RunId -and -not (Test-Path -LiteralPath $log)) "${Label}: $(@($res.RefusalCodes) -join ',') (esperado $Code); nada coletado, apresentado, perguntado nem registrado"
+            Assert-Eq (Read-AtmRecoverRunLog -Path $Path -RunId $RunId).Code $Code "${Label}: leitor direto"
+        }
+        $edit = { param([int]$I, [string]$From, [string]$To) $c = @($lines); Assert-True ($c[$I].Contains($From)) "linha $I contem $From"; $c[$I] = $c[$I].Replace($From, $To); $c }
+        Assert-Eq (Read-AtmRecoverRunLog -Path $s.Log -RunId $rid).Code $null 'controle positivo: a origem verdadeira e aceita'
+        & $check (Join-Path $s.Dir 'nao-existe.jsonl') $rid 'UNDO_SOURCE_UNREADABLE' 'arquivo inexistente'
+        & $check 'recover.jsonl' $rid 'UNDO_SOURCE_UNREADABLE' 'caminho relativo'
+        & $check (Join-Path $s.Dir '*.jsonl') $rid 'UNDO_SOURCE_UNREADABLE' 'curinga'
+        $j = Join-Path $sandbox ('r3-junction-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Junction $j $s.Dir
+        & $check (Join-Path $j 'recover.jsonl') $rid 'UNDO_SOURCE_NOT_REGULAR' 'ponto de reparse no caminho'
+        $big = Join-Path $s.Dir 'grande.jsonl'; [IO.File]::WriteAllBytes($big, (New-Object byte[] 1048577))
+        & $check $big $rid 'UNDO_SOURCE_TOO_LARGE' 'acima de 1 MiB'
+        $cap = Join-Path $s.Dir 'limite.jsonl'; [IO.File]::WriteAllBytes($cap, (New-Object byte[] 1048576))
+        & $check $cap $rid 'UNDO_SOURCE_PROVENANCE' 'exatamente 1 MiB passa do limite (arquivo comum: procedencia)'
+        $copy = Join-Path $s.Dir 'copia.jsonl'; [IO.File]::WriteAllBytes($copy, [IO.File]::ReadAllBytes($s.Log))
+        & $check $copy $rid 'UNDO_SOURCE_PROVENANCE' 'copia comum do log (dono e DACL de um arquivo comum)'
+        Assert-Eq (Read-AtmRecoverRunLog -Path (New-R3Log $s 'reescrita.jsonl' $lines) -RunId $rid).Code $null 'controle positivo: as mesmas linhas pelo escritor sao aceitas'
+        & $check (New-R3Log $s 'json.jsonl' @($lines[0..2] + @($lines[3].Substring(0, $lines[3].Length - 1)) + $lines[4..8])) $rid 'UNDO_SOURCE_INVALID' 'JSON invalido numa linha'
+        & $check (New-R3Log $s 'esquema.jsonl' @(& $edit 0 '"schema":"atm.recoverlog/1"' '"schema":"atm.recoverlog/2"')) $rid 'UNDO_SOURCE_INVALID' 'esquema'
+        & $check (New-R3Log $s 'runid.jsonl' @(& $edit 4 $rid ([guid]::NewGuid().ToString()))) $rid 'UNDO_SOURCE_INVALID' 'run id divergente numa linha'
+        & $check $s.Log ([guid]::NewGuid().ToString()) 'UNDO_SOURCE_RUN_MISMATCH' '-RunId de outra execucao'
+        & $check $s.Log $rid.ToUpperInvariant() 'UNDO_SOURCE_RUN_MISMATCH' '-RunId em outra grafia'
+        & $check $s.Log 'nao-e-um-guid' 'UNDO_SOURCE_RUN_MISMATCH' '-RunId fora do formato'
+        & $check (New-R3Log $s 'lacuna.jsonl' @($lines[0..1] + $lines[3..8])) $rid 'UNDO_SOURCE_INVALID' 'recSeq com lacuna'
+        & $check (New-R3Log $s 'duplicado.jsonl' @(& $edit 2 '"type":"before"' '"type":"plan"')) $rid 'UNDO_SOURCE_INVALID' 'registro duplicado'
+        & $check (New-R3Log $s 'desconhecido.jsonl' @(& $edit 2 '"type":"before"' '"type":"bogus"')) $rid 'UNDO_SOURCE_INVALID' 'registro desconhecido'
+        & $check (New-R3Log $s 'chave.jsonl' @(& $edit 0 '{"schema":' '{"schema":"atm.recoverlog/1","schema":')) $rid 'UNDO_SOURCE_INVALID' 'chave duplicada'
+        & $check (New-R3Log $s 'resto.jsonl' @($lines[0..7] + @($lines[8] + ' 1'))) $rid 'UNDO_SOURCE_INVALID' 'dado depois do JSON'
+        & $check (New-R3Log $s 'mais.jsonl' @($lines + @($lines[8]))) $rid 'UNDO_SOURCE_INVALID' 'linha a mais'
+        & $check (New-R3Log $s 'incompleta.jsonl' @($lines[0..5])) $rid 'UNDO_SOURCE_INCOMPLETE' 'sequencia incompleta (parou antes do run-end)'
+        & $check (New-R3Log $s 'vazia.jsonl' @()) $rid 'UNDO_SOURCE_INCOMPLETE' 'origem vazia'
+        $other = @($lines | ForEach-Object { $_.Replace('"operation":"REC-SVC-START"', '"operation":"REC-SVC-STOP"') })
+        & $check (New-R3Log $s 'operacao.jsonl' $other) $rid 'UNDO_SOURCE_OPERATION_INVALID' 'outra operacao'
+        & $check (New-R3Log $s 'desfecho.jsonl' @(& $edit 8 '"outcome":"COMPLETE"' '"outcome":"PARTIAL"')) $rid 'UNDO_SOURCE_INVALID' 'desfecho do result diferente do run-end'
+        & $check (New-R3Log $s 'after.jsonl' @(& $edit 7 '"state":"RUNNING"' '"state":5')) $rid 'UNDO_SOURCE_INVALID' 'after com um campo fora do tipo'
+        Assert-True ($s.SeamCalls.Count -eq 0 -and $s.Presented.Count -eq 0) 'em nenhum caso o seam foi chamado ou o plano apresentado'
+    }
+    Test-Case 'V0.4 R3' 'R3 origem com desfecho que nao se desfaz (logs reais do R2): FAILED por codigo do seam, FAILED de volta a STOPPED, REFUSED, EXCEPTION -> UNDO_SOURCE_OUTCOME_NOT_UNDOABLE; parada antes do seam (frase recusada, revalidacao recusada) -> UNDO_SOURCE_NOT_STARTED; nada perguntado, seam nao chamado' {
+        $cases = @(
+            @{ Key = 'failed'; Want = 'FAILED'; Code = 'UNDO_SOURCE_OUTCOME_NOT_UNDOABLE'; Prep = { param($x) $x.SeamResult = 'SERVICE_DISABLED'; $x.OnSeam = @{} } }
+            @{ Key = 'back'; Want = 'FAILED'; Code = 'UNDO_SOURCE_OUTCOME_NOT_UNDOABLE'; Prep = { param($x) $x.OnSeam = @{ State = 'Start Pending'; CheckPoint = [uint32]1; WaitHint = [uint32]2000 }; [void]$x.OnWait.Add(@{ State = 'Stopped'; CheckPoint = [uint32]0; WaitHint = [uint32]0 }) } }
+            @{ Key = 'refused'; Want = 'REFUSED'; Code = 'UNDO_SOURCE_OUTCOME_NOT_UNDOABLE'; Prep = { param($x) $x.SeamResult = 'ACCESS_DENIED'; $x.OnSeam = @{} } }
+            @{ Key = 'exc'; Want = 'EXCEPTION'; Code = 'UNDO_SOURCE_OUTCOME_NOT_UNDOABLE'; Prep = { param($x) $x.SeamResult = { throw (New-Object InvalidOperationException('r3')) } } }
+            @{ Key = 'phrase'; Want = $null; Code = 'UNDO_SOURCE_NOT_STARTED'; Answer = 'PARAR SERVICO 00000000' }
+            @{ Key = 'reval'; Want = $null; Code = 'UNDO_SOURCE_NOT_STARTED'; Answer = { param($ph) $null = $null } }
+        )
+        foreach ($c in $cases) {
+            $x = New-R2Sim ('r3o-' + $c.Key)
+            if (-not $x) { return }
+            if ($c.ContainsKey('Prep')) { $null = & $c.Prep $x }
+            $op = New-TestCleanOperator
+            if ($c.Key -ceq 'reval') { $xx = $x; $op = New-TestCleanOperator -Answers @{ confirm = { param($ph) $xx.Row.StartMode = 'Auto'; $null }.GetNewClosure() } }
+            elseif ($c.ContainsKey('Answer')) { $op = New-TestCleanOperator -Answers @{ confirm = $c.Answer } }
+            $r = Invoke-R2Open (Get-R2Args $x $op)
+            Assert-True ($r.Outcome -ceq $c.Want -and ($null -ne $c.Want -or -not $r.SeamCalled)) "$($c.Key): execucao de origem $($r.Aborted) $($r.Outcome)"
+            Reset-R3Sim $x
+            $op = New-TestCleanOperator
+            $res = Invoke-R3Open (Get-R3Args $x $r $op)
+            Assert-R3NotStopped $res $x 'UNDO_SOURCE_REFUSED' $c.Key
+            Assert-True ((@($res.RefusalCodes) -join ',') -ceq $c.Code -and $op.Calls.Count -eq 0 -and $x.Presented.Count -eq 0 -and -not (Test-Path -LiteralPath $x.Undo)) "$($c.Key): $(@($res.RefusalCodes) -join ',') (esperado $($c.Code))"
+        }
+    }
+    # The criteria of the inverse plan, one case per refusal: Setup before the source run, Change after it (the state the
+    # undo finds), Kind of the source (COMPLETE by default), Deps an injected dependency source for the undo. Codes: every
+    # one present; Exact: the codes exactly; Fields: the changed fields exactly. Offered: the undo is offered and runs.
+    $r3SysUser = { param($x, [string]$State, [string]$Path = $null) $x.Links = @([pscustomobject]@{ Antecedent = 'R'; Dependent = 'SysUser' }); $x.Related = @([pscustomobject]@{ Name = 'SysUser'; State = $State; PathName = $(if ($Path) { $Path } else { $x.SysPath }) }) }
+    $r3Natural = { param($x) $x.Row.State = 'Running'; $x.Row.ProcessId = 4321; $x.Row.CheckPoint = [uint32]0; $x.Row.WaitHint = [uint32]0; $x.Row.AcceptStop = $true }
+    $r3Criteria = @(
+        @{ Key = 'state'; Why = 'pausado por outro'; Change = { param($x) $x.Row.State = 'Paused' }; Codes = @('UNDO_NOT_RUNNING', 'UNDO_STATE_CHANGED'); Fields = 'state' }
+        @{ Key = 'stopped'; Why = 'parado por outro'; Change = { param($x) $x.Row.State = 'Stopped'; $x.Row.ProcessId = 0 }; Codes = @('UNDO_NOT_RUNNING', 'UNDO_STATE_CHANGED'); Has = @('state') }
+        @{ Key = 'pending'; Why = 'parando por outro (estado e condicao)'; Change = { param($x) $x.Row.State = 'Stop Pending'; $x.Row.CheckPoint = [uint32]1; $x.Row.WaitHint = [uint32]2000 }; Codes = @('UNDO_NOT_RUNNING', 'UNDO_STATE_CHANGED'); Has = @('state', 'condition', 'checkPoint', 'waitHint') }
+        @{ Key = 'startmode'; Why = 'modo de inicio'; Change = { param($x) $x.Row.StartMode = 'Auto' }; Exact = 'UNDO_STATE_CHANGED'; Fields = 'startMode' }
+        @{ Key = 'delayed'; Why = 'inicio atrasado'; Change = { param($x) $x.Row.DelayedAutoStart = $true }; Exact = 'UNDO_STATE_CHANGED'; Fields = 'delayedAutoStart' }
+        @{ Key = 'exitcode'; Why = 'codigo de saida'; Change = { param($x) $x.Row.ExitCode = [uint32]1066 }; Exact = 'UNDO_STATE_CHANGED'; Fields = 'exitCode' }
+        @{ Key = 'ssexit'; Why = 'codigo de saida do servico'; Change = { param($x) $x.Row.ServiceSpecificExitCode = [uint32]5 }; Exact = 'UNDO_STATE_CHANGED'; Fields = 'serviceSpecificExitCode' }
+        @{ Key = 'checkpoint'; Why = 'checkpoint'; Change = { param($x) $x.Row.CheckPoint = [uint32]3 }; Exact = 'UNDO_STATE_CHANGED'; Fields = 'checkPoint' }
+        @{ Key = 'waithint'; Why = 'wait hint'; Change = { param($x) $x.Row.WaitHint = [uint32]1000 }; Exact = 'UNDO_STATE_CHANGED'; Fields = 'waitHint' }
+        @{ Key = 'acceptstop'; Why = 'deixou de aceitar parada'; Change = { param($x) $x.Row.AcceptStop = $false }; Exact = 'UNDO_ACCEPT_STOP_FALSE,UNDO_STATE_CHANGED'; Fields = 'acceptStop' }
+        @{ Key = 'account'; Why = 'conta do servico'; Change = { param($x) $x.Row.StartName = 'NT AUTHORITY\LocalService' }; Codes = @('UNDO_STATE_CHANGED'); Has = @('account') }
+        @{ Key = 'executable'; Why = 'outro executavel'; Change = { param($x) $x.Row.PathName = "`"$env:SystemRoot\System32\other.exe`" -k test" }; Codes = @('UNDO_STATE_CHANGED'); Has = @('executable') }
+        @{ Key = 'image'; Why = 'a imagem declarada nao casa mais'; Change = { param($x) $x.Hints = @([pscustomobject]@{ Name = 'R'; Role = $null; ExpectedImage = '%SystemRoot%\System32\other.exe' }) }; Codes = @('RECOVERY_IMAGE_MISMATCH', 'UNDO_STATE_CHANGED'); Has = @('image') }
+        @{ Key = 'dependson'; Why = 'uma dependencia nova'; Change = { param($x) $x.Links = @([pscustomobject]@{ Antecedent = 'SysDep'; Dependent = 'R' }); $x.Related = @([pscustomobject]@{ Name = 'SysDep'; State = 'Running'; PathName = $x.SysPath }) }; Exact = 'UNDO_STATE_CHANGED'; Fields = 'dependsOn' }
+        @{ Key = 'dependents'; Why = 'um dependente novo, parado'; Change = { param($x) & $r3SysUser $x 'Stopped' }; Exact = 'UNDO_STATE_CHANGED'; Fields = 'dependents' }
+        @{ Key = 'notdeclared'; Why = 'o alvo deixou de ser declarado'; Change = { param($x) $x.Hints = @([pscustomobject]@{ Name = 'R9'; Role = $null; ExpectedImage = $x.Img }) }; Exact = 'RECOVERY_NOT_DECLARED'; Fields = '' }
+        @{ Key = 'noimage'; Why = 'a imagem deixou de ser declarada'; Change = { param($x) $x.Hints = @([pscustomobject]@{ Name = 'R'; Role = $null; ExpectedImage = $null }) }; Codes = @('RECOVERY_IMAGE_NOT_DECLARED') }
+        @{ Key = 'deprunning'; Why = 'dependente RUNNING (ja no after)'; Setup = { param($x) & $r3SysUser $x 'Running' }; Exact = 'UNDO_DEPENDENT_ACTIVE'; Fields = '' }
+        @{ Key = 'deppaused'; Why = 'dependente PAUSED (ja no after)'; Setup = { param($x) & $r3SysUser $x 'Paused' }; Exact = 'UNDO_DEPENDENT_ACTIVE'; Fields = '' }
+        @{ Key = 'deppending'; Why = 'dependente PENDING (ja no after)'; Setup = { param($x) & $r3SysUser $x 'Start Pending' }; Exact = 'UNDO_DEPENDENT_ACTIVE'; Fields = '' }
+        @{ Key = 'dephidden'; Why = 'dependente oculto (*) RUNNING (ja no after)'; Setup = { param($x) & $r3SysUser $x 'Running' "`"$svcUser\x\dep.exe`" -k r3" }; Exact = 'UNDO_DEPENDENT_ACTIVE'; Fields = ''; Label = '*|RUNNING' }
+        @{ Key = 'depunreadable'; Why = 'dependente UNREADABLE'; Setup = { param($x) & $r3SysUser $x 'Stopped' }; Change = { param($x) & $r3SysUser $x 'Weird' }; Codes = @('RECOVERY_DEPENDENCIES_UNREADABLE', 'UNDO_DEPENDENT_ACTIVE', 'UNDO_STATE_CHANGED'); Has = @('dependents') }
+        @{ Key = 'depnotlisted'; Why = 'dependente NOT_LISTED'; Setup = { param($x) & $r3SysUser $x 'Stopped' }; Change = { param($x) $x.Related = @() }; Codes = @('RECOVERY_DEPENDENCIES_UNREADABLE', 'UNDO_DEPENDENT_ACTIVE', 'UNDO_STATE_CHANGED'); Has = @('dependents') }
+        @{ Key = 'depcapped'; Why = 'dependente NOT_QUERIED (acima do teto)'; Setup = { param($x) & $r3SysUser $x 'Stopped' }
+            Deps = { param($Names) [pscustomobject]@{ Links = @([pscustomobject]@{ Antecedent = 'R'; Dependent = 'SysUser' }); Related = @(); RelatedFailed = $null; Capped = @('SysUser') } }
+            Codes = @('RECOVERY_DEPENDENCIES_CAPPED', 'UNDO_DEPENDENT_ACTIVE', 'UNDO_STATE_CHANGED'); Has = @('dependents') }
+        @{ Key = 'depstopped'; Why = 'controle: dependente STOPPED'; Setup = { param($x) & $r3SysUser $x 'Stopped' }; Offered = $true }
+        @{ Key = 'dephiddenstopped'; Why = 'controle: dependente oculto (*) STOPPED'; Setup = { param($x) & $r3SysUser $x 'Stopped' "`"$svcUser\x\dep.exe`" -k r3" }; Offered = $true; Label = '*|STOPPED' }
+        @{ Key = 'acceptfalse'; Why = 'origem COMPLETE que ja nao aceitava parada'; Setup = { param($x) $x.OnSeam = @{ State = 'Running'; ProcessId = 4321; ExitCode = [uint32]0; AcceptStop = $false } }; Exact = 'UNDO_ACCEPT_STOP_FALSE'; Fields = '' }
+        @{ Key = 'pnatural'; Why = 'PARTIAL -> RUNNING pela transicao natural'; Kind = 'PARTIAL'; Change = $r3Natural; Offered = $true }
+        @{ Key = 'pstill'; Why = 'PARTIAL ainda pendente'; Kind = 'PARTIAL'; Exact = 'UNDO_STILL_PENDING'; Fields = '' }
+        @{ Key = 'pstillcp'; Why = 'PARTIAL ainda pendente, checkpoint avancou'; Kind = 'PARTIAL'; Change = { param($x) $x.Row.CheckPoint = [uint32]2 }; Exact = 'UNDO_STILL_PENDING'; Fields = '' }
+        @{ Key = 'poutside'; Why = 'PARTIAL -> RUNNING com o modo de inicio mudado'; Kind = 'PARTIAL'; Change = { param($x) & $r3Natural $x; $x.Row.StartMode = 'Auto' }; Exact = 'UNDO_STATE_CHANGED'; Fields = 'startMode' }
+        @{ Key = 'pexit'; Why = 'PARTIAL -> RUNNING com o codigo de saida mudado'; Kind = 'PARTIAL'; Change = { param($x) & $r3Natural $x; $x.Row.ExitCode = [uint32]1066 }; Exact = 'UNDO_STATE_CHANGED'; Fields = 'exitCode' }
+        @{ Key = 'pstopped'; Why = 'PARTIAL -> STOPPED'; Kind = 'PARTIAL'; Change = { param($x) $x.Row.State = 'Stopped'; $x.Row.CheckPoint = [uint32]0; $x.Row.WaitHint = [uint32]0 }; Codes = @('UNDO_NOT_RUNNING', 'UNDO_STATE_CHANGED'); Has = @('state') }
+        @{ Key = 'ppaused'; Why = 'PARTIAL -> PAUSED'; Kind = 'PARTIAL'; Change = { param($x) $x.Row.State = 'Paused' }; Codes = @('UNDO_NOT_RUNNING', 'UNDO_STATE_CHANGED'); Has = @('state') }
+        @{ Key = 'pfrompaused'; Why = 'PARTIAL que terminou PAUSED (nao pendente) -> RUNNING: sem transicao aceita'; Kind = 'PARTIAL'; Setup = { param($x) $x.OnSeam = @{ State = 'Paused'; ExitCode = [uint32]0 } }; Change = $r3Natural; Codes = @('UNDO_STATE_CHANGED'); Has = @('state') }
+    )
+    foreach ($r3Crit in $r3Criteria) {
+        Test-Case 'V0.4 R3' ('R3 criterio: {0} ({1}) -> {2}' -f $r3Crit.Key, $r3Crit.Why, $(if ($r3Crit.ContainsKey('Offered') -and $r3Crit.Offered) { 'oferecido e executado' } else { 'UNDO_REFUSED antes de perguntar' })) {
+            $s = New-R2Sim ('r3c-' + $r3Crit.Key)
+            if (-not $s) { return }
+            if ($r3Crit.ContainsKey('Setup')) { $null = & $r3Crit.Setup $s }
+            $kind = $(if ($r3Crit.ContainsKey('Kind')) { $r3Crit.Kind } else { 'COMPLETE' })
+            if ($r3Crit.Key -ceq 'pfrompaused') {
+                $r = Invoke-R2Open (Get-R2Args $s (New-TestCleanOperator))
+                Assert-True ($r.Outcome -ceq 'PARTIAL' -and $r.After.State -ceq 'PAUSED') "origem PARTIAL terminada PAUSED ($($r.Outcome) $($r.After.State))"
+                Reset-R3Sim $s
+                $src = $r
+            } else { $src = New-R3Source $s $kind }
+            if ($r3Crit.ContainsKey('Change')) { $null = & $r3Crit.Change $s }
+            $extra = @{}
+            if ($r3Crit.ContainsKey('Deps')) { $extra['ServiceDependencySource'] = $r3Crit.Deps }
+            $op = New-TestCleanOperator
+            $res = Invoke-R3Open (Get-R3Args $s $src $op $extra)
+            $codes = @($res.RefusalCodes); $fields = @($res.ChangedFields)
+            if ($r3Crit.ContainsKey('Label')) { Assert-True (@($src.After.Dependents) -ccontains $r3Crit.Label -or @($res.Plan.Capture.Dependents) -ccontains $r3Crit.Label) "dependente como $($r3Crit.Label)" }
+            if ($r3Crit.ContainsKey('Offered') -and $r3Crit.Offered) {
+                Assert-True ($null -eq $res.Aborted -and $res.Outcome -ceq 'COMPLETE' -and $res.Plan.Offered -and $codes.Count -eq 0 -and $s.SeamCalls.Count -eq 1) "oferecido e executado ($($res.Aborted) $($res.Outcome) $($codes -join ','))"
+                if ($kind -ceq 'PARTIAL') { Assert-True ((@($res.Plan.AcceptedTransition) -join ',') -ceq 'state,checkPoint,waitHint,condition,acceptStop' -and (@(@(Get-R2Record $s.Undo 'plan')[0].acceptedTransition) -join ',') -ceq 'state,checkPoint,waitHint,condition,acceptStop' -and $res.SourceOutcome -ceq 'PARTIAL') 'transicao aceita no plano e no log' }
+                return
+            }
+            Assert-R3NotStopped $res $s 'UNDO_REFUSED' $r3Crit.Key
+            Assert-True ($null -eq $res.PlanId -and -not $res.Plan.Offered -and $op.Calls.Count -eq 0 -and $s.Presented.Count -eq 0 -and -not (Test-Path -LiteralPath $s.Undo) -and $null -eq $res.RunId) 'recusado antes de perguntar: nada apresentado nem registrado'
+            if ($r3Crit.ContainsKey('Exact')) { Assert-Eq ($codes -join ',') $r3Crit.Exact "codigos ($($codes -join ','); campos $($fields -join ','))" }
+            if ($r3Crit.ContainsKey('Codes')) { foreach ($c in $r3Crit.Codes) { Assert-True ($codes -ccontains $c) "codigo $c ($($codes -join ','); campos $($fields -join ','))" } }
+            if ($r3Crit.ContainsKey('Fields')) { Assert-Eq ($fields -join ',') $r3Crit.Fields "campos mudados ($($fields -join ','))" }
+            if ($r3Crit.ContainsKey('Has')) { foreach ($f in $r3Crit.Has) { Assert-True ($fields -ccontains $f) "campo $f ($($fields -join ','))" } }
+            if ($kind -ceq 'PARTIAL' -and $r3Crit.Key -cne 'pfrompaused') { foreach ($f in @('state', 'checkPoint', 'waitHint', 'condition', 'acceptStop')) { if ($r3Crit.Key -ceq 'poutside' -or $r3Crit.Key -ceq 'pexit' -or $r3Crit.Key -like 'pstill*') { Assert-True ($fields -cnotcontains $f) "transicao natural aceita: $f fora dos campos" } } }
+        }
+    }
+    Test-Case 'V0.4 R3' 'R3 AUT-2: frase errada, vazia, cancelada, de outro plano, a frase de inicio do R2, outra grafia -> CONFIRMACAO_AUSENTE_OU_DIVERGENTE; sem console, sem leitor, sem -LogFile, -LogFile igual a -SourceLog (inclusive outra grafia), log existente, log numa base, sem apresentacao -> parada antes de qualquer pergunta; seam nao chamado' {
+        $s = New-R2Sim 'r3aut2'
+        if (-not $s) { return }
+        $src = New-R3Source $s
+        $a = Get-R3Args $s $src (New-TestCleanOperator)
+        $closed = Invoke-AtmRecoverUndo @a
+        Assert-True ($closed.Plan.Offered) 'plano inverso oferecido'
+        Reset-R3Sim $s
+        $right = 'PARAR SERVICO ' + $closed.PlanId.Substring(0, 8).ToUpperInvariant()
+        $otherPlan = 'PARAR SERVICO ' + $src.PlanId.Substring(0, 8).ToUpperInvariant()
+        $startPhrase = 'INICIAR SERVICO ' + $closed.PlanId.Substring(0, 8).ToUpperInvariant()
+        Assert-True ($otherPlan -cne $right) 'frase de outro plano difere'
+        $n = 0
+        foreach ($c in @(@('errada', 'PARAR SERVICO 00000000', 'DECLINED'), @('vazia', '', 'CANCELLED'), @('cancelada', $null, 'CANCELLED'), @('de outro plano', $otherPlan, 'DECLINED'),
+                @('frase de inicio do R2', $startPhrase, 'DECLINED'), @('outra grafia', $right.ToLowerInvariant(), 'DECLINED'), @('com espaco', ($right + ' '), 'DECLINED'))) {
+            $n++
+            $log = $s.Undo + '.p' + $n
+            $op = New-TestCleanOperator -Answers @{ confirm = $c[1] }
+            $res = Invoke-R3Open (Get-R3Args $s $src $op @{ LogFile = $log })
+            Assert-R3NotStopped $res $s 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE' "frase $($c[0])"
+            Assert-True ($res.ConfirmationCode -ceq $c[2] -and $res.Phrase -ceq $right -and ($op.Calls -join ',') -ceq 'confirm|') "frase $($c[0]): $($res.ConfirmationCode)"
+            $cf = @(Get-R2Record $log 'confirmation')
+            Assert-True ($cf.Count -eq 1 -and $cf[0].accepted -eq $false -and $cf[0].refusal -ceq 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE' -and $cf[0].reason -ceq $c[2]) "frase $($c[0]): confirmation recusada no log"
+            Assert-Eq (Get-R2Types $log) 'run-start,plan,before,confirmation,run-end' "frase $($c[0]): sem plan-check, intent nem result"
+        }
+        $p0 = $s.Presented.Count
+        $srcBytes = [Convert]::ToBase64String([IO.File]::ReadAllBytes($s.Log))
+        $early = {
+            param($Res, $Op, [string]$Code, [string]$Log, [string]$Label)
+            Assert-R3NotStopped $Res $s $Code $Label
+            Assert-True ($Op.Calls.Count -eq 0 -and $s.Presented.Count -eq $p0 -and $null -eq $Res.RunId -and $null -eq $Res.Plan) "${Label}: nada coletado, apresentado nem perguntado"
+            if ($Log) { Assert-True (-not (Test-Path -LiteralPath $Log)) "${Label}: nenhum log" }
+        }
+        $script:AtmCleanConsoleSource = { $false }
+        try { $op = New-TestCleanOperator; $res = Invoke-R3Open (Get-R3Args $s $src $op @{ LogFile = ($s.Undo + '.noconsole') }) } finally { $script:AtmCleanConsoleSource = { $true } }
+        & $early $res $op 'CONSOLE_NOT_OBSERVED' ($s.Undo + '.noconsole') 'sem console observado'
+        $op = New-TestCleanOperator; $a = Get-R3Args $s $src $op @{ LogFile = ($s.Undo + '.noreader') }; $a.Remove('ConfirmationReader')
+        & $early (Invoke-R3Open $a) $op 'SEM_APRESENTACAO_OU_CONFIRMACAO' ($s.Undo + '.noreader') 'sem leitor da confirmacao'
+        $op = New-TestCleanOperator; $a = Get-R3Args $s $src $op; $a.Remove('LogFile')
+        & $early (Invoke-R3Open $a) $op 'LOG_REQUIRED' $null 'sem -LogFile'
+        $op = New-TestCleanOperator
+        & $early (Invoke-R3Open (Get-R3Args $s $src $op @{ LogFile = $s.Log })) $op 'LOG_SAME_AS_SOURCE' $null '-LogFile igual a -SourceLog'
+        $op = New-TestCleanOperator
+        & $early (Invoke-R3Open (Get-R3Args $s $src $op @{ LogFile = $s.Log.ToUpperInvariant() })) $op 'LOG_SAME_AS_SOURCE' $null '-LogFile igual a -SourceLog em outra grafia'
+        Assert-Eq ([Convert]::ToBase64String([IO.File]::ReadAllBytes($s.Log))) $srcBytes 'log de origem intacto'
+        $ex = $s.Undo + '.exists'
+        [IO.File]::WriteAllText($ex, 'x')
+        $op = New-TestCleanOperator
+        & $early (Invoke-R3Open (Get-R3Args $s $src $op @{ LogFile = $ex })) $op 'LOG_ALREADY_EXISTS' $null 'log ja existente'
+        Assert-Eq ([IO.File]::ReadAllText($ex)) 'x' 'log existente intacto'
+        $inBase = Join-Path (Get-Base $s.Profile) 'r3.jsonl'
+        $op = New-TestCleanOperator
+        & $early (Invoke-R3Open (Get-R3Args $s $src $op @{ LogFile = $inBase })) $op 'LOG_DESTINATION_NOT_ALLOWED' $inBase 'log dentro de uma base'
+        $op = New-TestCleanOperator; $a = Get-R3Args $s $src $op; $a.Remove('PlanPresenter')
+        $res = Invoke-R3Open $a
+        Assert-R3NotStopped $res $s 'SEM_APRESENTACAO' 'sem apresentacao'
+    }
+    # Revalidation: one case per field changed between the confirmation and the stop (inside the confirmation answer).
+    $r3Changes = @(
+        @{ Key = 'target'; Field = 'target'; Why = 'o nome deixa de ser declarado'; Change = { param($x) $x.Hints = @([pscustomobject]@{ Name = 'R9'; Role = $null; ExpectedImage = $x.Img }) } }
+        @{ Key = 'provider'; Field = 'provider'; Why = 'o papel declarado pelo provider'; Change = { param($x) $x.Hints = @([pscustomobject]@{ Name = 'R'; Role = 'helper'; ExpectedImage = $x.Img }) } }
+        @{ Key = 'executable'; Field = 'executable'; Why = 'outro executavel'; Change = { param($x) $x.Row.PathName = "`"$env:SystemRoot\System32\other.exe`" -k test" } }
+        @{ Key = 'image'; Field = 'image'; Why = 'a imagem declarada nao casa mais'; Change = { param($x) $x.Hints = @([pscustomobject]@{ Name = 'R'; Role = $null; ExpectedImage = '%SystemRoot%\System32\other.exe' }) } }
+        @{ Key = 'state'; Field = 'state'; Why = 'o servico foi parado por outro'; Change = { param($x) $x.Row.State = 'Stopped'; $x.Row.ProcessId = 0 } }
+        @{ Key = 'startmode'; Field = 'startMode'; Why = 'o modo de inicio'; Change = { param($x) $x.Row.StartMode = 'Auto' } }
+        @{ Key = 'delayed'; Field = 'delayedAutoStart'; Why = 'o inicio atrasado'; Change = { param($x) $x.Row.DelayedAutoStart = $true } }
+        @{ Key = 'acceptstop'; Field = 'acceptStop'; Why = 'deixou de aceitar parada'; Change = { param($x) $x.Row.AcceptStop = $false } }
+        @{ Key = 'exitcode'; Field = 'exitCode'; Why = 'o codigo de saida'; Change = { param($x) $x.Row.ExitCode = [uint32]1066 } }
+        @{ Key = 'dependson'; Field = 'dependsOn'; Why = 'uma dependencia nova'; Change = { param($x) $x.Links = @([pscustomobject]@{ Antecedent = 'SysDep'; Dependent = 'R' }); $x.Related = @([pscustomobject]@{ Name = 'SysDep'; State = 'Running'; PathName = $x.SysPath }) } }
+        @{ Key = 'dependents'; Field = 'dependents'; Why = 'um dependente novo, parado'; Change = { param($x) & $r3SysUser $x 'Stopped' } }
+        @{ Key = 'depstarted'; Field = 'dependents'; Why = 'um dependente que iniciou'; Reason = 'UNDO_DEPENDENT_ACTIVE'; Setup = { param($x) & $r3SysUser $x 'Stopped' }; Change = { param($x) & $r3SysUser $x 'Running' } }
+        @{ Key = 'account'; Field = 'account'; Why = 'a conta do servico'; Change = { param($x) $x.Row.StartName = 'NT AUTHORITY\LocalService' } }
+        @{ Key = 'identity'; Field = 'identity'; Why = 'outro usuario no token'; Change = { param($x) $x.Id = [pscustomobject]@{ Name = 'TEST\bob'; Sid = 'S-1-5-21-1-2-3-1002'; IsAdmin = $false; ElevationTypeRaw = 3; IntegrityRid = 0x2000; SessionId = 1 } } }
+        @{ Key = 'elevation'; Field = 'elevation'; Why = 'o mesmo usuario, token elevado'; Change = { param($x) $x.Id = [pscustomobject]@{ Name = 'TEST\alice'; Sid = 'S-1-5-21-1-2-3-1001'; IsAdmin = $true; ElevationTypeRaw = 2; IntegrityRid = 0x3000; SessionId = 1 } } }
+    )
+    foreach ($r3Chg in $r3Changes) {
+        Test-Case 'V0.4 R3' ('R3 revalidacao: {0} ({1}) muda entre a confirmacao e a parada -> REVALIDATION_REFUSED com o campo em changedFields; seam de parada nao chamado' -f $r3Chg.Field, $r3Chg.Why) {
+            $s = New-R2Sim ('r3rv-' + $r3Chg.Key)
+            if (-not $s) { return }
+            if ($r3Chg.ContainsKey('Setup')) { $null = & $r3Chg.Setup $s }
+            $src = New-R3Source $s
+            $chg = $r3Chg.Change
+            $op = New-TestCleanOperator -Answers @{ confirm = { param($ph) $null = & $chg $s; $null }.GetNewClosure() }
+            $res = Invoke-R3Open (Get-R3Args $s $src $op)
+            Assert-R3NotStopped $res $s 'REVALIDATION_REFUSED' $r3Chg.Field
+            Assert-True (@($res.ChangedFields) -ccontains $r3Chg.Field) "changedFields com $($r3Chg.Field) ($(@($res.ChangedFields) -join ','); motivos $(@($res.RevalidationCodes) -join ','))"
+            if ($r3Chg.ContainsKey('Reason')) { Assert-True (@($res.RevalidationCodes) -ccontains $r3Chg.Reason) "motivo $($r3Chg.Reason) ($(@($res.RevalidationCodes) -join ','))" }
+            $names = @(@($script:AtmRecoveryCaptureFields.Values) + @($script:AtmRecoveryChangedFieldsExtra))
+            foreach ($f in @($res.ChangedFields)) { Assert-True ($names -ccontains $f) "so nomes de campo ($f)" }
+            $pc = @(Get-R2Record $s.Undo 'plan-check')
+            Assert-True ($pc.Count -eq 1 -and $pc[0].matched -eq $false -and @($pc[0].changedFields) -ccontains $r3Chg.Field) 'plan-check registra o campo'
+            Assert-Eq (Get-R2Types $s.Undo) 'run-start,plan,before,confirmation,plan-check,run-end' 'sem intent nem result'
+            $txt = [IO.File]::ReadAllText($s.Undo)
+            Assert-True (-not $txt.Contains('S-1-5-21') -and -not $txt.Contains('alice') -and -not $txt.Contains('bob')) 'identidade comparada em memoria, nunca registrada'
+        }
+    }
+    Test-Case 'V0.4 R3' 'R3 segundo desfazer: a mesma origem depois de um desfazer COMPLETE e recusada pelos criterios (UNDO_NOT_RUNNING, UNDO_STATE_CHANGED); o log do desfazer como origem -> UNDO_SOURCE_OPERATION_INVALID (nao existe desfazer de desfazer); um novo inicio e uma nova execucao REC-SVC-START, com o seu proprio desfazer' {
+        $s = New-R2Sim 'r3second'
+        if (-not $s) { return }
+        $src = New-R3Source $s
+        $first = Invoke-R3Open (Get-R3Args $s $src (New-TestCleanOperator))
+        Assert-True ($first.Outcome -ceq 'COMPLETE' -and $s.SeamCalls.Count -eq 1) "primeiro desfazer COMPLETE ($($first.Outcome))"
+        $op = New-TestCleanOperator
+        $res = Invoke-R3Open (Get-R3Args $s $src $op @{ LogFile = ($s.Undo + '.2') })
+        Assert-True ($res.Aborted -ceq 'UNDO_REFUSED' -and @($res.RefusalCodes) -ccontains 'UNDO_NOT_RUNNING' -and @($res.RefusalCodes) -ccontains 'UNDO_STATE_CHANGED' -and @($res.ChangedFields) -ccontains 'state' -and $s.SeamCalls.Count -eq 1 -and $op.Calls.Count -eq 0 -and -not (Test-Path -LiteralPath ($s.Undo + '.2'))) "segundo desfazer recusado ($($res.Aborted) $(@($res.RefusalCodes) -join ','))"
+        $op = New-TestCleanOperator
+        $res = Invoke-R3Open (Get-R3Args $s $src $op @{ SourceLog = $s.Undo; RunId = $first.RunId; LogFile = ($s.Undo + '.3') })
+        Assert-True ($res.Aborted -ceq 'UNDO_SOURCE_REFUSED' -and (@($res.RefusalCodes) -join ',') -ceq 'UNDO_SOURCE_OPERATION_INVALID' -and $s.SeamCalls.Count -eq 1 -and $op.Calls.Count -eq 0) "desfazer de desfazer recusado ($(@($res.RefusalCodes) -join ','))"
+        $s.OnSeam = @{ State = 'Running'; ProcessId = 4321; ExitCode = [uint32]0; AcceptStop = $true }
+        $again = Invoke-R2Open (Get-R2Args $s (New-TestCleanOperator) @{ LogFile = ($s.Log + '.again') })
+        Assert-True ($again.Outcome -ceq 'COMPLETE' -and $again.RunId -cne $src.RunId) "novo inicio: nova execucao REC-SVC-START ($($again.Outcome))"
+        Reset-R3Sim $s
+        $res = Invoke-R3Open (Get-R3Args $s $again (New-TestCleanOperator) @{ SourceLog = ($s.Log + '.again'); LogFile = ($s.Undo + '.4') })
+        Assert-True ($res.Outcome -ceq 'COMPLETE' -and $res.SourceRunId -ceq $again.RunId) "o novo inicio tem o seu desfazer ($($res.Aborted) $($res.Outcome))"
+    }
+    Test-Case 'V0.4 R3' 'R3 lock B8 ocupado: CLEAN_LOCK_BUSY (o mesmo lock do clean e do R2); nada perguntado, nenhum log, seam de parada nao chamado' {
+        $s = New-R2Sim 'r3busy'
+        if (-not $s) { return }
+        $src = New-R3Source $s
+        $h = Start-TestLockHolder -Name $script:AtmCleanLockName -Mode release
+        try { $op = New-TestCleanOperator; $res = Invoke-R3Open (Get-R3Args $s $src $op) } finally { $end = Stop-TestLockHolderByGo $h }
+        Assert-True ($h.Status -ceq 'ACQUIRED' -and $end.Exited -and $end.Exit -eq 0) "portador do lock ($($h.Status), saida $($end.Exit))"
+        Assert-R3NotStopped $res $s 'CLEAN_LOCK_BUSY' 'lock ocupado'
+        Assert-True ($op.Calls.Count -eq 0 -and -not (Test-Path -LiteralPath $s.Undo) -and $null -eq $res.RunId -and $s.Presented.Count -eq 1) 'nada perguntado nem registrado (o plano foi apresentado no passo 4, antes do lock)'
+    }
+    Test-Case 'V0.4 R3' 'R3 lock B8 abandonado: CLEAN_LOCK_ABANDONED, nada perguntado nem registrado, posse liberada; nova tentativa comeca do zero e completa' {
+        $s = New-R2Sim 'r3aband'
+        if (-not $s) { return }
+        $src = New-R3Source $s
+        Initialize-AtmTestMutex
+        $n = New-TestLockName
+        $prev = $script:AtmCleanLockName
+        $script:AtmCleanLockName = $n
+        $obs = $null
+        try {
+            $h = Start-TestLockHolder -Name $n -Mode abandon
+            Assert-Eq $h.Status 'ACQUIRED' 'o filho adquiriu'
+            $obs = [AtmTestMutex]::OpenSync($n)
+            $end = Stop-TestLockHolderByGo $h
+            Assert-True ($end.Exited -and $end.Exit -eq 0) "o filho terminou sozinho sem liberar (saida $($end.Exit))"
+            $op = New-TestCleanOperator
+            $res = Invoke-R3Open (Get-R3Args $s $src $op)
+            Assert-R3NotStopped $res $s 'CLEAN_LOCK_ABANDONED' 'lock abandonado'
+            Assert-True ($op.Calls.Count -eq 0 -and -not (Test-Path -LiteralPath $s.Undo) -and $null -eq $res.RunId) 'nada perguntado nem registrado'
+            Assert-True (-not [AgentTempManager.AtmCleanLock]::IsHeld) 'posse recebida liberada'
+            $res2 = Invoke-R3Open (Get-R3Args $s $src (New-TestCleanOperator) @{ LogFile = ($s.Undo + '.retry') })
+            Assert-True ($null -eq $res2.Aborted -and $res2.Outcome -ceq 'COMPLETE' -and $s.SeamCalls.Count -eq 1 -and (Get-R2Types ($s.Undo + '.retry')) -ceq $r3Types) "nova tentativa do zero ($($res2.Aborted) $($res2.Outcome))"
+        } finally {
+            if ($null -ne $obs) { $obs.Dispose() }
+            $script:AtmCleanLockName = $prev
+        }
+    }
+    Test-Case 'V0.4 R3' 'R3 privacidade do log do desfazer: sem nome nem SID do token, conta alem das tres padrao, caminho fora do local conhecido, linha de comando, nome oculto, caminho do log de origem nem mensagem de excecao (COMPLETE e EXCEPTION); DACL protegida' {
+        $prep = {
+            param($x)
+            $x.Row.StartName = 'CORPDOM\r3-acct'; $x.Row.PathName = "`"$svcUser\AppData\Local\Vendor\svc.exe`" --token=r3-secret"
+            $x.Hints = @([pscustomobject]@{ Name = 'R'; Role = $null; ExpectedImage = 'svc.exe' })
+            $x.Links = @([pscustomobject]@{ Antecedent = 'R'; Dependent = 'SecretDep' })
+            $x.Related = @([pscustomobject]@{ Name = 'SecretDep'; State = 'Stopped'; PathName = "`"$svcUser\x\secretdep.exe`" -k r3-secret" })
+        }
+        $s = New-R2Sim 'r3priv'
+        if (-not $s) { return }
+        & $prep $s
+        $src = New-R3Source $s
+        $res = Invoke-R3Open (Get-R3Args $s $src (New-TestCleanOperator))
+        Assert-True ($res.Outcome -ceq 'COMPLETE' -and $res.Before.Executable -ceq 'svc.exe' -and $res.Before.AccountKind -ceq 'USER' -and $null -eq $res.Before.Account -and (@($res.Before.Dependents) -join ',') -ceq '*|STOPPED') "reducoes do diagnose ($($res.Aborted) $($res.Outcome) $(@($res.RefusalCodes) -join ','))"
+        $e = New-R2Sim 'r3privexc'
+        if (-not $e) { return }
+        & $prep $e
+        $srcE = New-R3Source $e
+        $e.SeamResult = { throw (New-Object InvalidOperationException('r3-exception-text p2a-person')) }
+        $res2 = Invoke-R3Open (Get-R3Args $e $srcE (New-TestCleanOperator))
+        Assert-True ($res2.Outcome -ceq 'EXCEPTION') "excecao ($($res2.Outcome))"
+        foreach ($x in @($s, $e)) {
+            $txt = [IO.File]::ReadAllText($x.Undo)
+            foreach ($w in @('alice', 'TEST\\', 'S-1-5-21', 'r3-acct', 'CORPDOM', '--token', 'r3-secret', 'p2a-person', 'AppData', 'SecretDep', 'secretdep', 'r3-exception-text', [string]$me.Sid, 'recover.jsonl', $x.Dir.Replace('\', '\\'))) { Assert-True (-not $txt.Contains($w)) "log sem '$w'" }
+            if ($me.Name) { Assert-True (-not $txt.Contains([string]$me.Name) -and -not $txt.Contains(([string]$me.Name).Replace('\', '\\'))) 'log sem o nome do usuario do processo' }
+            Assert-True ((Get-Acl -LiteralPath $x.Undo).AreAccessRulesProtected) 'DACL protegida'
+            $b = @(Get-R2Record $x.Undo 'before')[0]
+            Assert-True ($b.accountKind -ceq 'USER' -and $null -eq $b.account -and $b.executable -ceq 'svc.exe') 'before so com o tipo da conta e o nome do executavel'
+        }
+    }
+    Test-Case 'V0.4 R3' 'R3 parada real pelo gerenciador de servicos (seam padrao de parada, AtmServiceStop): NAO_TESTADO' {
+        $script:caseSkipped = $true
+        $script:caseNote = 'nenhum servico e parado nesta maquina nem na CI: o seam padrao de parada nunca e chamado pela suite (sombreado onde e alcancado) e a classe nativa so e compilada e conferida pelos estaticos; a parada real de um servico declarado fica para a VM do operador (R6)'
+    }
+    Test-Case 'V0.4 R3' 'R3 transicao real de pendente para RUNNING num servico do gerenciador (campos da regra do PARTIAL): NAO_TESTADO' {
+        $script:caseSkipped = $true
+        $script:caseNote = 'o conjunto state, checkPoint, waitHint, condition e acceptStop vem da captura do R0 (Get-AtmRecoverCapture e Get-AtmServiceCondition) e e exercitado com linhas simuladas; o que o gerenciador de servicos relata de fato entre START_PENDING e RUNNING (inclusive exitCode) nao foi observado num servico real'
+    }
+    Test-Case 'V0.4 R3' 'R3 lock B8 entre portador elevado e nao elevado (operator-only): NAO_TESTADO' {
+        $script:caseSkipped = $true
+        $script:caseNote = 'a suite cobre portadores da mesma identidade e do mesmo nivel (ocupado e abandonado acima); um portador elevado contra um chamador nao elevado, e o inverso, exigem dois tokens na mesma maquina, como a matriz B8 do clean e do R2'
+    }
+    Test-Case 'V0.4 R3' 'R3 (estatico): API de parada so na classe AtmServiceStop do Native.cs (gerenciador com conexao, servico so com SERVICE_STOP, um SERVICE_CONTROL_STOP), chamada so pelo seam padrao de parada, uma vez; nunca ServiceController.Stop(); nenhum outro verbo; o seam de parada so pelo desfazer, nunca pelo R2; os passos do R2 na mesma ordem; a trava lida primeiro; funcoes de leitura sem efeito; a suite nunca chama a classe nativa; area sem espera real' {
+        $all = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | ForEach-Object { [pscustomobject]@{ Rel = $_.FullName.Substring($srcDir.Length + 1); Text = [IO.File]::ReadAllText($_.FullName) } })
+        $rec = @($all | Where-Object { $_.Rel -ceq 'lib\Engine.Recover.ps1' })[0].Text
+        $ncs = @($all | Where-Object { $_.Rel -ceq 'lib\Native.cs' })[0].Text
+        $strip = { param([string]$T) [regex]::Replace([regex]::Replace($T, '(?s)<#.*?#>', ''), '(?m)#.*$', '') }
+        $count = { param([string]$Text, [string]$Pat) [regex]::Matches($Text, [regex]::Escape($Pat), [Text.RegularExpressions.RegexOptions]::IgnoreCase).Count }
+        $tk = $null; $er = $null
+        $ast = [Management.Automation.Language.Parser]::ParseInput($rec, [ref]$tk, [ref]$er)
+        Assert-Eq @($er).Count 0 'motor sem erro de sintaxe'
+        $fn = @{}; $fnRaw = @{}
+        foreach ($d in @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] }, $false))) { $fnRaw[$d.Name] = $d.Extent.Text; $fn[$d.Name] = & $strip $d.Extent.Text }
+        $recCode = & $strip $rec
+        $stopFn = 'Invoke-AtmRecoverServiceStopDefault'
+        # The native stop: one narrow class, the last of Native.cs; the service APIs nowhere else in the file.
+        $c0 = $ncs.IndexOf('public static class AtmServiceStop')
+        Assert-True ($c0 -gt 0 -and $ncs.IndexOf('public static class AtmJobRunner') -lt $c0) 'classe de parada no fim do Native.cs'
+        $cls = $ncs.Substring($c0); $before = $ncs.Substring(0, $c0)
+        foreach ($api in @('OpenSCManager', 'OpenService', 'ControlService', 'CloseServiceHandle', 'SERVICE_CONTROL_STOP', 'SERVICE_STATUS')) { Assert-True ($before.IndexOf($api, [StringComparison]::OrdinalIgnoreCase) -lt 0) "'$api' so na classe de parada" }
+        Assert-True ($cls.Contains('const uint SC_MANAGER_CONNECT = 0x0001;') -and $cls.Contains('const uint SERVICE_STOP = 0x0020;') -and $cls.Contains('const uint SERVICE_CONTROL_STOP = 0x00000001;')) 'direitos minimos: conexao ao gerenciador, so SERVICE_STOP no servico, o controle de parada'
+        Assert-True ([regex]::Matches($cls, [regex]::Escape('OpenSCManagerW(null, null, SC_MANAGER_CONNECT)')).Count -eq 1 -and [regex]::Matches($cls, [regex]::Escape('OpenServiceW(scm, serviceName, SERVICE_STOP)')).Count -eq 1 -and [regex]::Matches($cls, [regex]::Escape('ControlService(svc, SERVICE_CONTROL_STOP, ref status)')).Count -eq 1) 'uma abertura do gerenciador, uma do servico e um unico controle, de parada'
+        foreach ($api in @('OpenSCManagerW', 'OpenServiceW', 'ControlService')) { Assert-Eq ([regex]::Matches($cls, '\b' + $api + '\(').Count) 2 "$api declarado e chamado uma vez" }
+        foreach ($pat in @('SERVICE_ALL_ACCESS', 'SC_MANAGER_ALL_ACCESS', 'SERVICE_START', 'StartService', 'SERVICE_PAUSE_CONTINUE', 'SERVICE_CONTROL_PAUSE', 'SERVICE_CONTROL_CONTINUE', 'SERVICE_CHANGE_CONFIG', 'ChangeServiceConfig', 'DeleteService',
+                'EnumDependentServices', 'SERVICE_ENUMERATE_DEPENDENTS', 'ControlServiceEx', 'QueryServiceStatus', 'Sleep', 'while', 'for (', 'ServiceController')) { Assert-True (-not $cls.Contains($pat)) "classe de parada sem '$pat'" }
+        Assert-True ($cls.Contains('if (!ControlService(svc, SERVICE_CONTROL_STOP, ref status)) return Failed(Marshal.GetLastWin32Error());') -and $cls.Contains('if (svc != IntPtr.Zero) CloseServiceHandle(svc);') -and $cls.Contains('if (scm != IntPtr.Zero) CloseServiceHandle(scm);')) 'erro Win32 lido logo depois da chamada que falhou; os dois handles fechados no finally'
+        $pub = @([AgentTempManager.AtmServiceStop].GetMembers([Reflection.BindingFlags]'Public,Static,DeclaredOnly') | ForEach-Object { $_.Name } | Sort-Object -Unique)
+        Assert-Eq ($pub -join ',') 'Stop' 'classe de parada: so Stop e publico'
+        Assert-Eq @([AgentTempManager.AtmServiceStop].GetMethod('Stop').GetParameters()).Count 1 'Stop recebe so o nome'
+        foreach ($f in $all) { if ($f.Rel -cne 'lib\Engine.Recover.ps1' -and $f.Rel -cne 'lib\Native.cs') { Assert-True (-not $f.Text.Contains('AtmServiceStop')) "$($f.Rel) nao chama a classe de parada" } }
+        $nativeStopCall = 'AtmServiceStop]::' + 'Stop('   # split, so the suite's own text never holds the call
+        Assert-True ((& $count $recCode $nativeStopCall) -eq 1 -and (& $count $fn[$stopFn] $nativeStopCall) -eq 1 -and (& $count $rec 'AtmServiceStop') -eq (& $count $fnRaw[$stopFn] 'AtmServiceStop')) 'uma unica chamada nativa de parada, so no seam padrao de parada (comentarios incluidos)'
+        Assert-True ((& $count $rec 'ServiceController.Stop') -eq 0 -and (& $count $rec '.Stop(') -eq 0 -and -not $fnRaw[$stopFn].Contains('ServiceController') -and -not $fnRaw[$stopFn].Contains('System.ServiceProcess')) 'nunca ServiceController.Stop() (ele para os dependentes em cascata)'
+        # The stop seam: only in the locked undo, once; the undo's own steps only where named.
+        $placement = [ordered]@{
+            ($stopFn + ' -Name') = @('Invoke-AtmRecoverUndoLocked'); '& $ServiceStopImpl' = @('Invoke-AtmRecoverUndoLocked'); 'ServiceStopImpl' = @('Invoke-AtmRecoverUndo', 'Invoke-AtmRecoverUndoLocked')
+            'Invoke-AtmRecoverUndoLocked @' = @('Invoke-AtmRecoverUndo'); 'Read-AtmRecoverRunLog -Path' = @('Invoke-AtmRecoverUndo'); 'AtmSharedRead]::Open(' = @('Read-AtmRecoverRunLog')
+            'Test-AtmRecoverSourceProvenance -Stream' = @('Read-AtmRecoverRunLog'); 'Get-AtmRecoverUndoRefusals -Collection' = @('Get-AtmRecoverUndoPlan', 'Invoke-AtmRecoverUndoLocked'); 'Get-AtmRecoverUndoPlan -Collection' = @('Invoke-AtmRecoverUndo')
+        }
+        foreach ($p in $placement.Keys) {
+            $total = & $count $recCode $p
+            $inside = 0; foreach ($a in $placement[$p]) { $inside += (& $count $fn[$a] $p) }
+            Assert-True ($total -gt 0 -and $total -eq $inside) "'$p' so em $($placement[$p] -join ', ') ($inside de $total)"
+        }
+        foreach ($p in @(($stopFn + ' -Name'), '& $ServiceStopImpl', 'Invoke-AtmRecoverUndoLocked @', 'Read-AtmRecoverRunLog -Path', 'AtmSharedRead]::Open(', '$fs.Read(')) { Assert-Eq (& $count $recCode $p) 1 "uma unica chamada: $p" }
+        # R2's path never reaches the stop seam or the undo; the undo never reaches the start seam or R2's locked steps.
+        foreach ($name in @('Invoke-AtmRecover', 'Invoke-AtmRecoverLocked', 'Get-AtmRecoverList', 'Get-AtmRecoverPlan', 'Get-AtmRecoveryOperation', 'Get-AtmRecoverRefusals', 'Get-AtmRecoverPlanCheck')) {
+            foreach ($pat in @('ServiceStop', 'AtmRecoverUndo', 'AtmRecoveryUndo', 'REC-SVC-STOP', 'AtmServiceStop')) { Assert-True (-not $fn[$name].Contains($pat)) "$name sem '$pat'" }
+        }
+        foreach ($name in @('Invoke-AtmRecoverUndo', 'Invoke-AtmRecoverUndoLocked')) {
+            foreach ($pat in @('ServiceControlImpl', 'Invoke-AtmRecoverServiceStartDefault', 'Invoke-AtmRecoverLocked', 'Invoke-AtmRecover ', 'foreach')) { Assert-True (-not $fn[$name].Contains($pat)) "$name sem '$pat'" }
+        }
+        $pk = @((Get-Command Invoke-AtmRecoverUndo).Parameters.Keys | Where-Object { @('Verbose', 'Debug', 'ErrorAction', 'WarningAction', 'InformationAction', 'ErrorVariable', 'WarningVariable', 'InformationVariable', 'OutVariable', 'OutBuffer', 'PipelineVariable', 'ProgressAction') -notcontains $_ } | Sort-Object)
+        Assert-Eq ($pk -join ',') 'ConfirmationReader,DeadlineSeconds,IdentitySource,Interaction,InventoryArgs,LogFile,PlanPresenter,Providers,RunId,ServiceDependencySource,ServiceSource,ServiceStopImpl,ServiceWait,SettleWait,SourceLog' 'desfazer: uma origem e um run id, nenhum nome de servico, operacao ou lista'
+        # The gate first, then R2's entry steps in R2's order, then the lock.
+        $iu = $fn['Invoke-AtmRecoverUndo']
+        $g = $iu.IndexOf('if (-not $script:AtmRecoveryEnabled)')
+        Assert-True ($g -gt 0 -and $iu.IndexOf("'RECUPERACAO_REAL_DESABILITADA'") -gt $g) 'a trava e lida em Invoke-AtmRecoverUndo'
+        $last = $g
+        foreach ($p in @('Get-AtmEngineConsoleObservation', "'SEM_APRESENTACAO_OU_CONFIRMACAO'", "'LOG_REQUIRED'", "'LOG_SAME_AS_SOURCE'", 'Invoke-AtmInventory', "'LOG_DESTINATION_NOT_ALLOWED'", "'LOG_ALREADY_EXISTS'", "'UNDO_SOURCE_REFUSED'", "'UNDO_REFUSED'", '& $PlanPresenter $plan', 'Invoke-AtmUnderSharedLock')) {
+            $i = $iu.IndexOf($p); Assert-True ($i -gt $last) "passo de entrada na ordem: $p"; $last = $i
+        }
+        $lk = $fn['Invoke-AtmRecoverUndoLocked']
+        $last = -1
+        foreach ($p in @('Open-AtmCleanLog', "-Type 'run-start'", "-Type 'plan'", "-Type 'before'", 'Test-AtmTypedPhrase', "-Type 'confirmation'", 'Get-AtmRecoverUndoRefusals', 'Get-AtmRecoverPlanCheck', "-Type 'plan-check'", "-Type 'intent'", '& $ServiceStopImpl', 'Wait-AtmRecoverSettle', "-Type 'result'", "-Type 'after'", "-Type 'run-end'", '$log.Close()')) {
+            $i = $lk.IndexOf($p); Assert-True ($i -gt $last) "passo na ordem: $p"; $last = $i
+        }
+        Assert-True ($lk.Contains("'PARAR SERVICO ' + ([string]`$Plan.PlanId).Substring(0, 8).ToUpperInvariant()")) 'frase PARAR SERVICO <8 do plan id>'
+        # The read-only functions keep R1's rules.
+        $sleep = 'Start-' + 'Sleep'
+        $ban = @('Get-CimInstance', 'Read-Host', 'Write-Host', 'Invoke-AtmUnderSharedLock', 'Mutex', 'Open-AtmCleanLog', 'Write-AtmCleanLogRecord', 'Write-AtmRecoverRecord', 'New-AtmPinnedTextFile', 'Write-AtmNewTextFile', '[IO.File]', 'Set-Content', 'Add-Content',
+            'Out-File', 'New-Item', 'ConvertTo-Json', 'ConvertFrom-Json', 'Get-Content', 'AppendLine', 'Invoke-AtmInventory', 'Start-Process', $sleep, 'Add-Type', 'Get-AtmEngineConsoleObservation', 'Test-AtmTypedPhrase', 'ServiceControlImpl',
+            'ServiceStopImpl', 'Invoke-AtmRecoverServiceStartDefault', $stopFn, 'AtmServiceStop', 'ServiceController')
+        foreach ($name in @('Skip-AtmRecoverJsonSpace', 'Read-AtmRecoverJsonHex4', 'Read-AtmRecoverJsonString', 'Read-AtmRecoverJsonValue', 'ConvertFrom-AtmRecoverJsonLine', 'ConvertFrom-AtmRecoverCaptureRecord', 'Test-AtmRecoverSourceProvenance',
+                'Read-AtmRecoverRunLog', 'Test-AtmRecoverUndoPendingSource', 'Get-AtmRecoverUndoRefusals', 'Get-AtmRecoverUndoPlanId', 'Get-AtmRecoverUndoPlan')) {
+            Assert-True $fn.ContainsKey($name) "funcao $name"
+            foreach ($pat in $ban) { Assert-True (-not $fn[$name].Contains($pat)) "$name sem '$pat'" }
+        }
+        Assert-True ($fn['Test-AtmRecoverSourceProvenance'].Contains('GetAccessControl') -and $fn['Test-AtmRecoverSourceProvenance'].Contains('AreAccessRulesProtected')) 'procedencia lida pelo handle aberto: dono e DACL protegida'
+        # The suite never calls the native stop, and reaches the default stop seam only where it is shadowed.
+        $self = [IO.File]::ReadAllText((Join-Path $testsDir 'Run-Tests.ps1'))
+        Assert-Eq ([regex]::Matches($self, [regex]::Escape('AtmServiceStop]::' + 'Stop(')).Count) 0 'a suite nunca chama a classe nativa de parada'
+        $a0 = $self.IndexOf('-----' + ' V0.4 R3 (assisted'); $a1 = $self.IndexOf('-----' + ' scale')
+        Assert-True ($a0 -gt 0 -and $a1 -gt $a0) 'area V0.4 R3 encontrada'
+        $area = $self.Substring($a0, $a1 - $a0)
+        Assert-True (-not $area.Contains($sleep)) 'area V0.4 R3 sem espera real'
+        $rm = [regex]::Matches($area, [regex]::Escape("Remove('Service" + "StopImpl')")).Count
+        $sh = [regex]::Matches($area, [regex]::Escape('function ' + $stopFn + ' {')).Count
+        Assert-True ($rm -eq 2 -and $sh -eq 2) "o seam padrao de parada so e alcancado em casos que o sombreiam ($rm sem seam injetado, $sh sombras)"
     }
 
     # ------------------------------------------------------------------ scale

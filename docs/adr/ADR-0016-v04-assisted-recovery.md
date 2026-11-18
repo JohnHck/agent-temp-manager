@@ -1,6 +1,6 @@
 # ADR-0016: Assisted recovery (V0.4)
 
-Status: ACCEPTED (V04-D1 to V04-D8 decided 2026-11-17: D3 (b) elevation on demand through UAC; the others as recommended); R0, R1 and R2 implemented
+Status: ACCEPTED (V04-D1 to V04-D8 decided 2026-11-17: D3 (b) elevation on demand through UAC; the others as recommended); R0, R1, R2 and R3 implemented
 Date: 2026-11-17
 Phase: V0.4 (phases R0 to R6 below, each a future round with its own contract and tests)
 
@@ -564,7 +564,9 @@ dependencies are injected, as in R0.
   * no service control API anywhere in `src/` (`Start-Service`, `Stop-Service`, `Set-Service`, `Restart-Service`,
     `sc.exe`, `ServiceController`, `Invoke-CimMethod`, `OpenService`, `ControlService`) (superseded by R2:
     `ServiceController` is now allowed only in `Engine.Recover.ps1`, only in the default seam; every other control verb
-    is still banned everywhere. See the R2 implementation record);
+    is still banned everywhere. See the R2 implementation record. Superseded again by R3: `OpenService` and
+    `ControlService` are allowed only in the stop class of `Native.cs`, reached only by the default stop seam. See the R3
+    implementation record);
   * no call to the engine from `Engine.Diagnose.ps1`, `Tui.ps1` or `Gui*.ps1`;
   * still two `Win32_Service` queries in the diagnose;
   * the engine in the launcher's check, `AtmRequiredFiles`, the manifest, the build and both e2e.
@@ -634,8 +636,9 @@ because it opens the service control manager with connect access and the service
 (`SERVICE_START`): no other right is asked, nothing but the start is requested, and no arguments are passed. The type is
 loaded lazily, on the first default call only (Windows PowerShell 5.1 does not load the assembly by default; PowerShell 7
 ships it as a package). A Win32 error of the start is mapped by number (`:340-344`); anything else is thrown again. The
-service control API appears only in this function, in this file. The seam is called once (`:647`), past the gate, after
-`intent` only. The suite never reaches the default; it injects the seam in every case past the gate.
+start's service control API (`ServiceController`) appears only in this function, in this file (since R3, the stop of the
+undo has its own API, in `Native.cs`; see the R3 implementation record). The seam is called once (`:647`), past the
+gate, after `intent` only. The suite never reaches the default; it injects the seam in every case past the gate.
 
 **The seam's closed results** (`:345-346`). `OK`, or one of these Win32 errors:
 
@@ -708,3 +711,259 @@ rows, dependencies, the console, the confirmation, the wait and the seam are inj
 * whether a real start also starts the service's stopped declared dependencies (the plan only shows them);
 * the start of a real service, because no shipped provider declares an `ExpectedImage`;
 * any command: no CLI verb calls `Invoke-AtmRecover` until R4.
+
+## R3 implementation record (2026-11-17)
+
+The line numbers in this record are those of the files as V04-R3 adds or changes them. Lines 9 to 700 of
+`Engine.Recover.ps1` keep the numbers the R1 and R2 records cite (R3 rewrites only the header comment, lines 5 to 8, with
+the same line count); R3 appends from line 702 on.
+
+R3 adds the undo of one `REC-SVC-START` run, in the engine, through a stop seam of its own: `Invoke-AtmRecoverUndo`
+(`Engine.Recover.ps1:1141-1232`) and its locked part `Invoke-AtmRecoverUndoLocked` (`:1234-1369`). Its operation is
+`REC-SVC-STOP` (`:711-716`), which exists only as that undo (V04-D1 (a)). It is never added to the catalog. `recover list`
+never offers it, and `recover plan` and `Invoke-AtmRecover` never accept it (they still answer
+`RECOVERY_OPERATION_INVALID`). **The gate stays `$false` in every copy** (`:15`, still its only assignment). No command
+calls `Invoke-AtmRecoverUndo`: the `recover undo` verb comes with the UAC relaunch (R4). Only the suite opens the gate,
+in its own process, and always with the stop seam injected. R3 changes no finding state, eligibility, B1 or RECENT rule,
+and changes neither the diagnose nor the providers.
+
+**The engine's contract, and what R4's verb will receive.** Section 4 names the verb `recover undo <runId>`, but an R2
+log goes to any `-LogFile` the caller chose, and the engine keeps no index of runs. So the engine takes two values:
+
+* `-SourceLog`: the absolute path of the run's log;
+* `-RunId`: the run id, as a cross-check. The log must carry exactly this id (`UNDO_SOURCE_RUN_MISMATCH`).
+
+The log is a source of data, never of instructions. The target it names is used only if a provider still declares it
+today. The current state comes only from a fresh collection. Nothing else in the log reaches an action. R4's verb will
+receive the same two values from the operator (`recover undo -RunId <id> -SourceLog <path>`) and pass them through
+unchanged. R4 decides the verb's exact spelling, without changing this contract.
+
+**Reading the source** (`Read-AtmRecoverRunLog`, `:933-1032`, read only). The checks, in order, each with its closed code
+(`AtmRecoveryUndoSourceCodes`, `:724-735`):
+
+| Check | Code |
+|---|---|
+| `-RunId` is a lowercase GUID in the `D` form | `UNDO_SOURCE_RUN_MISMATCH` |
+| A plain absolute local path (`Test-AtmAllowListPathSyntax`: no relative path, wildcard or `~`), found and readable | `UNDO_SOURCE_UNREADABLE` |
+| No reparse point in the path (`Get-AtmChainStatus`) nor on the file; not a directory (`AtmSharedRead.Open`, which follows no reparse point) | `UNDO_SOURCE_NOT_REGULAR` |
+| At most 1 MiB (`AtmRecoveryUndoSourceMaxBytes`), checked on the open handle before reading | `UNDO_SOURCE_TOO_LARGE` |
+| The provenance, on the same handle (see below) | `UNDO_SOURCE_PROVENANCE` |
+| Read once. Strict UTF-8, no BOM, LF only with a final LF, no blank line, at most nine lines. Each line a strict JSON object (duplicate keys refused, a closed grammar, depth 8). `schema` = `atm.recoverlog/1`. One `runId` in every line, `recSeq` contiguous from 1, only the nine R2 record types, none twice, in R2's order | `UNDO_SOURCE_INVALID` |
+| The log's run id equals `-RunId` | `UNDO_SOURCE_RUN_MISMATCH` |
+| A strict prefix of a complete run, with no `run-end` (empty included) | `UNDO_SOURCE_INCOMPLETE` |
+| `run-start` names `REC-SVC-START` (it also needs a target, a 64-hex plan id and `gateOpen` true, else `UNDO_SOURCE_INVALID`) | `UNDO_SOURCE_OPERATION_INVALID` |
+| A run that ended before `intent` (refused phrase, failed revalidation): nothing was started | `UNDO_SOURCE_NOT_STARTED` |
+| The same operation, target and plan id in every record that carries them. `accepted`, `matched` and `seamCalled` true. The outcome is one of R2's, the same in `result` and `run-end` | `UNDO_SOURCE_INVALID` |
+| The outcome is `COMPLETE` or `PARTIAL` | `UNDO_SOURCE_OUTCOME_NOT_UNDOABLE` |
+| The seam code `OK`. `before` and `after` are captures in R0's form (`ConvertFrom-AtmRecoverCaptureRecord`). `before` is `STOPPED`. A `COMPLETE` run's `after` is `RUNNING`; a `PARTIAL` run's is neither `RUNNING` nor `STOPPED` | `UNDO_SOURCE_INVALID` |
+
+A refused source stops before anything is asked: the code goes into the plan's `Codes`, and `Aborted` is
+`UNDO_SOURCE_REFUSED`. With the gate closed the same code appears in the plan. A source that is not `OK` makes no
+collection.
+
+**What the operator sees for a run that cannot be undone.** A `FAILED` run (another seam code, or back to `STOPPED`), a
+`REFUSED` run (access denied) and an `EXCEPTION` run never started the service, as far as the engine knows. Their source
+gives `UNDO_SOURCE_OUTCOME_NOT_UNDOABLE`, with no plan and nothing asked. The run's own log already holds the field by
+field difference (R2's `result` and `after`). If the service runs anyway, the engine did not start it, and the engine
+offers no stop for it: stopping a service outside the undo is V04-D1 (b), which was not chosen.
+
+**The provenance, and the residual risk** (`Test-AtmRecoverSourceProvenance`, `:914-931`). The engine reads the
+owner and the DACL through the open handle. The owner must be this process's user or Administrators. The DACL must be
+protected. Allow entries may name no one but this user, SYSTEM, Administrators and OWNER RIGHTS. This is the security
+descriptor `Open-AtmCleanLog` gives every log (`D:P(A;;FA;;;OW)(A;;FA;;;SY)(A;;FA;;;BA)`, owner the user). It refuses a
+log copied or written by another account, and a plain copy, which inherits its folder's DACL. **It proves who could have
+written the file, not that the engine wrote it.** The validation proves the log's form, not its origin. The residual
+risk: this user, or an administrator, can write a log by hand that gives a stop plan for a declared service which is
+running in the same state as the forged `after`. Four things limit that:
+
+* the target must be a name a provider declares today, with a declared image that matches (R1);
+* the current state must equal the forged `after`, field by field, and the service must be `RUNNING` with no dependent
+  running;
+* the plan is shown;
+* the operator must type the phrase.
+
+This touches V04-D1 (a): stop only as an undo. It is recorded as a residual risk, not as a new decision.
+
+**The criteria of the inverse plan** (`Get-AtmRecoverUndoRefusals`, `:1040-1074`; the plan, `Get-AtmRecoverUndoPlan`,
+`:1091-1122`; codes, `:738-744`):
+
+* The R1 criteria the undo shares with a start: declared, one provider, coverage, a declared image that matches
+  (`RECOVERY_IMAGE_NOT_DECLARED` and `RECOVERY_IMAGE_MISMATCH` refuse), listed once, properties and fault signals read,
+  dependencies read in both directions (`RECOVERY_DEPENDENCIES_UNREADABLE`, `RECOVERY_DEPENDENCIES_CAPPED`). The three
+  start-only codes are left out (`RECOVERY_NOT_STOPPED`, `RECOVERY_START_MODE_DISABLED`, `RECOVERY_DEPENDENCY_STOPPED`;
+  `:746`). A target that is no longer declared gives only `RECOVERY_NOT_DECLARED`.
+* **The current capture equals the recorded `after`,** field by field, by R2's log names (`Compare-AtmRecoverCapture`).
+  Any difference gives `UNDO_STATE_CHANGED`, with the fields in `ChangedFields`. The undo never overwrites a newer
+  state, as the isolation restore refuses newer content (ADR-0013 section 7).
+* **The `PARTIAL` rule** (`:747-750`, `Test-AtmRecoverUndoPendingSource` `:1034-1038`). It applies only to a `PARTIAL`
+  run whose recorded `after` is `PENDING`. The only accepted change is the natural continuation of that start, from
+  pending to `RUNNING`. It may change exactly these fields, confirmed against R0's capture (`Get-AtmRecoverCapture` and
+  the R0 record):
+  * `state` (`PENDING` to `RUNNING`);
+  * `checkPoint` and `waitHint`, the raw `dwCheckPoint` and `dwWaitHint`, which only a pending service advances;
+  * `condition`, which R0 sets only for `STOPPED` (`STOPPED_*`) and `PENDING` (`PENDING_*`), and is null for `RUNNING`;
+  * `acceptStop`, since a starting service usually accepts no stop yet.
+
+  `exitCode` is **not** in the set. `dwWin32ExitCode` stays `NO_ERROR` through a normal start; a changed value reports a
+  start-up error, not the natural transition. Any other changed field refuses (`UNDO_STATE_CHANGED`). A service still
+  pending gives `UNDO_STILL_PENDING`: stopping a pending service is out (`REC-SVC-RESTART-PENDING` is Out). A `PARTIAL`
+  run that ended `PAUSED`, or with the service unlisted, gets no exemption. The accepted set is shown in the plan and in
+  the `plan` record (`acceptedTransition`).
+* **It is `RUNNING`** (`UNDO_NOT_RUNNING`) **and accepts a stop** (`AcceptStop` `TRUE`, else `UNDO_ACCEPT_STOP_FALSE`).
+* **No dependent active** (`UNDO_DEPENDENT_ACTIVE`). The dependents come from the capture, as R0's `name|STATE` labels
+  (`Get-AtmServiceDependencies`), with no new query. Any state but `STOPPED` refuses: `RUNNING`, `PAUSED`, `PENDING`,
+  `UNREADABLE`, `NOT_LISTED`, `NOT_QUERIED`, and a hidden name (`*`) in any of them. There is never a stop in cascade
+  (section 3, the `REC-SVC-STOP` row).
+* **The plan id** (`Get-AtmRecoverUndoPlanId`, `:1076-1089`). R1's encoding (SHA-256, each value length-prefixed,
+  `$null` distinct from empty), over its own prefix `atm-recover-undo-plan/1`, the operation, the target, the source run
+  id and every field of the current capture.
+* **What the undo does not undo** (`NotUndone`): `WHAT_THE_SERVICE_DID_WHILE_RUNNING`, and `STATE_HELD_IN_MEMORY`
+  (including a VM or a session it kept), shown in the plan and in the `plan` record.
+
+**The steps past the gate, in this order.** These are R2's steps in R2's order. The undo differs where the table says
+so.
+
+| # | Step | Where | Stops with |
+|---|---|---|---|
+| 1 | The console, observed by the engine; then a confirmation reader | `:1204-1206` | `CONSOLE_NOT_OBSERVED`, `SEM_APRESENTACAO_OU_CONFIRMACAO` |
+| 2 | A new `-LogFile`: not the `-SourceLog` (full paths compared, ignoring case), outside every base, and not existing | `:1207-1215` | `LOG_REQUIRED`, `LOG_SAME_AS_SOURCE`, `LOG_DESTINATION_NOT_ALLOWED`, `LOG_ALREADY_EXISTS` |
+| 3 | The source read, a fresh collection and the undo's criteria | `:1216-1219` | `UNDO_SOURCE_REFUSED` (the source code in `RefusalCodes`), `UNDO_REFUSED` (the codes and `ChangedFields`) |
+| 4 | The presenter shows the inverse plan | `:1220` | |
+| 5 | Lock B8 (`Invoke-AtmUnderSharedLock`); the log (`Open-AtmCleanLog`); `run-start` (with `undoOf`, `sourceRunId` and `sourceOutcome` in fields of their own), `plan`, `before` | `:1224-1231`, `:1262-1275` | `CLEAN_LOCK_BUSY`, `CLEAN_LOCK_ABANDONED`, `LOG_OPEN_FAILED`, `LOG_WRITE_FAILED` |
+| 6 | The typed phrase (`Test-AtmTypedPhrase`, exact); `confirmation` | `:1260`, `:1277-1290` | `CONFIRMACAO_AUSENTE_OU_DIVERGENTE` |
+| 7 | The revalidation on a fresh collection: the undo's criteria again (`reasons`, so a dependent that started refuses) and R2's changed fields (`Get-AtmRecoverPlanCheck`); `plan-check` | `:1292-1302` | `REVALIDATION_REFUSED` |
+| 8 | `intent` (with `sourceRunId`), written and flushed; then the stop seam, once, with the service name and nothing else | `:1304-1317` | `LOG_INTENT_FAILED` (no call) |
+| 9 | The settle wait, bounded and injectable, after `OK` only | `:1319-1337` | |
+| 10 | The outcome, the diff, `result` and `after` | `:1339-1355` | `LOG_RESULT_FAILED`, `LOG_AFTER_FAILED` |
+| 11 | `run-end`, the log closed; the lock released by the caller | `:1357-1365`, `:1225-1230` | `LOG_END_FAILED`, `LOG_CLOSE_FAILED`, `LOCK_RELEASE_FAILED` |
+
+With the gate closed (`:1197-1202`), the engine reads the source, collects only when the source is `OK`, builds the
+inverse plan, calls the presenter, and returns `RECUPERACAO_REAL_DESABILITADA`. It asks nothing, takes no lock, writes no
+log, reads no inventory and calls no seam. No presenter gives `SEM_APRESENTACAO` before anything else (`:1187`).
+
+**The phrase:** `PARAR SERVICO <the first 8 characters of the undo's plan id, upper case>` (`:1260`). It binds the
+confirmation to the presented inverse plan. R2's `INICIAR SERVICO` phrase, another plan's phrase, another spelling,
+empty or cancelled are all refused.
+
+**The stop seam.** `-ServiceStopImpl` (a scriptblock that receives the service name) replaces the default,
+`Invoke-AtmRecoverServiceStopDefault` (`:1124-1139`). The default loads the native type with `Initialize-AtmNative`, on
+its first call only, and calls `AgentTempManager.AtmServiceStop.Stop(name)` (`Native.cs:2361-2411`), a new narrow class
+whose only public member is `Stop`:
+
+* `OpenSCManagerW(null, null, SC_MANAGER_CONNECT)`: connect access only;
+* `OpenServiceW(scm, name, SERVICE_STOP)`: the stop right only;
+* one `ControlService(svc, SERVICE_CONTROL_STOP, ...)`;
+* `CloseServiceHandle` on both handles, in `finally`.
+
+It returns 0, or the Win32 error of the first call that failed, read right after that call. It never enumerates, opens or
+stops a dependent service, never retries, and never waits. While a dependent runs, the manager refuses the stop with
+`ERROR_DEPENDENT_SERVICES_RUNNING` (1051), which comes back as is. The installer already compiles all of `Native.cs` into
+the DLL that the manifest pins by SHA-256 (`install/InstallCommon.ps1` `New-AtmNativeAssembly`), so R3 changes nothing
+in `install/`, `tools/` or the build.
+
+**Why not `ServiceController.Stop()`.** That method stops every running dependent service first, which is the cascade
+section 3 forbids:
+
+* .NET Framework reference source (microsoft/referencesource@ec9fa9ae770d522a5b5f0607898044b7478574a3,
+  `System.ServiceProcess/ServiceController.cs`): `public unsafe void Stop()` (`:1184`) opens the service with
+  `SERVICE_STOP` (`:1194`). Under the comment "Before stopping this service, stop all the dependent services that are
+  running." (`:1198`), it loops over `DependentServices`, calls `currentDependent.Stop()` and waits up to 30 s for each to
+  stop (`:1202-1207`). Only then does it send `ControlService(..., CONTROL_STOP, ...)` (`:1212`).
+* .NET (dotnet/runtime@30d28af1a4405cfc256f1fe6c1475c5bb59480f9,
+  `src/libraries/System.ServiceProcess.ServiceController/src/System/ServiceProcess/ServiceController.cs`):
+  `public void Stop()` (`:918`) calls `Stop(stopDependentServices: true)` (`:920`). `Stop(bool)` (`:938`) stops each
+  running dependent (`currentDependent.Stop()`, `:951`) before its own `ControlService` (`:958`).
+
+**The stop seam's closed results** (`:753-758`). `OK`, or one of these Win32 errors:
+
+| Win32 | Code | Outcome |
+|---|---|---|
+| 5 | `ACCESS_DENIED` | `REFUSED` |
+| 1051 | `DEPENDENT_SERVICES_RUNNING` | `FAILED` |
+| 1053 | `SERVICE_REQUEST_TIMEOUT` | `FAILED` |
+| 1060 | `SERVICE_DOES_NOT_EXIST` | `FAILED` |
+| 1061 | `SERVICE_CANNOT_ACCEPT_CTRL` | `FAILED` |
+| 1062 | `SERVICE_NOT_ACTIVE` | `FAILED` (never `COMPLETE`) |
+| 1072 | `SERVICE_MARKED_FOR_DELETE` | `FAILED` |
+| any other | `SERVICE_WIN32_OTHER` | `FAILED` |
+
+A result that is not one of these strings (exact case; a start code such as `SERVICE_ALREADY_RUNNING` included) is
+`SEAM_RESULT_INVALID`, recorded as the exception type. An exception is recorded by its type only, never its message.
+
+**The wait** (`:1319-1337`). After `OK` only: one read right after the seam, then one every 500 ms, with R2's limit (the
+largest `WaitHint` read, at least 5 s, at most 30 s, on waited milliseconds and the clock) and R2's `-SettleWait`. It
+ends at `STOPPED`, at `RUNNING` after a read that was not `RUNNING` (back to `RUNNING`), or at the limit. A service
+that never leaves `RUNNING` runs to the limit. Any other seam code reads "after" once, with no wait.
+
+**The outcomes** (`:1343-1344`), in this order:
+
+* `EXCEPTION`: the seam threw or gave no closed code;
+* `REFUSED`: `ACCESS_DENIED`;
+* `FAILED`: another seam code, with no wait;
+* `COMPLETE`: `STOPPED`;
+* `FAILED`: `RUNNING` at the end (back to it, or never left);
+* `PARTIAL`: anything else at the end of the wait, typically still stopping.
+
+In every outcome "after" is read and compared field by field with the presented capture. Nothing is compensated or
+retried: a failed undo starts nothing again. The undo of an undo does not exist. Its log names `REC-SVC-STOP`, which the
+source reader refuses (`UNDO_SOURCE_OPERATION_INVALID`). A new start is a new `REC-SVC-START` run, with its own plan,
+phrase and undo. A second undo of the same source is refused by the criteria, because the state is no longer the
+recorded `after`.
+
+**The log** is R2's `atm.recoverlog/1`, through the same writer (`Write-AtmRecoverRecord`), with the same nine record
+types in the same order. The undo adds `undoOf`, `sourceRunId` and `sourceOutcome` to `run-start`. It adds `undoOf`,
+`sourceRunId`, `sourceOutcome`, `acceptedTransition` and `notUndone` to `plan`, and `sourceRunId` to `intent`. Like R2's,
+it never holds the token's name or SID, a command line, a path outside a known program location, a hidden related name
+or an exception message.
+
+**Tests:** the area `V0.4 R3` of `tests/Run-Tests.ps1` (`:19047-19714`), in both shells. Every source log is written by
+the suite: either an R2 run with the start seam injected, or a log written through `Open-AtmCleanLog`. Providers,
+identities, service rows, dependencies, the console, the confirmation, the wait and the stop seam are injected.
+
+* The closed constants. `REC-SVC-STOP` is outside the catalog, `recover list`, `recover plan` and `Invoke-AtmRecover`.
+* The closed gate by instrumentation: no inventory, console, lock, log, wait or seam (injected or default), with a
+  positive control with the gate opened in the suite's process. R2's path never reaches the stop seam (a counter on the
+  shadowed default, with a positive control through the undo).
+* One case per outcome, each with the after, the diff and the records in order:
+  * `COMPLETE`;
+  * `PARTIAL` (still stopping at the limit);
+  * `FAILED`, back to `RUNNING` and never leaving it;
+  * every seam code, a throw, and invalid results.
+* The source: one case per failure code. Unreadable, relative, wildcard, a junction in the path, over 1 MiB, a plain
+  copy, invalid JSON, schema, run id (in a line and in `-RunId`), a `recSeq` gap, a duplicate or unknown record, a
+  duplicate key, trailing data, an extra line, incomplete, empty, another operation, a mismatched outcome. Each outcome
+  that cannot be undone uses a real R2 log, and so do the two runs stopped before the seam. In every case nothing is
+  asked and the seam is not called.
+* The criteria, one table:
+  * the undo after `COMPLETE`, and a `PARTIAL` that became `RUNNING` with the transition's fields changed;
+  * a `PARTIAL` still pending, and a `PARTIAL` with a field outside the set (`startMode`, `exitCode`);
+  * a `PARTIAL` that ended `PAUSED`;
+  * one case per changed field after a `COMPLETE`;
+  * `acceptStop` false;
+  * every dependent state that refuses, a hidden one included, and the `STOPPED` controls;
+  * a target no longer declared, and an image no longer declared or no longer matching.
+* AUT-2:
+  * a wrong, empty, cancelled or other plan's phrase, and R2's start phrase;
+  * no console, no reader, no presenter;
+  * no `-LogFile`, an existing log, a log in a base, and a `-LogFile` equal to the `-SourceLog` (another spelling
+    included).
+* The revalidation, one case per field, including a dependent that started between the confirmation and the stop.
+* A second undo of the same source, and an undo log given as a source.
+* B8 busy and abandoned.
+* The privacy of the undo's log.
+* A static check: the stop class in `Native.cs` asks for no other right and sends no other control. It is called only
+  by the default stop seam, which only `Invoke-AtmRecoverUndoLocked` calls. `ServiceController.Stop(` appears nowhere in
+  `src/`. The read-only functions write nothing. The steps are in order. The suite never calls the class and the area
+  has no real wait. The R1 and R2 static checks now allow `OpenService` and `ControlService` in the stop class of
+  `Native.cs` only. R2's per-file single-call checks became per-function: one lock call in each of `Invoke-AtmRecover`
+  and `Invoke-AtmRecoverUndo`.
+
+**Not tested:**
+
+* the default stop seam (`AtmServiceStop`) and its Win32 mapping: never called, by the suite or the CI; no real service
+  is started, stopped or opened with a control right;
+* the real pending-to-`RUNNING` transition of a service: the `PARTIAL` rule runs on injected rows that follow R0's
+  capture;
+* lock B8 between an elevated and a non-elevated holder: for the VM or the operator's e2e, as in R2;
+* the stop of a real service, because no shipped provider declares an `ExpectedImage`;
+* any command: no CLI verb calls `Invoke-AtmRecoverUndo` until R4.

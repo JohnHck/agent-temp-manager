@@ -2357,4 +2357,56 @@ namespace AgentTempManager
             }
         }
     }
+
+    // The stop of one service by name (ADR-0016, phase R3), for the undo of REC-SVC-START: called only by the default
+    // stop seam in Engine.Recover.ps1, past the recovery gate. The service control manager is opened with connect access
+    // only, the service with the stop right only, and one stop control is sent. Its dependent services are never
+    // enumerated, opened or stopped: while one runs, the manager refuses the stop with ERROR_DEPENDENT_SERVICES_RUNNING
+    // (1051), which is returned as is. Nothing is retried and no state is waited for here.
+    // Returns 0, or the Win32 error of the first call that failed, read right after that call.
+    public static class AtmServiceStop
+    {
+        const uint SC_MANAGER_CONNECT = 0x0001;
+        const uint SERVICE_STOP = 0x0020;
+        const uint SERVICE_CONTROL_STOP = 0x00000001;
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct SERVICE_STATUS { public uint dwServiceType, dwCurrentState, dwControlsAccepted, dwWin32ExitCode, dwServiceSpecificExitCode, dwCheckPoint, dwWaitHint; }
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern IntPtr OpenSCManagerW(string machineName, string databaseName, uint desiredAccess);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern IntPtr OpenServiceW(IntPtr scManager, string serviceName, uint desiredAccess);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        static extern bool ControlService(IntPtr service, uint control, ref SERVICE_STATUS status);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        static extern bool CloseServiceHandle(IntPtr handle);
+
+        public static int Stop(string serviceName)
+        {
+            if (string.IsNullOrEmpty(serviceName)) return 1060;   // ERROR_SERVICE_DOES_NOT_EXIST: no name, no call
+            IntPtr scm = IntPtr.Zero, svc = IntPtr.Zero;
+            try
+            {
+                scm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
+                if (scm == IntPtr.Zero) return Failed(Marshal.GetLastWin32Error());
+                svc = OpenServiceW(scm, serviceName, SERVICE_STOP);
+                if (svc == IntPtr.Zero) return Failed(Marshal.GetLastWin32Error());
+                SERVICE_STATUS status = new SERVICE_STATUS();
+                if (!ControlService(svc, SERVICE_CONTROL_STOP, ref status)) return Failed(Marshal.GetLastWin32Error());
+                return 0;
+            }
+            finally
+            {
+                if (svc != IntPtr.Zero) CloseServiceHandle(svc);
+                if (scm != IntPtr.Zero) CloseServiceHandle(scm);
+            }
+        }
+
+        // A failed call that reports no error is never taken for success.
+        static int Failed(int error) { return error != 0 ? error : -1; }
+    }
 }

@@ -2,10 +2,10 @@
 # catalog, a fresh read-only collection made with the diagnose engine's own functions (Engine.Diagnose.ps1: identity,
 # provider runtime hints, the services query with its V0.4 R0 fault signals, dependencies and image comparison, and the
 # service findings), the criteria that offer or refuse an operation for one declared service, and the plan of one
-# operation for one target. Phase R2 (end of this file): the start of one declared service past the recovery gate,
-# through the service control seam. Depends on Engine.Audit.ps1, Engine.Diagnose.ps1 and, past the gate, Engine.Clean.ps1
-# (lock B8, log writer, console). No terminal output of its own. With the recovery gate closed (every copy) nothing is
-# asked, locked, logged or written, and no service is opened with a control right: the seam is reached past it only.
+# operation for one target. Phases R2 and R3 (end of this file): the start of one declared service, and the undo of one
+# such start, past the recovery gate, through their seams. Depends on Engine.Audit.ps1, Engine.Diagnose.ps1 and
+# Engine.Clean.ps1 (lock B8, log writer, console; the undo's source read in both gate states). No terminal output of its
+# own. With the gate closed (every copy) nothing is asked, locked, logged or written, and no seam is ever reached.
 Set-StrictMode -Version 2.0
 
 # RECOVERY GATE (V0.4, ADR-0016 section 5): assisted recovery is DISABLED. recover list and recover plan collect, apply
@@ -674,6 +674,675 @@ function Invoke-AtmRecoverLocked {
             $afterState = $(if ($null -ne $after) { [string]$after.State } else { '' })
             $Res.Outcome = $(if ($null -ne $exType) { 'EXCEPTION' } elseif ($code -ceq 'ACCESS_DENIED') { 'REFUSED' } elseif ($code -cne 'OK') { 'FAILED' }
                 elseif ($afterState -ceq 'RUNNING') { 'COMPLETE' } elseif ($afterState -ceq 'STOPPED') { 'FAILED' } else { 'PARTIAL' })
+            $Res.Diff = @(Compare-AtmRecoverCapture -Before $Plan.Capture -After $after)
+            $lc = Write-AtmRecoverRecord -Log $log -State $ls -Type 'result' -Fields ([ordered]@{ operation = $op.Id; target = $service; outcome = $Res.Outcome; seamCode = $code; exceptionType = $exType
+                    waitedMs = $Res.WaitedMs; limitMs = $limit; reads = $Res.Reads; exitCode = $(if ($null -ne $after) { $after.ExitCode } else { $null }); serviceSpecificExitCode = $(if ($null -ne $after) { $after.ServiceSpecificExitCode } else { $null })
+                    diff = @($Res.Diff) })
+            if ($null -ne $lc) { & $logFail 'result' $lc; & $halt 'LOG_RESULT_FAILED' }
+            else {
+                $lc = Write-AtmRecoverRecord -Log $log -State $ls -Type 'after' -Fields (ConvertTo-AtmRecoverCaptureRecord $after)
+                if ($null -ne $lc) { & $logFail 'after' $lc; & $halt 'LOG_AFTER_FAILED' }
+            }
+        }
+
+        # Step 11: run-end only while the log has not failed; neither a failed run-end nor a failed close replaces the
+        # main code.
+        if ($LogErrors.Count -eq 0) {
+            $lc = Write-AtmRecoverRecord -Log $log -State $ls -Type 'run-end' -Fields ([ordered]@{ outcome = $Res.Outcome; stoppedBy = $(if ($Res.StoppedBy) { $Res.StoppedBy } else { $Res.Aborted }); seamCalled = [bool]$Res.SeamCalled
+                    changedFields = @($Res.Diff).Count })
+            if ($null -ne $lc) { & $logFail 'run-end' $lc; & $halt 'LOG_END_FAILED' }
+        }
+        $cc = $log.Close()
+        if ($null -ne $cc) { & $logFail 'close' $cc; & $halt 'LOG_CLOSE_FAILED' }
+    } finally {
+        if ($null -ne $log) { try { $log.Dispose() } catch { $null = $_ } }
+    }
+}
+
+# ---------------------------------------------------------------------------------------------
+# Phase R3 (ADR-0016 sections 3, 4 and 6): the undo of one REC-SVC-START run, REC-SVC-STOP, which exists only as that
+# undo (V04-D1 (a)): never in the catalog, never offered by recover list, never accepted by recover plan or
+# Invoke-AtmRecover. The inverse plan is built from the "before" and "after" records of that run's log and a fresh
+# collection, and it is refused when the service is no longer in the recorded "after" state: the undo never overwrites a
+# newer state. The stop seam is reached past the gate only, by the undo only, and only the suite reaches it (with the
+# gate opened in its own process and the seam injected). No compensation and no repetition, ever (V04-D7 (a)); the
+# undo of an undo does not exist (a new start is a new REC-SVC-START run).
+# ---------------------------------------------------------------------------------------------
+$script:AtmRecoveryUndoOperation = [pscustomobject]@{
+    Id        = 'REC-SVC-STOP'
+    UndoOf    = 'REC-SVC-START'
+    Target    = 'SERVICE'
+    NotUndone = @('WHAT_THE_SERVICE_DID_WHILE_RUNNING', 'STATE_HELD_IN_MEMORY')
+}
+$script:AtmRecoveryUndoPlanSchema = 'atm-recover-undo-plan/1'
+# The source log: read once, at most 1 MiB, through a handle that never follows a reparse point.
+$script:AtmRecoveryUndoSourceMaxBytes = 1048576
+# The records of a complete R2 run, in order (Invoke-AtmRecoverLocked).
+$script:AtmRecoveryRunTypes = @('run-start', 'plan', 'before', 'confirmation', 'plan-check', 'intent', 'result', 'after', 'run-end')
+$script:AtmRecoveryUndoableOutcomes = @('COMPLETE', 'PARTIAL')
+# Why a source log gives no plan, closed, in the order they are checked.
+$script:AtmRecoveryUndoSourceCodes = @(
+    'UNDO_SOURCE_UNREADABLE',           # not a plain absolute local path, not found, or not readable
+    'UNDO_SOURCE_NOT_REGULAR',          # a reparse point in its path or the file itself, or a directory
+    'UNDO_SOURCE_TOO_LARGE',            # over AtmRecoveryUndoSourceMaxBytes
+    'UNDO_SOURCE_PROVENANCE',           # not the owner and protected DACL Open-AtmCleanLog gives a log
+    'UNDO_SOURCE_INVALID',              # not strict JSON lines of atm.recoverlog/1 with one run id, a contiguous recSeq and the records of an R2 run
+    'UNDO_SOURCE_RUN_MISMATCH',         # -RunId is not the log's run id
+    'UNDO_SOURCE_INCOMPLETE',           # the run's records stop before run-end
+    'UNDO_SOURCE_OPERATION_INVALID',    # the run's operation is not REC-SVC-START
+    'UNDO_SOURCE_NOT_STARTED',          # a run that stopped before the seam: nothing was started
+    'UNDO_SOURCE_OUTCOME_NOT_UNDOABLE'  # FAILED, REFUSED or EXCEPTION: nothing the engine can undo
+)
+# Why an inverse plan is refused (with the R1 codes of the criteria it shares: declaration, coverage, image, properties,
+# signals and dependencies read).
+$script:AtmRecoveryUndoRefusalCodes = @(
+    'UNDO_STATE_CHANGED',      # a field differs from the recorded "after" (ChangedFields names them)
+    'UNDO_STILL_PENDING',      # a PARTIAL run whose service is still pending: stopping a pending service is out
+    'UNDO_NOT_RUNNING',        # the service is not RUNNING
+    'UNDO_ACCEPT_STOP_FALSE',  # it does not accept a stop
+    'UNDO_DEPENDENT_ACTIVE'    # a dependent service is not STOPPED (hidden names included): never a cascade
+)
+# The R1 criteria that belong to a start only, left out of the undo's.
+$script:AtmRecoveryUndoStartOnly = @('RECOVERY_NOT_STOPPED', 'RECOVERY_START_MODE_DISABLED', 'RECOVERY_DEPENDENCY_STOPPED')
+# A PARTIAL run's natural continuation, pending to RUNNING, changes these capture fields (R0's capture: CheckPoint and
+# WaitHint as the service reports them, which only a pending service advances; the condition only for STOPPED and
+# PENDING; whether it accepts a stop). Any other changed field refuses, exitCode included.
+$script:AtmRecoveryUndoPartialTransition = @('state', 'checkPoint', 'waitHint', 'condition', 'acceptStop')
+# The stop seam's closed results, as R2's: OK, ACCESS_DENIED (REFUSED), the other Win32 errors of a stop by number
+# (FAILED, no wait), SERVICE_WIN32_OTHER outside the map.
+$script:AtmRecoveryStopWin32Codes = @{
+    5 = 'ACCESS_DENIED'; 1051 = 'DEPENDENT_SERVICES_RUNNING'; 1053 = 'SERVICE_REQUEST_TIMEOUT'; 1060 = 'SERVICE_DOES_NOT_EXIST'; 1061 = 'SERVICE_CANNOT_ACCEPT_CTRL'
+    1062 = 'SERVICE_NOT_ACTIVE'; 1072 = 'SERVICE_MARKED_FOR_DELETE'
+}
+$script:AtmRecoveryStopSeamCodes = @('OK', 'ACCESS_DENIED', 'DEPENDENT_SERVICES_RUNNING', 'SERVICE_REQUEST_TIMEOUT', 'SERVICE_DOES_NOT_EXIST', 'SERVICE_CANNOT_ACCEPT_CTRL',
+    'SERVICE_NOT_ACTIVE', 'SERVICE_MARKED_FOR_DELETE', 'SERVICE_WIN32_OTHER')
+$script:AtmRecoverJsonNumber = New-Object System.Text.RegularExpressions.Regex('\G-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?', [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)
+$script:AtmRecoverJsonMaxDepth = 8
+
+function Skip-AtmRecoverJsonSpace {
+    param([hashtable]$S)
+    while ($S.I -lt $S.T.Length -and ([int]$S.T[$S.I] -eq 32 -or [int]$S.T[$S.I] -eq 9)) { $S.I++ }
+}
+
+function Read-AtmRecoverJsonHex4 {
+    param([string]$T, [int]$At)
+    if ($At + 4 -gt $T.Length) { throw (New-Object FormatException('JSON_ESCAPE')) }
+    $h = $T.Substring($At, 4)
+    if ($h -cnotmatch '^[0-9A-Fa-f]{4}$') { throw (New-Object FormatException('JSON_ESCAPE')) }
+    return [Convert]::ToInt32($h, 16)
+}
+
+function Read-AtmRecoverJsonString {
+    # A JSON string at S.I (its opening quote) into S.V. Refused: a control character, an unknown escape, a lone surrogate.
+    param([hashtable]$S)
+    $t = $S.T; $i = $S.I + 1
+    $sb = New-Object System.Text.StringBuilder
+    while ($true) {
+        if ($i -ge $t.Length) { throw (New-Object FormatException('JSON_STRING_END')) }
+        $c = [int]$t[$i]
+        if ($c -eq 34) { $i++; break }
+        if ($c -lt 32) { throw (New-Object FormatException('JSON_CONTROL_CHAR')) }
+        if ($c -ne 92) { [void]$sb.Append([char]$c); $i++; continue }
+        if ($i + 1 -ge $t.Length) { throw (New-Object FormatException('JSON_ESCAPE')) }
+        $e = [int]$t[$i + 1]; $i += 2
+        if ($e -eq 34 -or $e -eq 92 -or $e -eq 47) { [void]$sb.Append([char]$e) }
+        elseif ($e -eq 98) { [void]$sb.Append([char]8) }
+        elseif ($e -eq 102) { [void]$sb.Append([char]12) }
+        elseif ($e -eq 110) { [void]$sb.Append([char]10) }
+        elseif ($e -eq 114) { [void]$sb.Append([char]13) }
+        elseif ($e -eq 116) { [void]$sb.Append([char]9) }
+        elseif ($e -eq 117) {
+            $u = Read-AtmRecoverJsonHex4 $t $i; $i += 4
+            if ($u -ge 0xD800 -and $u -le 0xDBFF) {
+                if ($i + 2 -gt $t.Length -or [int]$t[$i] -ne 92 -or [int]$t[$i + 1] -ne 117) { throw (New-Object FormatException('JSON_SURROGATE')) }
+                $lo = Read-AtmRecoverJsonHex4 $t ($i + 2)
+                if ($lo -lt 0xDC00 -or $lo -gt 0xDFFF) { throw (New-Object FormatException('JSON_SURROGATE')) }
+                $i += 6
+                [void]$sb.Append([char]$u); [void]$sb.Append([char]$lo)
+            } elseif ($u -ge 0xDC00 -and $u -le 0xDFFF) { throw (New-Object FormatException('JSON_SURROGATE')) }
+            else { [void]$sb.Append([char]$u) }
+        } else { throw (New-Object FormatException('JSON_ESCAPE')) }
+    }
+    $S.I = $i
+    $S.V = $sb.ToString()
+}
+
+function Read-AtmRecoverJsonValue {
+    # One JSON value at S.I into S.V: an object (an ordered dictionary with ordinal keys, a duplicate key refused), an
+    # array (object[], never unrolled), a string, a number (long, or double with a fraction or an exponent), true, false
+    # or null. Deeper than AtmRecoverJsonMaxDepth is refused.
+    param([hashtable]$S)
+    $t = $S.T
+    Skip-AtmRecoverJsonSpace $S
+    if ($S.I -ge $t.Length) { throw (New-Object FormatException('JSON_END')) }
+    $c = [int]$t[$S.I]
+    if ($c -eq 123 -or $c -eq 91) {
+        $S.D++
+        if ($S.D -gt $script:AtmRecoverJsonMaxDepth) { throw (New-Object FormatException('JSON_DEPTH')) }
+        $S.I++
+        Skip-AtmRecoverJsonSpace $S
+        if ($c -eq 123) {
+            $o = New-Object System.Collections.Specialized.OrderedDictionary([StringComparer]::Ordinal)
+            if ($S.I -lt $t.Length -and [int]$t[$S.I] -eq 125) { $S.I++ }
+            else {
+                while ($true) {
+                    Skip-AtmRecoverJsonSpace $S
+                    if ($S.I -ge $t.Length -or [int]$t[$S.I] -ne 34) { throw (New-Object FormatException('JSON_KEY')) }
+                    Read-AtmRecoverJsonString $S
+                    $k = [string]$S.V
+                    if ($o.Contains($k)) { throw (New-Object FormatException('JSON_DUPLICATE_KEY')) }
+                    Skip-AtmRecoverJsonSpace $S
+                    if ($S.I -ge $t.Length -or [int]$t[$S.I] -ne 58) { throw (New-Object FormatException('JSON_COLON')) }
+                    $S.I++
+                    Read-AtmRecoverJsonValue $S
+                    $o[$k] = $S.V
+                    Skip-AtmRecoverJsonSpace $S
+                    if ($S.I -lt $t.Length -and [int]$t[$S.I] -eq 44) { $S.I++; continue }
+                    if ($S.I -lt $t.Length -and [int]$t[$S.I] -eq 125) { $S.I++; break }
+                    throw (New-Object FormatException('JSON_OBJECT'))
+                }
+            }
+            $S.V = $o
+        } else {
+            $list = New-Object System.Collections.Generic.List[object]
+            if ($S.I -lt $t.Length -and [int]$t[$S.I] -eq 93) { $S.I++ }
+            else {
+                while ($true) {
+                    Read-AtmRecoverJsonValue $S
+                    $list.Add($S.V)
+                    Skip-AtmRecoverJsonSpace $S
+                    if ($S.I -lt $t.Length -and [int]$t[$S.I] -eq 44) { $S.I++; continue }
+                    if ($S.I -lt $t.Length -and [int]$t[$S.I] -eq 93) { $S.I++; break }
+                    throw (New-Object FormatException('JSON_ARRAY'))
+                }
+            }
+            $S.V = $list.ToArray()
+        }
+        $S.D--
+        return
+    }
+    if ($c -eq 34) { Read-AtmRecoverJsonString $S; return }
+    foreach ($lit in @(@('true', $true), @('false', $false), @('null', $null))) {
+        $w = [string]$lit[0]
+        if ($S.I + $w.Length -le $t.Length -and [string]::CompareOrdinal($t, $S.I, $w, 0, $w.Length) -eq 0) { $S.I += $w.Length; $S.V = $lit[1]; return }
+    }
+    $m = $script:AtmRecoverJsonNumber.Match($t, $S.I)
+    if (-not $m.Success -or $m.Length -eq 0) { throw (New-Object FormatException('JSON_VALUE')) }
+    $S.I += $m.Length
+    if ($m.Value.IndexOfAny([char[]]'.eE') -ge 0) { $S.V = [double]::Parse($m.Value, [Globalization.CultureInfo]::InvariantCulture); return }
+    $l = [long]0
+    if (-not [long]::TryParse($m.Value, [Globalization.NumberStyles]::AllowLeadingSign, [Globalization.CultureInfo]::InvariantCulture, [ref]$l)) { throw (New-Object FormatException('JSON_NUMBER')) }
+    $S.V = $l
+}
+
+function ConvertFrom-AtmRecoverJsonLine {
+    # One log line as strict JSON: one object and nothing after it. Throws FormatException otherwise.
+    param([string]$Text)
+    $S = @{ T = $Text; I = 0; V = $null; D = 0 }
+    Read-AtmRecoverJsonValue $S
+    Skip-AtmRecoverJsonSpace $S
+    if ($S.I -ne $Text.Length) { throw (New-Object FormatException('JSON_TRAILING')) }
+    if (-not ($S.V -is [System.Collections.Specialized.OrderedDictionary])) { throw (New-Object FormatException('JSON_NOT_OBJECT')) }
+    return $S.V
+}
+
+function ConvertFrom-AtmRecoverCaptureRecord {
+    # A before or after record back to a capture (the inverse of ConvertTo-AtmRecoverCaptureRecord). Ok: exactly the
+    # record's header and the capture fields, each $null or a string, the two lists arrays of strings; or every capture
+    # field $null (the service was not read: Capture $null). Any other shape is not Ok.
+    param($Record)
+    $bad = [pscustomobject]@{ Ok = $false; Capture = $null }
+    $want = @('schema', 'type', 'runId', 'recSeq', 'utc') + @($script:AtmRecoveryCaptureFields.Values)
+    if ($null -eq $Record -or $Record.Count -ne $want.Count) { return $bad }
+    foreach ($k in $want) { if (-not $Record.Contains($k)) { return $bad } }
+    if (@(@($script:AtmRecoveryCaptureFields.Values) | Where-Object { $null -ne $Record[$_] }).Count -eq 0) { return [pscustomobject]@{ Ok = $true; Capture = $null } }
+    $o = [ordered]@{}
+    foreach ($k in $script:AtmRecoveryCaptureFields.Keys) {
+        $v = $Record[$script:AtmRecoveryCaptureFields[$k]]
+        if ($k -ceq 'DependsOn' -or $k -ceq 'Dependents') {
+            if (-not ($v -is [object[]])) { return $bad }
+            foreach ($x in $v) { if (-not ($x -is [string])) { return $bad } }
+            $o[$k] = [string[]]$v
+        } else {
+            if ($null -ne $v -and -not ($v -is [string])) { return $bad }
+            $o[$k] = $v
+        }
+    }
+    return [pscustomobject]@{ Ok = $true; Capture = [pscustomobject]$o }
+}
+
+function Test-AtmRecoverSourceProvenance {
+    <#
+      The owner and DACL that Open-AtmCleanLog gives every log, read through the open handle: owned by this process's
+      user or by Administrators, a protected DACL, and access allowed to no one but this user, SYSTEM, Administrators and
+      OWNER RIGHTS. It shows who could have written the file, not that the engine wrote what it says (ADR-0016, R3).
+    #>
+    param($Stream)
+    $me = Get-AtmCurrentIdentity
+    $sec = $(if ($null -ne ('System.IO.FileSystemAclExtensions' -as [type])) { [System.IO.FileSystemAclExtensions]::GetAccessControl($Stream) } else { $Stream.GetAccessControl() })
+    $owner = $sec.GetOwner([Security.Principal.SecurityIdentifier])
+    if ($null -eq $owner -or @([string]$me.Sid, 'S-1-5-32-544') -cnotcontains $owner.Value) { return $false }
+    if (-not $sec.AreAccessRulesProtected) { return $false }
+    $allowed = @([string]$me.Sid, 'S-1-5-18', 'S-1-5-32-544', 'S-1-3-4')
+    foreach ($r in @($sec.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))) {
+        if ($r.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $allowed -cnotcontains $r.IdentityReference.Value) { return $false }
+    }
+    return $true
+}
+
+function Read-AtmRecoverRunLog {
+    <#
+      The source of an undo: the log of one R2 run, given by the caller (-Path) and its run id (-RunId), read only and as
+      untrusted data. In this order: a plain absolute local path; no reparse point in its path or on the file (checked on
+      the handle, which follows none); a regular file of at most 1 MiB, read once; the owner and protected DACL of a log
+      (Test-AtmRecoverSourceProvenance); UTF-8 without BOM, LF only, ending with LF, no blank line; each line strict JSON
+      of atm.recoverlog/1, one run id (that of -RunId), recSeq contiguous from 1, the records of an R2 run in order,
+      none unknown or repeated; operation REC-SVC-START with one target and one plan id throughout, confirmed, matched,
+      the seam called with OK, and the outcome COMPLETE or PARTIAL; before STOPPED, after RUNNING (COMPLETE) or neither
+      RUNNING nor STOPPED (PARTIAL). Returns Code ($null, or one of AtmRecoveryUndoSourceCodes), RunId, Target, PlanId, Outcome, Before and
+      After (captures). Never throws: every failure is a code. Nothing in it is used unchecked: the target must still be
+      declared and the state comes only from a fresh collection.
+    #>
+    param([string]$Path, [string]$RunId)
+    $out = [ordered]@{ Code = $null; RunId = $null; Target = $null; PlanId = $null; Outcome = $null; Before = $null; After = $null }
+    $fail = { param([string]$Code) $out.Code = $Code; [pscustomobject]$out }
+    $g = [guid]::Empty
+    if (-not [guid]::TryParseExact([string]$RunId, 'D', [ref]$g) -or $g.ToString() -cne $RunId) { return (& $fail 'UNDO_SOURCE_RUN_MISMATCH') }
+    if ($null -ne (Test-AtmAllowListPathSyntax $Path)) { return (& $fail 'UNDO_SOURCE_UNREADABLE') }
+    $bytes = $null
+    try {
+        Initialize-AtmNative
+        $at = $null
+        $chain = [AgentTempManager.AtmPathCheck]::Chain($Path, [ref]$at)
+        if ($chain -ceq 'REPARSE_IN_PATH') { return (& $fail 'UNDO_SOURCE_NOT_REGULAR') }
+        if ($chain -cne 'OK') { return (& $fail 'UNDO_SOURCE_UNREADABLE') }
+        $err = $null
+        $h = [AgentTempManager.AtmSharedRead]::Open($Path, [ref]$err)
+        if ($null -eq $h) { return (& $fail $(if ($err -ceq 'REPARSE' -or $err -ceq 'DIRECTORY') { 'UNDO_SOURCE_NOT_REGULAR' } else { 'UNDO_SOURCE_UNREADABLE' })) }
+        $fs = New-Object IO.FileStream($h, [IO.FileAccess]::Read)
+        try {
+            $len = $fs.Length
+            if ($len -gt $script:AtmRecoveryUndoSourceMaxBytes) { return (& $fail 'UNDO_SOURCE_TOO_LARGE') }
+            if (-not (Test-AtmRecoverSourceProvenance -Stream $fs)) { return (& $fail 'UNDO_SOURCE_PROVENANCE') }
+            $bytes = New-Object byte[] ([int]$len)
+            $n = 0
+            while ($n -lt $len) { $r = $fs.Read($bytes, $n, [int]$len - $n); if ($r -le 0) { break }; $n += $r }
+            if ($n -ne $len) { return (& $fail 'UNDO_SOURCE_UNREADABLE') }
+        } finally { $fs.Dispose() }
+    } catch { return (& $fail 'UNDO_SOURCE_UNREADABLE') }
+
+    $str = { param($R, [string]$K) if ($null -ne $R -and $R.Contains($K) -and $R[$K] -is [string]) { $R[$K] } else { $null } }
+    $isTrue = { param($R, [string]$K) ($null -ne $R -and $R.Contains($K) -and $R[$K] -is [bool] -and $R[$K]) }
+    try {
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { return (& $fail 'UNDO_SOURCE_INVALID') }
+        $text = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes)
+        if ($text.Length -eq 0) { return (& $fail 'UNDO_SOURCE_INCOMPLETE') }
+        if ($text.Contains([string][char]13) -or -not $text.EndsWith([string][char]10)) { return (& $fail 'UNDO_SOURCE_INVALID') }
+        $lines = $text.Substring(0, $text.Length - 1).Split([char]10)
+        if ($lines.Count -gt $script:AtmRecoveryRunTypes.Count) { return (& $fail 'UNDO_SOURCE_INVALID') }
+        $recs = New-Object System.Collections.Generic.List[object]
+        foreach ($ln in $lines) {
+            if ($ln.Length -eq 0) { return (& $fail 'UNDO_SOURCE_INVALID') }
+            $rec = ConvertFrom-AtmRecoverJsonLine $ln
+            if ((& $str $rec 'schema') -cne $script:AtmRecoverLogSchema -or $null -eq (& $str $rec 'type') -or $null -eq (& $str $rec 'runId') -or $null -eq (& $str $rec 'utc') -or
+                -not $rec.Contains('recSeq') -or -not ($rec['recSeq'] -is [long])) { return (& $fail 'UNDO_SOURCE_INVALID') }
+            $recs.Add($rec)
+        }
+        $byType = @{}
+        $types = New-Object System.Collections.Generic.List[string]
+        for ($i = 0; $i -lt $recs.Count; $i++) {
+            $ty = [string]$recs[$i]['type']
+            if ([string]$recs[$i]['runId'] -cne [string]$recs[0]['runId'] -or $recs[$i]['recSeq'] -ne ($i + 1) -or $script:AtmRecoveryRunTypes -cnotcontains $ty -or $byType.ContainsKey($ty)) { return (& $fail 'UNDO_SOURCE_INVALID') }
+            $byType[$ty] = $recs[$i]
+            $types.Add($ty)
+        }
+        if ([string]$recs[0]['runId'] -cne $RunId) { return (& $fail 'UNDO_SOURCE_RUN_MISMATCH') }
+        $full = $script:AtmRecoveryRunTypes
+        $isPrefix = { param($List) for ($j = 0; $j -lt $List.Count; $j++) { if ($List[$j] -cne $full[$j]) { return $false } }; return $true }
+        $stopped = $false
+        if ($types.Count -lt $full.Count) {
+            if (& $isPrefix $types) { return (& $fail 'UNDO_SOURCE_INCOMPLETE') }
+            # A run stopped before the seam: its records up to the stop, then run-end, and never an intent.
+            $head = @($types.GetRange(0, $types.Count - 1))
+            if ($types[$types.Count - 1] -ceq 'run-end' -and (& $isPrefix $head) -and $head -cnotcontains 'intent') { $stopped = $true }
+            else { return (& $fail 'UNDO_SOURCE_INVALID') }
+        } elseif (-not (& $isPrefix $types)) { return (& $fail 'UNDO_SOURCE_INVALID') }
+        $rs = $byType['run-start']
+        $op = & $str $rs 'operation'; $target = & $str $rs 'target'; $planId = & $str $rs 'planId'
+        if (-not $op -or -not $target -or $planId -cnotmatch '^[0-9a-f]{64}$' -or -not (& $isTrue $rs 'gateOpen')) { return (& $fail 'UNDO_SOURCE_INVALID') }
+        if ($op -cne $script:AtmRecoveryUndoOperation.UndoOf) { return (& $fail 'UNDO_SOURCE_OPERATION_INVALID') }
+        if ($stopped) { return (& $fail 'UNDO_SOURCE_NOT_STARTED') }
+        foreach ($ty in @('plan', 'intent', 'result')) { if ((& $str $byType[$ty] 'operation') -cne $op -or (& $str $byType[$ty] 'target') -cne $target) { return (& $fail 'UNDO_SOURCE_INVALID') } }
+        foreach ($ty in @('plan', 'confirmation', 'plan-check', 'intent')) { if ((& $str $byType[$ty] 'planId') -cne $planId) { return (& $fail 'UNDO_SOURCE_INVALID') } }
+        if (-not (& $isTrue $byType['confirmation'] 'accepted') -or -not (& $isTrue $byType['plan-check'] 'matched') -or -not (& $isTrue $byType['run-end'] 'seamCalled')) { return (& $fail 'UNDO_SOURCE_INVALID') }
+        $outcome = & $str $byType['result'] 'outcome'
+        if ($script:AtmRecoveryOutcomes -cnotcontains $outcome -or (& $str $byType['run-end'] 'outcome') -cne $outcome) { return (& $fail 'UNDO_SOURCE_INVALID') }
+        if ($script:AtmRecoveryUndoableOutcomes -cnotcontains $outcome) { return (& $fail 'UNDO_SOURCE_OUTCOME_NOT_UNDOABLE') }
+        if ((& $str $byType['result'] 'seamCode') -cne 'OK') { return (& $fail 'UNDO_SOURCE_INVALID') }
+        # R2's outcomes: COMPLETE ends RUNNING; PARTIAL ends neither RUNNING nor STOPPED (pending, paused, unreadable or
+        # not read at all).
+        $before = ConvertFrom-AtmRecoverCaptureRecord $byType['before']
+        $after = ConvertFrom-AtmRecoverCaptureRecord $byType['after']
+        if (-not $before.Ok -or -not $after.Ok -or $null -eq $before.Capture -or [string]$before.Capture.State -cne 'STOPPED') { return (& $fail 'UNDO_SOURCE_INVALID') }
+        $afterState = $(if ($null -ne $after.Capture) { [string]$after.Capture.State } else { '' })
+        if (($outcome -ceq 'COMPLETE' -and $afterState -cne 'RUNNING') -or ($outcome -ceq 'PARTIAL' -and ($afterState -ceq 'RUNNING' -or $afterState -ceq 'STOPPED'))) { return (& $fail 'UNDO_SOURCE_INVALID') }
+        $out.RunId = $RunId; $out.Target = $target; $out.PlanId = $planId; $out.Outcome = $outcome; $out.Before = $before.Capture; $out.After = $after.Capture
+        return [pscustomobject]$out
+    } catch { return (& $fail 'UNDO_SOURCE_INVALID') }
+}
+
+function Test-AtmRecoverUndoPendingSource {
+    # A PARTIAL run that ended with its service pending: the only source whose natural continuation is accepted.
+    param([string]$SourceOutcome, $Recorded)
+    return ($SourceOutcome -ceq 'PARTIAL' -and $null -ne $Recorded -and [string]$Recorded.State -ceq 'PENDING')
+}
+
+function Get-AtmRecoverUndoRefusals {
+    <#
+      The criteria of the undo of one recorded run for one declared name of a collection. Codes (ordinal order; none
+      means offered) and ChangedFields (log names):
+        * the R1 criteria it shares with a start (declared, one provider, coverage, a declared image that matches,
+          listed once, properties and fault signals read, dependencies read in both directions);
+        * the current capture equals the recorded "after", field by field (UNDO_STATE_CHANGED with the fields). For a
+          PARTIAL run that ended pending, the fields of its natural continuation (AtmRecoveryUndoPartialTransition) may
+          differ, and only while the service is RUNNING or still pending; still pending is UNDO_STILL_PENDING;
+        * it is RUNNING (UNDO_NOT_RUNNING) and accepts a stop (UNDO_ACCEPT_STOP_FALSE);
+        * every dependent is STOPPED, hidden names included (UNDO_DEPENDENT_ACTIVE): read from the capture, no new
+          query.
+    #>
+    param($Collection, [string]$Name, $Recorded, [string]$SourceOutcome)
+    $codes = New-Object System.Collections.Generic.List[string]
+    $fields = New-Object System.Collections.Generic.List[string]
+    foreach ($c in @(Get-AtmRecoverRefusals -Collection $Collection -Name $Name)) { if ($script:AtmRecoveryUndoStartOnly -cnotcontains $c) { $codes.Add($c) } }
+    if ($codes -ccontains 'RECOVERY_NOT_DECLARED') { return [pscustomobject]@{ Codes = @('RECOVERY_NOT_DECLARED'); ChangedFields = @() } }
+    $f = $Collection.FindingsByName[$Name]
+    if ((Test-AtmRecoverEvidence $f 'SERVICE_STATE') -or (Test-AtmRecoverEvidence $f 'SERVICE_STATE_UNREADABLE')) {
+        $now = Get-AtmRecoverCapture -Collection $Collection -Name $Name
+        $st = [string]$now.State
+        $pendingSource = (Test-AtmRecoverUndoPendingSource -SourceOutcome $SourceOutcome -Recorded $Recorded)
+        $natural = ($pendingSource -and ($st -ceq 'RUNNING' -or $st -ceq 'PENDING'))
+        foreach ($d in @(Compare-AtmRecoverCapture -Before $Recorded -After $now)) {
+            if (-not ($natural -and $script:AtmRecoveryUndoPartialTransition -ccontains [string]$d.field)) { $fields.Add([string]$d.field) }
+        }
+        if ($pendingSource -and $st -ceq 'PENDING') { $codes.Add('UNDO_STILL_PENDING') }
+        elseif ($st -cne 'RUNNING') { $codes.Add('UNDO_NOT_RUNNING') }
+        elseif ([string]$now.AcceptStop -cne 'TRUE') { $codes.Add('UNDO_ACCEPT_STOP_FALSE') }
+        foreach ($label in @($now.Dependents)) { if ((Split-AtmRecoverDependencyLabel $label).State -cne 'STOPPED') { $codes.Add('UNDO_DEPENDENT_ACTIVE'); break } }
+        if ($fields.Count -gt 0) { $codes.Add('UNDO_STATE_CHANGED') }
+    }
+    return [pscustomobject]@{ Codes = @(Get-AtmSortedCodes $codes); ChangedFields = $fields.ToArray() }
+}
+
+function Get-AtmRecoverUndoPlanId {
+    # The undo's plan id: SHA-256 of its own prefix and, in a fixed order, the operation, the target, the source run id
+    # and every field of the current capture, each value length-prefixed ($null distinct from empty), each list with its
+    # count (the encoding of Get-AtmRecoverPlanId).
+    param([string]$Target, [string]$SourceRunId, $Capture)
+    $parts = New-Object System.Collections.Generic.List[object]
+    $parts.Add($script:AtmRecoveryUndoPlanSchema); $parts.Add($script:AtmRecoveryUndoOperation.Id); $parts.Add($Target); $parts.Add($SourceRunId)
+    foreach ($k in @('State', 'StartMode', 'DelayedAutoStart', 'ExitCode', 'ServiceSpecificExitCode', 'CheckPoint', 'WaitHint', 'AcceptStop', 'Condition', 'AccountKind', 'Account', 'Executable', 'ExecutableForm', 'Image')) { $parts.Add($Capture.$k) }
+    foreach ($k in @('DependsOn', 'Dependents')) { $list = @($Capture.$k); $parts.Add([string]$list.Count); foreach ($x in $list) { $parts.Add($x) } }
+    $text = -join @($parts | ForEach-Object { if ($null -eq $_) { '~;' } else { $s = [string]$_; '{0}:{1};' -f $s.Length, $s } })
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $hash = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)) } finally { $sha.Dispose() }
+    return (-join @($hash | ForEach-Object { $_.ToString('x2') }))
+}
+
+function Get-AtmRecoverUndoPlan {
+    <#
+      The inverse plan of one source run (Read-AtmRecoverRunLog) on a collection: REC-SVC-STOP for its target, the source
+      run id and outcome, the recorded "after", the current capture, the fields a PARTIAL run's continuation may change,
+      what the undo does not undo, the likely elevation and the plan id. Refused: the source's code, or the codes and
+      changed fields of Get-AtmRecoverUndoRefusals (no plan id). Read only; Changed is always $false.
+    #>
+    param($Collection, $Source)
+    $op = $script:AtmRecoveryUndoOperation
+    $out = [ordered]@{
+        Operation = $op; UndoOf = $op.UndoOf; Target = $Source.Target; SourceRunId = $Source.RunId; SourceOutcome = $Source.Outcome; SourceCode = $Source.Code
+        Declared = $false; Provider = $null; Providers = @(); Offered = $false; Codes = @(); ChangedFields = @(); Recorded = $Source.After; SourceBefore = $Source.Before
+        Capture = $null; PlanId = $null; Elevation = $(if ($null -ne $Collection) { $Collection.Elevation } else { $null }); NotUndone = @($op.NotUndone); AcceptedTransition = @()
+        GateOpen = [bool]$script:AtmRecoveryEnabled; Changed = $false
+    }
+    if ($null -ne $Source.Code) { $out.Codes = @($Source.Code); return [pscustomobject]$out }
+    $r = Get-AtmRecoverUndoRefusals -Collection $Collection -Name $Source.Target -Recorded $Source.After -SourceOutcome $Source.Outcome
+    $out.Codes = @($r.Codes); $out.ChangedFields = @($r.ChangedFields); $out.Offered = (@($r.Codes).Count -eq 0)
+    if (Test-AtmRecoverUndoPendingSource -SourceOutcome $Source.Outcome -Recorded $Source.After) { $out.AcceptedTransition = @($script:AtmRecoveryUndoPartialTransition) }
+    $out.Declared = (@($Collection.DeclaredNames) -ccontains $Source.Target)
+    if ($out.Declared) {
+        $d = $Collection.DeclaredByName[$Source.Target]
+        $out.Provider = $Collection.FindingsByName[$Source.Target].Provider
+        $out.Providers = @(@($d.Providers) | ForEach-Object { if ($_.Role) { $_.Id + ':' + $_.Role } else { $_.Id } })
+        if ($out.Offered) {
+            $cap = Get-AtmRecoverCapture -Collection $Collection -Name $Source.Target
+            $out.Capture = $cap
+            $out.PlanId = Get-AtmRecoverUndoPlanId -Target $Source.Target -SourceRunId $Source.RunId -Capture $cap
+        }
+    }
+    return [pscustomobject]$out
+}
+
+function Invoke-AtmRecoverServiceStopDefault {
+    <#
+      The default stop seam: stops one service, by name, and nothing else (AtmServiceStop in Native.cs). The service
+      control manager is opened with connect access only, the service with the stop right only (SERVICE_STOP), and
+      SERVICE_CONTROL_STOP is sent once. Its dependent services are never enumerated, opened or stopped: a running
+      dependent makes the stop fail (DEPENDENT_SERVICES_RUNNING), never a cascade. Returns a closed code of
+      AtmRecoveryStopSeamCodes, mapped by Win32 number. Called only by Invoke-AtmRecoverUndoLocked, past the recovery
+      gate, when no -ServiceStopImpl is given; the suite never reaches it.
+    #>
+    param([string]$Name)
+    Initialize-AtmNative
+    $n = [int][AgentTempManager.AtmServiceStop]::Stop($Name)
+    if ($n -eq 0) { return 'OK' }
+    if ($script:AtmRecoveryStopWin32Codes.ContainsKey($n)) { return $script:AtmRecoveryStopWin32Codes[$n] }
+    return 'SERVICE_WIN32_OTHER'
+}
+
+function Invoke-AtmRecoverUndo {
+    <#
+      The undo of ONE REC-SVC-START run (ADR-0016 sections 3, 4 and 6): REC-SVC-STOP for its one service, with no list
+      or batch form. -SourceLog is the run's log, -RunId its run id (a cross-check: the log must carry it). Every
+      collection is fresh and made in this process (the test overrides as Invoke-AtmRecover).
+      Gate closed (every copy): the source read, the collection, the inverse plan and the presenter, then
+      RECUPERACAO_REAL_DESABILITADA. Nothing is asked, locked or logged, no inventory is read and no seam is called.
+      Past the gate (the suite only), the steps of Invoke-AtmRecover in the same order:
+        1. an interactive console observed by the engine (CONSOLE_NOT_OBSERVED), then a confirmation reader;
+        2. a NEW -LogFile, not the -SourceLog, outside every audited base (LOG_REQUIRED, LOG_SAME_AS_SOURCE,
+           LOG_DESTINATION_NOT_ALLOWED, LOG_ALREADY_EXISTS);
+        3. the source read (UNDO_SOURCE_REFUSED, the code in RefusalCodes), a fresh collection and the undo's criteria
+           (UNDO_REFUSED, with the codes and ChangedFields): any refusal stops before anything is asked;
+        4. the inverse plan through the mandatory -PlanPresenter;
+        5. to 11. under the lock B8 (CLEAN_LOCK_<status> starts nothing): Invoke-AtmRecoverUndoLocked.
+      -ServiceStopImpl: test seam, scriptblock(name) returning a code of AtmRecoveryStopSeamCodes; without it the default
+      stop seam runs. -SettleWait as Invoke-AtmRecover. Aborted: the seam was never called; StoppedBy: a failure after
+      it; Outcome: what the stop gave.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$SourceLog,
+        [string]$RunId,
+        [scriptblock]$PlanPresenter,
+        [scriptblock]$ConfirmationReader,
+        [hashtable]$InventoryArgs = @{},
+        [string]$LogFile,
+        [hashtable]$Interaction = @{},
+        $Providers = $null,
+        [scriptblock]$IdentitySource = $null,
+        [scriptblock]$ServiceSource = $null,
+        [scriptblock]$ServiceDependencySource = $null,
+        [scriptblock]$ServiceWait = $null,
+        [int]$DeadlineSeconds = $script:AtmRecoveryDeadlineSeconds,
+        [scriptblock]$ServiceStopImpl,
+        [scriptblock]$SettleWait
+    )
+    $logErrors = New-Object System.Collections.Generic.List[object]
+    $res = [ordered]@{
+        Operation = $script:AtmRecoveryUndoOperation.Id; Target = $null; SourceRunId = $RunId; SourceOutcome = $null; GateOpen = [bool]$script:AtmRecoveryEnabled; Plan = $null; PlanId = $null; Phrase = $null
+        Aborted = $null; RefusalCodes = @(); ConfirmationCode = $null; RevalidationCodes = @(); ChangedFields = @(); StoppedBy = $null
+        SeamCalled = $false; SeamCode = $null; ExceptionType = $null; Outcome = $null; WaitedMs = 0; Reads = 0
+        Before = $null; After = $null; Diff = @(); Changed = $false
+        RunId = $null; LogFile = $null; LogCreated = $false; LogErrors = @(); LockReleaseError = $null
+    }
+    $done = { $res.LogErrors = $logErrors.ToArray(); $res.Changed = (@($res.Diff).Count -gt 0); [pscustomobject]$res }
+    if (-not $PlanPresenter) { $res.Aborted = 'SEM_APRESENTACAO'; return (& $done) }
+    $collArgs = @{ Providers = $Providers; IdentitySource = $IdentitySource; ServiceSource = $ServiceSource; ServiceDependencySource = $ServiceDependencySource; ServiceWait = $ServiceWait; DeadlineSeconds = $DeadlineSeconds }
+    $plan = $null
+    $build = {
+        $src = Read-AtmRecoverRunLog -Path $SourceLog -RunId $RunId
+        $coll = $(if ($null -eq $src.Code) { Get-AtmRecoverCollection @collArgs } else { $null })
+        $p = Get-AtmRecoverUndoPlan -Collection $coll -Source $src
+        $res.Plan = $p; $res.PlanId = $p.PlanId; $res.Target = $p.Target; $res.SourceOutcome = $p.SourceOutcome; $res.RefusalCodes = @($p.Codes); $res.ChangedFields = @($p.ChangedFields); $res.Before = $p.Capture
+        return [pscustomobject]@{ Plan = $p; Collection = $coll }
+    }
+    if (-not $script:AtmRecoveryEnabled) {
+        $b = & $build
+        & $PlanPresenter $b.Plan
+        $res.Aborted = 'RECUPERACAO_REAL_DESABILITADA'
+        return (& $done)
+    }
+
+    # ---- past the recovery gate (the suite only, in its own process) ----
+    $console = Get-AtmEngineConsoleObservation
+    if (-not $console.Observed) { $res.Aborted = 'CONSOLE_NOT_OBSERVED'; return (& $done) }
+    if (-not $ConfirmationReader) { $res.Aborted = 'SEM_APRESENTACAO_OU_CONFIRMACAO'; return (& $done) }
+    if (-not $LogFile) { $res.Aborted = 'LOG_REQUIRED'; return (& $done) }
+    $same = $false
+    if ($SourceLog) { try { $same = [string]::Equals([IO.Path]::GetFullPath($LogFile), [IO.Path]::GetFullPath($SourceLog), [StringComparison]::OrdinalIgnoreCase) } catch { $same = $false } }
+    if ($same) { $res.Aborted = 'LOG_SAME_AS_SOURCE'; return (& $done) }
+    $ia = @{} + $InventoryArgs; $ia['NoProgress'] = $true
+    $inv = Invoke-AtmInventory @ia
+    if (-not (Test-AtmOutputPathOutsideBases -Path $LogFile -Inventory $inv)) { $res.Aborted = 'LOG_DESTINATION_NOT_ALLOWED'; return (& $done) }
+    if (Test-Path -LiteralPath $LogFile) { $res.Aborted = 'LOG_ALREADY_EXISTS'; return (& $done) }
+    $b = & $build
+    $plan = $b.Plan
+    if ($null -ne $plan.SourceCode) { $res.Aborted = 'UNDO_SOURCE_REFUSED'; return (& $done) }
+    if (-not $plan.Offered) { $res.Aborted = 'UNDO_REFUSED'; return (& $done) }
+    & $PlanPresenter $plan
+    # No closure: the body runs in this session state, where the engine's functions are, and finds $undoBound here.
+    $undoBound = @{ Res = $res; LogErrors = $logErrors; Collection = $b.Collection; Plan = $plan; Inventory = $inv; CollectionArgs = $collArgs; LogFile = $LogFile
+        ConfirmationReader = $ConfirmationReader; Interaction = $Interaction; Console = $console; ServiceStopImpl = $ServiceStopImpl; SettleWait = $SettleWait }
+    $u = Invoke-AtmUnderSharedLock -Body { Invoke-AtmRecoverUndoLocked @undoBound }
+    if (-not $u.Acquired) { $res.Aborted = 'CLEAN_LOCK_' + $u.Status; $res.LockReleaseError = $u.ReleaseError; return (& $done) }
+    # A failed release never replaces the main code; with none it makes the run incomplete.
+    if ($null -ne $u.ReleaseError) {
+        $res.LockReleaseError = $u.ReleaseError
+        if (-not $res.Aborted -and -not $res.StoppedBy) { if ($res.SeamCalled) { $res.StoppedBy = 'LOCK_RELEASE_FAILED' } else { $res.Aborted = 'LOCK_RELEASE_FAILED' } }
+    }
+    return (& $done)
+}
+
+function Invoke-AtmRecoverUndoLocked {
+    <#
+      Steps 5 to 11 of Invoke-AtmRecoverUndo, called only by it, past the recovery gate and under the lock B8; fills -Res.
+        5. the log (Open-AtmCleanLog), then run-start (with the source run id), plan and before (the current capture);
+        6. the typed phrase PARAR SERVICO <the first 8 characters of the plan id, upper case>, compared exactly
+           (Test-AtmTypedPhrase); confirmation. Anything else: CONFIRMACAO_AUSENTE_OU_DIVERGENTE;
+        7. the revalidation on a fresh collection: the undo's criteria again (reasons) and the fields changed since the
+           presented capture, its providers, the token's identity and its elevation (Get-AtmRecoverPlanCheck's
+           ChangedFields); plan-check. Any reason or changed field: REVALIDATION_REFUSED;
+        8. intent, flushed, then the stop seam, with the service name and nothing else;
+        9. the settle wait, after OK only: until STOPPED, back to RUNNING after a read that was not RUNNING, or the
+           limit (as Invoke-AtmRecoverLocked's);
+       10. result and after; 11. run-end, the log closed, the lock released by the caller.
+      Outcomes: EXCEPTION (the seam threw, or gave no closed code); REFUSED (ACCESS_DENIED); FAILED (another seam code,
+      with no wait, or RUNNING at the end); COMPLETE (STOPPED); PARTIAL (anything else). "After" is read and the diff
+      computed in every outcome. Nothing is compensated or retried: a failed undo starts nothing again.
+    #>
+    param([System.Collections.IDictionary]$Res, $LogErrors, $Collection, $Plan, $Inventory, [hashtable]$CollectionArgs, [string]$LogFile, [scriptblock]$ConfirmationReader,
+        [hashtable]$Interaction = @{}, $Console, [scriptblock]$ServiceStopImpl, [scriptblock]$SettleWait)
+    $service = [string]$Plan.Target
+    $op = $Plan.Operation
+    $logFail = { param([string]$Stage, [string]$Code) $LogErrors.Add([pscustomobject]@{ Stage = $Stage; Code = $Code }) }
+    $halt = { param([string]$Code) if (-not $Res.Aborted -and -not $Res.StoppedBy) { if ($Res.SeamCalled) { $Res.StoppedBy = $Code } else { $Res.Aborted = $Code } } }
+    $me = Get-AtmCurrentIdentity
+    $runId = [guid]::NewGuid().ToString()
+    $Res.RunId = $runId; $Res.LogFile = $LogFile
+    $Res.Phrase = 'PARAR SERVICO ' + ([string]$Plan.PlanId).Substring(0, 8).ToUpperInvariant()
+    $ls = @{ Id = $runId; Seq = 0 }
+    $log = $null
+    try {
+        $opened = Open-AtmCleanLog -Path $LogFile -Inventory $Inventory -ProcessUserSid $me.Sid
+        $Res.LogCreated = [bool]$opened.Created
+        if ($null -eq $opened.Log) { & $logFail 'open' $opened.Code; $Res.Aborted = 'LOG_OPEN_FAILED'; return }
+        $log = $opened.Log
+        $lc = Write-AtmRecoverRecord -Log $log -State $ls -Type 'run-start' -Fields ([ordered]@{ tool = $script:AtmVersion; operation = $op.Id; undoOf = $op.UndoOf; target = $service; planId = $Plan.PlanId
+                sourceRunId = $Plan.SourceRunId; sourceOutcome = $Plan.SourceOutcome; elevation = $Collection.Elevation; elevationType = [string]$Collection.Identity.ElevationType; gateOpen = $true })
+        if ($null -eq $lc) {
+            $lc = Write-AtmRecoverRecord -Log $log -State $ls -Type 'plan' -Fields ([ordered]@{ operation = $op.Id; undoOf = $op.UndoOf; target = $service; provider = $Plan.Provider; providers = [string[]]@($Plan.Providers)
+                    sourceRunId = $Plan.SourceRunId; sourceOutcome = $Plan.SourceOutcome; acceptedTransition = [string[]]@($Plan.AcceptedTransition); notUndone = [string[]]@($Plan.NotUndone); planId = $Plan.PlanId })
+        }
+        if ($null -eq $lc) { $lc = Write-AtmRecoverRecord -Log $log -State $ls -Type 'before' -Fields (ConvertTo-AtmRecoverCaptureRecord $Plan.Capture) }
+        if ($null -ne $lc) { & $logFail 'plan' $lc; $Res.Aborted = 'LOG_WRITE_FAILED'; return }
+
+        # Step 6: the typed phrase, bound to the plan id.
+        $callerName = [string]$Interaction['Caller']
+        $interactionRec = [ordered]@{ caller = $(if ($callerName -ceq 'CLI' -or $callerName -ceq 'TUI') { $callerName } else { 'DIRECT_CALL' }); consoleRequiredByCaller = ($Interaction['ConsoleRequired'] -eq $true)
+            callerFieldsVerified = $false; interactiveConsoleObserved = $true; observedBy = $Console.By; identifiesRespondent = $false }
+        $tp = Test-AtmTypedPhrase -Typed (& $ConfirmationReader $Res.Phrase 'confirm' $null @($Res.Phrase)) -Phrases @($Res.Phrase)
+        if ($tp.Code) {
+            $Res.ConfirmationCode = $tp.Code
+            $lc = Write-AtmRecoverRecord -Log $log -State $ls -Type 'confirmation' -Fields ([ordered]@{ accepted = $false; planId = $Plan.PlanId; refusal = 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE'; reason = $tp.Code; interaction = $interactionRec })
+            if ($null -ne $lc) { & $logFail 'confirmation' $lc }
+            $Res.Aborted = 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE'
+        } else {
+            $lc = Write-AtmRecoverRecord -Log $log -State $ls -Type 'confirmation' -Fields ([ordered]@{ accepted = $true; planId = $Plan.PlanId; interaction = $interactionRec })
+            if ($null -ne $lc) { & $logFail 'confirmation' $lc; $Res.Aborted = 'LOG_WRITE_FAILED' }
+        }
+
+        # Step 7: the revalidation, immediately before acting.
+        if (-not $Res.Aborted) {
+            $fresh = Get-AtmRecoverCollection @CollectionArgs
+            $again = Get-AtmRecoverUndoRefusals -Collection $fresh -Name $service -Recorded $Plan.Recorded -SourceOutcome $Plan.SourceOutcome
+            $chk = Get-AtmRecoverPlanCheck -Plan $Plan -Collection $Collection -Fresh $fresh -Service $service
+            $Res.RevalidationCodes = @($again.Codes); $Res.ChangedFields = @($chk.ChangedFields)
+            $matched = (@($again.Codes).Count -eq 0 -and @($chk.ChangedFields).Count -eq 0)
+            $lc = Write-AtmRecoverRecord -Log $log -State $ls -Type 'plan-check' -Fields ([ordered]@{ planId = $Plan.PlanId; matched = $matched; reasons = [string[]]@($again.Codes); changedFields = [string[]]@($chk.ChangedFields) })
+            if ($null -ne $lc) { & $logFail 'plan-check' $lc; $Res.Aborted = 'LOG_WRITE_FAILED' }
+            elseif (-not $matched) { $Res.Aborted = 'REVALIDATION_REFUSED' }
+        }
+
+        # Step 8: the intent, written and flushed BEFORE the stop seam; without it, no call.
+        if (-not $Res.Aborted) {
+            $lc = Write-AtmRecoverRecord -Log $log -State $ls -Type 'intent' -Fields ([ordered]@{ operation = $op.Id; target = $service; planId = $Plan.PlanId; sourceRunId = $Plan.SourceRunId; seam = $(if ($ServiceStopImpl) { 'TEST_SEAM' } else { 'DEFAULT' }) })
+            if ($null -ne $lc) { & $logFail 'intent' $lc; $Res.Aborted = 'LOG_INTENT_FAILED' }
+        }
+        if (-not $Res.Aborted) {
+            # The only call to the stop seam: the service name and nothing else.
+            $Res.SeamCalled = $true
+            $code = $null; $exType = $null
+            try {
+                if ($ServiceStopImpl) { $code = & $ServiceStopImpl $service } else { $code = Invoke-AtmRecoverServiceStopDefault -Name $service }
+            } catch { $code = $null; $exType = $_.Exception.GetBaseException().GetType().Name }
+            if ($null -eq $exType -and (-not ($code -is [string]) -or $script:AtmRecoveryStopSeamCodes -cnotcontains $code)) { $code = $null; $exType = 'SEAM_RESULT_INVALID' }
+            $Res.SeamCode = $code; $Res.ExceptionType = $exType
+
+            # Step 9: the settle wait, bounded (after OK only). RUNNING ends it only after a read that was not RUNNING.
+            $last = $null
+            $limit = $script:AtmRecoverySettleMinMs
+            if ($code -ceq 'OK') {
+                $clock = [Diagnostics.Stopwatch]::StartNew()
+                $left = $false
+                while ($true) {
+                    $last = Get-AtmRecoverCollection @CollectionArgs
+                    $Res.Reads = $Res.Reads + 1
+                    $cap = $(if ($last.FindingsByName.ContainsKey($service)) { Get-AtmRecoverCapture -Collection $last -Name $service } else { $null })
+                    $st = $(if ($null -ne $cap) { [string]$cap.State } else { '' })
+                    $wh = 0
+                    if ($null -ne $cap -and [int]::TryParse([string]$cap.WaitHint, [ref]$wh) -and $wh -gt $limit) { $limit = [Math]::Min($wh, $script:AtmRecoverySettleCapMs) }
+                    if ($st -ceq 'STOPPED') { break }
+                    if ($st -ceq 'RUNNING') { if ($left) { break } } else { $left = $true }
+                    if ($Res.WaitedMs -ge $limit -or $clock.ElapsedMilliseconds -ge $limit) { break }
+                    if ($SettleWait) { & $SettleWait $script:AtmRecoverySettlePollMs } else { Wait-AtmRecoverSettle -Milliseconds $script:AtmRecoverySettlePollMs }
+                    $Res.WaitedMs = $Res.WaitedMs + $script:AtmRecoverySettlePollMs
+                }
+            }
+            # Step 10: "after", read again in every outcome.
+            if ($null -eq $last) { $last = Get-AtmRecoverCollection @CollectionArgs; $Res.Reads = $Res.Reads + 1 }
+            $after = $(if ($last.FindingsByName.ContainsKey($service)) { Get-AtmRecoverCapture -Collection $last -Name $service } else { $null })
+            $Res.After = $after
+            $afterState = $(if ($null -ne $after) { [string]$after.State } else { '' })
+            $Res.Outcome = $(if ($null -ne $exType) { 'EXCEPTION' } elseif ($code -ceq 'ACCESS_DENIED') { 'REFUSED' } elseif ($code -cne 'OK') { 'FAILED' }
+                elseif ($afterState -ceq 'STOPPED') { 'COMPLETE' } elseif ($afterState -ceq 'RUNNING') { 'FAILED' } else { 'PARTIAL' })
             $Res.Diff = @(Compare-AtmRecoverCapture -Before $Plan.Capture -After $after)
             $lc = Write-AtmRecoverRecord -Log $log -State $ls -Type 'result' -Fields ([ordered]@{ operation = $op.Id; target = $service; outcome = $Res.Outcome; seamCode = $code; exceptionType = $exType
                     waitedMs = $Res.WaitedMs; limitMs = $limit; reads = $Res.Reads; exitCode = $(if ($null -ne $after) { $after.ExitCode } else { $null }); serviceSpecificExitCode = $(if ($null -ne $after) { $after.ServiceSpecificExitCode } else { $null })
