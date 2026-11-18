@@ -1524,3 +1524,40 @@ function Wait-AtmRecoverKey {
     # (redirected) does not wait.
     try { $null = [Console]::ReadKey($true) } catch { $null = $_ }
 }
+
+function Get-AtmMonitorStatusLines {
+    # monitor status (V0.5 M1, ADR-0017): the monitoring gate and the history as Get-AtmMonitorStatus found them, as lines
+    # (each item: Text and Color). Display only. The folder is always named by its environment form, never resolved.
+    param($Status)
+    $lines = New-Object System.Collections.Generic.List[object]
+    $add = { param([string]$Text, [string]$Color) $lines.Add([pscustomobject]@{ Text = $Text; Color = $Color }) }
+    if ($Status.GateOpen) { & $add (Get-AtmText 'mon.gateOpen') 'Cyan' }
+    else { & $add (Get-AtmText 'mon.gateClosed') 'Yellow'; & $add (Get-AtmText 'mon.optIn') 'Gray' }
+    $h = $Status.History
+    switch ([string]$h.FolderState) {
+        'ABSENT' { & $add (Get-AtmText 'mon.historyAbsent') 'Gray' }
+        'OK' {
+            $n = @($h.Records).Count
+            & $add (Get-AtmText 'mon.historyCount' $n) 'Cyan'
+            if ($null -ne $Status.Latest) {
+                $lt = $Status.Latest
+                & $add (Get-AtmText 'mon.latest' $lt.Utc.ToString('yyyy-MM-dd HH:mm') $lt.Outcome $lt.Groups (Format-AtmMB $lt.Bytes)) 'Cyan'
+                if (-not $Status.GateOpen) { & $add (Get-AtmText 'mon.residue') 'Yellow' }
+            }
+            if (@($h.Invalid).Count -gt 0) { & $add (Get-AtmText 'mon.invalid' @($h.Invalid).Count) 'Yellow' }
+            if ($h.ClockSkew -gt 0) { & $add (Get-AtmText 'mon.clockSkew' $h.ClockSkew) 'Yellow' }
+            if ($h.Partial -gt 0) { & $add (Get-AtmText 'mon.partial' $h.Partial) 'Gray' }
+            if ($h.Unexpected -gt 0) { & $add (Get-AtmText 'mon.unexpected' $h.Unexpected) 'Yellow' }
+            if ($h.Skipped -gt 0) { & $add (Get-AtmText 'mon.skipped' $h.Skipped) 'Gray' }
+        }
+        default { & $add (Get-AtmText 'mon.historyRefused' ([string]$h.FolderCode)) 'Yellow' }
+    }
+    & $add (Get-AtmText 'mon.nothingChanged') 'Gray'
+    return $lines.ToArray()
+}
+
+function Show-AtmMonitorStatus {
+    param($Status)
+    Write-AtmHeader (Get-AtmText 'mon.header')
+    foreach ($l in (Get-AtmMonitorStatusLines -Status $Status)) { Write-Host ('  ' + $l.Text) -ForegroundColor $l.Color }
+}

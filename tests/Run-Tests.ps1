@@ -31,6 +31,7 @@ $srcDir = Join-Path (Split-Path -Parent $testsDir) 'src'
 . (Join-Path $srcDir 'lib\Tui.ps1')
 . (Join-Path $srcDir 'lib\GuiModel.ps1')
 . (Join-Path $srcDir 'lib\Gui.ps1')
+. (Join-Path $srcDir 'lib\Engine.Monitor.ps1')
 . (Join-Path (Split-Path -Parent $testsDir) 'install\InstallCommon.ps1')
 Initialize-AtmNative -LibDir (Join-Path $srcDir 'lib')
 $cfgDir = Join-Path $srcDir 'config'
@@ -42,6 +43,10 @@ $script:AtmRealDeletionEnabled = $true
 # real clean: a test name of its own, only inside this process (dedicated tests check the shipped constant).
 $shippedCleanLockName = $script:AtmCleanLockName
 $script:AtmCleanLockName = 'Global\AgentTempManager.Test.' + [guid]::NewGuid().ToString('N')
+# V0.5 M1: the same for the monitoring collectors' per-user mutex (a dedicated test checks the shipped $null and the
+# product name). The monitoring gate itself stays closed here; the V0.5 M1 cases open it around each call.
+$shippedMonitorMutexName = $script:AtmMonitorMutexName
+$script:AtmMonitorMutexName = 'Global\AgentTempManager.Test.' + [guid]::NewGuid().ToString('N')
 # B2-1: the runtime evidence of preview and clean never queries this runner's services or Hyper-V (deterministic, fast):
 # empty service and virtualization sources, only inside this process (dedicated tests check the shipped $null).
 $shippedRuntimeSources = $script:AtmRuntimeEvidenceSources
@@ -3576,7 +3581,9 @@ exit 0
         # P4, purge).
         foreach ($fi in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1', '.cmd') -and $_.Name -ne 'Engine.Isolate.ps1' })) {
             $t = [IO.File]::ReadAllText($fi.FullName)
-            foreach ($api in @('AtmMover', 'CreateNewDirectory', 'OpenExisting')) { Assert-True (-not $t.Contains($api)) "$($fi.Name) nao chama $api (so o motor de isolamento)" }
+            # V0.5 M1: the monitoring engine creates its history folder with CreateNewDirectory too (past its own gate,
+            # Open-AtmMonitorFolder only: the V0.5 M1 statics); the mover and OpenExisting stay the isolation engine's.
+            foreach ($api in @('AtmMover', 'CreateNewDirectory', 'OpenExisting')) { if ($api -ceq 'CreateNewDirectory' -and $fi.Name -ceq 'Engine.Monitor.ps1') { continue }; Assert-True (-not $t.Contains($api)) "$($fi.Name) nao chama $api (so o motor de isolamento)" }
         }
         $isoSrc = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Isolate.ps1'))
         Assert-Eq ([regex]::Matches($isoSrc, '\[AgentTempManager\.AtmMover\]::MoveTree\(').Count) 2 'duas chamadas de produto ao mover: isolar e restaurar (P3b)'
@@ -4556,8 +4563,8 @@ exit 0
         return $d
     }
 
-    Test-Case 'Isolamento P4' 'Oito travas: cada uma com uma unica atribuicao a $false no seu arquivo; a do expurgo (sexta) so no motor, conferida pelo build, pelo e2e da instalacao e mostrada em version; leitura independente: o expurgo so le a sua, isolar, restaurar, a gestao e os outros motores nunca a leem' {
-        foreach ($g in @(@('lib\Engine.Clean.ps1', 'AtmRealDeletionEnabled'), @('lib\Engine.Diagnose.ps1', 'AtmWorktreeDiagnosticsEnabled'), @('lib\Engine.Diagnose.ps1', 'AtmHandleDiagnosticsEnabled'), @('lib\Report.ps1', 'AtmDiagnoseExportEnabled'), @('lib\Engine.Isolate.ps1', 'AtmIsolationEnabled'), @('lib\Engine.Isolate.ps1', 'AtmQuarantinePurgeEnabled'), @('lib\Gui.ps1', 'AtmGuiEnabled'), @('lib\Engine.Recover.ps1', 'AtmRecoveryEnabled'))) {
+    Test-Case 'Isolamento P4' 'Nove travas: cada uma com uma unica atribuicao a $false no seu arquivo; a do expurgo (sexta) so no motor, conferida pelo build, pelo e2e da instalacao e mostrada em version; leitura independente: o expurgo so le a sua, isolar, restaurar, a gestao e os outros motores nunca a leem' {
+        foreach ($g in @(@('lib\Engine.Clean.ps1', 'AtmRealDeletionEnabled'), @('lib\Engine.Diagnose.ps1', 'AtmWorktreeDiagnosticsEnabled'), @('lib\Engine.Diagnose.ps1', 'AtmHandleDiagnosticsEnabled'), @('lib\Report.ps1', 'AtmDiagnoseExportEnabled'), @('lib\Engine.Isolate.ps1', 'AtmIsolationEnabled'), @('lib\Engine.Isolate.ps1', 'AtmQuarantinePurgeEnabled'), @('lib\Gui.ps1', 'AtmGuiEnabled'), @('lib\Engine.Recover.ps1', 'AtmRecoveryEnabled'), @('lib\Engine.Monitor.ps1', 'AtmMonitoringEnabled'))) {
             $t = [IO.File]::ReadAllText((Join-Path $srcDir $g[0]))
             Assert-True ([regex]::Matches($t, '\$script:' + $g[1] + '\s*=').Count -eq 1 -and $t -match ('(?m)^\$script:' + $g[1] + ' = \$false\r?$')) "$($g[1]): uma unica atribuicao, a `$false ($($g[0]))"
         }
@@ -4569,7 +4576,7 @@ exit 0
         $br = [IO.File]::ReadAllText((Join-Path $root 'tools\Build-Release.ps1'))
         Assert-True ($br.Contains("@(`$isoTxt, 'AtmQuarantinePurgeEnabled')") -and $br.Contains("@(`$isoTxt, 'AtmIsolationEnabled')") -and $br.Contains("@(`$repTxt, 'AtmDiagnoseExportEnabled')")) 'build recusa o pacote sem as travas fechadas, a do expurgo inclusive'
         $e2e = [IO.File]::ReadAllText((Join-Path $testsDir 'e2e\Invoke-InstallE2E.ps1'))
-        Assert-True ($e2e.Contains("AtmQuarantinePurgeEnabled = 'lib\Engine.Isolate.ps1'") -and $e2e.Contains("Step 'shipped-purge-gate'") -and $e2e.Contains('eight installed gates')) 'e2e confere as travas instaladas (seis ate a 0.3.x; sete desde a V0.2.1 P1, com a da GUI; oito desde a V0.4 R1, com a da recuperacao)'
+        Assert-True ($e2e.Contains("AtmQuarantinePurgeEnabled = 'lib\Engine.Isolate.ps1'") -and $e2e.Contains("Step 'shipped-purge-gate'") -and $e2e.Contains('nine installed gates')) 'e2e confere as travas instaladas (seis ate a 0.3.x; sete desde a V0.2.1 P1, com a da GUI; oito desde a V0.4 R1, com a da recuperacao; nove desde a V0.5 M1, com a do monitoramento)'
         $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
         Assert-True ($cli.Contains("Get-AtmText 'cli.purge' `$(if (`$script:AtmQuarantinePurgeEnabled)") -and $cli.Contains('Get-AtmQuarantinePolicyLines -Policy (Get-AtmQuarantinePolicy')) 'version mostra a trava do expurgo e a politica efetiva'
         $iso = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Isolate.ps1'))
@@ -15249,7 +15256,7 @@ try {
         'System.Timers', 'Threading.Timer', 'Register-ObjectEvent', 'Start-Job', 'Start-ThreadJob', 'runspacefactory',
         # V0.4 R5 (ADR-0016): the recovery area shows list and plan only; executing stays in the CLI (T-ISO-6).
         'Invoke-AtmRecover', 'AtmServiceStop', 'ServiceController', ('run' + 'as'), 'ShellExecute', 'AtmRecoverOperationTaken', 'Open-AtmCleanLog')
-    $guiOtherGates = @('AtmRealDeletionEnabled', 'AtmWorktreeDiagnosticsEnabled', 'AtmHandleDiagnosticsEnabled', 'AtmDiagnoseExportEnabled', 'AtmIsolationEnabled', 'AtmQuarantinePurgeEnabled', 'AtmRecoveryEnabled')
+    $guiOtherGates = @('AtmRealDeletionEnabled', 'AtmWorktreeDiagnosticsEnabled', 'AtmHandleDiagnosticsEnabled', 'AtmDiagnoseExportEnabled', 'AtmIsolationEnabled', 'AtmQuarantinePurgeEnabled', 'AtmRecoveryEnabled', 'AtmMonitoringEnabled')
     # Returns the violations of the given files (empty: inside the closed list). Reads and parses only.
     $guiCheck = {
         param([string[]]$Files)
@@ -15352,10 +15359,11 @@ try {
         $i = $Text.IndexOf($k, [StringComparison]::Ordinal)
         if ($i -lt 0) { return $Text }
         return ($Text.Substring(0, $i) + $Text.Substring($i + $k.Length)) }
-    Test-Case 'GUI P1' 'Setima trava (AtmGuiEnabled): uma unica atribuicao a $false em Gui.ps1, fechada neste processo, nenhum outro arquivo a altera; as oito travas fechadas; build, instalador, e2e, manifesto, lancador e version a conferem nos dois idiomas' {
-        $eight = @(@('lib\Engine.Clean.ps1', 'AtmRealDeletionEnabled'), @('lib\Engine.Diagnose.ps1', 'AtmWorktreeDiagnosticsEnabled'), @('lib\Engine.Diagnose.ps1', 'AtmHandleDiagnosticsEnabled'), @('lib\Report.ps1', 'AtmDiagnoseExportEnabled'),
-            @('lib\Engine.Isolate.ps1', 'AtmIsolationEnabled'), @('lib\Engine.Isolate.ps1', 'AtmQuarantinePurgeEnabled'), @('lib\Gui.ps1', 'AtmGuiEnabled'), @('lib\Engine.Recover.ps1', 'AtmRecoveryEnabled'))
-        foreach ($g in $eight) {
+    Test-Case 'GUI P1' 'Setima trava (AtmGuiEnabled): uma unica atribuicao a $false em Gui.ps1, fechada neste processo, nenhum outro arquivo a altera; as nove travas fechadas; build, instalador, e2e, manifesto, lancador e version a conferem nos dois idiomas' {
+        $nine = @(@('lib\Engine.Clean.ps1', 'AtmRealDeletionEnabled'), @('lib\Engine.Diagnose.ps1', 'AtmWorktreeDiagnosticsEnabled'), @('lib\Engine.Diagnose.ps1', 'AtmHandleDiagnosticsEnabled'), @('lib\Report.ps1', 'AtmDiagnoseExportEnabled'),
+            @('lib\Engine.Isolate.ps1', 'AtmIsolationEnabled'), @('lib\Engine.Isolate.ps1', 'AtmQuarantinePurgeEnabled'), @('lib\Gui.ps1', 'AtmGuiEnabled'), @('lib\Engine.Recover.ps1', 'AtmRecoveryEnabled'),
+            @('lib\Engine.Monitor.ps1', 'AtmMonitoringEnabled'))
+        foreach ($g in $nine) {
             $t = [IO.File]::ReadAllText((Join-Path $srcDir $g[0]))
             Assert-True ([regex]::Matches($t, '\$script:' + $g[1] + '\s*=').Count -eq 1 -and $t -match ('(?m)^\$script:' + $g[1] + ' = \$false\r?$')) "$($g[1]): uma unica atribuicao, a `$false ($($g[0]))"
         }
@@ -15372,7 +15380,7 @@ try {
         $br = [IO.File]::ReadAllText((Join-Path $root 'tools\Build-Release.ps1'))
         Assert-True ($br.Contains("@(`$guiTxt, 'AtmGuiEnabled')") -and $br.Contains("& `$read 'src/lib/Gui.ps1'") -and $br.Contains("& `$read 'src/lib/GuiModel.ps1'")) 'build confere a setima trava e exige os dois arquivos no pacote'
         $e2e = [IO.File]::ReadAllText((Join-Path $root 'tests\e2e\Invoke-InstallE2E.ps1'))
-        Assert-True ($e2e.Contains("AtmGuiEnabled = 'lib\Gui.ps1'") -and $e2e.Contains("'eight installed gates `$false'") -and $e2e.Contains("Step 'shipped-gui-gate'")) 'e2e da instalacao: oito travas e o passo da GUI'
+        Assert-True ($e2e.Contains("AtmGuiEnabled = 'lib\Gui.ps1'") -and $e2e.Contains("'nine installed gates `$false'") -and $e2e.Contains("Step 'shipped-gui-gate'")) 'e2e da instalacao: nove travas e o passo da GUI'
         $launcher = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
         Assert-True ($launcher.Contains("'lib\Tui.ps1', 'lib\GuiModel.ps1', 'lib\Gui.ps1')") -and $launcher.Contains(". (Join-Path `$here 'lib\GuiModel.ps1')") -and $launcher.Contains(". (Join-Path `$here 'lib\Gui.ps1')")) 'lancador: os dois arquivos na lista da verificacao de integridade e carregados'
         foreach ($rel in @('lib\GuiModel.ps1', 'lib\Gui.ps1')) { Assert-True ($script:AtmRequiredFiles -contains $rel) "instalador exige $rel" }
@@ -18552,7 +18560,7 @@ if ($null -eq $res.env) {
         Assert-True ($br.Contains("`$recTxt = & `$read 'src/lib/Engine.Recover.ps1'") -and $br.Contains("@(`$recTxt, 'AtmRecoveryEnabled')")) 'build recusa o pacote sem a oitava trava fechada'
         foreach ($e in @('Invoke-InstallE2E.ps1', 'Invoke-IsolateE2E.ps1', 'Invoke-RecoverE2E.ps1')) {
             $t = [IO.File]::ReadAllText((Join-Path $testsDir "e2e\$e"))
-            Assert-True ($t.Contains("AtmRecoveryEnabled = 'lib\Engine.Recover.ps1'") -and $t.Contains('eight installed gates') -and -not $t.Contains('seven installed gates')) "$e confere as oito travas instaladas"
+            Assert-True ($t.Contains("AtmRecoveryEnabled = 'lib\Engine.Recover.ps1'") -and $t.Contains('nine installed gates') -and -not $t.Contains('eight installed gates')) "$e confere as nove travas instaladas"
         }
         $self = [IO.File]::ReadAllText((Join-Path $testsDir 'Run-Tests.ps1'))
         $a0 = $self.IndexOf('-----' + ' V0.4 R1 (assisted'); $a1 = $self.IndexOf('-----' + ' V0.4 R2 (assisted')
@@ -20845,6 +20853,590 @@ if ($null -eq $res.env) {
     Test-Case 'V0.4 R6' 'R6 execucao real do harness (servicos criados, inicio e undo reais pelos seams padrao): NAO_TESTADO nesta suite' {
         $script:caseSkipped = $true
         $script:caseNote = 'so na CI, no install e2e (Setup elevado, perna A usuario padrao, perna B elevada), em runners descartaveis; nesta suite so o caminho de recusa (que nao cria nada) e os estaticos'
+    }
+
+    # ------------------------------------------------------------------ V0.5 M1 (preventive monitoring: the collector and the storage, gate closed, ADR-0017)
+    # The monitoring gate is opened only around each call (Invoke-MonCollect, Open-MonFolder) and closed again. Every
+    # history folder is a folder of the sandbox (the folder seam); this user's %LOCALAPPDATA%\AgentTempManager\Monitor is
+    # never created (checked). The audit is a synthetic inventory (the audit seam), except in the privacy and cost cases,
+    # which run the real audit on planted test profiles. The clock, the name suffix and (one case) the owner are seams.
+    # The removals of the rotation are real, in the sandbox only, and only through the engine's single removal function.
+    $script:monN = 0
+    $monRealFolder = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'AgentTempManager\Monitor'
+    $monRealBefore = Get-AtmPathPresence $monRealFolder
+    $monT0 = New-Object DateTime(2026, 11, 18, 12, 0, 0, [DateTimeKind]::Utc)
+    $monForeignSid = 'S-1-5-21-1-2-3-4444'
+    function New-MonFolder {
+        # A new base folder of the sandbox; the two levels of the history folder are created by the engine itself.
+        $script:monN++
+        $b = Join-Path $sandbox ('mon-' + $script:monN)
+        [void][IO.Directory]::CreateDirectory($b)
+        return (Join-Path $b 'AgentTempManager\Monitor')
+    }
+    function Reset-MonSeams {
+        $script:AtmMonitoringEnabled = $false
+        $script:AtmMonitorClockSource = $null; $script:AtmMonitorFolderPath = $null; $script:AtmMonitorAuditSource = $null
+        $script:AtmMonitorRandomSource = $null; $script:AtmMonitorOwnerSource = $null
+    }
+    function New-MonPart {
+        param([string]$Provider = 'claude-code', [string]$Project = 'proj', [bool]$Identified = $true, [string]$Class = 'RECENT', [long]$Bytes = 1000, [bool]$Complete = $true, $Newest = $null)
+        return [pscustomobject]@{ Provider = $Provider; Project = $Project; ProjectIdentified = $Identified; Class = $Class; Bytes = $Bytes; AllocatedBytesEstimate = $Bytes; Files = 2L
+            MeasurementComplete = $Complete; ReparsePoints = 0; ErrorCount = 0; NewestWriteTimeUtc = $Newest }
+    }
+    function New-MonInv { param([object[]]$Parts = @(), [bool]$Coverage = $true) return [pscustomobject]@{ CoverageComplete = $Coverage; ProcessCoverageComplete = $true; Partitions = $Parts; Bases = @(); ProfileBaseStatus = @{} } }
+    function Get-MonAudit { param($Inventory) return { param($a) $Inventory }.GetNewClosure() }
+    function Invoke-MonCollect {
+        # One collection with the gate open in this process only; -Audit $null runs the real audit with -InventoryArgs.
+        param([string]$Folder, [datetime]$Utc, [scriptblock]$Audit, [string]$Suffix = $null, [hashtable]$InventoryArgs = @{})
+        $script:AtmMonitorFolderPath = $Folder
+        $script:AtmMonitorClockSource = { $Utc }.GetNewClosure()
+        $script:AtmMonitorAuditSource = $Audit
+        $script:AtmMonitorRandomSource = $(if ($Suffix) { { $Suffix }.GetNewClosure() } else { $null })
+        $script:AtmMonitoringEnabled = $true
+        try { return (Invoke-AtmMonitorCollection -InventoryArgs $InventoryArgs) } finally { $script:AtmMonitoringEnabled = $false }
+    }
+    function Open-MonFolder {
+        # Creates (or checks) the history folder with the gate open in this process only: $null, or the engine's code.
+        param([string]$Folder)
+        $script:AtmMonitorFolderPath = $Folder
+        $script:AtmMonitoringEnabled = $true
+        try { return (Open-AtmMonitorFolder -Path $Folder -UserSid $me.Sid) } finally { $script:AtmMonitoringEnabled = $false }
+    }
+    function Test-MonFolderSkip {
+        # Like New-TestCleanLogDir: a sandbox this run could not give a single-owner ACL (a standard session whose TEMP
+        # lets other accounts change it) makes the case NAO_TESTADO; with the ACL adjusted (CI) a refusal is a failure.
+        param([string]$Code)
+        if (-not $script:sandboxAclAdjusted -and $Code -like 'MONITOR_FOLDER_*THIRD_PARTY*') {
+            $script:caseSkipped = $true; $script:caseNote = "pasta do sandbox recusada pela politica da pasta ($Code): o TEMP desta maquina permite alteracao por outras contas"
+            return $true
+        }
+        return $false
+    }
+    function Get-MonName { param([datetime]$Utc, [string]$Suffix = '0000abcd') return ((ConvertTo-AtmMonitorTimeText $Utc) + '-' + $Suffix + '.json') }
+    function Write-MonPlanted { param([string]$Folder, [string]$Name, [int]$Bytes = 10) [IO.File]::WriteAllBytes((Join-Path $Folder $Name), (New-Object byte[] $Bytes)) }
+    function Get-MonNames {
+        param([string]$Folder)
+        $n = [string[]]@((New-Object IO.DirectoryInfo($Folder)).GetFileSystemInfos() | ForEach-Object { $_.Name })
+        [Array]::Sort($n, [StringComparer]::Ordinal)
+        return $n
+    }
+    function Get-MonSorted { param([string[]]$Names) $n = [string[]]@($Names); [Array]::Sort($n, [StringComparer]::Ordinal); return ($n -join ',') }
+    function Write-MonRecordText {
+        # A record file written by the test (no gate needed): the record of -Inventory at -Utc, edited by -Edit before its
+        # hash is computed, stored under -Name (default: the name of its own time).
+        param([string]$Folder, [datetime]$Utc, $Inventory, [scriptblock]$Edit = $null, [string]$Name = $null, [string]$Previous = $null)
+        $rec = New-AtmMonitorRecord -Inventory $Inventory -Utc $Utc -DurationMs 5 -AuditMs 4 -Failure $null -Previous $Previous
+        if ($null -ne $Edit) { & $Edit $rec }
+        if (-not $Name) { $Name = Get-MonName $Utc }
+        [IO.File]::WriteAllText((Join-Path $Folder $Name), (ConvertTo-AtmMonitorRecordText -Record $rec), (New-Object Text.UTF8Encoding($false)))
+        return $Name
+    }
+
+    Test-Case 'V0.5 M1' 'M1: trava fechada (distribuida e neste processo) - coleta, pasta, escrita, rotacao e remocao recusam com MONITORING_GATE_CLOSED antes de tudo: zero auditorias, nenhuma pasta, nenhum mutex, nada gravado; controle positivo com a trava aberta neste processo' {
+        Assert-Eq $script:AtmMonitoringEnabled $false 'trava fechada neste processo'
+        $folder = New-MonFolder
+        $base = Split-Path (Split-Path $folder -Parent) -Parent
+        $k = @{ Audit = 0; MutexSeen = $false }
+        $mx = $script:AtmMonitorMutexName
+        $inv = New-MonInv @(New-MonPart)
+        try {
+            $script:AtmMonitorFolderPath = $folder
+            $script:AtmMonitorClockSource = { $monT0 }.GetNewClosure()
+            $script:AtmMonitorAuditSource = { param($a) $k.Audit++; $m = $null; $k.MutexSeen = [Threading.Mutex]::TryOpenExisting($mx, [ref]$m); if ($m) { $m.Dispose() }; $inv }.GetNewClosure()
+            $before = Get-TreeListing $base
+            $r = Invoke-AtmMonitorCollection
+            Assert-Eq $r.Code 'MONITORING_GATE_CLOSED' 'coleta recusada'
+            Assert-Eq $k.Audit 0 'nenhuma auditoria com a trava fechada'
+            $m = $null; Assert-True (-not [Threading.Mutex]::TryOpenExisting($mx, [ref]$m)) 'mutex nunca criado com a trava fechada'
+            Assert-Eq (Open-AtmMonitorFolder -Path $folder -UserSid $me.Sid) 'MONITORING_GATE_CLOSED' 'pasta recusada'
+            Assert-Eq (Write-AtmMonitorRecordFile -Folder $folder -Name (Get-MonName $monT0) -Bytes ([byte[]]@(1))) 'MONITORING_GATE_CLOSED' 'escrita recusada'
+            Assert-Eq (Invoke-AtmMonitorRotation -Folder $folder -NowUtc $monT0 -Owners @($me.Sid) -KeepName '').Code 'MONITORING_GATE_CLOSED' 'rotacao recusada'
+            Assert-Eq (Invoke-AtmMonitorPrune -Folder $folder -Name (Get-MonName $monT0) -Owners @($me.Sid)) 'MONITORING_GATE_CLOSED' 'remocao recusada'
+            Assert-Eq (Get-TreeListing $base) $before 'nada criado nem gravado'
+            Assert-True (-not [IO.Directory]::Exists((Split-Path $folder -Parent))) 'nenhuma pasta criada'
+            # Positive control: the same call with the gate open in this process takes the mutex, audits once, writes once.
+            $script:AtmMonitoringEnabled = $true
+            try { $r = Invoke-AtmMonitorCollection } finally { $script:AtmMonitoringEnabled = $false }
+            if (Test-MonFolderSkip $r.Code) { return }
+            Assert-True ($r.Code -ceq 'OK' -and $k.Audit -eq 1 -and $k.MutexSeen) "controle positivo: uma auditoria com o mutex tomado ($($r.Code))"
+            Assert-Eq @(Get-MonNames $folder).Count 1 'controle positivo: um registro'
+            $m = $null; Assert-True (-not [Threading.Mutex]::TryOpenExisting($mx, [ref]$m)) 'mutex liberado depois da coleta'
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M1' 'M1: registro atm.monitor/1 - membros exatos e na ordem, linhas 1 a 6 do ADR, worktrees NOT_OBSERVABLE e holders NOT_COLLECTED, inteiros, hash do texto gravado, nome <UTC>-<8 hex>.json do horario do registro, arquivo novo sem .partial; resultados OK, INCOMPLETE e AUDIT_FAILED (so o tipo da excecao)' {
+        $folder = New-MonFolder
+        try {
+            $parts = @((New-MonPart -Project 'alpha' -Bytes 500 -Newest $monT0.AddHours(-30)), (New-MonPart -Project 'alpha' -Bytes 700 -Newest $monT0.AddHours(-2)),
+                (New-MonPart -Project 'ignorado' -Identified $false -Class 'ORPHAN_SUSPECTED' -Bytes 40 -Complete $false))
+            $r = Invoke-MonCollect -Folder $folder -Utc $monT0 -Audit (Get-MonAudit (New-MonInv $parts)) -Suffix '0a1b2c3d'
+            if (Test-MonFolderSkip $r.Code) { return }
+            Assert-True ($r.Code -ceq 'OK' -and $r.File -ceq (Get-MonName $monT0 '0a1b2c3d') -and $r.Outcome -ceq 'INCOMPLETE') "gravado ($($r.Code) $($r.File) $($r.Outcome))"
+            Assert-Eq ((Get-MonNames $folder) -join ',') $r.File 'so o arquivo final, nenhum .partial'
+            $text = [IO.File]::ReadAllText((Join-Path $folder $r.File))
+            Assert-True ($text.Length -eq $r.Bytes -and (Test-AtmMonitorHash $text) -and $text.EndsWith('"}')) 'hash do texto gravado'
+            Assert-True ((Test-AtmMonitorRecordText -Text $text -Name $r.File).Valid) 'o leitor valida o registro'
+            $o = $text | ConvertFrom-Json
+            Assert-Eq (@($o.PSObject.Properties | ForEach-Object { $_.Name }) -join ',') 'schema,utc,toolVersion,outcome,failure,durationMs,auditMs,previous,coverage,bases,groupFields,groups,groupsSummed,worktrees,holders,sha256' 'membros na ordem'
+            Assert-True ($o.schema -ceq 'atm.monitor/1' -and $o.utc -ceq '20261118T120000000Z' -and $o.toolVersion -ceq $script:AtmVersion -and $null -eq $o.failure -and $null -eq $o.previous) 'cabecalho'
+            Assert-True ($o.worktrees -ceq 'NOT_OBSERVABLE' -and $o.holders -ceq 'NOT_COLLECTED') 'linhas 8 e 9: nunca zero'
+            Assert-Eq (@($o.coverage.PSObject.Properties | ForEach-Object { $_.Name }) -join ',') 'complete,processCoverageComplete,profilesInaccessible,profilesTempUnverified,profilesNotAudited,profilesIncomplete' 'cobertura em contagens'
+            Assert-Eq (@($o.groupFields) -join ',') ($script:AtmMonitorGroupFields -join ',') 'ordem dos campos dos grupos'
+            Assert-Eq @($o.groups).Count 2 'dois grupos: alpha e o nao identificado'
+            $g0 = @($o.groups)[0]; $g1 = @($o.groups)[1]
+            Assert-True ($g0[0] -ceq 'claude-code' -and $g0[1] -ceq 'alpha' -and $g0[2] -eq $true -and $g0[3] -ceq 'RECENT' -and $g0[4] -eq $false -and $g0[5] -eq 2 -and $g0[7] -eq 1200 -and $g0[8] -eq 1200 -and $g0[9] -eq $true -and $g0[10] -eq 30) "grupo alpha ($($g0 -join '|'))"
+            Assert-True ($null -eq $g1[1] -and $g1[2] -eq $false -and $g1[3] -ceq 'ORPHAN_SUSPECTED' -and $g1[9] -eq $false -and $null -eq $g1[10] -and $g1[13] -eq 1) "nao identificado somado sem nome ($($g1 -join '|'))"
+            Assert-True (-not $text.Contains('ignorado')) 'nome de projeto nao identificado nunca gravado'
+            # OK: coverage and every measurement complete.
+            $r2 = Invoke-MonCollect -Folder $folder -Utc $monT0.AddMinutes(1) -Audit (Get-MonAudit (New-MonInv @(New-MonPart))) -Suffix '0a1b2c3e'
+            Assert-True ($r2.Code -ceq 'OK' -and $r2.Outcome -ceq 'OK') "resultado OK ($($r2.Code) $($r2.Outcome))"
+            Assert-Eq (([IO.File]::ReadAllText((Join-Path $folder $r2.File)) | ConvertFrom-Json).previous) $r.File 'previous: o registro anterior'
+            # AUDIT_FAILED: the exception's type name only, never its message.
+            $r3 = Invoke-MonCollect -Folder $folder -Utc $monT0.AddMinutes(2) -Audit { param($a) throw 'MENSAGEM-COM-DADO-SECRETO' } -Suffix '0a1b2c3f'
+            $t3 = [IO.File]::ReadAllText((Join-Path $folder $r3.File))
+            $o3 = $t3 | ConvertFrom-Json
+            Assert-True ($r3.Code -ceq 'OK' -and $o3.outcome -ceq 'AUDIT_FAILED' -and $o3.failure -ceq 'RuntimeException' -and $null -eq $o3.coverage -and @($o3.groups).Count -eq 0 -and -not $t3.Contains('SECRETO')) "AUDIT_FAILED com o tipo so ($($o3.failure))"
+            Assert-True ((Test-AtmMonitorRecordText -Text $t3 -Name $r3.File).Valid) 'registro de falha valido'
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M1' 'M1: limites do registro - no maximo 64 grupos, os maiores primeiro, o resto somado num grupo other (sem provider, projeto nem classe); acima de 16 KB depois do limite: MONITOR_RECORD_TOO_LARGE, nada gravado e nenhuma pasta criada' {
+        $folder = New-MonFolder
+        try {
+            $parts = @(for ($i = 0; $i -lt 70; $i++) { New-MonPart -Project ('p' + $i.ToString('D2')) -Bytes (1000 + $i) })
+            $r = Invoke-MonCollect -Folder $folder -Utc $monT0 -Audit (Get-MonAudit (New-MonInv $parts)) -Suffix '00000064'
+            if (Test-MonFolderSkip $r.Code) { return }
+            Assert-Eq $r.Code 'OK' 'gravado'
+            $o = [IO.File]::ReadAllText((Join-Path $folder $r.File)) | ConvertFrom-Json
+            Assert-True (@($o.groups).Count -eq 65 -and $o.groupsSummed -eq 6) "64 grupos e o other ($(@($o.groups).Count), somados $($o.groupsSummed))"
+            Assert-Eq ((@($o.groups)[0..63] | ForEach-Object { $_[1] }) -join ',') ((69..6 | ForEach-Object { 'p' + $_.ToString('D2') }) -join ',') 'os 64 maiores, do maior ao menor'
+            $ot = @($o.groups)[64]
+            Assert-True ($ot[4] -eq $true -and $null -eq $ot[0] -and $null -eq $ot[1] -and $null -eq $ot[3] -and $ot[5] -eq 6 -and $ot[7] -eq 6015) "other: os seis menores somados ($($ot -join '|'))"
+            $folder2 = New-MonFolder
+            $big = @(for ($i = 0; $i -lt 64; $i++) { New-MonPart -Project (('N' * 300) + $i.ToString('D2')) -Bytes (1000 + $i) })
+            $r2 = Invoke-MonCollect -Folder $folder2 -Utc $monT0 -Audit (Get-MonAudit (New-MonInv $big)) -Suffix '00000065'
+            Assert-True ($r2.Code -ceq 'MONITOR_RECORD_TOO_LARGE' -and $r2.Bytes -gt 16384 -and $null -eq $r2.File) "recusado acima de 16 KB ($($r2.Code), $($r2.Bytes) bytes)"
+            Assert-True (-not [IO.Directory]::Exists((Split-Path $folder2 -Parent))) 'nada gravado, nenhuma pasta criada'
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M1' 'M1: privacidade - auditoria real de um perfil plantado; o historico nao guarda SID, conta, perfil, caminho, slug, nome de particao, maquina nem amostra (agulhas distintas dos nomes de exibicao); tools\Test-AtmPrivacy.ps1 com zero achados e controle positivo no inventario' {
+        $p = New-TestProfile 'MonPrivNeedleQ7'
+        $slug = 'C--MonSlugNeedleK4'
+        $uuid = [guid]::NewGuid().ToString()
+        $null = New-TestRoot -ProfileInfo $p -Slug $slug -Uuid $uuid -Files @{ 'MonFileNeedleZ9.txt' = 10 }
+        $folder = New-MonFolder
+        try {
+            $r = Invoke-MonCollect -Folder $folder -Utc $monT0 -Audit $null -InventoryArgs (Get-InvArgs -Profiles @($p))
+            if (Test-MonFolderSkip $r.Code) { return }
+            Assert-True ($r.Code -ceq 'OK' -and $r.Outcome -ne 'AUDIT_FAILED') "auditoria real gravada ($($r.Code) $($r.Outcome))"
+            $text = [IO.File]::ReadAllText((Join-Path $folder $r.File))
+            Assert-True (@(($text | ConvertFrom-Json).groups).Count -ge 1) 'ao menos um grupo'
+            $needles = @('MonPrivNeedleQ7', 'MonSlugNeedleK4', 'MonFileNeedleZ9', $uuid, $testOwnerSid, $me.Sid, $sandbox, $p.ProfilePath, $env:COMPUTERNAME)
+            $i = 0; foreach ($n in $needles) { $i++; Assert-True (-not $text.Contains([string]$n)) "agulha $i ausente do registro" }
+            $scan = Join-Path (Split-Path -Parent $testsDir) 'tools\Test-AtmPrivacy.ps1'
+            $f = @(& $scan -Path $folder -ExtraNeedles $needles -WarningAction SilentlyContinue)
+            Assert-Eq $f.Count 0 "scanner: zero achados no historico ($(@($f | ForEach-Object { $_.Kind }) -join ','))"
+            # Positive control: what the audit saw (the identifying fields of its partitions) holds the needles.
+            $inv = Inv -Profiles @($p)
+            $ctl = Join-Path $sandbox ('mon-priv-control-' + $script:monN)
+            [void][IO.Directory]::CreateDirectory($ctl)
+            [IO.File]::WriteAllText((Join-Path $ctl 'inventario.json'), (ConvertTo-Json -InputObject @($inv.Partitions | Select-Object Sid, UserName, ProfilePath, Slug, Path) -Compress))
+            $fc = @(& $scan -Path $ctl -ExtraNeedles $needles -WarningAction SilentlyContinue)
+            Assert-True ($fc.Count -ge 3) "controle positivo: o scanner acha as agulhas no inventario ($($fc.Count))"
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M1' 'M1: rotacao por 90 dias (isolada) - os registros com mais de 90 dias saem, o de 89 dias e o novo ficam' {
+        $folder = New-MonFolder
+        try {
+            $c = Open-MonFolder $folder
+            if (Test-MonFolderSkip $c) { return }
+            Assert-Eq $c $null 'pasta criada'
+            $old1 = Get-MonName $monT0.AddDays(-100) '00000001'; $old2 = Get-MonName $monT0.AddDays(-91) '00000002'; $keep = Get-MonName $monT0.AddDays(-89) '00000003'
+            foreach ($n in @($old1, $old2, $keep)) { Write-MonPlanted $folder $n }
+            $r = Invoke-MonCollect -Folder $folder -Utc $monT0 -Audit (Get-MonAudit (New-MonInv @())) -Suffix '0000000a'
+            Assert-True ($r.Code -ceq 'OK' -and $null -eq $r.Rotation.Code) "coleta e rotacao ($($r.Code) $($r.Rotation.Code))"
+            Assert-Eq (@($r.Rotation.Removed) -join ',') "$old1,$old2" 'removidos os dois com mais de 90 dias'
+            Assert-Eq ((Get-MonNames $folder) -join ',') (Get-MonSorted @($keep, $r.File)) 'restam o de 89 dias e o novo'
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M1' 'M1: rotacao por 400 arquivos (isolada) - com 405 plantados e o novo, os seis mais antigos saem e ficam 400' {
+        $folder = New-MonFolder
+        try {
+            $c = Open-MonFolder $folder
+            if (Test-MonFolderSkip $c) { return }
+            Assert-Eq $c $null 'pasta criada'
+            $planted = @(for ($i = 1; $i -le 405; $i++) { $n = Get-MonName $monT0.AddMinutes(-$i) ('{0:x8}' -f $i); Write-MonPlanted $folder $n; $n })
+            $r = Invoke-MonCollect -Folder $folder -Utc $monT0 -Audit (Get-MonAudit (New-MonInv @())) -Suffix 'aaaaaaaa'
+            Assert-True ($r.Code -ceq 'OK' -and $null -eq $r.Rotation.Code -and $r.Rotation.Kept -eq 400) "coleta e rotacao ($($r.Code) $($r.Rotation.Code) $($r.Rotation.Kept))"
+            Assert-Eq (@($r.Rotation.Removed) -join ',') ((405..400 | ForEach-Object { $planted[$_ - 1] }) -join ',') 'os seis mais antigos, do mais antigo'
+            $left = Get-MonNames $folder
+            Assert-True (@($left).Count -eq 400 -and @($left) -ccontains $r.File) "400 restantes com o novo ($(@($left).Count))"
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M1' 'M1: rotacao por 8 MB (isolada) - com nove registros de 1 MB e o novo, os dois mais antigos saem' {
+        $folder = New-MonFolder
+        try {
+            $c = Open-MonFolder $folder
+            if (Test-MonFolderSkip $c) { return }
+            Assert-Eq $c $null 'pasta criada'
+            $planted = @(for ($i = 1; $i -le 9; $i++) { $n = Get-MonName $monT0.AddHours(-$i) ('{0:x8}' -f $i); Write-MonPlanted $folder $n 1048576; $n })
+            $r = Invoke-MonCollect -Folder $folder -Utc $monT0 -Audit (Get-MonAudit (New-MonInv @())) -Suffix 'bbbbbbbb'
+            Assert-True ($r.Code -ceq 'OK' -and $null -eq $r.Rotation.Code) "coleta e rotacao ($($r.Code) $($r.Rotation.Code))"
+            Assert-Eq (@($r.Rotation.Removed) -join ',') "$($planted[8]),$($planted[7])" 'os dois mais antigos'
+            $total = [long]0; foreach ($n in (Get-MonNames $folder)) { $total += (New-Object IO.FileInfo((Join-Path $folder $n))).Length }
+            Assert-True ($total -le 8MB -and @(Get-MonNames $folder).Count -eq 8) "ate 8 MB ($total bytes)"
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M1' 'M1: .partial deixado por uma execucao encerrada - nunca lido pelo leitor; a rotacao o remove so depois de um dia' {
+        $folder = New-MonFolder
+        try {
+            $c = Open-MonFolder $folder
+            if (Test-MonFolderSkip $c) { return }
+            Assert-Eq $c $null 'pasta criada'
+            $pOld = (ConvertTo-AtmMonitorTimeText $monT0.AddHours(-30)) + '-00000001.json.partial'
+            $pNew = (ConvertTo-AtmMonitorTimeText $monT0.AddHours(-2)) + '-00000002.json.partial'
+            foreach ($n in @($pOld, $pNew)) { [IO.File]::WriteAllText((Join-Path $folder $n), '{"parcial":') }
+            $script:AtmMonitorFolderPath = $folder
+            $h = Get-AtmMonitorHistory
+            Assert-True ($h.FolderState -ceq 'OK' -and @($h.Records).Count -eq 0 -and @($h.Invalid).Count -eq 0 -and $h.Partial -eq 2) "leitor: dois .partial contados, nenhum lido ($($h.Partial))"
+            $r = Invoke-MonCollect -Folder $folder -Utc $monT0 -Audit (Get-MonAudit (New-MonInv @())) -Suffix 'cccccccc'
+            Assert-True ($r.Code -ceq 'OK' -and $null -eq $r.Rotation.Code) "coleta e rotacao ($($r.Code) $($r.Rotation.Code))"
+            Assert-Eq (@($r.Rotation.Removed) -join ',') $pOld 'so o .partial com mais de um dia'
+            Assert-Eq ((Get-MonNames $folder) -join ',') (Get-MonSorted @($pNew, $r.File)) 'o .partial recente fica'
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M1' 'M1: rotacao recusada inteira - nome estranho, ponto de reparse ou outro dono na pasta: codigo proprio, nada removido (nem o que passaria dos limites); o registro novo fica' {
+        try {
+            foreach ($kind in @('name', 'reparse', 'owner')) {
+                $folder = New-MonFolder
+                $c = Open-MonFolder $folder
+                if (Test-MonFolderSkip $c) { return }
+                Assert-Eq $c $null "${kind}: pasta criada"
+                $old = Get-MonName $monT0.AddDays(-100) '00000001'
+                Write-MonPlanted $folder $old
+                [IO.File]::WriteAllText((Join-Path $folder ((ConvertTo-AtmMonitorTimeText $monT0.AddHours(-30)) + '-00000002.json.partial')), 'x')
+                $want = $null
+                if ($kind -ceq 'name') { Write-MonPlanted $folder 'notas.txt'; $want = 'MONITOR_ROTATION_UNEXPECTED_ITEM' }
+                elseif ($kind -ceq 'reparse') {
+                    $tgt = Join-Path $sandbox ('mon-junction-target-' + $script:monN)
+                    [void][IO.Directory]::CreateDirectory($tgt)
+                    New-Junction -Link (Join-Path $folder 'j') -Target $tgt
+                    $want = 'MONITOR_ROTATION_REPARSE'
+                } else {
+                    $script:AtmMonitorOwnerSource = { param($P) if ($P.EndsWith($old)) { $monForeignSid } else { (Get-Acl -LiteralPath $P).GetOwner([Security.Principal.SecurityIdentifier]).Value } }.GetNewClosure()
+                    $want = 'MONITOR_ROTATION_FOREIGN_OWNER'
+                }
+                $before = Get-MonNames $folder
+                $r = Invoke-MonCollect -Folder $folder -Utc $monT0 -Audit (Get-MonAudit (New-MonInv @())) -Suffix 'dddddddd'
+                Assert-True ($r.Code -ceq 'OK' -and $r.Rotation.Code -ceq $want -and @($r.Rotation.Removed).Count -eq 0 -and $r.Rotation.Problems -eq 1) "${kind}: rotacao inteira recusada ($($r.Code) $($r.Rotation.Code))"
+                Assert-Eq ((Get-MonNames $folder) -join ',') (Get-MonSorted (@($before) + @($r.File))) "${kind}: nada removido, o registro novo a mais"
+                $script:AtmMonitorOwnerSource = $null
+            }
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M1' 'M1: a unica remocao (Invoke-AtmMonitorPrune) confere trava, nome, pasta do produto, item e dono imediatamente antes; cada recusa nao remove nada; controle positivo remove so o nome dado' {
+        $folder = New-MonFolder
+        try {
+            $c = Open-MonFolder $folder
+            if (Test-MonFolderSkip $c) { return }
+            Assert-Eq $c $null 'pasta criada'
+            $n = Get-MonName $monT0 '00000001'; $other = Get-MonName $monT0 '00000002'
+            Write-MonPlanted $folder $n; Write-MonPlanted $folder $other
+            $jn = Get-MonName $monT0 '00000003'; $tgt = Join-Path $sandbox ('mon-prune-target-' + $script:monN); [void][IO.Directory]::CreateDirectory($tgt)
+            New-Junction -Link (Join-Path $folder $jn) -Target $tgt
+            $dn = Get-MonName $monT0 '00000004'; [void][IO.Directory]::CreateDirectory((Join-Path $folder $dn))
+            $owners = (Get-AtmMonitorIdentity).Owners
+            $before = (Get-MonNames $folder) -join ','
+            $script:AtmMonitorFolderPath = $folder
+            $script:AtmMonitoringEnabled = $true
+            try {
+                Assert-Eq (Invoke-AtmMonitorPrune -Folder $folder -Name 'notas.txt' -Owners $owners) 'MONITOR_PRUNE_NAME_REFUSED' 'nome fora do padrao'
+                Assert-Eq (Invoke-AtmMonitorPrune -Folder $folder -Name ('..\' + $n) -Owners $owners) 'MONITOR_PRUNE_NAME_REFUSED' 'nome com caminho'
+                Assert-Eq (Invoke-AtmMonitorPrune -Folder (Split-Path $folder -Parent) -Name $n -Owners $owners) 'MONITOR_PRUNE_FOLDER_REFUSED' 'outra pasta'
+                Assert-Eq (Invoke-AtmMonitorPrune -Folder $folder -Name $jn -Owners $owners) 'MONITOR_PRUNE_REPARSE' 'juncao com nome de registro'
+                Assert-Eq (Invoke-AtmMonitorPrune -Folder $folder -Name $dn -Owners $owners) 'MONITOR_PRUNE_NOT_A_FILE' 'pasta com nome de registro'
+                Assert-Eq (Invoke-AtmMonitorPrune -Folder $folder -Name $n -Owners @($monForeignSid)) 'MONITOR_PRUNE_FOREIGN_OWNER' 'outro dono'
+                Assert-Eq (Invoke-AtmMonitorPrune -Folder $folder -Name (Get-MonName $monT0 '00000009') -Owners $owners) 'MONITOR_PRUNE_NOT_FOUND' 'ausente'
+                Assert-Eq ((Get-MonNames $folder) -join ',') $before 'nenhuma recusa removeu algo'
+                Assert-Eq (Invoke-AtmMonitorPrune -Folder $folder -Name $n -Owners $owners) $null 'controle positivo: removido'
+            } finally { $script:AtmMonitoringEnabled = $false }
+            Assert-Eq ((Get-MonNames $folder) -join ',') (Get-MonSorted @($other, $jn, $dn)) 'so o nome dado saiu'
+            Assert-True ([IO.Directory]::Exists($tgt)) 'alvo da juncao intacto'
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M1' 'M1: leitor (trava fechada, sem lock) - pasta ausente e historico vazio e nunca criada; corrompido, hash errado, fora do esquema, membro a mais, grupo invalido, horario diferente do nome e acima de 16 KB viram HISTORY_RECORD_INVALID e sao pulados (nunca zero); .partial contado e nunca lido; outro nome, pasta e juncao contados como inesperados; juncao no caminho da pasta: nao lida' {
+        $script:monN++
+        $base = Join-Path $sandbox ('mon-read-' + $script:monN)
+        $folder = Join-Path $base 'Monitor'
+        try {
+            $script:AtmMonitorFolderPath = $folder
+            $h = Get-AtmMonitorHistory
+            Assert-True ($h.FolderState -ceq 'ABSENT' -and @($h.Records).Count -eq 0 -and -not [IO.Directory]::Exists($base)) "ausente: vazio e nunca criada ($($h.FolderState))"
+            [void][IO.Directory]::CreateDirectory($folder)
+            $inv = New-MonInv @(New-MonPart)
+            $v1 = Write-MonRecordText -Folder $folder -Utc $monT0.AddHours(-9) -Inventory $inv
+            $v2 = Write-MonRecordText -Folder $folder -Utc $monT0.AddHours(-8) -Inventory $inv -Previous $v1
+            $want = @{}
+            $n = Get-MonName $monT0.AddHours(-7); [IO.File]::WriteAllBytes((Join-Path $folder $n), [byte[]]@(0x7B, 0xC3, 0x28, 0x7D)); $want[$n] = 'READ'
+            $n = Get-MonName $monT0.AddHours(-6); $t = [IO.File]::ReadAllText((Join-Path $folder $v2)).Replace('"durationMs":5', '"durationMs":6'); [IO.File]::WriteAllText((Join-Path $folder $n), $t); $want[$n] = 'HASH'
+            $n = Write-MonRecordText -Folder $folder -Utc $monT0.AddHours(-5) -Inventory $inv -Edit { param($r) $r.schema = 'atm.monitor/2' }; $want[$n] = 'SCHEMA'
+            $n = Write-MonRecordText -Folder $folder -Utc $monT0.AddHours(-4) -Inventory $inv -Edit { param($r) $r['machine'] = 'x' }; $want[$n] = 'MEMBERS'
+            $n = Write-MonRecordText -Folder $folder -Utc $monT0.AddHours(-3) -Inventory $inv -Edit { param($r) $r.groups = @(, [object[]]@('claude-code')) }; $want[$n] = 'GROUPS'
+            $n = Write-MonRecordText -Folder $folder -Utc $monT0.AddHours(-2) -Inventory $inv -Name (Get-MonName $monT0.AddHours(-1)); $want[$n] = 'UTC'
+            $n = Get-MonName $monT0.AddMinutes(-30); [IO.File]::WriteAllText((Join-Path $folder $n), ('{' + ('x' * 17000) + '}')); $want[$n] = 'SIZE'
+            [IO.File]::WriteAllText((Join-Path $folder ((ConvertTo-AtmMonitorTimeText $monT0) + '-00000001.json.partial')), 'nunca lido')
+            [IO.File]::WriteAllText((Join-Path $folder 'notas.txt'), 'x')
+            [void][IO.Directory]::CreateDirectory((Join-Path $folder 'sub'))
+            $tgt = Join-Path $sandbox ('mon-read-target-' + $script:monN); [void][IO.Directory]::CreateDirectory($tgt)
+            New-Junction -Link (Join-Path $folder 'j') -Target $tgt
+            $h = Get-AtmMonitorHistory
+            Assert-Eq $script:AtmMonitoringEnabled $false 'leitura com a trava fechada'
+            Assert-True ($h.FolderState -ceq 'OK' -and (@($h.Records | ForEach-Object { $_.Name }) -join ',') -ceq "$v1,$v2") "so os dois validos lidos ($(@($h.Records | ForEach-Object { $_.Name }) -join ','))"
+            Assert-Eq @($h.Invalid).Count $want.Count 'cada invalido listado'
+            foreach ($e in @($h.Invalid)) { Assert-True ($e.Code -ceq 'HISTORY_RECORD_INVALID' -and $e.Reason -ceq $want[$e.Name]) "$($e.Name): $($e.Reason), esperado $($want[$e.Name])" }
+            Assert-True ($h.Partial -eq 1 -and $h.Unexpected -eq 3 -and $h.Skipped -eq 0 -and $h.ClockSkew -eq 0) "contagens ($($h.Partial) $($h.Unexpected) $($h.Skipped) $($h.ClockSkew))"
+            $st = Get-AtmMonitorStatus
+            Assert-True ($st.GateOpen -eq $false -and $st.Latest.Outcome -ceq 'OK' -and $st.Latest.Groups -eq 1 -and $st.Latest.Bytes -eq 1000) 'status: o ultimo valido'
+            $lines = @(Get-AtmMonitorStatusLines -Status $st | ForEach-Object { $_.Text }) -join ' | '
+            Assert-True ($lines.Contains((Get-AtmText 'mon.gateClosed')) -and $lines.Contains((Get-AtmText 'mon.residue')) -and $lines.Contains((Get-AtmText 'mon.invalid' $want.Count)) -and -not $lines.Contains($sandbox)) 'linhas do status: trava, residuo, invalidos; caminho real nunca mostrado'
+            # A folder whose chain holds a junction is not read.
+            $jl = Join-Path $sandbox ('mon-read-link-' + $script:monN)
+            New-Junction -Link $jl -Target $base
+            $script:AtmMonitorFolderPath = Join-Path $jl 'Monitor'
+            $h2 = Get-AtmMonitorHistory
+            Assert-True ($h2.FolderState -ceq 'REFUSED' -and $h2.FolderCode -ceq 'MONITOR_FOLDER_REPARSE_IN_PATH' -and @($h2.Records).Count -eq 0) "juncao no caminho: nao lida ($($h2.FolderState) $($h2.FolderCode))"
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M1' 'M1: relogio - cada registro leva o nome do mais recente antes dele (previous); um registro com horario anterior ao do previous e marcado CLOCK_SKEW pelo leitor; um nome que ja existe e recusado e nada e gravado' {
+        $folder = New-MonFolder
+        try {
+            $inv = New-MonInv @(New-MonPart)
+            $r1 = Invoke-MonCollect -Folder $folder -Utc $monT0 -Audit (Get-MonAudit $inv) -Suffix '00000001'
+            if (Test-MonFolderSkip $r1.Code) { return }
+            $r2 = Invoke-MonCollect -Folder $folder -Utc $monT0.AddHours(-1) -Audit (Get-MonAudit $inv) -Suffix '00000002'
+            $r3 = Invoke-MonCollect -Folder $folder -Utc $monT0.AddHours(1) -Audit (Get-MonAudit $inv) -Suffix '00000003'
+            Assert-True ($r1.Code -ceq 'OK' -and $r2.Code -ceq 'OK' -and $r3.Code -ceq 'OK') "tres coletas ($($r1.Code) $($r2.Code) $($r3.Code))"
+            $prev = { param($f) ([IO.File]::ReadAllText((Join-Path $folder $f)) | ConvertFrom-Json).previous }
+            Assert-True ($null -eq (& $prev $r1.File) -and (& $prev $r2.File) -ceq $r1.File -and (& $prev $r3.File) -ceq $r1.File) 'previous: o nome mais recente presente antes de cada coleta'
+            $script:AtmMonitorFolderPath = $folder
+            $h = Get-AtmMonitorHistory
+            $skew = @($h.Records | Where-Object { @($_.Codes) -ccontains 'CLOCK_SKEW' } | ForEach-Object { $_.Name })
+            Assert-True ($h.ClockSkew -eq 1 -and ($skew -join ',') -ceq $r2.File -and @($h.Records).Count -eq 3) "CLOCK_SKEW so no registro do relogio atrasado ($($skew -join ','))"
+            $before = (Get-MonNames $folder) -join ','
+            $r4 = Invoke-MonCollect -Folder $folder -Utc $monT0 -Audit (Get-MonAudit $inv) -Suffix '00000001'
+            Assert-True ($r4.Code -ceq 'MONITOR_NAME_EXISTS' -and $null -eq $r4.File) "nome existente recusado ($($r4.Code))"
+            Assert-Eq ((Get-MonNames $folder) -join ',') $before 'nada gravado'
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M1' 'M1: dois coletores ao mesmo tempo - com o mutex por usuario tomado por outro processo: MONITOR_BUSY sem espera, sem auditoria e sem nada gravado (nao e o lock B8); abandonado pelo outro processo: tomado e a coleta segue' {
+        $folder = New-MonFolder
+        $child = Join-Path $sandbox 'mon-mutex-holder.ps1'
+        [IO.File]::WriteAllText($child, @'
+param([string]$Name, [string]$HeldFile, [string]$GoFile, [string]$Mode)
+$ErrorActionPreference = 'Stop'
+$m = New-Object Threading.Mutex($false, $Name)
+$got = $m.WaitOne(0)
+[IO.File]::WriteAllText($HeldFile + '.tmp', [string]$got); [IO.File]::Move($HeldFile + '.tmp', $HeldFile)
+$sw = [Diagnostics.Stopwatch]::StartNew()
+while (-not (Test-Path -LiteralPath $GoFile) -and $sw.Elapsed.TotalSeconds -lt 120) { [Threading.Thread]::Sleep(100) }
+if ($Mode -ceq 'abandon') { [Environment]::Exit(0) }
+$m.ReleaseMutex()
+exit 0
+'@, (New-Object Text.UTF8Encoding $true))
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $start = { param([string]$Mode)
+            $script:monN++
+            $d = Join-Path $sandbox ('mon-holder-' + $script:monN); [void][IO.Directory]::CreateDirectory($d)
+            $held = Join-Path $d 'held.txt'; $go = Join-Path $d 'go.txt'
+            $p = Start-AtmTestHelperProcess -File $shell -Arguments ("-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Name `"$($script:AtmMonitorMutexName)`" -HeldFile `"$held`" -GoFile `"$go`" -Mode $Mode")
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            # The R2 and R4 statics read up to the scale area, so this wait uses the helper's process handle, not a sleep cmdlet.
+            while (-not (Test-Path -LiteralPath $held) -and -not $p.HasExited -and $sw.Elapsed.TotalSeconds -lt 120) { $null = $p.WaitForExit(100) }
+            [pscustomobject]@{ Process = $p; Held = $(if (Test-Path -LiteralPath $held) { [IO.File]::ReadAllText($held) } else { '<sem sinal>' }); Go = $go } }
+        $keep = $null
+        try {
+            $k = @{ Audit = 0 }
+            $inv = New-MonInv @(New-MonPart)
+            $audit = { param($a) $k.Audit++; $inv }.GetNewClosure()
+            $h = & $start 'release'
+            Assert-Eq $h.Held 'True' 'o outro processo tomou o mutex'
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $r = Invoke-MonCollect -Folder $folder -Utc $monT0 -Audit $audit -Suffix '00000001'
+            $sw.Stop()
+            [IO.File]::WriteAllText($h.Go, 'go'); $null = $h.Process.WaitForExit(120000)
+            Assert-True ($r.Code -ceq 'MONITOR_BUSY' -and $k.Audit -eq 0 -and $sw.Elapsed.TotalSeconds -lt 10) "ocupado sem espera nem auditoria ($($r.Code), $([int]$sw.Elapsed.TotalMilliseconds) ms)"
+            Assert-True (-not [IO.Directory]::Exists((Split-Path $folder -Parent))) 'nada gravado, nenhuma pasta criada'
+            $m = $null; Assert-True (-not [Threading.Mutex]::TryOpenExisting($script:AtmCleanLockName, [ref]$m)) 'o lock B8 nao foi tocado'
+            # Abandoned: this process keeps a handle (so the object outlives the holder), the holder ends without releasing.
+            $h2 = & $start 'abandon'
+            Assert-Eq $h2.Held 'True' 'o outro processo tomou o mutex de novo'
+            $keep = New-Object Threading.Mutex($false, $script:AtmMonitorMutexName)
+            [IO.File]::WriteAllText($h2.Go, 'go'); $null = $h2.Process.WaitForExit(120000)
+            $r2 = Invoke-MonCollect -Folder $folder -Utc $monT0 -Audit $audit -Suffix '00000002'
+            if (Test-MonFolderSkip $r2.Code) { return }
+            Assert-True ($r2.Code -ceq 'OK' -and $r2.MutexAbandoned -and $k.Audit -eq 1) "abandonado: tomado e a coleta seguiu ($($r2.Code) $($r2.MutexAbandoned))"
+        } finally { if ($null -ne $keep) { $keep.Dispose() }; Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M1' 'M1: nada gravado fora da pasta do historico (instantaneo do sandbox antes e depois de coletas com rotacao) e a pasta %LOCALAPPDATA%\AgentTempManager\Monitor deste usuario nunca criada pela suite' {
+        $folder = New-MonFolder
+        $monBase = Split-Path (Split-Path $folder -Parent) -Parent
+        $snap = { param([string]$Root, [string]$Skip)
+            $out = New-Object System.Collections.Generic.List[string]
+            $stack = New-Object System.Collections.Generic.Stack[string]; $stack.Push($Root)
+            while ($stack.Count -gt 0) {
+                $dir = $stack.Pop(); $items = $null
+                # A folder another case left unreadable is recorded as such (the same on both sides of the comparison).
+                try { $items = (New-Object IO.DirectoryInfo($dir)).GetFileSystemInfos() } catch { $out.Add($dir + '|UNREADABLE'); continue }
+                foreach ($e in $items) {
+                    if ($e.FullName -eq $Skip -or $e.FullName.StartsWith($Skip + '\')) { continue }
+                    $isFile = $e -is [IO.FileInfo]
+                    $out.Add(('{0}|{1}|{2}' -f $e.FullName, $(if ($isFile) { $e.Length } else { -1 }), $(if ($isFile) { $e.LastWriteTimeUtc.Ticks } else { 0 })))
+                    if (-not $isFile -and -not ($e.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $stack.Push($e.FullName) }
+                }
+            }
+            (@($out) | Sort-Object) -join "`n" }
+        try {
+            $before = & $snap $sandbox $monBase
+            $r1 = Invoke-MonCollect -Folder $folder -Utc $monT0.AddDays(-95) -Audit (Get-MonAudit (New-MonInv @(New-MonPart))) -Suffix '00000001'
+            if (Test-MonFolderSkip $r1.Code) { return }
+            $r2 = Invoke-MonCollect -Folder $folder -Utc $monT0 -Audit (Get-MonAudit (New-MonInv @(New-MonPart))) -Suffix '00000002'
+            Assert-True ($r1.Code -ceq 'OK' -and $r2.Code -ceq 'OK' -and (@($r2.Rotation.Removed) -join ',') -ceq $r1.File) "duas coletas, a segunda rotaciona a primeira ($($r1.Code) $($r2.Code))"
+            Assert-Eq (& $snap $sandbox $monBase) $before 'nada mudou no sandbox fora da pasta do historico'
+            Assert-Eq ((Get-MonNames $folder) -join ',') $r2.File 'na pasta: so o registro restante'
+            Assert-Eq (Get-AtmPathPresence $monRealFolder) $monRealBefore 'pasta real do usuario igual ao inicio da area'
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M1' 'M1: custo da coleta (so na CI) - arvore plantada de 2.000 arquivos em todo job e mais 10.000 nos jobs x64; duracao da auditoria e total medidas e registradas como informacao' {
+        if ($env:GITHUB_ACTIONS -ne 'true') { $script:caseSkipped = $true; $script:caseNote = 'so na CI (GITHUB_ACTIONS): a arvore plantada e a medida sao da CI'; return }
+        $arch = [string][Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+        $sizes = @(2000); if ($arch -ceq 'X64') { $sizes += 10000 }
+        if (-not ('AtmTestGen' -as [type])) {
+            Add-Type -TypeDefinition 'public static class AtmTestGen { public static void Make(string root, int n) { for (int i = 0; i < n; i++) { string d = System.IO.Path.Combine(root, "d" + (i / 1000)); if (i % 1000 == 0) System.IO.Directory.CreateDirectory(d); System.IO.File.WriteAllBytes(System.IO.Path.Combine(d, "f" + i + ".bin"), new byte[i % 7]); } } }'
+        }
+        $p = New-TestProfile 'moncost'
+        $folder = New-MonFolder
+        $notes = New-Object System.Collections.Generic.List[string]
+        $total = 0; $minute = 0
+        try {
+            foreach ($n in $sizes) {
+                $root = New-TestRoot -ProfileInfo $p -Files @{}
+                [AtmTestGen]::Make($root, $n)
+                $total += $n; $minute++
+                $r = Invoke-MonCollect -Folder $folder -Utc $monT0.AddMinutes($minute) -Audit $null -InventoryArgs (Get-InvArgs -Profiles @($p))
+                if (Test-MonFolderSkip $r.Code) { return }
+                Assert-True ($r.Code -ceq 'OK' -and $r.Outcome -ne 'AUDIT_FAILED') "coleta de $total arquivos ($($r.Code) $($r.Outcome))"
+                $notes.Add(('{0} arquivos: auditoria {1} ms, total {2} ms' -f $total, $r.AuditMs, $r.TotalMs))
+            }
+        } finally { Reset-MonSeams }
+        $script:caseNote = ('{0} {1} {2}: {3}' -f $arch, $PSVersionTable.PSEdition, $PSVersionTable.PSVersion, ($notes -join '; '))
+        Write-Host ('   V0.5 M1 custo: ' + $script:caseNote)
+    }
+    Test-Case 'V0.5 M1' 'M1: CLI (processo novo deste shell) - monitor status 0 com a trava fechada nos dois idiomas, opt-in sem prometer comando e nada alterado; sem subverbo ou com subverbo desconhecido: uso 2; version mostra a nona trava; a pasta real nunca criada' {
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $launch = { param([string]$CliArgs) Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$(Join-Path $srcDir 'agent-temp.ps1')`" " + $CliArgs) -TimeoutSec 300 }
+        $before = Get-AtmPathPresence $monRealFolder
+        $r = & $launch 'monitor status -Lang en-US'
+        Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('Monitoring is not available in this release: nothing is collected, scheduled or written.') -and $r.Text.Contains('This one has no such command.') -and $r.Text.Contains('Nothing was collected, created or changed.')) "status en-US: saida $($r.Exit)"
+        $r = & $launch 'monitor status -Lang pt-BR'
+        Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('Monitoramento preventivo (V0.5)') -and $r.Text.Contains('Nada foi coletado, criado ou alterado.')) "status pt-BR: saida $($r.Exit)"
+        foreach ($u in @('monitor', 'monitor collect')) {
+            $r = & $launch "$u -Lang en-US"
+            Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('Usage: agent-temp monitor status. Nothing was changed.')) "${u}: uso 2 ($($r.Exit))"
+        }
+        $r = & $launch 'version -Lang en-US'
+        Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('preventive monitoring: DISABLED in this release (monitor status only reads the history; nothing is collected or scheduled)')) "version: saida $($r.Exit)"
+        Assert-Eq (Get-AtmPathPresence $monRealFolder) $before 'pasta real do usuario inalterada'
+    }
+    Test-Case 'V0.5 M1' 'M1 (estatico): uma unica atribuicao da trava e de cada costura; cada funcao que escreve le a trava antes de tudo; leitores sem escrita; motor sem diagnose, clean, isolamento, recuperacao, agendador, lock B8 nem rede; a remocao numa unica funcao; CreateNewDirectory e o mutex so depois da trava; motor so em monitor e version, na verificacao de integridade, no instalador e no manifesto; nove travas; build, e2e e GUI com a nona' {
+        $all = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Rel = $_.FullName.Substring($srcDir.Length + 1); Text = [IO.File]::ReadAllText($_.FullName) } })
+        $monFile = Join-Path $srcDir 'lib\Engine.Monitor.ps1'
+        $mon = [IO.File]::ReadAllText($monFile)
+        Assert-Eq @([IO.File]::ReadAllBytes($monFile) | Where-Object { $_ -gt 127 }).Count 0 'motor so em ASCII'
+        Assert-True ([regex]::Matches($mon, '\$script:AtmMonitoringEnabled\s*=').Count -eq 1 -and $mon -match '(?m)^\$script:AtmMonitoringEnabled = \$false\r?$') 'uma unica atribuicao, a $false'
+        foreach ($f in $all) { if ($f.Rel -cne 'lib\Engine.Monitor.ps1') { Assert-True (-not [regex]::IsMatch($f.Text, 'AtmMonitoringEnabled\s*=')) "$($f.Rel) nao altera a trava" } }
+        $code = [regex]::Replace([regex]::Replace($mon, '(?s)<#.*?#>', ''), '(?m)#.*$', '')
+        foreach ($pat in @('$env:', 'Get-Content', 'Set-Variable', 'New-Variable')) { Assert-True (-not $code.Contains($pat)) "nenhum '$pat' abre a trava" }
+        Assert-Eq $shippedMonitorMutexName $null 'costura do mutex distribuida $null'
+        foreach ($s in @('AtmMonitorClockSource', 'AtmMonitorFolderPath', 'AtmMonitorAuditSource', 'AtmMonitorRandomSource', 'AtmMonitorMutexName', 'AtmMonitorOwnerSource')) {
+            Assert-True ([regex]::Matches($mon, '\$script:' + $s + '\s*=').Count -eq 1 -and $mon -match ('(?m)^\$script:' + $s + ' = \$null\r?$')) "costura ${s}: uma unica atribuicao, a `$null"
+            foreach ($f in $all) { if ($f.Rel -cne 'lib\Engine.Monitor.ps1') { Assert-True (-not $f.Text.Contains($s)) "$($f.Rel) nao usa a costura $s" } }
+        }
+        $saved = $script:AtmMonitorMutexName
+        try { $script:AtmMonitorMutexName = $null; $pn = Get-AtmMonitorMutexName -Sid 'S-1-5-21-1-2-3-777' } finally { $script:AtmMonitorMutexName = $saved }
+        Assert-True ($pn -cmatch '^Global\\AgentTempManager\.Monitor-[0-9a-f]{16}$' -and -not $pn.Contains('777') -and $pn -cne $shippedCleanLockName) "nome do produto: prefixo e 16 hex do SHA-256 do SID, nunca o SID nem o lock B8 ($pn)"
+        # Forbidden in the engine's code: the diagnose (every function it defines), clean, isolation, recovery, the
+        # scheduler, the B8 lock, the network, elevation and every other removal or ACL write.
+        $diagFns = @([regex]::Matches(@($all | Where-Object { $_.Rel -ceq 'lib\Engine.Diagnose.ps1' })[0].Text, '(?m)^function\s+([A-Za-z]+-[A-Za-z0-9]+)') | ForEach-Object { $_.Groups[1].Value })
+        Assert-True ($diagFns.Count -gt 20) "funcoes do diagnose lidas ($($diagFns.Count))"
+        foreach ($fn in $diagFns) { Assert-True (-not [regex]::IsMatch($code, '(?<![\w-])' + [regex]::Escape($fn) + '(?![\w-])')) "motor nao chama $fn" }
+        foreach ($pat in @('Invoke-AtmDiagnose', 'Engine.Diagnose', 'Invoke-AtmClean', 'Invoke-AtmIsolat', 'Invoke-AtmRecover', 'Invoke-AtmPurge', 'Invoke-AtmRestore', 'Schedule.Service', 'Register-ScheduledTask', 'ScheduledTask',
+                'AtmCleanLock', 'AtmCleanLockName', 'Invoke-WebRequest', 'Invoke-RestMethod', 'Net.WebClient', 'HttpClient', 'Net.Sockets', 'Start-Process', 'Read-Host', 'Write-Host', 'AtmDeleter', 'AtmMover', 'PinForMove',
+                'OpenExisting', 'Remove-Item', 'Move-Item', 'Directory]::Delete', '.Delete(', 'Set-Acl', 'SetAccessControl', 'Add-Type', ('run' + 'as'), 'ShellExecute')) {
+            Assert-True ($code.IndexOf($pat, [StringComparison]::OrdinalIgnoreCase) -lt 0) "motor de monitoramento sem '$pat'"
+        }
+        $ast = [Management.Automation.Language.Parser]::ParseFile($monFile, [ref]$null, [ref]$null)
+        $defs = @{}; foreach ($d in @($ast.FindAll({ param($a) $a -is [Management.Automation.Language.FunctionDefinitionAst] }, $true))) { $defs[$d.Name] = $d }
+        $fnOf = { param([string]$Pat) @($defs.Keys | Where-Object { $defs[$_].Extent.Text.Contains($Pat) } | Sort-Object) -join ',' }
+        # The single removal: one file system call, in Invoke-AtmMonitorPrune, after its checks in order; called only by
+        # the rotation, and the rotation only by the collector.
+        Assert-Eq ([regex]::Matches($code, '::Delete\(').Count) 1 'uma unica chamada de remocao no motor'
+        Assert-Eq (& $fnOf '[IO.File]::Delete(') 'Invoke-AtmMonitorPrune' 'remocao so em Invoke-AtmMonitorPrune'
+        $pr = $defs['Invoke-AtmMonitorPrune'].Extent.Text
+        $order = @('if (-not $script:AtmMonitoringEnabled)', 'AtmMonitorNamePattern', 'Get-AtmMonitorFolder', 'Test-AtmPathChain', 'ReparsePoint', 'Get-AtmMonitorFileOwner', '[IO.File]::Delete(')
+        for ($i = 1; $i -lt $order.Count; $i++) { Assert-True ($pr.IndexOf($order[$i - 1]) -ge 0 -and $pr.IndexOf($order[$i - 1]) -lt $pr.IndexOf($order[$i])) "remocao: '$($order[$i - 1])' antes de '$($order[$i])'" }
+        Assert-Eq (& $fnOf 'Invoke-AtmMonitorPrune -') 'Invoke-AtmMonitorRotation' 'a remocao so chamada pela rotacao'
+        Assert-Eq (& $fnOf 'Invoke-AtmMonitorRotation -') 'Invoke-AtmMonitorCollectionCore' 'a rotacao so chamada pelo coletor'
+        Assert-Eq (& $fnOf 'Invoke-AtmMonitorCollectionCore -') 'Invoke-AtmMonitorCollection' 'o nucleo so pelo coletor, com o mutex tomado'
+        Assert-Eq (& $fnOf '::CreateNewDirectory(') 'Open-AtmMonitorFolder' 'CreateNewDirectory so em Open-AtmMonitorFolder'
+        Assert-Eq (& $fnOf '::CreateNew(') 'Write-AtmMonitorRecordFile' 'CreateNew so no escritor'
+        Assert-Eq (& $fnOf 'File]::Move(') 'Write-AtmMonitorRecordFile' 'troca de nome so no escritor'
+        Assert-Eq (& $fnOf 'Threading.Mutex') 'Invoke-AtmMonitorCollection' 'mutex so no coletor'
+        Assert-Eq (& $fnOf 'Invoke-AtmInventory @') 'Invoke-AtmMonitorCollectionCore' 'auditoria so no nucleo do coletor'
+        foreach ($fn in @('Open-AtmMonitorFolder', 'Write-AtmMonitorRecordFile', 'Invoke-AtmMonitorPrune', 'Invoke-AtmMonitorRotation', 'Invoke-AtmMonitorCollection')) {
+            $first = @($defs[$fn].Body.EndBlock.Statements)[0].Extent.Text
+            Assert-True ($first.StartsWith('if (-not $script:AtmMonitoringEnabled) { return ')) "${fn}: a trava e a primeira instrucao"
+        }
+        foreach ($fn in @('Get-AtmMonitorHistory', 'Get-AtmMonitorStatus', 'Get-AtmMonitorNewestName', 'Test-AtmMonitorRecordText', 'Get-AtmMonitorFolder')) {
+            $t = $defs[$fn].Extent.Text
+            foreach ($pat in @('CreateNew', '::Pin(', 'File]::Move', 'Mutex', '::Delete(', 'WriteAll', 'CreateDirectory', 'Invoke-AtmMonitor', 'Open-AtmMonitorFolder', 'Write-AtmMonitorRecordFile')) { Assert-True (-not $t.Contains($pat)) "leitor $fn sem '$pat'" }
+        }
+        Assert-True (-not $defs['Get-AtmMonitorHistory'].Extent.Text.Contains('AtmMonitoringEnabled')) 'o leitor nao depende da trava'
+        # The launcher: the engine in monitor and version only, once each; no collection, no seam.
+        $launcher = @($all | Where-Object { $_.Rel -ceq 'agent-temp.ps1' })[0].Text
+        $loadLine = ". (Join-Path `$here 'lib\Engine.Monitor.ps1')"
+        $lBlock = $null; $lHits = New-Object System.Collections.Generic.List[string]
+        foreach ($ln in @($launcher -split "`r?`n")) {
+            if ($ln -cmatch "^        '([a-z-]+)' \{\s*$") { $lBlock = $Matches[1] }
+            if ($ln.Contains($loadLine)) { $lHits.Add([string]$lBlock) }
+        }
+        Assert-Eq (@($lHits | Sort-Object) -join ',') 'monitor,version' "motor carregado so em monitor e version, uma vez cada ($($lHits -join ','))"
+        Assert-True ($launcher.Contains("'lib\Report.ps1', 'lib\Engine.Monitor.ps1', 'lib\Tui.ps1'") -and $script:AtmRequiredFiles -contains 'lib\Engine.Monitor.ps1') 'motor na verificacao de integridade do lancador e obrigatorio na instalacao'
+        Assert-True ($launcher.Contains("Get-AtmText 'cli.monitoring' `$(if (`$script:AtmMonitoringEnabled)") -and [regex]::Matches($launcher, 'AtmMonitoringEnabled').Count -eq 1 -and $launcher.Contains("'help.monitor'")) 'version le a trava (uma vez); ajuda com a linha de monitor'
+        foreach ($pat in @('Invoke-AtmMonitorCollection', 'Invoke-AtmMonitorRotation', 'Invoke-AtmMonitorPrune', 'Open-AtmMonitorFolder', 'Write-AtmMonitorRecordFile')) {
+            foreach ($f in $all) { if ($f.Rel -cne 'lib\Engine.Monitor.ps1') { Assert-True (-not $f.Text.Contains($pat)) "$($f.Rel) nao chama $pat" } }
+        }
+        foreach ($f in @($all | Where-Object { @('lib\Engine.Audit.ps1', 'lib\Engine.Clean.ps1', 'lib\Engine.Isolate.ps1', 'lib\Engine.Diagnose.ps1', 'lib\Engine.Recover.ps1', 'lib\Tui.ps1', 'lib\Gui.ps1', 'lib\GuiModel.ps1') -ccontains $_.Rel })) {
+            Assert-True (-not $f.Text.Contains('Engine.Monitor') -and -not $f.Text.Contains('AtmMonitor')) "$($f.Rel) nao carrega nem le o monitoramento"
+        }
+        $rep = @($all | Where-Object { $_.Rel -ceq 'lib\Report.ps1' })[0].Text
+        $repFn = $rep.Substring($rep.IndexOf('function Get-AtmMonitorStatusLines'))
+        foreach ($pat in @('AtmMonitoringEnabled', 'GetFolderPath', 'LOCALAPPDATA', 'Get-AtmMonitorFolder', 'AtmMonitorFolderPath')) { Assert-True (-not $repFn.Contains($pat)) "apresentacao sem '$pat'" }
+        foreach ($l in @('en-US', 'pt-BR')) { foreach ($key in @('cli.monitoring', 'cli.monitoringDisabled', 'cli.monitorUsage', 'help.monitor', 'mon.header', 'mon.gateClosed', 'mon.optIn', 'mon.gateOpen', 'mon.historyAbsent', 'mon.historyCount', 'mon.latest', 'mon.residue', 'mon.invalid', 'mon.clockSkew', 'mon.partial', 'mon.unexpected', 'mon.skipped', 'mon.historyRefused', 'mon.nothingChanged')) { Assert-True $script:AtmMessages[$l].ContainsKey($key) "$key ($l)" } }
+        # Nine gates, each a single assignment to $false in its own file.
+        $gates = @(foreach ($f in $all) { foreach ($m in [regex]::Matches($f.Text, '(?m)^\$script:(Atm\w+Enabled) = \$false\r?$')) { $m.Groups[1].Value + '@' + $f.Rel } })
+        Assert-Eq (Get-MonSorted $gates) (Get-MonSorted @('AtmRealDeletionEnabled@lib\Engine.Clean.ps1', 'AtmWorktreeDiagnosticsEnabled@lib\Engine.Diagnose.ps1', 'AtmHandleDiagnosticsEnabled@lib\Engine.Diagnose.ps1', 'AtmDiagnoseExportEnabled@lib\Report.ps1',
+                'AtmIsolationEnabled@lib\Engine.Isolate.ps1', 'AtmQuarantinePurgeEnabled@lib\Engine.Isolate.ps1', 'AtmGuiEnabled@lib\Gui.ps1', 'AtmRecoveryEnabled@lib\Engine.Recover.ps1', 'AtmMonitoringEnabled@lib\Engine.Monitor.ps1')) 'nove travas, cada uma no seu arquivo'
+        Assert-True ($guiOtherGates -ccontains 'AtmMonitoringEnabled') 'a GUI nunca le a nona trava (lista de travas proibidas na GUI)'
+        $root = Split-Path -Parent $testsDir
+        $br = [IO.File]::ReadAllText((Join-Path $root 'tools\Build-Release.ps1'))
+        Assert-True ($br.Contains("`$monTxt = & `$read 'src/lib/Engine.Monitor.ps1'") -and $br.Contains("@(`$monTxt, 'AtmMonitoringEnabled')")) 'build recusa o pacote sem a nona trava fechada'
+        foreach ($e in @('Invoke-InstallE2E.ps1', 'Invoke-IsolateE2E.ps1', 'Invoke-RecoverE2E.ps1')) {
+            $t = [IO.File]::ReadAllText((Join-Path $testsDir "e2e\$e"))
+            Assert-True ($t.Contains("AtmMonitoringEnabled = 'lib\Engine.Monitor.ps1'") -and $t.Contains('nine installed gates')) "$e confere as nove travas instaladas"
+        }
+        $mfDir = Join-Path $sandbox 'm1-manifest'
+        [void][IO.Directory]::CreateDirectory($mfDir)
+        Copy-AtmTree -From $srcDir -To $mfDir
+        Write-AtmManifest -Root $mfDir -Version (Get-AtmSourceVersion -SourceDir $mfDir)
+        Assert-True (@(([IO.File]::ReadAllText((Join-Path $mfDir 'manifest.json')) | ConvertFrom-Json).files | Where-Object { [string]$_.path -ceq 'lib\Engine.Monitor.ps1' }).Count -eq 1) 'manifesto lista lib\Engine.Monitor.ps1'
     }
 
     # ------------------------------------------------------------------ scale

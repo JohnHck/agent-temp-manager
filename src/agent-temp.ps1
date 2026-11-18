@@ -41,7 +41,7 @@ $here = $PSScriptRoot
 # Source checkouts (neither file) load as-is. Hashes are computed with .NET and messages are printed in both
 # languages, because no code (not even the message catalog) is loaded before the check passes. A file or directory
 # that cannot be read is a problem too, reported by its relative name only (no exception text, no absolute path).
-$loadedLibs = @('lib\Engine.Audit.ps1', 'lib\I18n.ps1', 'lib\Engine.Clean.ps1', 'lib\Engine.Isolate.ps1', 'lib\Engine.Diagnose.ps1', 'lib\Engine.Recover.ps1', 'lib\Report.ps1', 'lib\Tui.ps1', 'lib\GuiModel.ps1', 'lib\Gui.ps1')
+$loadedLibs = @('lib\Engine.Audit.ps1', 'lib\I18n.ps1', 'lib\Engine.Clean.ps1', 'lib\Engine.Isolate.ps1', 'lib\Engine.Diagnose.ps1', 'lib\Engine.Recover.ps1', 'lib\Report.ps1', 'lib\Engine.Monitor.ps1', 'lib\Tui.ps1', 'lib\GuiModel.ps1', 'lib\Gui.ps1')
 $providersDir = Join-Path $here 'providers'
 
 function Get-AtmLauncherSha256 {
@@ -230,7 +230,7 @@ $cliInvArgs['NoProgress'] = [bool]$NoProgress
 $cliInvArgs['ProgressCallback'] = { param($pct, $msg) $act = Get-AtmText 'cli.progressActivity'; if ($pct -ge 100) { Write-Progress -Activity $act -Completed } else { Write-Progress -Activity $act -Status $msg -PercentComplete $pct } }
 
 function Show-Help {
-    foreach ($k in @('help.title', 'help.blank', 'help.tui', 'help.audit', 'help.preview', 'help.diagnose', 'help.clean', 'help.clean2', 'help.isolate', 'help.isolate2', 'help.quarantine', 'help.quarantine2', 'help.quarantine3', 'help.authorize', 'help.verify', 'help.version', 'help.gui', 'help.recover', 'help.recover2', 'help.recover3', 'help.recover4', 'help.help', 'help.blank',
+    foreach ($k in @('help.title', 'help.blank', 'help.tui', 'help.audit', 'help.preview', 'help.diagnose', 'help.clean', 'help.clean2', 'help.isolate', 'help.isolate2', 'help.quarantine', 'help.quarantine2', 'help.quarantine3', 'help.authorize', 'help.verify', 'help.version', 'help.gui', 'help.recover', 'help.recover2', 'help.recover3', 'help.recover4', 'help.monitor', 'help.help', 'help.blank',
             'help.drill', 'help.export', 'help.diagOpts', 'help.cleanOpts', 'help.cleanOpts2', 'help.cleanOpts3', 'help.cleanOpts4', 'help.tuiOpts', 'help.lang', 'help.blank', 'help.examples')) { Write-Host (Get-AtmText $k) }
     Write-Host '  agent-temp'
     Write-Host '  agent-temp audit'
@@ -533,6 +533,18 @@ try {
             Show-AtmRecoverPlan -Plan $recPlan
             exit $(if ($recPlan.Offered) { 0 } else { 3 })
         }
+        'monitor' {
+            # V0.5 M1 (docs/adr/ADR-0017): status only. The monitoring engine is loaded here and by version. status reads the
+            # monitoring gate as this copy has it and the history as it is: it never creates the history folder, never
+            # collects, takes no lock and writes nothing. There is no other monitor verb. Exit 0 status shown, 2 usage.
+            . (Join-Path $here 'lib\Engine.Monitor.ps1')
+            foreach ($opt in @('User', 'Project', 'Root', 'Path', 'AllowListFile', 'IncludeOtherUsers', 'AcceptB1ResidualRisk', 'ExportJson', 'LogFile', 'RecordFile', 'Entry', 'All', 'PseudonymKeyFile', 'Operation', 'Service', 'RunId', 'AtmElevatedRecovery', 'DeadlineSeconds')) {
+                if ($PSBoundParameters.ContainsKey($opt)) { Write-Host (Get-AtmText 'cli.monitorUsage') -ForegroundColor Red; exit 2 }
+            }
+            if (-not $SubCommand -or $SubCommand.ToLowerInvariant() -cne 'status') { Write-Host (Get-AtmText 'cli.monitorUsage') -ForegroundColor Red; exit 2 }
+            Show-AtmMonitorStatus -Status (Get-AtmMonitorStatus)
+            exit 0
+        }
         'version' {
             Initialize-AtmNative -LibDir (Join-Path $here 'lib')
             Write-Host "agent-temp $script:AtmVersion"
@@ -545,6 +557,9 @@ try {
             # V0.4 (ADR-0016 section 5): the eighth release gate, read from the recovery engine (loaded by version and recover).
             . (Join-Path $here 'lib\Engine.Recover.ps1')
             Write-Host (Get-AtmText 'cli.recovery' $(if ($script:AtmRecoveryEnabled) { Get-AtmText 'cli.enabled' } else { Get-AtmText 'cli.recoveryDisabled' }))
+            # V0.5 (ADR-0017 section 5): the ninth release gate, read from the monitoring engine (loaded by version and monitor).
+            . (Join-Path $here 'lib\Engine.Monitor.ps1')
+            Write-Host (Get-AtmText 'cli.monitoring' $(if ($script:AtmMonitoringEnabled) { Get-AtmText 'cli.enabled' } else { Get-AtmText 'cli.monitoringDisabled' }))
             # The effective quarantine policy (contract section 11.2), with its warnings (an invalid file counts as off).
             foreach ($pl in (Get-AtmQuarantinePolicyLines -Policy (Get-AtmQuarantinePolicy -ConfigDir $invArgs.ConfigDir))) { Write-Host $pl.Text -ForegroundColor $pl.Color }
             # The user's scheduled task of the automatic purge, read only (P6b).

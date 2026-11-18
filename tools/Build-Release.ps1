@@ -69,7 +69,9 @@ try {
     $null = & $read 'src/lib/GuiModel.ps1'
     # V0.4 R1 (ADR-0016 section 5): the eighth gate, assisted recovery's, a single assignment to $false too.
     $recTxt = & $read 'src/lib/Engine.Recover.ps1'
-    foreach ($g in @(@($diagTxt, 'AtmWorktreeDiagnosticsEnabled'), @($diagTxt, 'AtmHandleDiagnosticsEnabled'), @($repTxt, 'AtmDiagnoseExportEnabled'), @($isoTxt, 'AtmIsolationEnabled'), @($isoTxt, 'AtmQuarantinePurgeEnabled'), @($guiTxt, 'AtmGuiEnabled'), @($recTxt, 'AtmRecoveryEnabled'))) {
+    # V0.5 M1 (ADR-0017 section 5): the ninth gate, preventive monitoring's, a single assignment to $false too.
+    $monTxt = & $read 'src/lib/Engine.Monitor.ps1'
+    foreach ($g in @(@($diagTxt, 'AtmWorktreeDiagnosticsEnabled'), @($diagTxt, 'AtmHandleDiagnosticsEnabled'), @($repTxt, 'AtmDiagnoseExportEnabled'), @($isoTxt, 'AtmIsolationEnabled'), @($isoTxt, 'AtmQuarantinePurgeEnabled'), @($guiTxt, 'AtmGuiEnabled'), @($recTxt, 'AtmRecoveryEnabled'), @($monTxt, 'AtmMonitoringEnabled'))) {
         if ([regex]::Matches($g[0], '\$script:' + $g[1] + '\s*=').Count -ne 1 -or $g[0] -notmatch ('(?m)^\$script:' + $g[1] + ' = \$false\r?$')) { $gateOk = $false }
     }
     if (-not $gateOk -or $cleanTxt.Contains('AcceptProcessCoverageGap') -or -not $auditTxt.Contains("`$script:AtmVersion = '$version'")) {

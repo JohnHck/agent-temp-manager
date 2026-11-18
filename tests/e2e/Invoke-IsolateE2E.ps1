@@ -7,7 +7,7 @@
   that contains it; the install e2e checks that it is absent from the package). It loads the INSTALLED engine into its
   own process and opens the isolation gate and the purge gate there only, in memory, like tests\Run-Tests.ps1 does for
   its sandbox: the installed files, the package and the sources keep the single assignment of every gate to $false
-  (the eight installed gates and the SHA-256 of every installed file are checked before and after). The deletion gate of
+  (the nine installed gates and the SHA-256 of every installed file are checked before and after). The deletion gate of
   clean is never opened. It uses the real mover (AtmMover), the real deleter of the purge (AtmDeleter), the T1 logs in
   real files, the real manifests, the real B8 lock name and the real revalidation; only the console observation is the
   existing test seam (AtmCleanConsoleSource, logged as TEST_SEAM): every confirmation is AUTOMATED by this script and
@@ -161,9 +161,9 @@ function Compare-Snapshot($Before, $After) {
 function Get-DiffCount($D) { return ($D.Removed.Count + $D.Added.Count + $D.Changed.Count) }
 function Test-Under([string]$Rel, [string]$Prefix) { return ([string]::Equals($Rel, $Prefix, [StringComparison]::OrdinalIgnoreCase) -or $Rel.StartsWith($Prefix + '\', [StringComparison]::OrdinalIgnoreCase)) }
 
-# The eight gates of the installation: each a single assignment to $false in its installed file (the seventh, the
-# desktop GUI's, since V0.2.1 P1; the eighth, assisted recovery's, since V0.4 R1).
-$gateFiles = [ordered]@{ AtmRealDeletionEnabled = 'lib\Engine.Clean.ps1'; AtmWorktreeDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmHandleDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmDiagnoseExportEnabled = 'lib\Report.ps1'; AtmIsolationEnabled = 'lib\Engine.Isolate.ps1'; AtmQuarantinePurgeEnabled = 'lib\Engine.Isolate.ps1'; AtmGuiEnabled = 'lib\Gui.ps1'; AtmRecoveryEnabled = 'lib\Engine.Recover.ps1' }
+# The nine gates of the installation: each a single assignment to $false in its installed file (the seventh, the
+# desktop GUI's, since V0.2.1 P1; the eighth, assisted recovery's, since V0.4 R1; the ninth, preventive monitoring's, since V0.5 M1).
+$gateFiles = [ordered]@{ AtmRealDeletionEnabled = 'lib\Engine.Clean.ps1'; AtmWorktreeDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmHandleDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmDiagnoseExportEnabled = 'lib\Report.ps1'; AtmIsolationEnabled = 'lib\Engine.Isolate.ps1'; AtmQuarantinePurgeEnabled = 'lib\Engine.Isolate.ps1'; AtmGuiEnabled = 'lib\Gui.ps1'; AtmRecoveryEnabled = 'lib\Engine.Recover.ps1'; AtmMonitoringEnabled = 'lib\Engine.Monitor.ps1' }
 function Get-InstalledGateProblems {
     return @(foreach ($g in $gateFiles.Keys) {
             $t = [IO.File]::ReadAllText((Join-Path $InstallDir $gateFiles[$g]))
@@ -186,7 +186,7 @@ Case 'installed-before' {
     $v = Invoke-InstalledVerify
     Assert ($v -eq 0) "agent-temp verify exit $v"
     $ctx.InstallBefore = Get-Snapshot $InstallDir ([long]::MaxValue)
-    "verify 0; eight installed gates `$false (single assignment each); $($ctx.InstallBefore.Count) installed entries hashed"
+    "verify 0; nine installed gates `$false (single assignment each); $($ctx.InstallBefore.Count) installed entries hashed"
 }
 if (-not $ChildMode -and ($summary.cases['identity'].status -ne 'PASS' -or $summary.cases['installed-before'].status -ne 'PASS')) {
     [IO.File]::WriteAllText($SummaryFile, ($summary | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
@@ -1168,7 +1168,7 @@ Case 'installed-after' {
     Assert ($v -eq 0) "agent-temp verify exit $v"
     $d = Compare-Snapshot $ctx.InstallBefore (Get-Snapshot $InstallDir ([long]::MaxValue))
     Assert ((Get-DiffCount $d) -eq 0) "instalacao alterada: $($d.Removed.Count) removidos, $($d.Added.Count) adicionados, $($d.Changed.Count) alterados"
-    'installed files identical by SHA-256 to before the runs; verify 0; eight installed gates still $false (isolation and purge opened only in this process memory)'
+    'installed files identical by SHA-256 to before the runs; verify 0; nine installed gates still $false (isolation and purge opened only in this process memory)'
 }
 # The variables set in the user environment are taken out again (or restored) if they still hold the values set here.
 try {

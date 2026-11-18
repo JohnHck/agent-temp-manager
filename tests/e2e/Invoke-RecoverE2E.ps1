@@ -18,7 +18,7 @@
       undo of leg A's log (provenance across legs); then the final stop of every own service that is not STOPPED, by
       exact name checked as its own. The services stay registered (the runner is discarded); none is removed.
   Containment: legs A and B load the INSTALLED engine into their own process and open the recovery gate there only, in
-  memory (the eight installed gates and the SHA-256 of every installed file are checked before and after). The test
+  memory (the nine installed gates and the SHA-256 of every installed file are checked before and after). The test
   provider is an in-memory object passed through -Providers that declares only this run's services. The real default
   seams are reached only through the guard wrappers ($recStartGuard, $recStopGuard), passed as -ServiceControlImpl and
   -ServiceStopImpl: each checks the name against this run's list, counts the call and calls the default seam with exactly
@@ -293,8 +293,8 @@ Add-Type -TypeDefinition ([IO.File]::ReadAllText($Source)) -ReferencedAssemblies
 }
 
 # ============================================================================================== legs A and B
-# The eight gates of the installation: each a single assignment to $false in its installed file.
-$gateFiles = [ordered]@{ AtmRealDeletionEnabled = 'lib\Engine.Clean.ps1'; AtmWorktreeDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmHandleDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmDiagnoseExportEnabled = 'lib\Report.ps1'; AtmIsolationEnabled = 'lib\Engine.Isolate.ps1'; AtmQuarantinePurgeEnabled = 'lib\Engine.Isolate.ps1'; AtmGuiEnabled = 'lib\Gui.ps1'; AtmRecoveryEnabled = 'lib\Engine.Recover.ps1' }
+# The nine gates of the installation: each a single assignment to $false in its installed file.
+$gateFiles = [ordered]@{ AtmRealDeletionEnabled = 'lib\Engine.Clean.ps1'; AtmWorktreeDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmHandleDiagnosticsEnabled = 'lib\Engine.Diagnose.ps1'; AtmDiagnoseExportEnabled = 'lib\Report.ps1'; AtmIsolationEnabled = 'lib\Engine.Isolate.ps1'; AtmQuarantinePurgeEnabled = 'lib\Engine.Isolate.ps1'; AtmGuiEnabled = 'lib\Gui.ps1'; AtmRecoveryEnabled = 'lib\Engine.Recover.ps1'; AtmMonitoringEnabled = 'lib\Engine.Monitor.ps1' }
 function Get-InstalledGateProblems {
     return @(foreach ($g in $gateFiles.Keys) {
             $t = [IO.File]::ReadAllText((Join-Path $InstallDir $gateFiles[$g]))
@@ -325,7 +325,7 @@ Case 'installed-before' {
     $v = Invoke-InstalledVerify
     Assert ($v -eq 0) "agent-temp verify exit $v"
     $ctx.InstallBefore = Get-InstallSnapshot
-    "verify 0; eight installed gates `$false (single assignment each); $($ctx.InstallBefore.Count) installed entries hashed"
+    "verify 0; nine installed gates `$false (single assignment each); $($ctx.InstallBefore.Count) installed entries hashed"
 }
 Case 'service-root' {
     # The names come only from the file Setup wrote in its protected root: the root's name, the nonce, every name (prefix,
@@ -669,6 +669,6 @@ Case 'installed-after' {
     $diff = @(@($ctx.InstallBefore.Keys | Where-Object { -not $after.ContainsKey($_) -or $after[$_] -cne $ctx.InstallBefore[$_] }) + @($after.Keys | Where-Object { -not $ctx.InstallBefore.ContainsKey($_) }))
     Assert ($diff.Count -eq 0) "instalacao alterada: $($diff.Count) entrada(s)"
     Assert ($script:recGuard.Refused -eq 0) "o envoltorio recusou $($script:recGuard.Refused) nome(s)"
-    'installed files identical by SHA-256 to before the runs; verify 0; eight installed gates still $false (recovery opened only in this process memory); the guard refused no name'
+    'installed files identical by SHA-256 to before the runs; verify 0; nine installed gates still $false (recovery opened only in this process memory); the guard refused no name'
 }
 exit (Write-Summary)
