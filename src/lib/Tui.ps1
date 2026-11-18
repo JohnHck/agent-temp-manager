@@ -15,6 +15,10 @@
 #    over a root (plan only with the isolation gate closed). The Quarantine area (Z) only lists, inspects and verifies,
 #    through the isolation engine's read-only functions, and shows EXPIRED, PURGED and the quarantine policy; it never
 #    restores or purges (T-ISO-6) and shows the CLI commands instead.
+#  * V0.4 R5 (ADR-0016): the recovery area (S) only reads. Entering it is the one action that collects: one fresh,
+#    read-only collection of the recovery engine, then its list; Enter shows the plan of a service chosen from that list
+#    (never a typed name), computed from the same collection. Executing stays in the CLI, as restoring does (T-ISO-6):
+#    the area asks nothing, takes no lock, writes no log, controls no service and requests no elevation.
 Set-StrictMode -Version 2.0
 
 $script:AtmTuiClassColor = @{ ACTIVE_EVIDENCE = 'Red'; RECENT = 'Yellow'; LIVENESS_UNKNOWN = 'DarkYellow'; ORPHAN_SUSPECTED = 'Cyan'; NOT_SCANNED = 'DarkGray' }
@@ -322,8 +326,38 @@ function Get-AtmTuiTextLines {
             foreach ($tl in (Get-AtmAutoPurgeTaskLines -Task (Get-AtmTuiStateValue $State 'AutoPurgeTask'))) { & $add $tl.Text $tl.Color }
             & $add (Get-AtmText 'tui.q.readOnly') 'Green'
         }
+        'rplan' {
+            # V0.4 R5: the plan of the service chosen in the recovery area, computed when it was chosen from the kept
+            # collection, with the lines the CLI writes for recover plan and the CLI-only note.
+            foreach ($pl in @(Get-AtmRecoverPlanLines -Plan $Screen.Filter.Plan -View)) { & $add $pl.Text $pl.Color }
+        }
     }
     return $L.ToArray()
+}
+
+function Get-AtmTuiRecoverRows {
+    # V0.4 R5: the recovery area, read only. Returns Pre (the lines above the table: the collection's time, the header,
+    # coverage, elevation and closing lines of recover list, the CLI-only note and the hint), Columns, Rows, Items (the
+    # list's candidates, for Enter) and Colors, from the list Invoke-AtmTuiRecover kept. Nothing is collected here: every
+    # frame only reads what entering the area collected.
+    param($State)
+    $rec = Get-AtmTuiStateValue $State 'Recover'
+    $cols = @(@{ Name = (Get-AtmText 'rec.col.operation'); Width = 14 }, @{ Name = (Get-AtmText 'rec.col.service'); Width = 28 }, @{ Name = (Get-AtmText 'rec.col.provider'); Width = 18 }, @{ Name = (Get-AtmText 'rec.col.result'); Width = 10 }, @{ Name = (Get-AtmText 'rec.col.codes'); Width = 0 })
+    $pre = New-Object System.Collections.Generic.List[object]; $rows = New-Object System.Collections.Generic.List[object]; $items = New-Object System.Collections.Generic.List[object]; $colors = New-Object System.Collections.Generic.List[string]
+    if ($null -eq $rec -or $null -eq $rec.List) {
+        $pre.Add([pscustomobject]@{ Text = (Get-AtmText 'rec.view.notCollected'); Fg = 'Yellow' })
+    } else {
+        $pre.Add([pscustomobject]@{ Text = (Get-AtmText 'rec.view.collected' (Format-AtmTuiUtc $rec.Collection.StartedUtc)); Fg = 'White' })
+        foreach ($l in @(Get-AtmRecoverListLines -List $rec.List)) { if ($l.Kind -cne 'row') { $pre.Add([pscustomobject]@{ Text = $l.Text.Trim(); Fg = $l.Color }) } }
+        $pre.Add([pscustomobject]@{ Text = (Get-AtmText 'rec.view.cliOnly'); Fg = 'Cyan' })
+        $pre.Add([pscustomobject]@{ Text = (Get-AtmText 'rec.view.hint'); Fg = 'DarkGray' })
+        foreach ($c in @($rec.List.Candidates)) {
+            $rows.Add(@($c.Operation, $c.Target, $(if ($c.Provider) { $c.Provider } else { '-' }), $(if ($c.Offered) { Get-AtmText 'rec.view.offered' } else { Get-AtmText 'rec.view.refused' }), $(if ($c.Offered) { $c.Undo } else { @($c.Codes) -join ', ' })))
+            $items.Add($c)
+            $colors.Add($(if ($c.Offered) { 'Green' } else { 'Yellow' }))
+        }
+    }
+    return [pscustomobject]@{ Pre = $pre.ToArray(); Columns = $cols; Rows = $rows.ToArray(); Items = $items.ToArray(); Colors = $colors.ToArray() }
 }
 
 # ------------------------------------------------------------------ frames
@@ -388,6 +422,8 @@ function Get-AtmTuiMenuItems {
         @{ Key = 'I'; Label = (Get-AtmText 'menu.isolate'); Screen = @{ Name = 'isolate'; Path = $null } }
         @{ Key = 'L'; Label = (Get-AtmText 'menu.clean'); Screen = @{ Name = 'clean'; Title = (Get-AtmText 'menu.cleanTitle') } }
         @{ Key = 'Z'; Label = (Get-AtmText 'menu.quarantine'); Screen = @{ Name = 'quarantine'; Title = (Get-AtmText 'menu.quarantineTitle') } }
+        # V0.4 R5: the recovery area, view only (list and plan; executing stays in the CLI).
+        @{ Key = 'S'; Label = (Get-AtmText 'menu.recover'); Screen = @{ Name = 'recover'; Title = (Get-AtmText 'menu.recoverTitle') } }
         @{ Key = 'R'; Label = (Get-AtmText 'menu.reaudit'); Screen = @{ Name = 'reaudit' } }
         @{ Key = 'H'; Label = (Get-AtmText 'menu.help'); Screen = @{ Name = 'help'; Title = (Get-AtmText 'menu.help') } }
         @{ Key = 'Q'; Label = (Get-AtmText 'menu.quit'); Screen = @{ Name = 'quit' } }
@@ -490,6 +526,26 @@ function Get-AtmTuiFrame {
             }
             $footer = Get-AtmText $(if ($scr.Name -eq 'quarantine') { 'foot.quarantine' } else { 'foot.list' }) $(if ($data.Rows.Count) { $scr.Sel + 1 } else { 0 }) $data.Rows.Count
         }
+        'recover' {
+            # V0.4 R5: the recovery area, from the list kept when it was entered (this frame collects nothing).
+            $data = Get-AtmTuiRecoverRows -State $State
+            $scr.Count = $data.Rows.Count
+            $pre = 0
+            # Lines above the table are wrapped, never clipped (the gate and CLI-only lines must stay whole).
+            foreach ($pl in @($data.Pre)) { foreach ($pc in (Split-AtmWrap $pl.Text ($w - 3))) { $lines.Add(@(New-AtmSeg (' ' + $pc) $pl.Fg)); $pre++ } }
+            $tbl = Format-AtmTuiTable -Columns $data.Columns -Rows $data.Rows -Width $w -G $G
+            $lines.Add(@(New-AtmSeg (' ' + $tbl.Header) 'White' 'DarkGray'))
+            $vis = [math]::Max(1, $bodyH - 2 - $pre)
+            if ($scr.Sel -ge $data.Rows.Count) { $scr.Sel = [math]::Max(0, $data.Rows.Count - 1) }
+            if ($scr.Sel -lt $scr.Top) { $scr.Top = $scr.Sel }
+            if ($scr.Sel -ge $scr.Top + $vis) { $scr.Top = $scr.Sel - $vis + 1 }
+            if ($data.Rows.Count -eq 0) { $lines.Add(@(New-AtmSeg ('  ' + (Get-AtmText 'common.none')) 'DarkGray')) }
+            for ($i = $scr.Top; $i -lt [math]::Min($data.Rows.Count, $scr.Top + $vis); $i++) {
+                $txt = $(if ($i -eq $scr.Sel) { $G.Sel } else { ' ' }) + $tbl.Lines[$i]
+                if ($i -eq $scr.Sel) { $lines.Add(@(New-AtmSeg (Limit-AtmText $txt ($w - 1) $G.Ell) 'Black' 'Cyan')) } else { $lines.Add(@(New-AtmSeg (Limit-AtmText $txt ($w - 1) $G.Ell) $data.Colors[$i])) }
+            }
+            $footer = Get-AtmText 'foot.list' $(if ($data.Rows.Count) { $scr.Sel + 1 } else { 0 }) $data.Rows.Count
+        }
         { $_ -in @('diag', 'dcov', 'dlist', 'dnodes', 'dissues') } {
             $data = Get-AtmTuiDiagList -State $State -Screen $scr
             $items = $data.Items; if ($null -eq $items) { $items = @() }
@@ -537,7 +593,7 @@ function Get-AtmTuiFrame {
             # Where the visible lines are, so more content is never hidden silently.
             $footer = Get-AtmText 'foot.diagText' $(if ($tl.Count) { $scr.Top + 1 } else { 0 }) $last $tl.Count
         }
-        { $_ -in @('errors', 'detail', 'help', 'qdetail') } {
+        { $_ -in @('errors', 'detail', 'help', 'qdetail', 'rplan') } {
             $tl = Get-AtmTuiTextLines -State $State -Screen $scr -Width $w
             $scr.Count = $tl.Count
             $vis = [math]::Max(1, $bodyH - 1)
@@ -593,8 +649,8 @@ function Write-AtmTuiFrameToConsole {
 # paging and details never run anything again. Only an explicit action (entering the area the first time, or U) runs
 # the diagnose.
 
-$script:AtmTuiListScreens = @('users', 'projects', 'roots', 'gates', 'quarantine', 'diag', 'dcov', 'dlist', 'dnodes', 'dissues')
-$script:AtmTuiTextScreens = @('errors', 'detail', 'help', 'qdetail', 'dsum', 'dcovdet', 'dfind', 'dnode')
+$script:AtmTuiListScreens = @('users', 'projects', 'roots', 'gates', 'quarantine', 'diag', 'dcov', 'dlist', 'dnodes', 'dissues', 'recover')
+$script:AtmTuiTextScreens = @('errors', 'detail', 'help', 'qdetail', 'dsum', 'dcovdet', 'dfind', 'dnode', 'rplan')
 $script:AtmTuiDiagScreens = @('diag', 'dcov', 'dlist', 'dnodes', 'dissues', 'dsum', 'dcovdet', 'dfind', 'dnode')
 $script:AtmTuiDiagStateColor = @{ IN_USE = 'Red'; UNKNOWN = 'Yellow'; NO_DEPENDENCY_OBSERVED = 'Green'; RUNTIME_NOT_DIAGNOSED = 'DarkGray' }
 # Strength is told by its marker, not by color alone.
@@ -889,6 +945,26 @@ function Invoke-AtmTuiDiagnose {
     return $true
 }
 
+function Invoke-AtmTuiRecover {
+    # V0.4 R5: the only place the TUI collects for the recovery area, on the explicit action of entering it (never per
+    # frame): one fresh, read-only collection of the recovery engine, with its own deadline (the runner; tests inject
+    # it), then its list. A failure keeps nothing and reports the exception code only (its message could carry collected
+    # data). Nothing is asked, locked, logged, started or elevated here: executing stays in the CLI.
+    param($State)
+    & $State.Draw (Get-AtmTuiBusyFrame -State $State -Text (Get-AtmText 'rec.view.running'))
+    $State.RecoverRuns++
+    $State.Recover = $null
+    try {
+        $coll = & $State.RecoverRunner
+        $State.Recover = @{ Collection = $coll; List = (Get-AtmRecoverList -Collection $coll) }
+        return $true
+    } catch {
+        $State.Recover = $null
+        $State.Message = Get-AtmText 'rec.view.failed' (ConvertTo-AtmExceptionCode $_.Exception.GetBaseException().GetType().Name)
+        return $false
+    }
+}
+
 # ------------------------------------------------------------------ actions
 
 function Invoke-AtmTuiAudit {
@@ -985,9 +1061,12 @@ function Start-AtmTui {
       -DiagnoseRunner: scriptblock(args) -> diagnose result (tests; default Invoke-AtmDiagnose)
       -AutoPurgeTaskReader: scriptblock() -> the state of the user's scheduled task of the automatic purge (tests; default
                        Get-AtmAutoPurgeTaskState, read only). The TUI only shows it: it never schedules or unschedules.
+      -RecoverCollectionRunner: scriptblock() -> one collection of the recovery engine (tests; default
+                       Get-AtmRecoverCollection with its own deadline). Called only when the recovery area is entered.
     #>
     param([hashtable]$InventoryArgs = @{}, [scriptblock]$KeySource, [scriptblock]$Renderer, [scriptblock]$LineReader, [switch]$Ascii, [int]$Width = 0, [int]$Height = 0, $Inventory,
-        [hashtable]$DiagnoseArgs = $null, [scriptblock]$DiagnoseRunner = $null, [scriptblock]$KeyFlush = $null, [scriptblock]$AutoPurgeTaskReader = $null)
+        [hashtable]$DiagnoseArgs = $null, [scriptblock]$DiagnoseRunner = $null, [scriptblock]$KeyFlush = $null, [scriptblock]$AutoPurgeTaskReader = $null,
+        [scriptblock]$RecoverCollectionRunner = $null)
     $headless = [bool]$Renderer
     $useAscii = $Ascii -or -not (Test-AtmTuiUnicodeDefault)
     # Callbacks below rely on dynamic scoping with tui-prefixed names (no GetNewClosure: such closures
@@ -1003,6 +1082,10 @@ function Start-AtmTui {
         AutoPurgeNotice = @(Get-AtmAutoPurgeNoticeLines -ConfigDir $(if ($InventoryArgs['ConfigDir']) { [string]$InventoryArgs['ConfigDir'] } else { Join-AtmPath (Split-Path $PSScriptRoot -Parent) 'config' }))
         AutoPurgeTask = $null
         AutoPurgeTaskReader = $(if ($null -ne $AutoPurgeTaskReader) { $AutoPurgeTaskReader } else { { Get-AtmAutoPurgeTaskState } })
+        # V0.4 R5: the recovery area's collection and list (kept until the area is entered again) and how many times
+        # entering it collected.
+        Recover = $null; RecoverRuns = 0
+        RecoverRunner = $(if ($null -ne $RecoverCollectionRunner) { $RecoverCollectionRunner } else { { Get-AtmRecoverCollection } })
     }
     $tuiHeadless = $headless
     $sizeOf = {
@@ -1072,6 +1155,15 @@ function Start-AtmTui {
                             }
                         }
                     }
+                    elseif ($scr.Name -eq 'recover') {
+                        # V0.4 R5: only a service of the list, by its row; the plan of that exact declared name comes from
+                        # the collection kept when the area was entered (no new collection, nothing typed).
+                        $data = Get-AtmTuiRecoverRows -State $state
+                        if ($data.Items.Count -gt 0) {
+                            $it = $data.Items[[math]::Min($scr.Sel, $data.Items.Count - 1)]
+                            $push = @{ Name = 'rplan'; Title = [string]$it.Target; Filter = @{ Plan = (Get-AtmRecoverPlan -Collection $state.Recover.Collection -Operation ([string]$it.Operation) -Service ([string]$it.Target)) } }
+                        }
+                    }
                     elseif ($scr.Name -in @('users', 'projects', 'roots', 'gates', 'quarantine')) {
                         $data = Get-AtmTuiScreenRows -State $state -Screen $scr
                         if ($data.Items.Count -gt 0) {
@@ -1139,6 +1231,12 @@ function Start-AtmTui {
                         elseif (@($state.Quarantine.Entries).Count -eq 0) { $state.Message = (Get-AtmText 'tui.q.empty') }
                         else { $state.Message = (Format-AtmQuarantinePolicy $state.Quarantine.Policy) }
                         $state.Stack.Add(@{ Name = 'quarantine'; Title = $push.Title; Sel = 0; Top = 0; Count = 0; Filter = $null })
+                    }
+                    'recover' {
+                        # V0.4 R5: entering the recovery area is the explicit action: one fresh read-only collection, each
+                        # time it is entered.
+                        $okR = Invoke-AtmTuiRecover -State $state; & $KeyFlush
+                        if ($okR) { $state.Stack.Add(@{ Name = 'recover'; Title = $push.Title; Sel = 0; Top = 0; Count = 0; Filter = $null }) }
                     }
                     default {
                         $s = @{} + $push

@@ -1,6 +1,6 @@
 # ADR-0016: Assisted recovery (V0.4)
 
-Status: ACCEPTED (V04-D1 to V04-D8 decided 2026-11-17: D3 (b) elevation on demand through UAC; the others as recommended); R0, R1, R2, R3 and R4 implemented
+Status: ACCEPTED (V04-D1 to V04-D8 decided 2026-11-17: D3 (b) elevation on demand through UAC; the others as recommended); R0, R1, R2, R3, R4 and R5 implemented
 Date: 2026-11-17
 Phase: V0.4 (phases R0 to R6 below, each a future round with its own contract and tests)
 
@@ -538,7 +538,8 @@ identity of the token is never shown.
 | The collection failed (reported by exception type only) | 10 |
 
 `-DeadlineSeconds` bounds the collection (default 120 s). `-Lang` selects the language. The engine is loaded only by
-`recover` and `version`. The help gains two lines in both languages.
+`recover` and `version` (at R1 time; since R5 also by `tui` and `gui`, for their read-only area: see the R5
+implementation record). The help gains two lines in both languages.
 
 **`SERVICE_IMAGE_NOT_DECLARED`: R1's behavior, and the decision for R2.** R1 refuses a service whose providers
 declare no `ExpectedImage`, with `RECOVERY_IMAGE_NOT_DECLARED`. That is the reading consistent with V04-D5 (b). So the
@@ -1202,3 +1203,130 @@ The fixed folder is a folder of the sandbox (`-LogDirBase`), except in the case 
   declares an `ExpectedImage`;
 * the fixed folder on this machine and on the CI runner's own `ProgramData`: the suite uses a folder of its sandbox, and
   the install e2e runs the installer only on the CI runner.
+
+## R5 implementation record (2026-11-18)
+
+The line numbers in this record are those of the files as V04-R5 adds or changes them. Earlier records keep the numbers
+of their own rounds.
+
+R5 is presentation only (section 6). The TUI and the desktop GUI show `recover list` and `recover plan` in a read-only
+area. Executing stays in the CLI, as restore does (T-ISO-6). The recovery gate and the GUI gate stay closed in every
+copy. R5 changes no engine function, finding state, eligibility, B1 or RECENT rule, no diagnose and no provider:
+`Engine.Recover.ps1` is not touched.
+
+**What each interface shows.**
+
+* **Shared formatters** (`Report.ps1`): `Get-AtmRecoverListLines` (`:1349-1371`) and `Get-AtmRecoverPlanLines`
+  (`:1373-1412`).
+  * They return as data the lines `Show-AtmRecoverList` and `Show-AtmRecoverPlan` write, in the same order and with
+    the same texts and codes, without the blank lines and rules. The CLI writers are unchanged.
+  * `-View` adds two lines after them: that executing is CLI-only (`rec.view.cliOnly`) and, while the plan says the
+    gate is closed, that `agent-temp recover start -Operation REC-SVC-START -Service "<name>"` shows the plan and exits
+    27 (`rec.view.gateClosed`).
+  * `GateOpen` is read from the plan or list data, as the CLI does. The TUI and GUI files never read the gate.
+* **TUI** (`Tui.ps1`):
+  * The menu item `S` (`:426`) opens the area. Entering it is the only collection, in `Invoke-AtmTuiRecover`
+    (`:948-966`):
+    * one fresh read-only collection per entry, through the runner of `Start-AtmTui`
+      (`-RecoverCollectionRunner`, `:1069`), by default `Get-AtmRecoverCollection` with the engine's deadline (`:1088`);
+    * then its list;
+    * a failure keeps nothing and shows the exception code only.
+  * The screen `recover` (`Get-AtmTuiFrame`, `:529-548`; rows from `Get-AtmTuiRecoverRows`, `:338-361`) shows, above
+    the table:
+    * the time of the collection;
+    * the list lines except the rows;
+    * the CLI-only note and a hint.
+  * Each row has five columns: operation, service, provider, `OFFERED` or `REFUSED`, and the undo or the codes.
+  * `Enter` on a row (`:1158-1166`) computes `Get-AtmRecoverPlan` from the kept collection for that exact declared name.
+    It opens the text screen `rplan` (`:329-333`), which shows the plan lines with `-View`.
+* **GUI** (`GuiModel.ps1`, `Gui.ps1`):
+  * The navigation item `S` (`GuiModel.ps1:220`; its button `ScreenS` is made from the list) returns `RECOVER_OPEN`
+    (`:530`). The form then calls `Invoke-AtmGuiRecover` (`Gui.ps1:329-352`):
+    * one blocking call on the UI thread with the screens and Refresh disabled, as the preview does
+      (`:828-833`, `:854-867`);
+    * ignored while an audit, the preview or the diagnose runs;
+    * a failure keeps the exception code only.
+  * `Invoke-AtmGuiNavRecover` (`GuiModel.ps1:1166-1176`) opens the area over the dashboard with that collection in the
+    screen's filter.
+  * `Get-AtmGuiRecoverTable` (`:1119-1152`) gives the TUI's columns, rows and lines above the table.
+  * `Enter` (`:560-571`) computes the plan from the kept collection. `Get-AtmGuiRecoverPlanText` (`:1154-1164`) gives
+    its lines.
+* **Launcher** (`agent-temp.ps1`): the engine is loaded for `gui` (`:254`, only past the GUI gate, which is closed in
+  every copy) and `tui` (`:266`), besides `recover` (`:487`) and `version` (`:546`).
+* **Texts** (`I18n.ps1`, `:314-329` and `:1540-1555`): `menu.recover`, `menu.recoverTitle`, `rec.col.*` and
+  `rec.view.*`, translated in both languages, with the same placeholders.
+
+**Why the area does not execute.**
+
+* **Only three engine functions are reachable.** The UI files call only the engine's three read functions, each in one
+  place: the collection in the entry function, the list right after it, and the plan on `Enter`.
+* **No typed target.** The service is chosen from the list, so a name no provider declares cannot be chosen.
+* **Nothing that executes is called.** No key, button or menu calls `Invoke-AtmRecover*`, the launcher, a service seam,
+  the log, the lock B8, a confirmation or a line reader.
+* **No other path collects.** Frames, view models, the GUI's ticker, `F5` and a re-audit never collect.
+
+**Statics.**
+
+* **The GUI's closed list** (`tests/Run-Tests.ps1:15236-15257`; ADR-0014 section 3):
+  * `$guiAllowedEngine` gains five names: `Get-AtmRecoverCollection`, `Get-AtmRecoverList`, `Get-AtmRecoverPlan`,
+    `Get-AtmRecoverListLines` and `Get-AtmRecoverPlanLines`. It now has 28 names, and the six count assertions say so.
+  * `$guiForbidden` gains `Invoke-AtmRecover`, `AtmServiceStop`, `ServiceController`, the elevation verb,
+    `ShellExecute`, `AtmRecoverOperationTaken` and `Open-AtmCleanLog`.
+  * `$guiOtherGates` gains `AtmRecoveryEnabled`.
+  * The tick check also refuses `Invoke-AtmGuiRecover` and `Get-AtmRecoverCollection` (`:15340-15341`).
+* **The R1 static** (`:18519-18542`):
+  * `Tui.ps1` and `Gui*.ps1` may name exactly the three read functions. The diagnose names none, and none loads the
+    engine or names `AtmRecovery`.
+  * The launcher loads the engine in exactly four blocks, `recover`, `version`, `tui` and `gui`, once each.
+  * `version` kept its load: it shows the gate.
+* **A new TUI static** (area `V0.4 R5`):
+  * `Tui.ps1` contains none of the execution names, `AtmRecoveryEnabled` or `Wait-AtmRecoverKey`.
+  * The six fragments of the area contain no `Read-AtmCleanAnswer`, line reader, key source or `Read-Host`. They are
+    the two functions, the two `recover` cases, the `rplan` case and the `Enter` branch.
+* **Placement of the reads.** Each read function is called only where expected, in both interfaces. The reads the view
+  uses, and every function of `src` they call transitively, contain none of the execution names.
+* **The seam.** `AtmGuiRecoverSource` is assigned once, to `$null`.
+* **Old statics adjusted, none loosened:**
+  * the TUI menu keys (`:14659`, `S` after `Z`);
+  * the GUI navigation keys (`:16434`, `S` after `D`);
+  * the window's tab order (`:18055`, `ScreenS` after `ScreenD`).
+
+**Tests:** the area `V0.4 R5` of `tests/Run-Tests.ps1` (`:20413-20733`), in both shells.
+
+* **Setup.** The collection is injected through the R1 helpers: providers, identity, service rows and dependencies. It
+  has a declared and offered service, a declared and refused one (running), and a name no provider declares. No
+  service is opened or queried.
+* **Formatter parity.** In both languages, the list and plan lines equal the CLI's lines in order. This covers the
+  offered, refused and undeclared targets, an empty list and a forged open gate. `-View` is the CLI's lines plus the
+  CLI-only note.
+* **TUI,** headless, in both languages:
+  * the area and both plans are drawn with every expected line and the codes of `recover plan`;
+  * the undeclared name never appears, and its plan screen equals the CLI's lines;
+  * with the area closed there are zero collections, and two entries make two;
+  * letters on both screens read no line and collect nothing;
+  * a failure shows only the code.
+* **GUI** (session and view model, no window), in both languages:
+  * `S` alone collects nothing, and an opening collects once;
+  * the rows and lines above the table equal the TUI's, and the plans equal the CLI's;
+  * `Enter`, `Esc`, a live monitoring tick and `F5` collect nothing;
+  * a busy session is ignored;
+  * a failure keeps only the code.
+* **Instrumentation.** No call reaches `Invoke-AtmRecover*`, the launcher, the service seams, the log, the lock, a
+  confirmation, `Read-Host`, CIM or `Start-Process`.
+  * There is no B8 mutex, with a positive control.
+  * The sandbox is unchanged.
+  * The default path calls the engine's collection, shadowed, once per entry.
+* **The GUI statics.**
+  * The real files pass.
+  * Each new forbidden name, the gate and two tick plants are refused in a copy, and so is an engine name outside the
+    list.
+
+**Not tested:**
+
+* **A real GUI window.** A window where `S` or its button is pressed, with the real collection, is never opened. The P6
+  window case checks the button's place in the tab order only.
+* **A real console.** The TUI never runs in a real console with a keyboard and the real collection.
+* **Who covers it.** Both are left for the operator's VM (R6).
+
+**Limit.** The GUI's collection blocks its window for up to the engine's deadline (120 s), with a fixed progress text.
+That is the same as the preview.

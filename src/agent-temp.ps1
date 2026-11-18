@@ -247,8 +247,12 @@ try {
         'gui' {
             # V0.2.1 (ADR-0014): presentation only. With the release gate closed (every copy): GUI_GATE_CLOSED, exit 7,
             # no window and no WinForms assembly. Past it: an STA thread and an interactive desktop, or exit 8 with the
-            # reason; never relaunched in another shell (GUI-D7).
-            if ($script:AtmGuiEnabled) { Initialize-AtmNative -LibDir (Join-Path $here 'lib') }
+            # reason; never relaunched in another shell (GUI-D7). V0.4 R5: past the gate, the recovery engine is loaded too,
+            # for the read-only recovery area (its collection, list and plan; the window never executes).
+            if ($script:AtmGuiEnabled) {
+                Initialize-AtmNative -LibDir (Join-Path $here 'lib')
+                . (Join-Path $here 'lib\Engine.Recover.ps1')
+            }
             exit (Invoke-AtmGuiCommand)
         }
         'tui' {
@@ -257,6 +261,9 @@ try {
                 Write-Host (Get-AtmText 'cli.tuiUse')
                 exit 6
             }
+            # V0.4 R5: the recovery engine, for the TUI's read-only recovery area (its collection, list and plan; the TUI
+            # never executes). Loading it defines functions and constants only.
+            . (Join-Path $here 'lib\Engine.Recover.ps1')
             $null = Start-AtmTui -InventoryArgs $invArgs -Ascii:$Ascii
             exit 0
         }
@@ -473,10 +480,10 @@ try {
         }
         'recover' {
             # V0.4 R1 (docs/adr/ADR-0016): list and plan, from a fresh read-only collection made in this process. The
-            # recovery engine is loaded here (and by version) only. list and plan never ask, lock, log or write anything and
-            # open no service. The operation comes only from the catalog and the service only from the exact name a provider
-            # declares: never a path, wildcard, file or plan. One operation and one target per call. Exit 0 list or plan
-            # shown, 3 target refused, 2 usage.
+            # recovery engine is loaded here, by version, and (V0.4 R5) by tui and gui for their read-only area. list and
+            # plan never ask, lock, log or write anything and open no service. The operation comes only from the catalog
+            # and the service only from the exact name a provider declares: never a path, wildcard, file or plan. One
+            # operation and one target per call. Exit 0 list or plan shown, 3 target refused, 2 usage.
             . (Join-Path $here 'lib\Engine.Recover.ps1')
             $recSub = $(if ($SubCommand) { $SubCommand.ToLowerInvariant() } else { '' })
             foreach ($opt in @('User', 'Project', 'Root', 'Path', 'AllowListFile', 'IncludeOtherUsers', 'AcceptB1ResidualRisk', 'ExportJson', 'LogFile', 'RecordFile', 'Entry', 'All', 'PseudonymKeyFile')) {

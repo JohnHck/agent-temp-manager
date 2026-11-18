@@ -14,7 +14,9 @@
 # from them; the categories, reasons and requirements are the engine's, as they come. Phase P4b: the diagnose area (D),
 # the TUI's screens over the schema view of one diagnose result, with the features behind the V0.2 gates shown as
 # disabled in this version. Phase P5: the live monitoring's choices (the six intervals), its status line, and the state
-# of the view STALE by slowness or age besides a failure.
+# of the view STALE by slowness or age besides a failure. V0.4 R5 (ADR-0016): the recovery area (S), read only: the list
+# and the plan of the recovery engine over the collection Gui.ps1 made when the area was opened; executing stays in the
+# CLI.
 
 function Get-AtmGuiIdentityHeader {
     # The process identity and its elevation state, as `version` shows them, and the language. -Source: test override
@@ -200,8 +202,9 @@ function Get-AtmGuiOpt {
 }
 
 function Get-AtmGuiNavItemList {
-    # The screens of the TUI menu that the GUI shows (keys 1 to 9, P and D), with the TUI's labels, titles and filters.
-    # D (P4b) opens the diagnose area; isolation, cleanup and the quarantine area are never offered (ADR-0014 section 6).
+    # The screens of the TUI menu that the GUI shows (keys 1 to 9, P, D and S), with the TUI's labels, titles and filters.
+    # D (P4b) opens the diagnose area; S (V0.4 R5) the recovery area, view only; isolation, cleanup and the quarantine
+    # area are never offered (ADR-0014 section 6).
     return @(
         @{ Key = '1'; Label = (Get-AtmText 'menu.dashboard'); Screen = @{ Name = 'dashboard'; Title = (Get-AtmText 'menu.dashboard') } }
         @{ Key = '2'; Label = (Get-AtmText 'menu.users'); Screen = @{ Name = 'users'; Title = (Get-AtmText 'menu.users') } }
@@ -214,6 +217,7 @@ function Get-AtmGuiNavItemList {
         @{ Key = '9'; Label = (Get-AtmText 'menu.errors'); Screen = @{ Name = 'errors'; Title = (Get-AtmText 'menu.errorsTitle') } }
         @{ Key = 'P'; Label = (Get-AtmText 'menu.preview'); Screen = @{ Name = 'gates'; Title = (Get-AtmText 'gui.term.preview'); Filter = @{ Category = $null } } }
         @{ Key = 'D'; Label = (Get-AtmText 'menu.diagnose'); Screen = @{ Name = 'diag'; Title = (Get-AtmText 'tui.diag.title') } }
+        @{ Key = 'S'; Label = (Get-AtmText 'menu.recover'); Screen = @{ Name = 'recover'; Title = (Get-AtmText 'menu.recoverTitle') } }
     )
 }
 
@@ -440,7 +444,18 @@ function Get-AtmGuiScreen {
     param($Inventory, [hashtable]$Screen, $Preview, [string]$PreviewFailure, $Diag)
     $known = ($null -ne $Inventory)
     $isDiag = (@(Get-AtmGuiDiagScreenNames) -ccontains [string]$Screen.Name)
-    $vm = [ordered]@{ Name = $Screen.Name; Title = $Screen.Title; Kind = 'table'; Known = $known; Gone = $false; Columns = @(); Rows = @(); Items = @(); Pairs = @(); Lines = @(); Note = $(if ($known -or $isDiag) { $null } else { Get-AtmText 'gui.noAudit' }); Notice = $null; Pre = @(); Empty = $null; GateLines = @() }
+    # V0.4 R5: the recovery area does not depend on an audit; its collection is kept in the screen's filter.
+    $isRec = (@('recover', 'rplan') -ccontains [string]$Screen.Name)
+    $vm = [ordered]@{ Name = $Screen.Name; Title = $Screen.Title; Kind = 'table'; Known = $known; Gone = $false; Columns = @(); Rows = @(); Items = @(); Pairs = @(); Lines = @(); Note = $(if ($known -or $isDiag -or $isRec) { $null } else { Get-AtmText 'gui.noAudit' }); Notice = $null; Pre = @(); Empty = $null; GateLines = @() }
+    if ($isRec) {
+        if ([string]$Screen.Name -ceq 'recover') {
+            $t = Get-AtmGuiRecoverTable -Screen $Screen
+            $vm.Columns = $t.Columns; $vm.Rows = $t.Rows; $vm.Items = $t.Items; $vm.Pre = $t.Pre; $vm.Empty = $t.Empty
+        } else {
+            $vm.Kind = 'lines'; $vm.Columns = @((Get-AtmText 'gui.col.line')); $vm.Lines = @(Get-AtmGuiRecoverPlanText -Screen $Screen)
+        }
+        return [pscustomobject]$vm
+    }
     if ($isDiag) {
         if (@(Get-AtmGuiDiagListNames) -ccontains [string]$Screen.Name) {
             $t = Get-AtmGuiDiagTable -Diag $Diag -Screen $Screen
@@ -502,6 +517,8 @@ function Invoke-AtmGuiNavKey {
     # screens). -Diag: the diagnose result kept in the session (the items Enter opens in its area).
     #  * 1 to 9 and P: the screen of that key, over the dashboard (1: the dashboard itself);
     #  * D: the diagnose area (DIAG_OPEN, nothing moves yet); U, only inside the area: a new observation (DIAG_REFRESH);
+    #  * S (V0.4 R5): the recovery area (RECOVER_OPEN, nothing moves yet: Gui.ps1 collects, then Invoke-AtmGuiNavRecover
+    #    moves); Enter on its list: the plan of that service, from the kept collection;
     #  * Enter on a row: user -> the roots of that user; project -> the roots of that project; root -> its detail (from
     #    the preview, with its gate: the detail shows the Preview line); in the diagnose area, as the TUI: a category ->
     #    its screen; a coverage record -> its detail; a finding -> its detail; a node -> its detail; an issue -> the
@@ -510,6 +527,7 @@ function Invoke-AtmGuiNavKey {
     param([hashtable]$Nav, $Inventory, [string]$Key, [bool]$Busy, $Preview, $Diag)
     if ($Busy) { return 'IGNORED' }
     if ($Key -ceq 'D') { return 'DIAG_OPEN' }
+    if ($Key -ceq 'S') { return 'RECOVER_OPEN' }
     if ($Key -ceq 'U') {
         if (@(Get-AtmGuiDiagScreenNames) -ccontains [string](Get-AtmGuiNavTop -Nav $Nav).Name) { return 'DIAG_REFRESH' }
         return 'NONE'
@@ -539,6 +557,18 @@ function Invoke-AtmGuiNavKey {
     }
     if ($Key -ceq 'Return' -or $Key -ceq 'Enter') {
         $top = Get-AtmGuiNavTop -Nav $Nav
+        if ([string]$top.Name -ceq 'recover') {
+            # V0.4 R5: only a service of the list, by its row; the plan of that exact declared name is computed from the
+            # collection kept when the area was opened (no new collection, nothing typed).
+            $rec = Get-AtmGuiOpt $top.Filter 'R'
+            $cands = @(if ($null -ne $rec -and $null -ne $rec.List) { $rec.List.Candidates })
+            if ($cands.Count -eq 0) { return 'NONE' }
+            $it = $cands[[math]::Max(0, [math]::Min([int]$top.Sel, $cands.Count - 1))]
+            $plan = Get-AtmRecoverPlan -Collection $rec.Collection -Operation ([string]$it.Operation) -Service ([string]$it.Target)
+            $Nav.Message = $null
+            $Nav.Stack.Add(@{ Name = 'rplan'; Title = [string]$it.Target; Filter = @{ R = $rec; Plan = $plan }; Sel = 0 })
+            return 'RENDER'
+        }
         if (@(Get-AtmGuiDiagListNames) -ccontains [string]$top.Name) {
             # The diagnose area, before the items of the audit: its items are the view's records (a finding has its own
             # kind property).
@@ -1078,4 +1108,69 @@ function Invoke-AtmGuiNavDiag {
     while ($Nav.Stack.Count -gt 1) { $Nav.Stack.RemoveAt($Nav.Stack.Count - 1) }
     $Nav.Stack.Add(@{ Name = 'diag'; Title = (Get-AtmText 'tui.diag.title'); Filter = $null; Sel = 0 })
     $Nav.Message = $failed
+}
+
+# ------------------------------------------------------------------ the recovery area (V0.4 R5)
+# The TUI's recovery area (Tui.ps1, S) over the collection Gui.ps1 made when the area was opened, kept in the screen's
+# filter: the same columns, rows and lines, from the same shared formatter of the CLI's texts (Report.ps1). Nothing here
+# collects, asks, locks, logs or controls a service; a plan is computed only from that collection, for a service chosen
+# from its list. Executing stays in the CLI (T-ISO-6).
+
+function Get-AtmGuiRecoverTable {
+    # Screen `recover`: Pre (the collection's time, the header, coverage, elevation and closing lines of recover list, the
+    # CLI-only note and the hint), the TUI's columns and one row per candidate of the list (its Items, for Enter), and the
+    # text of an empty list. Without a kept collection: only the line that says so.
+    param([hashtable]$Screen)
+    $out = [ordered]@{ Columns = @((Get-AtmText 'rec.col.operation'), (Get-AtmText 'rec.col.service'), (Get-AtmText 'rec.col.provider'), (Get-AtmText 'rec.col.result'), (Get-AtmText 'rec.col.codes')); Rows = @(); Items = @(); Pre = @(); Empty = $null }
+    $rec = Get-AtmGuiOpt $Screen.Filter 'R'
+    if ($null -eq $rec -or $null -eq $rec.List) {
+        $out.Pre = @((Get-AtmText 'rec.view.notCollected'))
+        $out.Empty = Get-AtmText 'common.none'
+        return [pscustomobject]$out
+    }
+    $pre = New-Object System.Collections.Generic.List[string]
+    $pre.Add((Get-AtmText 'rec.view.collected' (Format-AtmGuiUtc $rec.Collection.StartedUtc)))
+    $empty = $null
+    foreach ($l in @(Get-AtmRecoverListLines -List $rec.List)) {
+        if ($l.Kind -ceq 'row') { continue }
+        if ($l.Kind -ceq 'empty') { $empty = $l.Text.Trim() }
+        $pre.Add($l.Text.Trim())
+    }
+    $pre.Add((Get-AtmText 'rec.view.cliOnly'))
+    $pre.Add((Get-AtmText 'rec.view.hint'))
+    $rows = New-Object System.Collections.Generic.List[object]
+    $items = New-Object System.Collections.Generic.List[object]
+    foreach ($c in @($rec.List.Candidates)) {
+        $rows.Add((ConvertTo-AtmGuiRow @($c.Operation, $c.Target, $(if ($c.Provider) { $c.Provider } else { '-' }), $(if ($c.Offered) { Get-AtmText 'rec.view.offered' } else { Get-AtmText 'rec.view.refused' }), $(if ($c.Offered) { $c.Undo } else { @($c.Codes) -join ', ' }))))
+        $items.Add($c)
+    }
+    $out.Pre = $pre.ToArray()
+    $out.Rows = $rows.ToArray()
+    $out.Items = $items.ToArray()
+    if ($items.Count -eq 0) { $out.Empty = $(if ($empty) { $empty } else { Get-AtmText 'common.none' }) }
+    return [pscustomobject]$out
+}
+
+function Get-AtmGuiRecoverPlanText {
+    # Screen `rplan`: the lines of the plan computed when its service was chosen (the CLI's texts and the CLI-only note),
+    # as the TUI shows them. Without one: only the line that says the area was not collected. Unrolled: callers wrap the
+    # result in @().
+    param([hashtable]$Screen)
+    $plan = Get-AtmGuiOpt $Screen.Filter 'Plan'
+    if ($null -eq $plan) { return @((Get-AtmText 'rec.view.notCollected')) }
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($pl in @(Get-AtmRecoverPlanLines -Plan $plan -View)) { $out.Add([string]$pl.Text) }
+    return $out.ToArray()
+}
+
+function Invoke-AtmGuiNavRecover {
+    # The move after opening the recovery area (S; Gui.ps1 collected, or not). -Result: OK, the area over the dashboard,
+    # first row, with the new collection kept in its filter; FAILED, the window stays where it is with the failure's code
+    # (never its message); anything else (IGNORED), nothing moves. -Recover: the session's result of that opening.
+    param([hashtable]$Nav, $Recover, [string]$Result)
+    if ($Result -ceq 'FAILED') { $Nav.Message = Get-AtmText 'rec.view.failed' $(if ($null -ne $Recover) { [string]$Recover.Error } else { '-' }); return }
+    if ($Result -cne 'OK') { return }
+    while ($Nav.Stack.Count -gt 1) { $Nav.Stack.RemoveAt($Nav.Stack.Count - 1) }
+    $Nav.Stack.Add(@{ Name = 'recover'; Title = (Get-AtmText 'menu.recoverTitle'); Filter = @{ R = $Recover }; Sel = 0 })
+    $Nav.Message = $null
 }

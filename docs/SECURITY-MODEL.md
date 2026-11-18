@@ -35,7 +35,7 @@ Current behaviour (V0.1):
 * **Manual elevation.** No shipped copy elevates itself, and the tool never handles credentials; only the installer
   scripts need an elevated PowerShell, which the user opens through the Windows UAC prompt, and they refuse to run
   without it before changing anything. The elevation on demand of `recover start` and `recover undo` (V0.4 R4) exists
-  only past the recovery gate, closed in every copy (see [Recovery gate](#recovery-gate-v04-phases-r1-to-r4)).
+  only past the recovery gate, closed in every copy (see [Recovery gate](#recovery-gate-v04-phases-r1-to-r5)).
 * Everything else runs without administrative rights; missing rights reduce coverage and are reported, never
   guessed.
 * Decisions use the **process** identity. After elevating with another account's credentials, that is the
@@ -71,7 +71,9 @@ isolated sandbox.
 * **Presentation only, not a gate over the engines.** The GUI decides nothing. `lib\Gui.ps1` and `lib\GuiModel.ps1` may
   call only the engine and catalog functions of ADR-0014's closed list. A static suite test fails on any other command,
   on the deletion, move, write, process, task and clipboard APIs named in ADR-0014 section 3, and on the gate variables of
-  the other features. Loading the two files defines functions and constants only.
+  the other features (since V0.4 R5 also the recovery execution names and `AtmRecoveryEnabled`: the GUI's recovery area
+  only shows list and plan, see [Recovery gate](#recovery-gate-v04-phases-r1-to-r5)). Loading the two files defines
+  functions and constants only.
 * **Past the gate** (tests only, in their own process): an STA thread and an interactive desktop are required (exit
   code `8` otherwise). The command is never relaunched in another shell. The window shows the identity and the
   elevation state (PRIV-10), changes nothing and leaves no process, timer or file behind.
@@ -977,7 +979,7 @@ the mover; a static suite test checks it.
   after the measurement is caught by the second measurement (`VERIFY_REPARSE_POINT_FOUND`). The reparse point moves
   with the tree and is never followed.
 
-## Recovery gate (V0.4 phases R1 to R4)
+## Recovery gate (V0.4 phases R1 to R5)
 
 * **The eighth gate:** `$script:AtmRecoveryEnabled`, `$false` in every shipped copy
   ([ADR-0016](adr/ADR-0016-v04-assisted-recovery.md) section 5). It is a single assignment in
@@ -1083,8 +1085,16 @@ the mover; a static suite test checks it.
     suite and the CI always inject the launcher.
 * **Read only, in the command's own process.** The collection reuses the diagnose's functions: the own token, the
   providers' hints, one `Win32_Service` query with the R0 signals, the dependencies and the image check. The engine
-  itself runs no CIM query. The diagnose, the TUI and the GUI do not load or call it, and the diagnose still has
-  exactly two `Win32_Service` queries.
+  itself runs no CIM query. The diagnose does not load or call it, and still has exactly two `Win32_Service` queries.
+* **The TUI and the GUI show; they do not reach recovery (R5).** Their recovery area (key `S`) calls only the engine's
+  three read functions (`Get-AtmRecoverCollection`, `Get-AtmRecoverList`, `Get-AtmRecoverPlan`) and shows the CLI's
+  lines of `recover list` and `recover plan`. The collection runs only when the area is entered, never from a frame,
+  a view model or the GUI's ticker. No key, button or menu starts, undoes, relaunches, elevates, takes the lock B8,
+  writes a log or reads a typed service name: the service is chosen from the list only. Executing stays in the CLI
+  (T-ISO-6). Static tests refuse in `Tui.ps1` and `Gui*.ps1` every recovery execution name (`Invoke-AtmRecover*`,
+  `AtmServiceStop`, `ServiceController`, `ShellExecute`, `AtmRecoverOperationTaken`, `Open-AtmCleanLog`), the elevation
+  verb and the gate `AtmRecoveryEnabled`; instrumentation shows that a walk through both areas calls none of the
+  execution, launcher, log, lock or console functions and leaves no B8 mutex.
 * **Narrow targets.** The operation comes only from the closed catalog (`REC-SVC-START`), compared exactly. The target is
   only the exact name a provider declares, compared case-sensitively: never a path, wildcard, file or plan of another
   process, and one target per call (the undo of R3 takes no name: its target comes from the source log and must still

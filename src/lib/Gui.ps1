@@ -29,6 +29,10 @@
 # catalog, in the language chosen at start; every control has an accessible name; the tab order follows the visual one
 # (header, state, monitoring, screens, title, lists, commands); Enter presses a focused button; system colors only; the
 # fixed widths of the lists and their columns are scaled by the form's DPI.
+# V0.4 R5 (ADR-0016): the recovery area (S), view only. Opening it is the one action that collects: one blocking,
+# read-only collection of the recovery engine on the UI thread (no progress, as the preview), then its list; Enter shows
+# the plan of a service chosen from that list. The live monitoring's ticker never collects. There is no button that
+# executes or undoes anything: executing stays in the CLI (T-ISO-6).
 
 # Release gate of the desktop GUI (D-A). Closed in every distributed copy: `agent-temp gui` opens no window and loads no
 # WinForms assembly. Tests open it only in their own process memory.
@@ -44,7 +48,8 @@ $script:AtmGuiExitEnvironment = 8
 # throws. Preview source (P4a): called with the session's inventory and inventory arguments; returns the preview rows or
 # throws. Diagnose source (P4b): called with the diagnose arguments (InventoryArgs, which carries the ProgressCallback);
 # returns a diagnose result or throws. Clock source (P5): returns the current time as a UTC [datetime]; used only for
-# "now" (the audit time, the duration of a refresh and the live monitoring's schedule).
+# "now" (the audit time, the duration of a refresh and the live monitoring's schedule). Recover source (V0.4 R5): called
+# with no argument when the recovery area is opened; returns one collection of the recovery engine or throws.
 $script:AtmGuiApartmentSource = $null
 $script:AtmGuiDesktopSource = $null
 $script:AtmGuiAssemblyLoader = $null
@@ -52,6 +57,7 @@ $script:AtmGuiInventorySource = $null
 $script:AtmGuiPreviewSource = $null
 $script:AtmGuiDiagnoseSource = $null
 $script:AtmGuiClockSource = $null
+$script:AtmGuiRecoverSource = $null
 
 # P5: a wake of the ticker this close to the due time counts as due (the ticker and the clock have different
 # granularity), in milliseconds.
@@ -117,6 +123,9 @@ function Initialize-AtmGuiSession {
         # P6: the DPI of the window (Get-AtmGuiDpi), for the fixed widths of the lists and their columns; 96 until the form
         # exists.
         Dpi = 96
+        # V0.4 R5: the recovery area's last opening (its collection and list, or the exception code of its failure) and
+        # the counters of the openings that collected.
+        Recover = $null; RecoverCalls = 0; RecoverFailures = 0
     }
 }
 
@@ -314,6 +323,31 @@ function Invoke-AtmGuiPreview {
         return 'FAILED'
     } finally {
         $Session.PreviewBusy = $false
+    }
+}
+
+function Invoke-AtmGuiRecover {
+    # V0.4 R5: the only place the GUI collects for the recovery area, on the explicit action of opening it (S or its
+    # button), never from the live monitoring's ticker. One blocking call on the calling (UI) thread, with no progress (as
+    # the preview): a fresh, read-only collection of the recovery engine with its own deadline, then its list. -OnStart
+    # runs just before the call, only when the call happens. Returns:
+    #  OK       the session keeps the new collection and its list (each opening collects again);
+    #  IGNORED  an audit, the preview or the diagnose runs: no call;
+    #  FAILED   nothing is kept but the exception code (never its message); nothing is shown.
+    # Nothing is asked, locked, logged, started or elevated here: executing stays in the CLI.
+    param([hashtable]$Session, [scriptblock]$OnStart)
+    if ($Session.Busy -or $Session.PreviewBusy -or $Session.DiagBusy) { return 'IGNORED' }
+    try {
+        if ($null -ne $OnStart) { & $OnStart }
+        $Session.RecoverCalls++
+        $coll = $null
+        if ($null -ne $script:AtmGuiRecoverSource) { $coll = & $script:AtmGuiRecoverSource } else { $coll = Get-AtmRecoverCollection }
+        $Session.Recover = @{ Collection = $coll; List = (Get-AtmRecoverList -Collection $coll); Error = $null }
+        return 'OK'
+    } catch {
+        $Session.Recover = @{ Collection = $null; List = $null; Error = (ConvertTo-AtmExceptionCode $_.Exception.GetBaseException().GetType().Name) }
+        $Session.RecoverFailures++
+        return 'FAILED'
     }
 }
 
@@ -789,6 +823,14 @@ function Start-AtmGui {
             $guiProgress.Text = Get-AtmText 'gui.diagProgress' (Get-AtmText 'tui.diag.running') $guiSession.DiagPercent
             [System.Windows.Forms.Application]::DoEvents()
         }
+        # V0.4 R5: while the recovery collection runs, the screens and Refresh are disabled and the progress label shows a
+        # fixed text (no percentage: the call is a single block). Painted before the call starts.
+        $guiRecoverStart = {
+            $guiRefresh.Enabled = $false
+            $guiScreens.Enabled = $false
+            $guiProgress.Text = Get-AtmText 'rec.view.running'
+            $guiForm.Refresh()
+        }
         $guiNavKey = {
             param([string]$Key)
             $r = Invoke-AtmGuiNavKey -Nav $guiSession.Nav -Inventory $guiSession.Inventory -Key $Key -Busy ([bool]$guiSession.Busy -or [bool]$guiSession.PreviewBusy -or [bool]$guiSession.DiagBusy) -Preview $guiSession.Preview -Diag $guiSession.Diag
@@ -807,6 +849,20 @@ function Start-AtmGui {
                 if ($guiRows.Visible) { $guiForm.ActiveControl = $guiRows }
                 # A close requested while the diagnose ran: its result was discarded; the window closes now.
                 if ($guiSession.CloseAfterDiag) { $guiSession.CloseAfterDiag = $false; $guiForm.Close() }
+                return
+            }
+            if ($r -ceq 'RECOVER_OPEN') {
+                # V0.4 R5: S or its button: the session's function collects (each opening), then the area opens.
+                $rr = $null
+                try { $rr = Invoke-AtmGuiRecover -Session $guiSession -OnStart $guiRecoverStart }
+                finally {
+                    $guiProgress.Text = ''
+                    $guiRefresh.Enabled = $true
+                    $guiScreens.Enabled = $true
+                }
+                Invoke-AtmGuiNavRecover -Nav $guiSession.Nav -Recover $guiSession.Recover -Result $rr
+                $null = Show-AtmGuiScreen -Form $guiForm -Session $guiSession
+                if ($guiRows.Visible) { $guiForm.ActiveControl = $guiRows }
                 return
             }
             if ($r -ceq 'CLOSE') { $guiForm.Close() }
@@ -869,7 +925,7 @@ function Start-AtmGui {
                     }
                 }
                 # Keys.Return and Keys.Enter are one value; its name can be either.
-                if ($kn -cmatch '^(D|NumPad)[1-9]$' -or $kn -ceq 'P' -or $kn -ceq 'D' -or $kn -ceq 'U' -or $kn -ceq 'Return' -or $kn -ceq 'Enter' -or $kn -ceq 'Escape') {
+                if ($kn -cmatch '^(D|NumPad)[1-9]$' -or $kn -ceq 'P' -or $kn -ceq 'D' -or $kn -ceq 'S' -or $kn -ceq 'U' -or $kn -ceq 'Return' -or $kn -ceq 'Enter' -or $kn -ceq 'Escape') {
                     $ev.Handled = $true
                     $ev.SuppressKeyPress = $true
                     & $guiNavKey $kn

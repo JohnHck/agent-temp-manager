@@ -1346,6 +1346,71 @@ function Show-AtmRecoverPlan {
     Write-Host ('  ' + (Get-AtmText $(if ($Pending) { 'rec.planPending' } else { 'rec.nothingChanged' }))) -ForegroundColor Black -BackgroundColor Yellow
 }
 
+function Get-AtmRecoverListLines {
+    # V0.4 R5: the lines of recover list as data, for the TUI and the GUI, which show them read only. The texts and their
+    # order are the ones Show-AtmRecoverList writes for the CLI, without its blank lines and rules; nothing is written to
+    # the console here. Each line has Text, Color and Kind: head (header, coverage, elevation), row (one declared
+    # service, with its Candidate), empty (no declared service) or tail (not offered, gate, nothing changed).
+    param($List)
+    $lines = New-Object System.Collections.Generic.List[object]
+    $add = { param([string]$Text, [string]$Color, [string]$Kind, $Candidate) $lines.Add([pscustomobject]@{ Text = $Text; Color = $Color; Kind = $Kind; Candidate = $Candidate }) }
+    & $add (Get-AtmText 'rec.listHeader') 'Cyan' 'head' $null
+    & $add ('  ' + (Get-AtmText 'rec.coverage' $List.ServiceCoverage.Status $List.PropertiesCoverage.Status)) 'Gray' 'head' $null
+    & $add ('  ' + (Get-AtmText ('rec.elevation.' + $List.Elevation))) 'Gray' 'head' $null
+    if (@($List.Candidates).Count -eq 0) { & $add ('  ' + (Get-AtmText 'rec.noCandidates')) 'Gray' 'empty' $null }
+    foreach ($c in @($List.Candidates)) {
+        $by = $(if ($c.Provider) { $c.Provider } else { '-' })
+        if ($c.Offered) { & $add ('  ' + (Get-AtmText 'rec.rowOffered' $c.Operation $c.Target $by $c.Undo)) 'Green' 'row' $c }
+        else { & $add ('  ' + (Get-AtmText 'rec.rowRefused' $c.Operation $c.Target $by (@($c.Codes) -join ', '))) 'Yellow' 'row' $c }
+    }
+    & $add ('  ' + (Get-AtmText 'rec.notOffered')) 'Gray' 'tail' $null
+    if (-not $List.GateOpen) { & $add ('  ' + (Get-AtmText 'rec.gateClosed')) 'Yellow' 'tail' $null }
+    & $add ('  ' + (Get-AtmText 'rec.nothingChanged')) 'Yellow' 'tail' $null
+    # Unrolled: callers wrap the result in @().
+    return $lines.ToArray()
+}
+
+function Get-AtmRecoverPlanLines {
+    # V0.4 R5: the lines of recover plan as data (Text and Color), for the TUI and the GUI. The texts and their order are
+    # the ones Show-AtmRecoverPlan writes for the CLI (the same capture fields, refusal codes, undo, elevation and plan
+    # id), without its blank lines and rules; nothing is written to the console here. -View (the TUI and the GUI) adds
+    # after them that executing is CLI-only and, while the plan says the gate is closed, what the CLI command does then.
+    param($Plan, [switch]$View)
+    $lines = New-Object System.Collections.Generic.List[object]
+    $add = { param([string]$Text, [string]$Color = 'Gray') $lines.Add([pscustomobject]@{ Text = $Text; Color = $Color }) }
+    $op = $Plan.Operation
+    & $add (Get-AtmText 'rec.planHeader' $op.Id $Plan.Target) 'Cyan'
+    & $add ('  ' + (Get-AtmText $op.DescriptionKey))
+    if (@($Plan.Providers).Count -gt 0) { & $add ('  ' + (Get-AtmText 'rec.declaredBy' (@($Plan.Providers) -join ', '))) }
+    if (-not $Plan.Offered) {
+        & $add (Get-AtmText 'rec.refusedHeader') 'Cyan'
+        foreach ($r in @($Plan.Codes)) { & $add ('  - ' + $r) 'Yellow' }
+    } else {
+        $cap = $Plan.Capture
+        & $add ('  ' + (Get-AtmText 'rec.before'))
+        $fields = @(@('STATE', $cap.State), @('START_MODE', $cap.StartMode), @('DELAYED_AUTO_START', $cap.DelayedAutoStart), @('EXIT_CODE', $cap.ExitCode),
+            @('SERVICE_SPECIFIC_EXIT_CODE', $cap.ServiceSpecificExitCode), @('CHECKPOINT', $cap.CheckPoint), @('WAIT_HINT_MS', $cap.WaitHint), @('ACCEPT_STOP', $cap.AcceptStop),
+            @('CONDITION', $cap.Condition), @('ACCOUNT_KIND', $cap.AccountKind), @('ACCOUNT', $cap.Account), @('EXECUTABLE', $cap.Executable), @('IMAGE', $cap.Image))
+        foreach ($fv in $fields) { & $add ('    {0,-27} {1}' -f $fv[0], $(if ($null -ne $fv[1]) { $fv[1] } else { '-' })) }
+        foreach ($x in @($cap.DependsOn)) { & $add ('    {0,-27} {1}' -f 'DEPENDS_ON', $x) }
+        foreach ($x in @($cap.Dependents)) { & $add ('    {0,-27} {1}' -f 'DEPENDENT', $x) }
+        if (@($cap.DependsOn).Count + @($cap.Dependents).Count -eq 0) { & $add ('    ' + (Get-AtmText 'rec.noDependencies')) }
+        if (@($Plan.DeclaredDependencyStopped).Count -gt 0) { & $add ('  ' + (Get-AtmText 'rec.declaredDepStopped' (@($Plan.DeclaredDependencyStopped) -join ', '))) 'Yellow' }
+        & $add ('  ' + (Get-AtmText 'rec.undo' $op.Undo))
+        & $add ('  ' + (Get-AtmText 'rec.notUndone'))
+        & $add ('  ' + (Get-AtmText ('rec.elevation.' + $Plan.Elevation)))
+        & $add ('  ' + (Get-AtmText 'rec.planId' $Plan.PlanId))
+    }
+    if (-not $Plan.GateOpen) { & $add ('  ' + (Get-AtmText 'rec.gateClosed')) 'Yellow' }
+    & $add ('  ' + (Get-AtmText 'rec.nothingChanged')) 'Yellow'
+    if ($View) {
+        & $add ('  ' + (Get-AtmText 'rec.view.cliOnly')) 'Cyan'
+        if (-not $Plan.GateOpen) { & $add ('  ' + (Get-AtmText 'rec.view.gateClosed' $op.Id $Plan.Target)) 'Cyan' }
+    }
+    # Unrolled: callers wrap the result in @().
+    return $lines.ToArray()
+}
+
 function Format-AtmRecoverValue {
     # One value of a capture or a difference, as the plan shows it: a list joined, $null as '-'.
     param($Value)

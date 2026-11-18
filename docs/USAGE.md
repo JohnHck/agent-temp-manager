@@ -23,7 +23,11 @@ agent-temp -Ascii     # ASCII frames for fonts/terminals without box-drawing gly
 Keys: arrows / PgUp / PgDn / Home / End to move, **Enter** to open, **Esc** or Backspace to go back,
 **R** to re-audit, **Q** to quit. Menu shortcuts: `1` Dashboard, `2` Users/SIDs, `3` Projects, `4` Roots,
 `5` ACTIVE_EVIDENCE, `6` RECENT, `7` LIVENESS_UNKNOWN, `8` Blocked paths, `9` Errors & coverage,
-`P` Preview, `D` Diagnostics V0.2, `L` Assisted cleanup, `H` Help.
+`P` Preview, `D` Diagnostics V0.2, `L` Assisted cleanup, `S` Recovery (view only, V0.4 R5), `H` Help.
+
+**Recovery (`S`, view only, V0.4 R5).** Entering the area makes one fresh, read-only collection of the services the
+providers declare, each time it is entered, and shows what `recover list` shows; `Enter` on a row shows what
+`recover plan` shows for that service. See [Recover](#in-the-tui-and-the-gui-v04-r5).
 
 **Diagnostics V0.2 (`D`, read-only).** Entering the area runs `diagnose` once (it can take a while: the V0.1
 inventory cannot be interrupted); navigating, paging and opening details reuse that result and run nothing.
@@ -775,6 +779,7 @@ What the window shows in this version (phases P1 to P6):
   | `P` | the preview: every root with its category (phase P4a) |
   | `D` | the diagnostics area: the TUI's `Diagnostics V0.2` (phase P4b) |
   | `U` | inside the diagnostics area only: run the diagnose again (phase P4b) |
+  | `S` | the recovery area, view only: the TUI's `S` (V0.4 R5; see [Recover](#in-the-tui-and-the-gui-v04-r5)) |
 
   Each screen also has a button, with its digit as the access key. `Enter` on a row opens it: a user or a project shows
   its roots, and a root shows its detail (the TUI's fields, then the evidence, the references and the samples of errors
@@ -888,7 +893,7 @@ it, with **Refresh** or `F5`, or when the live monitoring is on and its interval
 Closing it leaves no process, timer or file behind. The installed command always runs in Windows PowerShell 5.1, and
 there is no other entry point (no `bin\` script, no shortcut).
 
-## Recover (V0.4 R1 to R4, unreleased; nothing is changed in any copy)
+## Recover (V0.4 R1 to R5, unreleased; nothing is changed in any copy)
 
 Assisted recovery of a service a provider declares ([ADR-0016](adr/ADR-0016-v04-assisted-recovery.md)). The recovery
 gate is closed in every copy, and `agent-temp version` shows it: `assisted recovery: DISABLED in this release (recover
@@ -1026,6 +1031,26 @@ Exit codes of `recover start` and `recover undo`:
 
 From a window without elevation, codes `2`, `3`, `5` and `20` to `31` can also be the elevated copy's own, passed on as
 they are.
+
+### In the TUI and the GUI (V0.4 R5)
+
+The TUI (`agent-temp`) and the desktop GUI (`agent-temp gui`, disabled in every copy) have a recovery area, key `S`,
+that only shows. Executing stays in the CLI (T-ISO-6), as restore does.
+
+* **Entering the area** (`S`, or the GUI's `S` button) makes one fresh, read-only collection of the services the
+  providers declare, with the engine's own deadline, and shows its time. Each entry collects again; nothing else
+  collects: moving, opening a plan, `F5`, a re-audit and the GUI's live monitoring do not. While it runs, the TUI shows
+  a waiting line and the GUI disables its screens (one blocking call, as the preview). A failed collection shows its
+  exception code only, and the area does not open.
+* **The list:** the lines of `recover list` (header, coverage, elevation, what is never offered, the gate line and
+  "Nothing was changed."), then one row per declared service: the operation, the service, the provider that declares it,
+  `OFFERED` or `REFUSED`, and the undo (`REC-SVC-STOP`) or the `RECOVERY_*` codes. A service no provider declares is
+  never in the list.
+* **The plan** (`Enter` on a row): the lines of `recover plan` for that exact declared name, computed from the
+  collection of that entry, with the same codes, then a note that executing is CLI-only and, while the gate is closed,
+  that `agent-temp recover start -Operation REC-SVC-START -Service "<name>"` shows the plan and exits with code `27`.
+* **Nothing else:** no service name is typed, and no key, button or menu starts, undoes, relaunches, elevates, takes the
+  lock or writes a log.
 
 ## Verify (installed copy)
 

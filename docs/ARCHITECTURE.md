@@ -125,7 +125,7 @@ layering:
   for clean.
 * The diagnose engine stays read-only and never uses the isolation engine.
 
-## Recovery engine (V0.4 phases R1 to R4; `lib\Engine.Recover.ps1`)
+## Recovery engine (V0.4 phases R1 to R5; `lib\Engine.Recover.ps1`)
 
 [ADR-0016](adr/ADR-0016-v04-assisted-recovery.md), assisted recovery of a service a provider declares. The eighth
 release gate (`AtmRecoveryEnabled`) is closed in every copy. With it closed, the engine only reads (R1). The execution
@@ -134,7 +134,8 @@ through `Invoke-AtmRecoverCommand`, but only past the gate: with it closed, both
 (exit 27). Only the test suite goes past the gate, with it opened in its own process and the seams and the elevated
 launcher injected.
 
-* **Loading.** The launcher loads the engine only for `recover` and `version`. It is in the launcher's integrity
+* **Loading.** The launcher loads the engine only for `recover`, `version` and, since R5, `tui` and `gui` (for their
+  read-only recovery area; `gui` only past its own gate, which is closed in every copy). It is in the launcher's integrity
   check, `AtmRequiredFiles` and the manifest. It depends on `Engine.Audit.ps1`, `Engine.Diagnose.ps1` and, for the
   lock B8, the log writer and the console past the gate, `Engine.Clean.ps1`. It writes
   nothing to the terminal: `Report.ps1` presents the list and the plan (`Show-AtmRecoverList`, `Show-AtmRecoverPlan`),
@@ -169,5 +170,13 @@ launcher injected.
     and writes the log `atm.recoverlog/1`;
   * the elevation verb (`runas`) appears once in `src/`, in the default elevated launcher, which only
     `Invoke-AtmRecoverCommand` calls, once. The launcher calls the command once and passes it no seam;
-  * `Engine.Diagnose.ps1`, `Tui.ps1` and `Gui*.ps1` neither load nor call it. The diagnose keeps its two
-    `Win32_Service` queries.
+  * `Engine.Diagnose.ps1` neither loads nor calls it, and keeps its two `Win32_Service` queries. `Tui.ps1` and
+    `Gui*.ps1` do not load it and, since R5, call only its three read functions (`Get-AtmRecoverCollection`,
+    `Get-AtmRecoverList`, `Get-AtmRecoverPlan`), each in one place; no recovery execution name, the gate or the
+    elevation verb appears in them.
+* **Presentation in the TUI and the GUI (R5).** A read-only area, key `S`, shows `recover list` and `recover plan`
+  through the shared formatters `Get-AtmRecoverListLines` and `Get-AtmRecoverPlanLines` (`Report.ps1`), which return
+  the CLI's lines as data. The collection runs only when the area is entered (`Invoke-AtmTuiRecover`,
+  `Invoke-AtmGuiRecover`), never per frame, from a view model or from the GUI's ticker; a plan is computed on `Enter`
+  from that collection, for a service of its list. Executing stays in the CLI (T-ISO-6): the GUI's closed list
+  ([ADR-0014](adr/ADR-0014-desktop-gui-winforms.md) section 3) refuses the execution names.

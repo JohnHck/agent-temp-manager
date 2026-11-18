@@ -81,7 +81,12 @@ Phase: V0.2.1, phases P1 to P6 (section 10)
   * `Get-AtmIdentityState` and `Get-AtmCurrentIdentity`;
   * `Get-AtmAutoPurgeNoticeLines`, for the automatic purge notice (GUI-D1);
   * `Get-AtmText`, `Get-AtmLanguage` and `Set-AtmLanguage`, plus the pure formatting helpers that P1 names in the
-    test.
+    test;
+  * since V0.4 R5 ([ADR-0016](ADR-0016-v04-assisted-recovery.md), the R5 implementation record), for the read-only
+    recovery area: `Get-AtmRecoverCollection`, `Get-AtmRecoverList` and `Get-AtmRecoverPlan` (the recovery engine's
+    collection, list and plan, all read only), and `Get-AtmRecoverListLines` and `Get-AtmRecoverPlanLines` (the
+    shared formatters of the CLI's `recover list` and `recover plan` texts, in `Report.ps1`). The test's list has 28
+    names.
 * **Forbidden, by name.** A static test fails if `src/lib/Gui*.ps1` mentions any of these:
   * `Invoke-AtmClean`, `Invoke-AtmIsolate`, `Invoke-AtmRestore`, `Invoke-AtmPurge`, `Invoke-AtmAutoPurgeSchedule`,
     `Invoke-AtmAutoPurgeUnschedule`, `Invoke-AtmDiscardAuthorization`, `AtmDeleter`, `AtmLockProbe`, and any other
@@ -93,7 +98,12 @@ Phase: V0.2.1, phases P1 to P6 (section 10)
   * process, service, task and VM control: `Start-Process`, `Stop-Process`, the service cmdlets,
     `Register-ScheduledTask` and the other scheduled-task cmdlets, `Invoke-CimMethod`, `Invoke-WmiMethod`, `*-VM`;
   * the clipboard (`Clipboard`, `Set-Clipboard`): no copy in V0.2.1 (GUI-D4);
-  * the release-gate variables of the other features (they are read only by the engines and `version`).
+  * since V0.4 R5, recovery execution: `Invoke-AtmRecover` (so every engine name that starts with it, such as the
+    undo and the command), `AtmServiceStop`, `ServiceController`, the elevation verb, `ShellExecute`,
+    `AtmRecoverOperationTaken` and `Open-AtmCleanLog`. Executing recovery stays CLI-only (T-ISO-6), and the live
+    monitoring's tick never calls the recovery collection;
+  * the release-gate variables of the other features (they are read only by the engines and `version`), since V0.4
+    R5 including `AtmRecoveryEnabled`.
 * **The existing tests stay as they are.** The TUI keeps its clean and isolate hand-over; the layering tests of
   ADR-0009 are extended to the new files, never relaxed.
 
