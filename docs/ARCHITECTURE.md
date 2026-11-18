@@ -125,13 +125,16 @@ layering:
   for clean.
 * The diagnose engine stays read-only and never uses the isolation engine.
 
-## Recovery engine (V0.4 phase R1; `lib\Engine.Recover.ps1`)
+## Recovery engine (V0.4 phases R1 to R3; `lib\Engine.Recover.ps1`)
 
-[ADR-0016](adr/ADR-0016-v04-assisted-recovery.md), assisted recovery of a service a provider declares. In R1 the engine
-only reads, and the eighth release gate (`AtmRecoveryEnabled`) is closed in every copy.
+[ADR-0016](adr/ADR-0016-v04-assisted-recovery.md), assisted recovery of a service a provider declares. The eighth
+release gate (`AtmRecoveryEnabled`) is closed in every copy. With it closed, the engine only reads (R1). The execution
+path (R2) and the undo (R3) are in the engine too, but only the test suite reaches them, with the gate opened in its
+own process and the seams injected. No CLI verb calls them until R4.
 
 * **Loading.** The launcher loads the engine only for `recover` and `version`. It is in the launcher's integrity
-  check, `AtmRequiredFiles` and the manifest. It depends on `Engine.Audit.ps1` and `Engine.Diagnose.ps1`. It writes
+  check, `AtmRequiredFiles` and the manifest. It depends on `Engine.Audit.ps1`, `Engine.Diagnose.ps1` and, for the
+  lock B8, the log writer and the console past the gate, `Engine.Clean.ps1`. It writes
   nothing to the terminal: `Report.ps1` presents the list and the plan (`Show-AtmRecoverList`, `Show-AtmRecoverPlan`).
 * **Collection** (`Get-AtmRecoverCollection`): fresh, in the command's own process, read only. It calls the diagnose's
   functions for the token identity, the providers' runtime hints, one services query (`Invoke-AtmServiceQuery`, with
@@ -140,9 +143,17 @@ only reads, and the eighth release gate (`AtmRecoveryEnabled`) is closed in ever
 * **Criteria and plan.** `Get-AtmRecoverRefusals` applies the criteria to one declared name and returns the closed
   `RECOVERY_*` codes. `Get-AtmRecoverList` lists every declared service. `Get-AtmRecoverPlan` gives one operation for one
   target: the "before" capture, the undo, the likely elevation and the plan id. The catalog has one operation,
-  `REC-SVC-START`.
+  `REC-SVC-START`. Its undo, `REC-SVC-STOP`, exists only as `Invoke-AtmRecoverUndo` (R3) and stays outside the
+  catalog: `recover list` never offers it, and `recover plan` and `Invoke-AtmRecover` never accept it. See ADR-0016's R3
+  implementation record.
 * **Layering rules** (static suite tests):
-  * no service control API anywhere in `src/`. The control seam comes in phase R2, in this file only;
-  * the engine asks nothing, takes no lock, and writes no log or file;
+  * two service control APIs, each in one place and each reached only with the gate open:
+    * the start: `ServiceController.Start()`, only in the default start seam of `Engine.Recover.ps1`;
+    * the stop: `AtmServiceStop` (`OpenSCManagerW`, `OpenServiceW`, `ControlService`), only in its class in
+      `Native.cs`, called only by the default stop seam;
+    * never `ServiceController.Stop()`, which stops running dependent services first;
+  * with the gate closed (`list`, `plan`, and `Invoke-AtmRecover` or `Invoke-AtmRecoverUndo`), the engine asks nothing,
+    takes no lock, and writes no log or file. Past the gate, in the suite only, it requires AUT-2, takes the lock B8
+    and writes the log `atm.recoverlog/1`;
   * `Engine.Diagnose.ps1`, `Tui.ps1` and `Gui*.ps1` neither load nor call it. The diagnose keeps its two
     `Win32_Service` queries.
