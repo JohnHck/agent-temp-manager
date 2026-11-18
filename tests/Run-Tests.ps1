@@ -18507,7 +18507,7 @@ if ($null -eq $res.env) {
         $recCode = [regex]::Replace([regex]::Replace($rec, '(?s)<#.*?#>', ''), '(?m)#.*$', '')
         foreach ($pat in @('Get-CimInstance', 'Get-WmiObject', 'Read-Host', 'Write-Host', 'AtmCleanLock', 'Mutex', 'Write-AtmCleanLogRecord', 'New-AtmPinnedTextFile', 'Write-AtmNewTextFile',
                 '[IO.File]', 'Set-Content', 'Add-Content', 'Out-File', 'New-Item', 'Read-AtmPseudonymKeyFile', 'Invoke-AtmDiagnose', 'Start-Process', 'Add-Type')) { Assert-True (-not $recCode.Contains($pat)) "motor de recuperacao sem '$pat'" }
-        Assert-True ([regex]::Matches($recCode, 'Invoke-AtmServiceQuery ').Count -eq 1 -and [regex]::Matches($recCode, 'Get-AtmServiceFindings ').Count -eq 1 -and [regex]::Matches($recCode, 'Get-AtmIdentityState ').Count -eq 1) 'coleta pelas funcoes do diagnose: uma consulta de servicos, seus achados e a identidade'
+        Assert-True ([regex]::Matches($recCode, 'Invoke-AtmServiceQuery ').Count -eq 1 -and [regex]::Matches($recCode, 'Get-AtmServiceFindings ').Count -eq 1 -and [regex]::Matches($recCode, 'Get-AtmIdentityState ').Count -eq 2 -and [regex]::Matches($recCode, 'Get-AtmIdentityState -Source \$Source').Count -eq 1) 'coleta pelas funcoes do diagnose: uma consulta de servicos, seus achados e a identidade (e, desde o R4, a identidade que age, Get-AtmRecoverActingIdentity)'
         $fns = @([regex]::Matches($rec, '(?m)^function\s+([A-Za-z]+-[A-Za-z0-9]+)') | ForEach-Object { $_.Groups[1].Value })
         Assert-True ($fns.Count -ge 8 -and $fns -ccontains 'Get-AtmRecoverPlan') "funcoes do motor ($($fns -join ','))"
         foreach ($f in @($all | Where-Object { $_.Rel -ceq 'lib\Engine.Diagnose.ps1' -or $_.Rel -ceq 'lib\Tui.ps1' -or $_.Name -like 'Gui*.ps1' })) {
@@ -19037,8 +19037,18 @@ if ($null -eq $res.env) {
             Assert-True $fn.ContainsKey($name) "funcao $name"
             foreach ($pat in $r1Ban) { Assert-True (-not $fn[$name].Contains($pat)) "$name sem '$pat'" }
         }
-        # Nobody outside the engine calls it (no execution verb before phase R4).
-        foreach ($f in $all) { if ($f.Rel -cne 'lib\Engine.Recover.ps1') { Assert-True (-not $f.Text.Contains('Invoke-AtmRecover')) "$($f.Rel) nao chama Invoke-AtmRecover" } }
+        # Nobody outside the engine calls it: since phase R4 the launcher reaches the engine's execution only through
+        # Invoke-AtmRecoverCommand, in one call (comments stripped); no other file names any Invoke-AtmRecover function.
+        foreach ($f in $all) {
+            if ($f.Rel -ceq 'lib\Engine.Recover.ps1') { continue }
+            $t = $f.Text
+            if ($f.Rel -ceq 'agent-temp.ps1') {
+                $t = & $strip $t
+                Assert-Eq (& $count $t 'Invoke-AtmRecoverCommand @recCmd') 1 'o lancador chama Invoke-AtmRecoverCommand uma vez'
+                $t = $t.Replace('Invoke-AtmRecoverCommand @recCmd', '')
+            }
+            Assert-True (-not $t.Contains('Invoke-AtmRecover')) "$($f.Rel) nao chama Invoke-AtmRecover (nem o desfazer)"
+        }
         $self = [IO.File]::ReadAllText((Join-Path $testsDir 'Run-Tests.ps1'))
         $a0 = $self.IndexOf('-----' + ' V0.4 R2 (assisted'); $a1 = $self.IndexOf('-----' + ' scale')
         Assert-True ($a0 -gt 0 -and $a1 -gt $a0 -and -not $self.Substring($a0, $a1 - $a0).Contains($sleep)) 'area V0.4 R2 sem espera real'
@@ -19674,7 +19684,7 @@ if ($null -eq $res.env) {
             foreach ($pat in @('ServiceControlImpl', 'Invoke-AtmRecoverServiceStartDefault', 'Invoke-AtmRecoverLocked', 'Invoke-AtmRecover ', 'foreach')) { Assert-True (-not $fn[$name].Contains($pat)) "$name sem '$pat'" }
         }
         $pk = @((Get-Command Invoke-AtmRecoverUndo).Parameters.Keys | Where-Object { @('Verbose', 'Debug', 'ErrorAction', 'WarningAction', 'InformationAction', 'ErrorVariable', 'WarningVariable', 'InformationVariable', 'OutVariable', 'OutBuffer', 'PipelineVariable', 'ProgressAction') -notcontains $_ } | Sort-Object)
-        Assert-Eq ($pk -join ',') 'ConfirmationReader,DeadlineSeconds,IdentitySource,Interaction,InventoryArgs,LogFile,PlanPresenter,Providers,RunId,ServiceDependencySource,ServiceSource,ServiceStopImpl,ServiceWait,SettleWait,SourceLog' 'desfazer: uma origem e um run id, nenhum nome de servico, operacao ou lista'
+        Assert-Eq ($pk -join ',') 'ConfirmationReader,DeadlineSeconds,IdentitySource,Interaction,InventoryArgs,LogFile,NewRunId,PlanPresenter,Providers,RunId,ServiceDependencySource,ServiceSource,ServiceStopImpl,ServiceWait,SettleWait,SourceLog' 'desfazer: uma origem e um run id (e o run id novo do R4), nenhum nome de servico, operacao ou lista'
         # The gate first, then R2's entry steps in R2's order, then the lock.
         $iu = $fn['Invoke-AtmRecoverUndo']
         $g = $iu.IndexOf('if (-not $script:AtmRecoveryEnabled)')
@@ -19710,6 +19720,672 @@ if ($null -eq $res.env) {
         $rm = [regex]::Matches($area, [regex]::Escape("Remove('Service" + "StopImpl')")).Count
         $sh = [regex]::Matches($area, [regex]::Escape('function ' + $stopFn + ' {')).Count
         Assert-True ($rm -eq 2 -and $sh -eq 2) "o seam padrao de parada so e alcancado em casos que o sombreiam ($rm sem seam injetado, $sh sombras)"
+    }
+
+    # ------------------------------------------------------------------ V0.4 R4 (assisted recovery: recover start and recover undo, UAC on demand, ADR-0016)
+    # Invoke-AtmRecoverCommand runs in this process with the recovery gate opened, and the one-operation guard cleared, only
+    # around each call (Invoke-R4Open); the launcher runs in a new process of this shell with every gate closed. Identities,
+    # providers, service rows, the start and stop seams, the settle wait, the confirmation, the presenter, the key and the
+    # elevated launcher are the case's stand-ins (the R2 simulation and New-R4Io). No UAC prompt is shown: the default
+    # elevated launcher is never reached (shadowed with a counter in every case that runs without the injected one). The
+    # fixed folder is a folder of the sandbox given through -LogDirBase; where a case needs one that passes, its check is
+    # shadowed by a stand-in that returns a T1 log folder of the sandbox, or (elevated token only, NAO_TESTADO otherwise)
+    # the installer's own function creates one. No service is opened, started, stopped or changed and nothing waits.
+    $r4Root = Join-Path $sandbox 'r4-install'
+    $r4Start = @('Command', 'SubCommand', 'Operation', 'Service', 'AtmElevatedRecovery')
+    $r4Undo = @('Command', 'SubCommand', 'RunId', 'AtmElevatedRecovery')
+    function Reset-R4Gate { $script:AtmRecoveryEnabled = $false; $script:AtmRecoverOperationTaken = $false }
+    function Invoke-R4Open {
+        # One process's call past the gate: the gate opened and the one-operation guard cleared only around it.
+        param([hashtable]$Arguments)
+        $script:AtmRecoverOperationTaken = $false; $script:AtmRecoveryEnabled = $true
+        try { return (Invoke-AtmRecoverCommand @Arguments) } finally { Reset-R4Gate }
+    }
+    function New-R4Io {
+        # The presenter, the key and the elevated launcher's stand-ins, each recording what it got. LaunchResult is what the
+        # launcher gives (a scriptblock is run instead: a throw); FailOn makes the presenter throw on that kind.
+        param($LaunchResult = [pscustomobject]@{ Started = $true; ExitCode = 20; Win32Error = $null })
+        $io = @{ Kinds = (New-Object System.Collections.Generic.List[string]); Shown = (New-Object System.Collections.Generic.List[object]); Keys = (New-Object System.Collections.Generic.List[int])
+            Launches = (New-Object System.Collections.Generic.List[object]); LaunchResult = $LaunchResult; FailOn = $null }
+        $io.Presenter = {
+            param($Kind, $Data)
+            $io.Kinds.Add([string]$Kind); $io.Shown.Add([pscustomobject]@{ Kind = [string]$Kind; Data = $Data })
+            if ($io.FailOn -ceq $Kind) { throw (New-Object InvalidOperationException('r4-presenter-secret')) }
+        }.GetNewClosure()
+        $io.Key = { $io.Keys.Add(1) }.GetNewClosure()
+        $io.Launcher = {
+            param($File, $Arguments)
+            $io.Launches.Add([pscustomobject]@{ File = $File; Arguments = $Arguments; Extra = $args.Count })
+            $r = $io.LaunchResult
+            if ($r -is [scriptblock]) { return (& $r) }
+            return $r
+        }.GetNewClosure()
+        return $io
+    }
+    function Get-R4Shown { param($Io, [string]$Kind) return @($Io.Shown | Where-Object { $_.Kind -ceq $Kind } | ForEach-Object { $_.Data }) }
+    function Get-R4Args {
+        # One call of the command on the R2 simulation: start (the start seam's stand-in) or undo (-Verb undo, the stop
+        # seam's stand-in); installed and listed, the launcher's stand-in, a fixed folder base that does not exist.
+        param($Sim, $Io, $Operator, [hashtable]$Extra = @{}, [string]$Verb = 'start')
+        $eng = @{ Providers = @($Sim.Provider); IdentitySource = $Sim.IdSource; ServiceSource = $Sim.Source; ServiceDependencySource = $Sim.Deps; SettleWait = $Sim.Wait }
+        $eng[$(if ($Verb -ceq 'undo') { 'ServiceStopImpl' } else { 'ServiceControlImpl' })] = $Sim.Seam
+        $a = @{ Verb = $Verb; Installed = $true; LauncherListed = $true; InstallRoot = $r4Root; InventoryArgs = $Sim.IA; Presenter = $Io.Presenter; ConfirmationReader = $Operator.Reader
+            KeyReader = $Io.Key; ElevatedLauncherImpl = $Io.Launcher; LogDirBase = (Join-Path $Sim.Dir 'sem-pasta-fixa'); EngineArgs = $eng }
+        if ($Verb -cne 'undo') { $a['Operation'] = 'REC-SVC-START'; $a['Service'] = $Sim.Service }
+        foreach ($k in $Extra.Keys) { $a[$k] = $Extra[$k] }
+        return $a
+    }
+    function Set-R4Stopped {
+        # The row as a new simulation has it (STOPPED, ready for a start), the start seam's stand-in reset.
+        param($Sim)
+        $Sim.Row.State = 'Stopped'; $Sim.Row.ProcessId = 0; $Sim.Row.ExitCode = [uint32]1077; $Sim.Row.AcceptStop = $false; $Sim.Row.CheckPoint = [uint32]0; $Sim.Row.WaitHint = [uint32]0
+        $Sim.SeamCalls.Clear(); $Sim.Waits.Clear(); $Sim.OnWait.Clear(); $Sim.SeamResult = 'OK'; $Sim.OnSeam = @{ State = 'Running'; ProcessId = 4321; ExitCode = [uint32]0; AcceptStop = $true }
+    }
+    function Get-R4Files { param([string]$Dir) return (@(Get-ChildItem -LiteralPath $Dir -Force | ForEach-Object { $_.Name } | Sort-Object) -join ',') }
+    Test-Case 'V0.4 R4' 'R4: constantes fechadas - codigos de saida (texto nos dois idiomas; "nada foi alterado" so onde nenhuma chamada de controle pode ter ocorrido), codigos repassados pelo lado que pede, recusas antes de perguntar, codigos da pasta fixa, estados de quem pediu, argumentos de um relancamento, forma do run id; trava fechada e guarda de uma operacao livre' {
+        Assert-Eq $script:AtmRecoveryEnabled $false 'trava fechada entre os casos'
+        Assert-Eq $script:AtmRecoverOperationTaken $false 'guarda de uma operacao livre entre os casos'
+        $want = 'USAGE=2,PLAN_REFUSED=3,INTEGRITY=5,UNEXPECTED=10,COMPLETE=20,PARTIAL=21,FAILED=22,REFUSED=23,EXCEPTION=24,STOPPED_BEFORE_SEAM=25,STOPPED_AFTER_SEAM=26,GATE_CLOSED=27,LOG_DIR_REFUSED=28,ELEVATED_REFUSED=29,SECOND_OPERATION=30,NOT_INSTALLED=31,UAC_ERROR_1223=40,UAC_WIN32_ERROR=41,UAC_LAUNCHER_EXCEPTION=42,UAC_NOT_STARTED=43,ELEVATED_EXIT_UNKNOWN=44'
+        Assert-Eq (@($script:AtmRecoverExitCodes.Keys | ForEach-Object { '{0}={1}' -f $_, $script:AtmRecoverExitCodes[$_] }) -join ',') $want 'tabela de codigos de saida'
+        Assert-Eq (@($script:AtmRecoverRelayedExitCodes) -join ',') '2,3,5,20,21,22,23,24,25,26,27,28,29,30,31' 'codigos repassados: os da copia elevada, nunca 10 nem os do pedido de elevacao'
+        Assert-Eq (@($script:AtmRecoverOutcomeExitCodes.Keys | Sort-Object | ForEach-Object { '{0}={1}' -f $_, $script:AtmRecoverOutcomeExitCodes[$_] }) -join ',') 'COMPLETE=20,EXCEPTION=24,FAILED=22,PARTIAL=21,REFUSED=23' 'um codigo por desfecho'
+        Assert-Eq (@($script:AtmRecoverPlanRefusals) -join ',') 'RECOVERY_REFUSED,UNDO_REFUSED,UNDO_SOURCE_REFUSED' 'recusas antes de qualquer pergunta'
+        Assert-Eq (@($script:AtmRecoverLogDirCodes) -join ',') 'RECOVER_LOG_DIR_MISSING,RECOVER_LOG_DIR_REPARSE,RECOVER_LOG_DIR_OWNER,RECOVER_LOG_DIR_DACL,RECOVER_LOG_DIR_UNREADABLE' 'codigos da pasta fixa'
+        Assert-Eq (@($script:AtmRecoverRequesterStatuses) -join ',') 'UNVERIFIED,SAME,DIFFERENT,UNREADABLE' 'estados de quem pediu'
+        Assert-True ($script:AtmRecoverElevatedArguments.Count -eq 2 -and ($script:AtmRecoverElevatedArguments['start'] -join ',') -ceq ($r4Start -join ',') -and ($script:AtmRecoverElevatedArguments['undo'] -join ',') -ceq ($r4Undo -join ',')) 'argumentos de um relancamento: so start e undo, com o marcador'
+        # 25 says only that the service was not changed (its log may exist); 10, 20 to 24, 26 and 44 never say it.
+        $quiet = @(2, 3, 5, 27, 28, 29, 30, 31, 40, 41, 42, 43)
+        foreach ($lang in @('en-US', 'pt-BR')) {
+            $m = $script:AtmMessages[$lang]
+            $nothing = $(if ($lang -ceq 'en-US') { 'Nothing was changed.' } else { 'Nada foi alterado.' })
+            foreach ($v in @($script:AtmRecoverExitCodes.Values)) {
+                $k = 'rec.exit.' + $v
+                Assert-True ($m.ContainsKey($k) -and $m[$k] -cmatch ('\b' + $v + '\b')) "$lang ${k}: texto com o numero"
+                Assert-Eq ([bool]$m[$k].Contains($nothing)) ($quiet -contains $v) "$lang ${k}: 'nada foi alterado' so onde nenhuma chamada de controle pode ter ocorrido"
+            }
+            Assert-True ($m['rec.exit.27'].Contains('RECUPERACAO_REAL_DESABILITADA')) "$lang rec.exit.27 com o codigo da trava"
+            foreach ($k in @('rec.uacNotice', 'rec.uacNotice2', 'rec.uacWhatStart', 'rec.uacWhatUndo', 'rec.actingIdentity', 'rec.requester.UNVERIFIED', 'rec.requester.SAME', 'rec.requester.DIFFERENT', 'rec.requester.UNREADABLE',
+                    'rec.undoRequest', 'rec.undoRequestLogDir', 'rec.waitKey', 'rec.relayed', 'cli.recoverRunIdInvalid', 'help.recover3', 'help.recover4')) { Assert-True ($m.ContainsKey($k)) "$lang $k" }
+        }
+        $en = $script:AtmMessages['en-US']
+        Assert-True ($en['rec.exit.27'].Contains('no elevation was requested') -and $en['rec.requester.UNVERIFIED'].Contains('NOT verified') -and $en['rec.uacNotice'].Contains('this one operation only') -and $en['rec.exit.44'].Contains('may have acted')) 'textos: nenhuma elevacao na trava fechada; quem pediu nao verificado; o UAC so para esta operacao; 44 pode ter agido'
+        $g = 'abcdef01-2345-6789-abcd-ef0123456789'
+        Assert-True ((Test-AtmRecoverRunIdForm $g) -and (Test-AtmRecoverRunIdForm ([guid]::NewGuid().ToString()))) 'run id na forma D minuscula'
+        foreach ($bad in @($g.ToUpperInvariant(), ('{' + $g + '}'), $g.Replace('-', ''), ($g + ' '), (' ' + $g), '', 'C:\x\run.log', ($g + '.log'), 'abcdef01-2345-6789-abcd-ef012345678g', $null)) { Assert-True (-not (Test-AtmRecoverRunIdForm $bad)) "run id recusado: '$bad'" }
+    }
+    Test-Case 'V0.4 R4' 'R4: trava fechada - start mostra o plano; undo o plano inverso quando a pasta fixa passa, ou so o pedido com o codigo da pasta; depois RECUPERACAO_REAL_DESABILITADA (saida 27), mesmo com o marcador de relancamento; nenhuma elevacao pedida (lancador injetado e padrao em 0); nada perguntado, travado nem registrado; nenhuma chave nem guarda de uma operacao; controle positivo com a trava aberta neste processo' {
+        $s = New-R2Sim 'r4closed'
+        if (-not $s) { return }
+        Reset-R4Gate
+        $calls = New-Object System.Collections.Generic.List[string]
+        $realInv = ${function:Invoke-AtmInventory}; $realLock = ${function:Invoke-AtmUnderSharedLock}; $realLog = ${function:Open-AtmCleanLog}; $realCon = ${function:Get-AtmEngineConsoleObservation}; $realDir = ${function:Test-AtmRecoverLogDir}
+        function Invoke-AtmInventory { $calls.Add('inventory'); & $realInv @args }
+        function Invoke-AtmUnderSharedLock { $calls.Add('lock'); & $realLock @args }
+        function Open-AtmCleanLog { $calls.Add('log'); & $realLog @args }
+        function Get-AtmEngineConsoleObservation { $calls.Add('console'); & $realCon @args }
+        function Invoke-AtmRecoverElevatedLaunchDefault { $calls.Add('default-launcher'); [pscustomobject]@{ Started = $false; ExitCode = $null; Win32Error = 1223 } }
+        $stand = @{ On = $true; Dir = $s.Dir }
+        function Test-AtmRecoverLogDir { param([string]$Base) $calls.Add('fixed-folder'); if ($stand.On) { return [pscustomobject]@{ Code = $null; Dir = $stand.Dir; Parent = [IO.Path]::GetDirectoryName($stand.Dir) } }; & $realDir -Base $Base }
+        $prevLock = $script:AtmCleanLockName
+        $lockName = New-TestLockName
+        try {
+            # The undo's source: a start in this process past the gate (an elevated token, the manual model (a)), under a
+            # lock name of its own; it is also the positive control of the steps past the gate.
+            $script:AtmCleanLockName = New-TestLockName
+            $s.Id = & $diagIdAdmin
+            $o = Invoke-R4Open (Get-R4Args $s (New-R4Io) (New-TestCleanOperator))
+            $script:AtmCleanLockName = $lockName
+            Assert-True ($o.Side -ceq 'SAME_PROCESS' -and $o.ExitCode -eq 20 -and [string]$o.RunId -cmatch '^[0-9a-f-]{36}$') "controle positivo: start com a trava aberta ($($o.Side) $($o.ExitCode) $($o.Code))"
+            Assert-Eq ($calls -join ',') 'fixed-folder,console,inventory,lock,log' 'controle positivo: pasta fixa, console, inventario, lock e log so com a trava aberta'
+            $src = [string]$o.RunId
+            $calls.Clear(); $s.Id = & $diagIdUser
+            $before = Get-R4Files $s.Dir
+            $op = New-TestCleanOperator
+            # Undo, the folder passes (its stand-in): the inverse plan read from it, then 27.
+            $io = New-R4Io
+            $a = Get-R4Args $s $io $op @{ RunId = $src } 'undo'
+            $o = Invoke-AtmRecoverCommand @a
+            Assert-True ($o.Side -ceq 'GATE_CLOSED' -and $o.ExitCode -eq 27 -and $o.Code -ceq 'RECUPERACAO_REAL_DESABILITADA' -and $null -eq $o.LogDir -and $o.Result.Aborted -ceq 'RECUPERACAO_REAL_DESABILITADA' -and $o.Result.Plan.Offered -and $o.Result.SourceRunId -ceq $src) "undo com a trava fechada: plano inverso e 27 ($($o.ExitCode) $($o.Code) $($o.Result.Aborted))"
+            Assert-Eq ($io.Kinds -join ',') 'undoPlan,end' 'undo: plano inverso e fim'
+            Assert-True (-not @(Get-R4Shown $io 'undoPlan')[0].GateOpen) 'plano inverso com a trava fechada'
+            Assert-Eq ($calls -join ',') 'fixed-folder' 'undo: so a conferencia da pasta fixa, so leitura'
+            # Undo, the folder refused (the real check, a base that does not exist): only the request with the folder's code.
+            $stand.On = $false; $calls.Clear()
+            $io = New-R4Io
+            $a = Get-R4Args $s $io $op @{ RunId = $src } 'undo'
+            $o = Invoke-AtmRecoverCommand @a
+            Assert-True ($o.ExitCode -eq 27 -and $o.LogDir -ceq 'RECOVER_LOG_DIR_MISSING' -and $o.Detail -ceq 'RECOVER_LOG_DIR_MISSING' -and $null -eq $o.Result) "undo com a pasta recusada: so o pedido e 27 ($($o.ExitCode) $($o.LogDir))"
+            Assert-Eq ($io.Kinds -join ',') 'undoRequest,end' 'undo: o pedido com o codigo da pasta e o fim'
+            $q = @(Get-R4Shown $io 'undoRequest')[0]
+            Assert-True ($q.RunId -ceq $src -and $q.LogDir -ceq 'RECOVER_LOG_DIR_MISSING' -and -not $q.GateOpen) 'pedido: o run id e o codigo da pasta'
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $s.Dir 'sem-pasta-fixa'))) 'a pasta fixa nunca e criada pelo motor'
+            # Start, an offered plan: the plan, then 27; with the marker (wrong or fixed arguments) and an elevated identity too.
+            Set-R4Stopped $s; $calls.Clear()
+            foreach ($v in @(@{}, @{ Elevated = $true; BoundNames = @('Lang', 'LogFile') }, @{ Elevated = $true; BoundNames = $r4Start })) {
+                $s.Id = $(if ($v.ContainsKey('Elevated')) { & $diagIdAdmin } else { & $diagIdUser })
+                $io = New-R4Io
+                $a = Get-R4Args $s $io $op $v
+                $o = Invoke-AtmRecoverCommand @a
+                Assert-True ($o.Side -ceq 'GATE_CLOSED' -and $o.ExitCode -eq 27 -and $o.Result.Aborted -ceq 'RECUPERACAO_REAL_DESABILITADA' -and $o.Result.Plan.Offered -and $null -eq $o.Result.RunId -and -not $o.Result.LogCreated) "start com a trava fechada ($(@($v.Keys) -join ',')): plano e 27 ($($o.ExitCode))"
+                Assert-Eq ($io.Kinds -join ',') 'plan,end' 'start: plano e fim; nenhuma identidade, aviso, resultado nem chave'
+                Assert-True (-not @(Get-R4Shown $io 'plan')[0].GateOpen) 'plano com a trava fechada'
+            }
+            # Without the injected launcher: the default one is not reached either.
+            $io = New-R4Io
+            $a = Get-R4Args $s $io $op; $a.Remove('ElevatedLauncherImpl')
+            $o = Invoke-AtmRecoverCommand @a
+            Assert-True ($o.ExitCode -eq 27 -and $o.Launches -eq 0) 'sem lancador injetado: 27'
+            Assert-Eq ($calls -join ',') '' 'trava fechada: nenhum console, inventario, lock, log nem lancador padrao'
+            Assert-True ($io.Launches.Count -eq 0 -and $io.Keys.Count -eq 0 -and $op.Calls.Count -eq 0 -and $s.SeamCalls.Count -eq 0 -and $s.Waits.Count -eq 0) 'nenhum pedido de elevacao, chave, pergunta, seam nem espera'
+            Assert-Eq (Get-R4Files $s.Dir) $before 'nenhum log criado com a trava fechada'
+            Assert-Eq $script:AtmRecoverOperationTaken $false 'a trava fechada nao toma a guarda de uma operacao'
+            $m = $null
+            Assert-True (-not [Threading.Mutex]::TryOpenExisting($lockName, [ref]$m)) 'mutex B8 nao existe depois das chamadas'
+            # Positive controls past the gate, the requester: the injected launcher once; without it the default one
+            # (shadowed) once; neither takes the console, the inventory, the lock or a log.
+            $s.Id = & $diagIdUser
+            $io = New-R4Io
+            $o = Invoke-R4Open (Get-R4Args $s $io $op)
+            Assert-True ($o.Side -ceq 'REQUESTER' -and $io.Launches.Count -eq 1 -and $o.ExitCode -eq 20) "controle positivo: o lancador injetado uma vez ($($o.Side) $($o.ExitCode))"
+            $a = Get-R4Args $s (New-R4Io) $op; $a.Remove('ElevatedLauncherImpl')
+            $o = Invoke-R4Open $a
+            Assert-True ($o.ExitCode -eq 40 -and $o.Code -ceq 'UAC_ERROR_1223') "controle positivo: sem o injetado, o padrao (sombreado) ($($o.ExitCode))"
+            Assert-Eq ($calls -join ',') 'default-launcher' 'lado que pede: nenhum console, inventario, lock nem log; o lancador padrao so com a trava aberta e sem o injetado'
+        } finally { Reset-R4Gate; $script:AtmCleanLockName = $prevLock }
+        Assert-Eq $script:AtmRecoveryEnabled $false 'trava fechada de novo'
+    }
+    Test-Case 'V0.4 R4' 'R4 lado que pede (token nao elevado, PRIV-2 e PRIV-7): start coleta e mostra o plano, o aviso do UAC e relanca so o bin\agent-temp.cmd instalado com os argumentos fixos e o marcador (nenhum caminho); undo mostra so o pedido com o run id e nada coleta; sem instalacao verificada, alvo recusado ou nao declarado e uso errado nada e pedido; nenhum log, lock, seam, pergunta nem chave' {
+        $s = New-R2Sim 'r4req'
+        if (-not $s) { return }
+        $name = 'Svc.A-1 b_2'
+        $s.Service = $name; $s.Row.Name = $name; $s.Hints = @([pscustomobject]@{ Name = $name; Role = $null; ExpectedImage = $s.Img })
+        $exe = Join-Path $r4Root 'bin\agent-temp.cmd'
+        $files0 = Get-R4Files $s.Dir
+        $op = New-TestCleanOperator
+        $io = New-R4Io
+        $o = Invoke-R4Open (Get-R4Args $s $io $op)
+        Assert-True ($o.Side -ceq 'REQUESTER' -and $o.ExitCode -eq 20 -and $o.Code -ceq 'ELEVATED_EXIT' -and $o.Relayed -and $o.Launches -eq 1 -and $null -eq $o.Result -and $null -eq $o.RunId) "start: saida da copia elevada repassada ($($o.Side) $($o.ExitCode) $($o.Code))"
+        Assert-Eq ($io.Kinds -join ',') 'plan,elevationNotice,end' 'plano, aviso do UAC e fim; nenhuma identidade, resultado nem chave'
+        $p = @(Get-R4Shown $io 'plan')[0]
+        Assert-True ($p.Offered -and $p.GateOpen -and [string]$p.PlanId -cmatch '^[0-9a-f]{64}$') 'plano oferecido, com a trava aberta (so um pedido)'
+        Assert-True ($io.Launches.Count -eq 1 -and $io.Launches[0].File -ceq $exe -and $io.Launches[0].Extra -eq 0 -and $o.LaunchFile -ceq $exe) 'um unico pedido, do lancador instalado no caminho instalado'
+        Assert-Eq $io.Launches[0].Arguments ('recover start -Operation REC-SVC-START -Service "' + $name + '" -AtmElevatedRecovery') 'argumentos fixos: verbo, operacao, nome entre aspas e marcador'
+        Assert-True (-not $io.Launches[0].Arguments.Contains('\') -and -not $io.Launches[0].Arguments.Contains(':') -and $o.LaunchArguments -ceq $io.Launches[0].Arguments) 'nenhum caminho nos argumentos'
+        $n = @(Get-R4Shown $io 'elevationNotice')[0]
+        Assert-True ($n.Verb -ceq 'start' -and $n.Operation -ceq 'REC-SVC-START' -and $n.Target -ceq $name) 'aviso: a operacao e o alvo'
+        $e = @(Get-R4Shown $io 'end')[0]
+        Assert-True ($e.ExitCode -eq 20 -and $e.Relayed -and $e.Side -ceq 'REQUESTER') 'fim: repassado'
+        # Undo: the run id only; this token cannot read the fixed folder, so nothing is collected or read.
+        $rid = [guid]::NewGuid().ToString()
+        $reads = $s.Reads
+        $io = New-R4Io
+        $o = Invoke-R4Open (Get-R4Args $s $io $op @{ RunId = $rid } 'undo')
+        Assert-True ($o.Side -ceq 'REQUESTER' -and $o.ExitCode -eq 20 -and $o.Launches -eq 1 -and $s.Reads -eq $reads) "undo: so o pedido, nada coletado ($($o.ExitCode))"
+        Assert-Eq ($io.Kinds -join ',') 'undoRequest,elevationNotice,end' 'undo: pedido, aviso do UAC e fim'
+        Assert-Eq $io.Launches[0].Arguments ('recover undo -RunId ' + $rid + ' -AtmElevatedRecovery') 'argumentos fixos do undo'
+        $q = @(Get-R4Shown $io 'undoRequest')[0]
+        Assert-True ($q.RunId -ceq $rid -and $null -eq $q.LogDir -and $q.GateOpen -and @(Get-R4Shown $io 'elevationNotice')[0].RunId -ceq $rid) 'pedido e aviso com o run id'
+        # Nothing is requested without a verified installation, for a refused or undeclared target, or for wrong usage.
+        $no = @(
+            @('start', @{ Installed = $false }, 31, 'RECOVER_ELEVATION_NEEDS_INSTALL', 'plan,end'), @('start', @{ LauncherListed = $false }, 31, 'RECOVER_ELEVATION_NEEDS_INSTALL', 'plan,end'),
+            @('start', @{ InstallRoot = '' }, 31, 'RECOVER_ELEVATION_NEEDS_INSTALL', 'plan,end'), @('undo', @{ RunId = $rid; Installed = $false }, 31, 'RECOVER_ELEVATION_NEEDS_INSTALL', 'undoRequest,end'),
+            @('start', @{ Service = 'Nope' }, 2, 'RECOVERY_NOT_DECLARED', 'plan,end'), @('start', @{ Verb = 'plan' }, 2, 'RECOVER_VERB_INVALID', 'end'),
+            @('start', @{ Service = 'C:\x\svc.exe' }, 2, 'RECOVER_ARGUMENTS_INVALID', 'end'), @('start', @{ Service = 'Svc*' }, 2, 'RECOVER_ARGUMENTS_INVALID', 'end'),
+            @('start', @{ Service = ('a' * 257) }, 2, 'RECOVER_ARGUMENTS_INVALID', 'end'), @('start', @{ Service = '' }, 2, 'RECOVER_ARGUMENTS_INVALID', 'end'),
+            @('start', @{ Operation = 'REC-SVC-STOP' }, 2, 'RECOVER_ARGUMENTS_INVALID', 'end'), @('undo', @{ RunId = $rid.ToUpperInvariant() + 'X' }, 2, 'RECOVER_ARGUMENTS_INVALID', 'end'),
+            @('undo', @{ RunId = ('{' + $rid + '}') }, 2, 'RECOVER_ARGUMENTS_INVALID', 'end'), @('undo', @{ RunId = 'C:\x\run.log' }, 2, 'RECOVER_ARGUMENTS_INVALID', 'end'))
+        foreach ($c in $no) {
+            $io = New-R4Io
+            $o = Invoke-R4Open (Get-R4Args $s $io $op $c[1] $c[0])
+            Assert-True ($o.ExitCode -eq $c[2] -and $o.Code -ceq $c[3] -and $o.Launches -eq 0 -and $io.Launches.Count -eq 0 -and ($io.Kinds -join ',') -ceq $c[4]) "$($c[0]) $(@($c[1].Keys) -join ','): $($o.ExitCode) $($o.Code) (esperado $($c[2]) $($c[3])); nada pedido"
+        }
+        Set-R4Stopped $s; $s.Row.State = 'Running'; $s.Row.ProcessId = 4321
+        $io = New-R4Io
+        $o = Invoke-R4Open (Get-R4Args $s $io $op)
+        Assert-True ($o.ExitCode -eq 3 -and $o.Code -ceq 'RECOVERY_REFUSED' -and [string]$o.Detail -ne '' -and $io.Launches.Count -eq 0 -and ($io.Kinds -join ',') -ceq 'plan,end') "alvo recusado: 3 com os codigos, nada pedido ($($o.ExitCode) $($o.Detail))"
+        Assert-True ($s.SeamCalls.Count -eq 0 -and $s.Waits.Count -eq 0 -and $op.Calls.Count -eq 0 -and (Get-R4Files $s.Dir) -ceq $files0) 'nenhum seam, espera, pergunta nem arquivo'
+    }
+    Test-Case 'V0.4 R4' 'R4 PRIV-4: o lado que pede responde so pelo que o lancador deu - 1223 -> 40, outro erro Win32 -> 41, excecao -> 42 so pelo tipo, resultado ilegivel -> 42, nenhum processo -> 43; processo iniciado: um codigo da copia elevada e repassado, qualquer outro (ou nenhum) -> 44; nenhum log lido nem caminho recebido' {
+        $s = New-R2Sim 'r4uac'
+        if (-not $s) { return }
+        $op = New-TestCleanOperator
+        $nl = { param($Started, $Exit, $W32) [pscustomobject]@{ Started = $Started; ExitCode = $Exit; Win32Error = $W32 } }
+        $exc = ConvertTo-AtmExceptionCode 'InvalidOperationException'
+        $cases = @(
+            @((& $nl $false $null 1223), 40, 'UAC_ERROR_1223', '1223'), @((& $nl $false $null 5), 41, 'UAC_WIN32_ERROR', '5'), @((& $nl $false $null 1155), 41, 'UAC_WIN32_ERROR', '1155'),
+            @({ throw (New-Object InvalidOperationException('r4-launcher-secret')) }, 42, 'UAC_LAUNCHER_EXCEPTION', $exc), @({ $null }, 42, 'UAC_LAUNCHER_EXCEPTION', 'LAUNCHER_RESULT_INVALID'),
+            @({ 'started' }, 42, 'UAC_LAUNCHER_EXCEPTION', 'LAUNCHER_RESULT_INVALID'), @([pscustomobject]@{ Started = 'yes' }, 42, 'UAC_LAUNCHER_EXCEPTION', 'LAUNCHER_RESULT_INVALID'),
+            @((& $nl $false $null '5'), 42, 'UAC_LAUNCHER_EXCEPTION', 'LAUNCHER_RESULT_INVALID'), @([pscustomobject]@{ Started = $false }, 43, 'UAC_NOT_STARTED', ''), @((& $nl $false $null $null), 43, 'UAC_NOT_STARTED', ''),
+            @((& $nl $true 0 $null), 44, 'ELEVATED_EXIT_UNKNOWN', '0'), @((& $nl $true 1 $null), 44, 'ELEVATED_EXIT_UNKNOWN', '1'), @((& $nl $true 10 $null), 44, 'ELEVATED_EXIT_UNKNOWN', '10'),
+            @((& $nl $true 40 $null), 44, 'ELEVATED_EXIT_UNKNOWN', '40'), @((& $nl $true -1073741510 $null), 44, 'ELEVATED_EXIT_UNKNOWN', '-1073741510'), @((& $nl $true $null $null), 44, 'ELEVATED_EXIT_UNKNOWN', ''),
+            @((& $nl $true '20' $null), 44, 'ELEVATED_EXIT_UNKNOWN', '20'), @([pscustomobject]@{ Started = $true }, 44, 'ELEVATED_EXIT_UNKNOWN', ''))
+        foreach ($c in $cases) {
+            $io = New-R4Io $c[0]
+            $o = Invoke-R4Open (Get-R4Args $s $io $op)
+            $label = "lancador -> $($c[1]) $($c[3])"
+            Assert-True ($o.Side -ceq 'REQUESTER' -and $o.ExitCode -eq $c[1] -and $o.Code -ceq $c[2] -and "$($o.Detail)" -ceq $c[3] -and -not $o.Relayed -and $io.Launches.Count -eq 1) "${label}: $($o.ExitCode) $($o.Code) '$($o.Detail)'"
+            $e = @(Get-R4Shown $io 'end')[0]
+            Assert-True ($e.ExitCode -eq $c[1] -and -not $e.Relayed -and $io.Kinds[$io.Kinds.Count - 1] -ceq 'end') "${label}: linha de fim"
+            Assert-True (-not "$($o.Detail)".Contains('r4-launcher-secret')) "${label}: nenhuma mensagem de excecao"
+        }
+        foreach ($x in @($script:AtmRecoverRelayedExitCodes)) {
+            $io = New-R4Io (& $nl $true $x $null)
+            $o = Invoke-R4Open (Get-R4Args $s $io $op)
+            Assert-True ($o.ExitCode -eq $x -and $o.Code -ceq 'ELEVATED_EXIT' -and $o.Relayed -and @(Get-R4Shown $io 'end')[0].Relayed) "codigo $x da copia elevada repassado ($($o.ExitCode))"
+        }
+        Assert-True ($s.SeamCalls.Count -eq 0 -and $s.Waits.Count -eq 0 -and $op.Calls.Count -eq 0) 'nenhum seam, espera nem pergunta no lado que pede'
+    }
+    Test-Case 'V0.4 R4' 'R4 PRIV-5 (ramo "nao da para verificar"): quem pediu e UNVERIFIED por padrao (nada lido); o seam injeta SAME, DIFFERENT e ilegivel; a janela elevada mostra a identidade que age e o tipo de elevacao, com o estado de quem pediu; nenhuma decisao muda com o que se sabe de quem pediu' {
+        $u = Get-AtmRecoverRequesterEvidence
+        Assert-True ($u.Status -ceq 'UNVERIFIED' -and $null -eq $u.Name) 'padrao: UNVERIFIED, nada lido'
+        $want = @(
+            @({ [pscustomobject]@{ Status = 'SAME' } }, 'SAME', $null), @({ [pscustomobject]@{ Status = 'DIFFERENT'; Name = 'TEST\bob' } }, 'DIFFERENT', 'TEST\bob'),
+            @({ [pscustomobject]@{ Status = 'UNREADABLE' } }, 'UNREADABLE', $null), @({ [pscustomobject]@{ Status = 'SAME'; Name = 'TEST\bob' } }, 'SAME', $null),
+            @({ [pscustomobject]@{ Status = 'UNVERIFIED' } }, 'UNVERIFIED', $null), @({ throw (New-Object UnauthorizedAccessException('r4-requester-secret')) }, 'UNREADABLE', $null),
+            @({ $null }, 'UNREADABLE', $null), @({ 'SAME' }, 'UNREADABLE', $null), @({ [pscustomobject]@{ Status = 'same' } }, 'UNREADABLE', $null),
+            @({ [pscustomobject]@{ Name = 'TEST\bob' } }, 'UNREADABLE', $null), @({ [pscustomobject]@{ Status = 'VERIFIED' } }, 'UNREADABLE', $null))
+        foreach ($w in $want) { $e = Get-AtmRecoverRequesterEvidence -Source $w[0]; Assert-True ($e.Status -ceq $w[1] -and $e.Name -ceq $w[2]) "evidencia: $($w[1]) ($($e.Status) $($e.Name))" }
+        $s = New-R2Sim 'r4priv5'
+        if (-not $s) { return }
+        $fixed = $s.Dir
+        function Test-AtmRecoverLogDir { param([string]$Base) [pscustomobject]@{ Code = $null; Dir = $fixed; Parent = [IO.Path]::GetDirectoryName($fixed) } }
+        $s.Id = & $diagIdAdmin
+        $acting = Get-AtmIdentityState -Source $diagIdAdmin
+        foreach ($w in @(@($null, 'UNVERIFIED'), @({ [pscustomobject]@{ Status = 'SAME' } }, 'SAME'), @({ [pscustomobject]@{ Status = 'DIFFERENT'; Name = 'TEST\bob' } }, 'DIFFERENT'), @({ throw 'x' }, 'UNREADABLE'))) {
+            Set-R4Stopped $s
+            $io = New-R4Io; $op = New-TestCleanOperator
+            $x = @{ Elevated = $true; BoundNames = $r4Start }
+            if ($null -ne $w[0]) { $x['RequesterEvidence'] = $w[0] }
+            $o = Invoke-R4Open (Get-R4Args $s $io $op $x)
+            Assert-True ($o.Side -ceq 'ELEVATED' -and $o.ExitCode -eq 20 -and $o.Result.Outcome -ceq 'COMPLETE' -and $o.Requester.Status -ceq $w[1] -and $s.SeamCalls.Count -eq 1 -and ($op.Calls -join ',') -ceq 'confirm|') "quem pediu $($w[1]): a mesma decisao e o mesmo desfecho ($($o.ExitCode) $($o.Requester.Status))"
+            Assert-Eq ($io.Kinds -join ',') 'identity,plan,result,end,waitKey' "quem pediu $($w[1]): identidade primeiro, a tecla por ultimo"
+            $id = @(Get-R4Shown $io 'identity')[0]
+            Assert-True ($id.Name -ceq 'TEST\admin' -and $id.ElevationType -ceq $acting.ElevationType -and $id.IntegrityLevel -ceq $acting.IntegrityLevel -and $id.Relaunched -and $id.Requester.Status -ceq $w[1]) "janela elevada: a identidade que age ($($id.Name), $($id.ElevationType)) e quem pediu ($($id.Requester.Status))"
+            if ($w[1] -ceq 'DIFFERENT') { Assert-Eq $id.Requester.Name 'TEST\bob' 'outra conta: o nome' }
+        }
+    }
+    Test-Case 'V0.4 R4' 'R4 copia relancada (lado elevado): so os argumentos fixos e o marcador (qualquer outro, ou sem marcador -> 29), so com token de administrador elevado (UAC desligado -> 29), so instalada e verificada (31); refaz tudo (identidade, plano, frase, log com o run id, resultado) e espera a tecla em todo caminho, inclusive num erro inesperado (10, so pelo tipo) e com a leitura da tecla falhando; nunca pede outra elevacao' {
+        $s = New-R2Sim 'r4elev'
+        if (-not $s) { return }
+        $fixed = $s.Dir
+        function Test-AtmRecoverLogDir { param([string]$Base) [pscustomobject]@{ Code = $null; Dir = $fixed; Parent = [IO.Path]::GetDirectoryName($fixed) } }
+        $op = New-TestCleanOperator
+        $rid = [guid]::NewGuid().ToString()
+        $user = Get-AtmIdentityState -Source $diagIdUser
+        $refuse = @(
+            @('start', @{ BoundNames = ($r4Start + 'Lang') }, $diagIdAdmin, 29, 'RECOVER_ELEVATED_ARGUMENTS', 'Lang'),
+            @('start', @{ BoundNames = ($r4Start + @('LogFile', 'DeadlineSeconds')) }, $diagIdAdmin, 29, 'RECOVER_ELEVATED_ARGUMENTS', 'LogFile,DeadlineSeconds'),
+            @('start', @{ BoundNames = @('Command', 'SubCommand', 'Operation', 'Service') }, $diagIdAdmin, 29, 'RECOVER_ELEVATED_ARGUMENTS', ''),
+            @('start', @{ BoundNames = ($r4Start + 'RunId') }, $diagIdAdmin, 29, 'RECOVER_ELEVATED_ARGUMENTS', 'RunId'),
+            @('undo', @{ BoundNames = ($r4Undo + 'Service'); RunId = $rid }, $diagIdAdmin, 29, 'RECOVER_ELEVATED_ARGUMENTS', 'Service'),
+            @('start', @{ BoundNames = $r4Start }, $diagIdUser, 29, 'RECOVER_ELEVATED_NOT_ELEVATED', [string]$user.ElevationType),
+            @('undo', @{ BoundNames = $r4Undo; RunId = $rid }, $diagIdUser, 29, 'RECOVER_ELEVATED_NOT_ELEVATED', [string]$user.ElevationType),
+            @('start', @{ BoundNames = $r4Start; Installed = $false }, $diagIdAdmin, 31, 'RECOVER_NOT_INSTALLED', ''),
+            @('start', @{ BoundNames = $r4Start; LauncherListed = $false }, $diagIdAdmin, 31, 'RECOVER_NOT_INSTALLED', ''),
+            @('undo', @{ BoundNames = $r4Undo; RunId = $rid; Installed = $false }, $diagIdAdmin, 31, 'RECOVER_NOT_INSTALLED', ''),
+            @('start', @{ BoundNames = ($r4Start + 'Lang'); KeyReader = { throw (New-Object InvalidOperationException('r4-key-secret')) } }, $diagIdAdmin, 29, 'RECOVER_ELEVATED_ARGUMENTS', 'Lang'))
+        foreach ($c in $refuse) {
+            $s.Id = & $c[2]
+            $reads = $s.Reads
+            $io = New-R4Io
+            $x = @{ Elevated = $true } + $c[1]
+            $keyed = -not $c[1].ContainsKey('KeyReader')
+            $o = Invoke-R4Open (Get-R4Args $s $io $op $x $c[0])
+            $label = "$($c[0]) $($c[4]) $($c[5])"
+            Assert-True ($o.Side -ceq 'ELEVATED' -and $o.ExitCode -eq $c[3] -and $o.Code -ceq $c[4] -and "$($o.Detail)" -ceq $c[5] -and $null -eq $o.Result) "${label}: $($o.ExitCode) $($o.Code) '$($o.Detail)'"
+            Assert-True (($io.Kinds -join ',') -ceq 'end,waitKey' -and $io.Keys.Count -eq [int]$keyed -and $io.Launches.Count -eq 0 -and $o.Launches -eq 0 -and $s.Reads -eq $reads) "${label}: so o fim e a tecla; nada coletado; nenhum pedido de elevacao"
+        }
+        Assert-True ($s.SeamCalls.Count -eq 0 -and $op.Calls.Count -eq 0) 'recusas: nenhum seam nem pergunta'
+        # The fixed arguments, an elevated token, installed: every step again, in this copy.
+        $s.Id = & $diagIdAdmin
+        $io = New-R4Io
+        $o = Invoke-R4Open (Get-R4Args $s $io $op @{ Elevated = $true; BoundNames = $r4Start })
+        $log = Join-Path $s.Dir ([string]$o.RunId + '.log')
+        Assert-True ($o.Side -ceq 'ELEVATED' -and $o.ExitCode -eq 20 -and $o.Result.Outcome -ceq 'COMPLETE' -and $o.Result.LogFile -ceq $log -and (Test-Path -LiteralPath $log) -and $o.Requester.Status -ceq 'UNVERIFIED') "relancada: COMPLETE com o log <pasta>\<run id>.log ($($o.ExitCode) $($o.Code))"
+        Assert-Eq ($io.Kinds -join ',') 'identity,plan,result,end,waitKey' 'identidade, plano, resultado, fim e a tecla'
+        Assert-True ($io.Keys.Count -eq 1 -and $io.Launches.Count -eq 0 -and ($op.Calls -join ',') -ceq 'confirm|' -and $s.SeamCalls.Count -eq 1) 'a tecla uma vez; nenhum pedido de elevacao; a frase uma vez; o seam uma vez'
+        Assert-True (@(Get-R4Shown $io 'waitKey')[0].RunId -ceq $o.RunId -and @(Get-R4Shown $io 'result')[0].RunId -ceq $o.RunId) 'o run id no resultado e junto da tecla'
+        Assert-True (@((Read-TestCleanLogFile $log).Records | Where-Object { $_.runId -cne $o.RunId }).Count -eq 0 -and (Get-R2Types $log) -ceq $r2Types) 'log: os nove registros com o run id do nome'
+        # An unexpected failure inside the operation: 10 by its type only, and the key still waited for.
+        Set-R4Stopped $s
+        $io = New-R4Io; $io.FailOn = 'plan'
+        $o = Invoke-R4Open (Get-R4Args $s $io (New-TestCleanOperator) @{ Elevated = $true; BoundNames = $r4Start })
+        Assert-True ($o.ExitCode -eq 10 -and $o.Code -ceq 'RECOVER_UNEXPECTED' -and $o.Detail -ceq (ConvertTo-AtmExceptionCode 'InvalidOperationException') -and ($io.Kinds -join ',') -ceq 'identity,plan,end,waitKey' -and $io.Keys.Count -eq 1 -and $s.SeamCalls.Count -eq 0) "erro inesperado: 10 pelo tipo, a tecla esperada ($($o.ExitCode) $($o.Detail) $($io.Kinds -join ','))"
+    }
+    Test-Case 'V0.4 R4' 'R4 mesmo processo (token elevado, modelo manual (a)) e o ciclo start -> undo: identidade, pasta fixa, um run id gerado uma vez que nomeia o log novo, plano, frase e resultado com o run id; o undo le a origem <pasta>\<run id>.log e grava o proprio log com um run id novo; run id sem log -> 3 RECOVER_RUN_NOT_FOUND; pasta fixa recusada -> 28 antes de qualquer coleta; nenhum pedido de elevacao nem tecla' {
+        $s = New-R2Sim 'r4same'
+        if (-not $s) { return }
+        $stand = @{ On = $true; Dir = $s.Dir }
+        $realDir = ${function:Test-AtmRecoverLogDir}
+        function Test-AtmRecoverLogDir { param([string]$Base) if ($stand.On) { return [pscustomobject]@{ Code = $null; Dir = $stand.Dir; Parent = [IO.Path]::GetDirectoryName($stand.Dir) } }; & $realDir -Base $Base }
+        $s.Id = & $diagIdAdmin
+        $io = New-R4Io; $op = New-TestCleanOperator
+        $o = Invoke-R4Open (Get-R4Args $s $io $op)
+        $log = Join-Path $s.Dir ([string]$o.RunId + '.log')
+        Assert-True ($o.Side -ceq 'SAME_PROCESS' -and $o.ExitCode -eq 20 -and $o.Code -ceq 'COMPLETE' -and $o.Result.RunId -ceq $o.RunId -and $o.Result.LogFile -ceq $log -and (Test-Path -LiteralPath $log) -and $null -eq $o.Requester) "start: COMPLETE, o run id nomeia o log ($($o.ExitCode) $($o.Code))"
+        Assert-Eq ($io.Kinds -join ',') 'identity,plan,result,end' 'identidade, plano, resultado e fim; nenhum aviso de UAC nem tecla'
+        $id = @(Get-R4Shown $io 'identity')[0]
+        Assert-True ($id.Name -ceq 'TEST\admin' -and -not $id.Relaunched -and $null -eq $id.Requester) 'a identidade que age; nao e um relancamento, sem quem pediu'
+        Assert-True (@(Get-R4Shown $io 'result')[0].Verb -ceq 'start' -and @(Get-R4Shown $io 'result')[0].RunId -ceq $o.RunId) 'resultado com o run id'
+        Assert-True ($io.Launches.Count -eq 0 -and $io.Keys.Count -eq 0 -and $o.Launches -eq 0 -and ($op.Calls -join ',') -ceq 'confirm|' -and $s.SeamCalls.Count -eq 1) 'nenhum pedido de elevacao nem tecla; a frase uma vez; o seam uma vez'
+        Assert-True (@((Read-TestCleanLogFile $log).Records | Where-Object { $_.runId -cne $o.RunId }).Count -eq 0 -and (Get-R2Types $log) -ceq $r2Types) 'log do start: os nove registros com o run id do nome'
+        # The undo of that run, as a new process.
+        Reset-R3Sim $s
+        $io = New-R4Io; $op = New-TestCleanOperator
+        $u = Invoke-R4Open (Get-R4Args $s $io $op @{ RunId = [string]$o.RunId } 'undo')
+        $ulog = Join-Path $s.Dir ([string]$u.RunId + '.log')
+        Assert-True ($u.Side -ceq 'SAME_PROCESS' -and $u.ExitCode -eq 20 -and $u.Result.Outcome -ceq 'COMPLETE' -and $u.Result.SourceRunId -ceq $o.RunId -and $u.RunId -cne $o.RunId -and $u.Result.LogFile -ceq $ulog -and (Test-Path -LiteralPath $ulog)) "undo: COMPLETE, origem pelo run id, log novo com run id novo ($($u.ExitCode) $($u.Code))"
+        Assert-Eq ($io.Kinds -join ',') 'identity,undoPlan,result,end' 'undo: identidade, plano inverso, resultado e fim'
+        Assert-True ($s.SeamCalls.Count -eq 1 -and $op.Phrases[0] -cmatch '^PARAR SERVICO [0-9A-F]{8}$' -and $io.Keys.Count -eq 0 -and $io.Launches.Count -eq 0) 'seam de parada uma vez; frase PARAR SERVICO; nenhuma tecla nem pedido de elevacao'
+        Assert-Eq (Get-R2Types $ulog) $r3Types 'log do undo: os nove registros'
+        Assert-Eq (Get-R2Types $log) $r2Types 'log de origem intacto'
+        # A run id with no log in the folder: refused before anything is collected or asked.
+        $files = Get-R4Files $s.Dir; $reads = $s.Reads
+        $io = New-R4Io; $op = New-TestCleanOperator
+        $n = Invoke-R4Open (Get-R4Args $s $io $op @{ RunId = [guid]::NewGuid().ToString() } 'undo')
+        Assert-True ($n.ExitCode -eq 3 -and $n.Code -ceq 'RECOVER_RUN_NOT_FOUND' -and $null -eq $n.Result -and $null -eq $n.RunId) "run id sem log: 3 ($($n.ExitCode) $($n.Code))"
+        Assert-True (($io.Kinds -join ',') -ceq 'identity,end' -and $op.Calls.Count -eq 0 -and $s.Reads -eq $reads -and (Get-R4Files $s.Dir) -ceq $files) 'nada coletado, perguntado nem gravado'
+        # The fixed folder refused (the real check, a base that does not exist): 28 before anything is collected.
+        $stand.On = $false
+        foreach ($verb in @('start', 'undo')) {
+            Set-R4Stopped $s
+            $io = New-R4Io; $op = New-TestCleanOperator
+            $x = @{}; if ($verb -ceq 'undo') { $x['RunId'] = [string]$o.RunId }
+            $f = Invoke-R4Open (Get-R4Args $s $io $op $x $verb)
+            Assert-True ($f.ExitCode -eq 28 -and $f.Code -ceq 'RECOVER_LOG_DIR_MISSING' -and $f.LogDir -ceq 'RECOVER_LOG_DIR_MISSING' -and $null -eq $f.Result) "${verb}: pasta fixa recusada -> 28 ($($f.ExitCode) $($f.Code))"
+            Assert-True (($io.Kinds -join ',') -ceq 'identity,end' -and $op.Calls.Count -eq 0 -and $s.Reads -eq $reads -and $s.SeamCalls.Count -eq 0 -and (Get-R4Files $s.Dir) -ceq $files) "${verb}: nada coletado, perguntado, controlado nem gravado"
+        }
+    }
+    Test-Case 'V0.4 R4' 'R4 codigo de saida de cada resultado do motor: COMPLETE 20, PARTIAL 21, FAILED 22, REFUSED 23, EXCEPTION 24, parado antes do seam 25, incompleto depois do seam 26, trava fechada 27, recusa antes de perguntar 3 (com os codigos); e pelo caminho do mesmo processo com os seams da simulacao' {
+        $m = { param([hashtable]$R) $o = [ordered]@{ Aborted = $null; StoppedBy = $null; SeamCalled = $false; Outcome = $null }; foreach ($k in $R.Keys) { $o[$k] = $R[$k] }; Get-AtmRecoverResultExitCode -Result ([pscustomobject]$o) }
+        $table = @(
+            @(@{ SeamCalled = $true; Outcome = 'COMPLETE' }, 20, 'COMPLETE'), @(@{ SeamCalled = $true; Outcome = 'PARTIAL' }, 21, 'PARTIAL'), @(@{ SeamCalled = $true; Outcome = 'FAILED' }, 22, 'FAILED'),
+            @(@{ SeamCalled = $true; Outcome = 'REFUSED' }, 23, 'REFUSED'), @(@{ SeamCalled = $true; Outcome = 'EXCEPTION' }, 24, 'EXCEPTION'),
+            @(@{ SeamCalled = $true; Outcome = 'COMPLETE'; StoppedBy = 'LOG_WRITE_FAILED' }, 26, 'LOG_WRITE_FAILED'), @(@{ SeamCalled = $true }, 26, ''),
+            @(@{ Aborted = 'RECUPERACAO_REAL_DESABILITADA' }, 27, 'RECUPERACAO_REAL_DESABILITADA'), @(@{ Aborted = 'RECOVERY_REFUSED' }, 3, 'RECOVERY_REFUSED'), @(@{ Aborted = 'UNDO_REFUSED' }, 3, 'UNDO_REFUSED'),
+            @(@{ Aborted = 'UNDO_SOURCE_REFUSED' }, 3, 'UNDO_SOURCE_REFUSED'), @(@{ Aborted = 'CONSOLE_NOT_OBSERVED' }, 25, 'CONSOLE_NOT_OBSERVED'), @(@{ Aborted = 'CLEAN_LOCK_BUSY' }, 25, 'CLEAN_LOCK_BUSY'),
+            @(@{ Aborted = 'LOG_ALREADY_EXISTS' }, 25, 'LOG_ALREADY_EXISTS'))
+        foreach ($t in $table) { $r = & $m $t[0]; Assert-True ($r.ExitCode -eq $t[1] -and $r.Code -ceq $t[2]) "$(@($t[0].Keys | ForEach-Object { '{0}={1}' -f $_, $t[0][$_] }) -join ' ') -> $($r.ExitCode) $($r.Code)" }
+        $s = New-R2Sim 'r4codes'
+        if (-not $s) { return }
+        $fixed = $s.Dir
+        function Test-AtmRecoverLogDir { param([string]$Base) [pscustomobject]@{ Code = $null; Dir = $fixed; Parent = [IO.Path]::GetDirectoryName($fixed) } }
+        $s.Id = & $diagIdAdmin
+        $flows = @(
+            @({ param($x) $x.OnSeam = @{ State = 'Start Pending'; CheckPoint = [uint32]1; WaitHint = [uint32]2000; ExitCode = [uint32]0 } }, @{}, 21, 'PARTIAL'),
+            @({ param($x) $x.SeamResult = 'ACCESS_DENIED' }, @{}, 23, 'REFUSED'), @({ param($x) $x.SeamResult = 'SERVICE_REQUEST_TIMEOUT' }, @{}, 22, 'FAILED'),
+            @({ param($x) $x.SeamResult = { throw (New-Object InvalidOperationException('r4-seam-secret')) } }, @{}, 24, 'EXCEPTION'),
+            @({ param($x) }, @{ confirm = 'nao' }, 25, $null), @({ param($x) $x.Row.State = 'Running'; $x.Row.ProcessId = 4321 }, @{}, 3, 'RECOVERY_REFUSED'))
+        foreach ($f in $flows) {
+            Set-R4Stopped $s
+            & $f[0] $s
+            $io = New-R4Io; $op = New-TestCleanOperator -Answers $f[1]
+            $o = Invoke-R4Open (Get-R4Args $s $io $op)
+            $code = $(if ($null -ne $f[3]) { $f[3] } else { [string]$o.Result.Aborted })
+            Assert-True ($o.Side -ceq 'SAME_PROCESS' -and $o.ExitCode -eq $f[2] -and $o.Code -ceq $code -and [string]$code -ne '' -and @(Get-R4Shown $io 'end')[0].ExitCode -eq $f[2] -and $io.Kinds -ccontains 'result') "fluxo -> $($f[2]) ($($o.ExitCode) $($o.Code) $($o.Result.Aborted))"
+            if ($f[2] -eq 3) { Assert-True ([string]$o.Detail -ne '' -and [string]$o.Detail -ceq (@($o.Result.RefusalCodes) -join ',') -and $s.SeamCalls.Count -eq 0 -and $null -eq $o.RunId) 'recusa: os codigos no detalhe; nenhum seam nem log' }
+            if ($f[2] -eq 25) { Assert-True ($s.SeamCalls.Count -eq 0) 'parado antes do seam' }
+            if ($f[2] -ge 21 -and $f[2] -le 24) { Assert-True ($s.SeamCalls.Count -eq 1 -and $null -ne $o.RunId -and -not "$($o.Detail)".Contains('r4-seam-secret')) 'seam uma vez; run id; nenhuma mensagem de excecao' }
+        }
+    }
+    Test-Case 'V0.4 R4' 'R4 PRIV-9: uma operacao por processo - a guarda e tomada na entrada, antes de qualquer trabalho, e vale ate para uma primeira chamada recusada; a segunda chamada -> 30 sem nada alem do fim; uso errado e trava fechada nao tomam a guarda' {
+        $s = New-R2Sim 'r4once'
+        if (-not $s) { return }
+        $op = New-TestCleanOperator
+        $rid = [guid]::NewGuid().ToString()
+        try {
+            $script:AtmRecoverOperationTaken = $false; $script:AtmRecoveryEnabled = $true
+            $a = Get-R4Args $s (New-R4Io) $op @{ Verb = 'plan' }
+            $o = Invoke-AtmRecoverCommand @a
+            Assert-True ($o.ExitCode -eq 2 -and -not $script:AtmRecoverOperationTaken) "uso errado: 2, guarda livre ($($o.ExitCode))"
+            $script:AtmRecoveryEnabled = $false
+            $a = Get-R4Args $s (New-R4Io) $op
+            $o = Invoke-AtmRecoverCommand @a
+            Assert-True ($o.ExitCode -eq 27 -and -not $script:AtmRecoverOperationTaken) "trava fechada: 27, guarda livre ($($o.ExitCode))"
+            $script:AtmRecoveryEnabled = $true
+            $io = New-R4Io
+            $a = Get-R4Args $s $io $op @{ Installed = $false }
+            $o = Invoke-AtmRecoverCommand @a
+            Assert-True ($o.ExitCode -eq 31 -and $script:AtmRecoverOperationTaken -and $io.Launches.Count -eq 0) "primeira chamada recusada (31): a guarda ja foi tomada ($($o.ExitCode))"
+            foreach ($v in @(@('start', @{}), @('start', @{ Elevated = $true; BoundNames = $r4Start }), @('undo', @{ RunId = $rid }))) {
+                $io2 = New-R4Io
+                $a = Get-R4Args $s $io2 $op $v[1] $v[0]
+                $o = Invoke-AtmRecoverCommand @a
+                Assert-True ($o.ExitCode -eq 30 -and $o.Code -ceq 'RECOVER_SECOND_OPERATION' -and $null -eq $o.Side -and $o.Launches -eq 0 -and ($io2.Kinds -join ',') -ceq 'end' -and $io2.Launches.Count -eq 0 -and $io2.Keys.Count -eq 0) "segunda operacao ($($v[0]) $(@($v[1].Keys) -join ',')): 30 ($($o.ExitCode) $($o.Code))"
+            }
+        } finally { Reset-R4Gate }
+        Assert-True ($s.SeamCalls.Count -eq 0 -and $op.Calls.Count -eq 0) 'nenhum seam nem pergunta'
+    }
+    Test-Case 'V0.4 R4' 'R4 pasta fixa: dono Administradores, DACL protegida, so SYSTEM e Administradores com controle total na propria pasta (descritores montados, inclusive o do instalador); no disco ausente, arquivo, ponto de reparse e outro dono ou DACL herdada recusados; o motor nunca cria nem corrige; o instalador recusa um pai que difere e nao o muda' {
+        $sec = { param([string]$Sddl) $d = New-Object Security.AccessControl.DirectorySecurity; $d.SetSecurityDescriptorSddlForm($Sddl); $d }
+        $good = '(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
+        $cases = @(
+            @(('O:BAD:P' + $good), $null), @($script:AtmRecoverLogDirSddl, $null), @(('O:BAD:P(D;OICI;FA;;;BU)' + $good), $null), @('O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)', $null),
+            @(('O:SYD:P' + $good), 'RECOVER_LOG_DIR_OWNER'), @(('O:S-1-5-21-1-2-3-1001D:P' + $good), 'RECOVER_LOG_DIR_OWNER'), @(('O:BAD:' + $good), 'RECOVER_LOG_DIR_DACL'),
+            @(('O:BAD:P' + $good + '(A;OICI;FR;;;BU)'), 'RECOVER_LOG_DIR_DACL'), @(('O:BAD:P' + $good + '(A;OICI;FA;;;S-1-5-21-1-2-3-1001)'), 'RECOVER_LOG_DIR_DACL'),
+            @(('O:BAD:P' + $good + '(A;OICI;FA;;;WD)'), 'RECOVER_LOG_DIR_DACL'), @(('O:BAD:P' + $good + '(A;OICI;FA;;;CO)'), 'RECOVER_LOG_DIR_DACL'), @(('O:BAD:P' + $good + '(A;OICI;FA;;;OW)'), 'RECOVER_LOG_DIR_DACL'),
+            @('O:BAD:P(A;OICI;FA;;;BA)', 'RECOVER_LOG_DIR_DACL'), @('O:BAD:P(A;OICIIO;FA;;;SY)(A;OICI;FA;;;BA)', 'RECOVER_LOG_DIR_DACL'), @('O:BAD:P(A;OICI;FR;;;SY)(A;OICI;FA;;;BA)', 'RECOVER_LOG_DIR_DACL'),
+            @('O:BAD:P', 'RECOVER_LOG_DIR_DACL'))
+        foreach ($c in $cases) { Assert-Eq (Test-AtmRecoverLogDirSecurity -Security (& $sec $c[0])) $c[1] "descritor $($c[0])" }
+        Assert-Eq $script:AtmRecoverLogDirSddl 'O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)' 'descritor do instalador'
+        $nb = { param([string]$Tag) $p = Join-Path $sandbox ('r4-dir-' + $Tag + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8)); $p }
+        $b = & $nb 'none'
+        $d = Test-AtmRecoverLogDir -Base $b
+        Assert-True ($d.Code -ceq 'RECOVER_LOG_DIR_MISSING' -and $d.Parent -ceq (Join-Path $b 'AgentTempManager') -and $d.Dir -ceq (Join-Path $b 'AgentTempManager\recover')) "base inexistente: MISSING; caminhos <base>\AgentTempManager\recover ($($d.Code))"
+        Assert-Eq (Get-AtmRecoverLogDir).Dir ([IO.Path]::Combine([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData), 'AgentTempManager', 'recover')) 'sem base: a pasta da maquina (CommonApplicationData)'
+        Assert-Eq (Get-AtmRecoverLogDirPaths).Dir (Get-AtmRecoverLogDir).Dir 'instalador e motor: o mesmo caminho'
+        [void][IO.Directory]::CreateDirectory($b)
+        Assert-Eq (Test-AtmRecoverLogDir -Base $b).Code 'RECOVER_LOG_DIR_MISSING' 'sem AgentTempManager: MISSING'
+        $parent = Join-Path $b 'AgentTempManager'
+        [void][IO.Directory]::CreateDirectory($parent)
+        $own = (Test-AtmRecoverLogDir -Base $b).Code
+        Assert-True (@('RECOVER_LOG_DIR_OWNER', 'RECOVER_LOG_DIR_DACL') -ccontains $own) "pai comum (dono do token, DACL herdada): recusado ($own)"
+        $sddl0 = (Get-Acl -LiteralPath $parent).Sddl
+        $threw = $null
+        try { $null = Initialize-AtmRecoverLogDir -Base $b } catch { $threw = $_.Exception.Message }
+        Assert-True ($null -ne $threw -and ($threw.Contains('OWNER') -or $threw.Contains('DACL'))) "instalador recusa o pai que difere ($threw)"
+        Assert-True ((Get-Acl -LiteralPath $parent).Sddl -ceq $sddl0 -and -not (Test-Path -LiteralPath (Join-Path $parent 'recover'))) 'instalador nao muda o pai nem cria a pasta embaixo dele'
+        $b2 = & $nb 'file'
+        [void][IO.Directory]::CreateDirectory($b2); [IO.File]::WriteAllBytes((Join-Path $b2 'AgentTempManager'), [byte[]]@(1))
+        Assert-Eq (Test-AtmRecoverLogDir -Base $b2).Code 'RECOVER_LOG_DIR_MISSING' 'arquivo no lugar do pai: MISSING'
+        $threw = $null
+        try { $null = Initialize-AtmRecoverLogDir -Base $b2 } catch { $threw = $_.Exception.Message }
+        Assert-True ($null -ne $threw -and $threw.Contains('NOT_A_FOLDER')) "instalador: arquivo no lugar do pai ($threw)"
+        $b3 = & $nb 'junction'
+        $tgt = Join-Path $b3 'alvo'
+        [void][IO.Directory]::CreateDirectory((Join-Path $tgt 'recover'))
+        try { New-Junction (Join-Path $b3 'AgentTempManager') $tgt } catch { $script:caseSkipped = $true; $script:caseNote = 'juncao nao pode ser criada neste ambiente (mklink /J recusado): o resto do caso passou'; return }
+        Assert-Eq (Test-AtmRecoverLogDir -Base $b3).Code 'RECOVER_LOG_DIR_REPARSE' 'juncao no lugar do pai: REPARSE'
+        $threw = $null
+        try { $null = Initialize-AtmRecoverLogDir -Base $b3 } catch { $threw = $_.Exception.Message }
+        Assert-True ($null -ne $threw -and $threw.Contains('REPARSE')) "instalador: juncao no lugar do pai ($threw)"
+    }
+    Test-Case 'V0.4 R4' 'R4 pasta fixa no disco criada pela funcao do instalador (token elevado): dono e DACL exatos nas duas pastas; aceita pelo motor; mantida como esta numa segunda instalacao; start e undo pela copia relancada gravam e leem nela; dono do log medido; com a trava fechada o plano inverso e lido dela' {
+        if (-not $me.IsAdmin) {
+            $script:caseSkipped = $true
+            $script:caseNote = 'a pasta fixa e de Administradores (dono BA, DACL protegida so SY e BA): cria-la exige um token elevado, e esta sessao nao e elevada; o dono real de um log do escritor nela fica sem medida aqui (a CI elevada executa este caso)'
+            return
+        }
+        $s = New-R2Sim 'r4fixed'
+        if (-not $s) { return }
+        $b = Join-Path $sandbox ('r4-fixed-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        [void][IO.Directory]::CreateDirectory($b)
+        $r = Initialize-AtmRecoverLogDir -Base $b
+        Assert-True ($r.Status -ceq 'CREATED' -and $r.Dir -ceq (Join-Path $b 'AgentTempManager\recover')) "criada ($($r.Status))"
+        foreach ($p in @((Join-Path $b 'AgentTempManager'), $r.Dir)) {
+            $acl = Get-Acl -LiteralPath $p
+            $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object { '{0}:{1}:{2}' -f $_.IdentityReference.Value, [int]$_.FileSystemRights, $_.IsInherited } | Sort-Object)
+            Assert-True ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ceq 'S-1-5-32-544' -and $acl.AreAccessRulesProtected -and ($rules -join ',') -ceq 'S-1-5-18:2032127:False,S-1-5-32-544:2032127:False') "dono e DACL ($($rules -join ','))"
+        }
+        Assert-Eq (Test-AtmRecoverLogDir -Base $b).Code $null 'aceita pelo motor'
+        $sd = (Get-Acl -LiteralPath $r.Dir).Sddl
+        $k = Initialize-AtmRecoverLogDir -Base $b
+        Assert-True ($k.Status -ceq 'KEPT' -and (Get-Acl -LiteralPath $r.Dir).Sddl -ceq $sd) 'segunda instalacao: mantida como esta'
+        $s.Id = & $diagIdAdmin
+        $io = New-R4Io; $op = New-TestCleanOperator
+        $o = Invoke-R4Open (Get-R4Args $s $io $op @{ Elevated = $true; BoundNames = $r4Start; LogDirBase = $b })
+        $log = Join-Path $r.Dir ([string]$o.RunId + '.log')
+        Assert-True ($o.ExitCode -eq 20 -and $null -eq $o.LogDir -and (Test-Path -LiteralPath $log) -and $io.Keys.Count -eq 1) "start na pasta fixa: 20 ($($o.ExitCode) $($o.Code) $($o.Result.Aborted) $(@($o.Result.LogErrors | ForEach-Object { $_.Code }) -join ','))"
+        $owner = (Get-Acl -LiteralPath $log).GetOwner([Security.Principal.SecurityIdentifier]).Value
+        $kind = $(if ($owner -ceq 'S-1-5-32-544') { 'ADMINISTRADORES' } elseif ($owner -ceq [string]$me.Sid) { 'USUARIO_DO_PROCESSO' } else { 'OUTRO' })
+        Assert-True ($kind -cne 'OUTRO') "dono do log: Administradores ou o usuario do processo ($kind)"
+        Reset-R3Sim $s
+        $io = New-R4Io
+        $a = Get-R4Args $s $io (New-TestCleanOperator) @{ RunId = [string]$o.RunId; LogDirBase = $b } 'undo'
+        $c = Invoke-AtmRecoverCommand @a
+        Assert-True ($c.ExitCode -eq 27 -and $null -eq $c.LogDir -and $c.Result.Plan.Offered -and ($io.Kinds -join ',') -ceq 'undoPlan,end') "trava fechada: plano inverso lido da pasta fixa ($($c.ExitCode) $($c.LogDir))"
+        $io = New-R4Io; $op = New-TestCleanOperator
+        $u = Invoke-R4Open (Get-R4Args $s $io $op @{ Elevated = $true; BoundNames = $r4Undo; RunId = [string]$o.RunId; LogDirBase = $b } 'undo')
+        Assert-True ($u.ExitCode -eq 20 -and $u.Result.SourceRunId -ceq $o.RunId -and (Test-Path -LiteralPath (Join-Path $r.Dir ([string]$u.RunId + '.log'))) -and $io.Keys.Count -eq 1) "undo da pasta fixa: 20 ($($u.ExitCode) $($u.Code))"
+        $script:caseNote = "dono medido do log gravado pelo escritor na pasta fixa sob este token elevado: $kind"
+    }
+    Test-Case 'V0.4 R4' 'R4 procedencia entre contas: um log cujo dono e o usuario de outro processo e recusado (UNDO_SOURCE_PROVENANCE); um log de dono Administradores e aceito pela identidade de outra conta (prova so "algum administrador", nunca qual)' {
+        $s = New-R2Sim 'r4prov'
+        if (-not $s) { return }
+        $src = New-R3Source $s
+        $rid = [string]$src.RunId
+        Assert-Eq (Read-AtmRecoverRunLog -Path $s.Log -RunId $rid).Code $null 'controle positivo: a mesma conta le a origem'
+        $owner = (Get-Acl -LiteralPath $s.Log).GetOwner([Security.Principal.SecurityIdentifier]).Value
+        $realId = ${function:Get-AtmCurrentIdentity}
+        function Get-AtmCurrentIdentity { $i = & $realId; [pscustomobject]@{ Name = 'TEST\bob'; Sid = 'S-1-5-21-1-2-3-1002'; IsAdmin = $i.IsAdmin } }
+        $code = (Read-AtmRecoverRunLog -Path $s.Log -RunId $rid).Code
+        if ($owner -ceq 'S-1-5-32-544') {
+            Assert-Eq $code $null 'dono Administradores: aceito pela identidade de outra conta (algum administrador, nao qual)'
+            $script:caseNote = 'sob este token o escritor deu ao log o dono Administradores: o ramo "outro usuario e dono" so roda numa sessao nao elevada'
+        } else {
+            Assert-Eq $owner ([string]$me.Sid) 'dono: o usuario do processo'
+            Assert-Eq $code 'UNDO_SOURCE_PROVENANCE' 'dono e o usuario de outro processo: recusado'
+        }
+    }
+    Test-Case 'V0.4 R4' 'R4: CLI (processo novo deste shell, todas as travas fechadas) - recover start do CoworkVMService mostra o plano e sai com 27 sem pedir elevacao, mesmo com o marcador; recover undo sai com 27; uso errado 2 (sem nome, caminho, curinga, operacao fora do catalogo, run id fora da forma, opcoes de outro verbo, opcoes recusadas); ajuda nos dois idiomas; estado do servico igual antes e depois' {
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $launch = { param([string]$CliArgs) Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$(Join-Path $srcDir 'agent-temp.ps1')`" " + $CliArgs) -TimeoutSec 300 }
+        $snap = { (@(Get-CimInstance -ClassName Win32_Service -Filter "Name='CoworkVMService'" -Property Name, State, StartMode -ErrorAction Stop | ForEach-Object { '{0}/{1}' -f $_.State, $_.StartMode })) -join ',' }
+        $svcBefore = & $snap
+        $g = [guid]::NewGuid().ToString()
+        foreach ($c in @('recover start -Operation REC-SVC-START -Service CoworkVMService -Lang en-US', 'recover start -Operation REC-SVC-START -Service CoworkVMService -AtmElevatedRecovery -Lang en-US')) {
+            $r = & $launch $c
+            Assert-True ($r.Exit -eq 27 -and $r.Text.Contains('REC-SVC-START') -and $r.Text.Contains('RECUPERACAO_REAL_DESABILITADA') -and $r.Text.Contains('no elevation was requested') -and $r.Text.Contains('Nothing was changed.') -and -not $r.Text.Contains('asks Windows (UAC)') -and -not $r.Text.Contains('Press any key')) "${c}: saida $($r.Exit) $($r.Text)"
+        }
+        $r = & $launch 'recover start -Operation REC-SVC-START -Service CoworkVMService -Lang pt-BR'
+        Assert-True ($r.Exit -eq 27 -and $r.Text.Contains('RECUPERACAO_REAL_DESABILITADA') -and $r.Text.Contains('Nada foi alterado.')) "start pt-BR: saida $($r.Exit)"
+        $r = & $launch "recover undo -RunId $g -Lang en-US"
+        Assert-True ($r.Exit -eq 27 -and $r.Text.Contains('RECUPERACAO_REAL_DESABILITADA') -and ($r.Text.Contains('RECOVER_LOG_DIR_') -or $r.Text.Contains('UNDO_SOURCE_UNREADABLE')) -and -not $r.Text.Contains('asks Windows (UAC)')) "undo: saida $($r.Exit) $($r.Text)"
+        $up = 'ABCDEF01-2345-6789-ABCD-EF0123456789'
+        foreach ($u in @(@('recover start -Operation REC-SVC-START', 'never a path, wildcard, file or plan'), @('recover start -Service CoworkVMService', 'Not an operation of the recovery catalog'),
+                @('recover start -Operation REC-SVC-STOP -Service CoworkVMService', 'Not an operation of the recovery catalog'), @('recover start -Operation REC-SVC-START -Service C:\x\svc.exe', 'never a path, wildcard, file or plan'),
+                @('recover start -Operation REC-SVC-START -Service Cowork*', 'never a path, wildcard, file or plan'), @("recover start -Operation REC-SVC-START -Service CoworkVMService -RunId $g", 'Usage: agent-temp recover list'),
+                @('recover undo', 'never a path, file or log'), @('recover undo -RunId C:\x\run.log', 'never a path, file or log'), @("recover undo -RunId $up", 'never a path, file or log'),
+                @("recover undo -RunId {$g}", 'never a path, file or log'), @("recover undo -RunId $g -Service CoworkVMService", 'Usage: agent-temp recover list'),
+                @("recover undo -RunId $g -Operation REC-SVC-START", 'Usage: agent-temp recover list'), @("recover plan -Operation REC-SVC-START -Service CoworkVMService -RunId $g", 'Usage: agent-temp recover list'),
+                @('recover list -AtmElevatedRecovery', 'Usage: agent-temp recover list'), @('recover start -Operation REC-SVC-START -Service CoworkVMService -LogFile x.log', 'recover does not take -LogFile'),
+                @("recover undo -RunId $g -Path C:\x", 'recover does not take -Path'))) {
+            $r = & $launch ($u[0] + ' -Lang en-US')
+            Assert-True ($r.Exit -eq 2 -and $r.Text.Contains($u[1]) -and $r.Text.Contains('Nothing was changed.')) "$($u[0]): saida $($r.Exit) $($r.Text)"
+        }
+        $r = & $launch 'help -Lang en-US'
+        Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('agent-temp recover  start -Operation REC-SVC-START -Service <exact declared name> | undo -RunId <run id> (V0.4).') -and $r.Text.Contains('no UAC prompt, no service is changed.')) "help en-US: saida $($r.Exit)"
+        $r = & $launch 'help -Lang pt-BR'
+        Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('agent-temp recover  start -Operation REC-SVC-START -Service <nome declarado exato> | undo -RunId <run id> (V0.4).')) "help pt-BR: saida $($r.Exit)"
+        Assert-Eq (& $snap) $svcBefore 'estado do CoworkVMService igual antes e depois (ou ausente nos dois)'
+    }
+    Test-Case 'V0.4 R4' 'R4 (estatico): o pedido de elevacao so no lancador padrao (o verbo de elevacao uma vez em src), chamado so pelo comando, uma vez; nenhuma credencial, senha salva, tarefa agendada, servico criado nem token de outro processo; o lancador chama o comando uma vez, sem seams; argumentos fixos sem caminho; a trava antes da guarda e a guarda antes de tudo; os passos dos dois lados na ordem; o lado que pede nunca toca log, lock, inventario nem pasta fixa; o motor nunca cria nem corrige a pasta fixa; so o Install-AgentTempManager.ps1 a cria; a suite nunca alcanca o lancador padrao sem sombra; area sem espera real' {
+        $all = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | ForEach-Object { [pscustomobject]@{ Rel = $_.FullName.Substring($srcDir.Length + 1); Text = [IO.File]::ReadAllText($_.FullName) } })
+        $rec = @($all | Where-Object { $_.Rel -ceq 'lib\Engine.Recover.ps1' })[0].Text
+        $cli = @($all | Where-Object { $_.Rel -ceq 'agent-temp.ps1' })[0].Text
+        $strip = { param([string]$T) [regex]::Replace([regex]::Replace($T, '(?s)<#.*?#>', ''), '(?m)#.*$', '') }
+        $count = { param([string]$Text, [string]$Pat) [regex]::Matches($Text, [regex]::Escape($Pat), [Text.RegularExpressions.RegexOptions]::IgnoreCase).Count }
+        $tk = $null; $er = $null
+        $ast = [Management.Automation.Language.Parser]::ParseInput($rec, [ref]$tk, [ref]$er)
+        Assert-Eq @($er).Count 0 'motor sem erro de sintaxe'
+        $fn = @{}
+        foreach ($d in @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] }, $false))) { $fn[$d.Name] = & $strip $d.Extent.Text }
+        $recCode = & $strip $rec
+        $launchFn = 'Invoke-AtmRecoverElevated' + 'LaunchDefault'
+        $verb = 'run' + 'as'
+        # The elevation request: one verb in all of src, in the default launcher; ShellExecute only there.
+        foreach ($f in $all) { Assert-Eq ([regex]::Matches($f.Text, $verb, [Text.RegularExpressions.RegexOptions]::IgnoreCase).Count) $(if ($f.Rel -ceq 'lib\Engine.Recover.ps1') { 1 } else { 0 }) "verbo de elevacao em $($f.Rel)" }
+        Assert-Eq (& $count $fn[$launchFn] $verb) 1 'o verbo de elevacao so no lancador padrao'
+        foreach ($p in @('UseShellExecute', 'Diagnostics.Process]::Start(', '.Verb =', 'ProcessStartInfo', 'WaitForExit')) { $t = & $count $recCode $p; Assert-True ($t -eq 1 -and (& $count $fn[$launchFn] $p) -eq 1) "'$p' so no lancador padrao, uma vez ($t)" }
+        foreach ($p in @(($launchFn + ' -FilePath'), '& $ElevatedLauncherImpl', 'Get-AtmRecoverLaunchExitCode -Launch', 'Get-AtmRecoverRequesterEvidence -Source')) { Assert-True ((& $count $recCode $p) -eq 1 -and (& $count $fn['Invoke-AtmRecoverCommand'] $p) -eq 1) "uma unica chamada, no comando: $p" }
+        Assert-True ((& $count $recCode 'Invoke-AtmRecoverOneOperation @one') -eq 2 -and (& $count $fn['Invoke-AtmRecoverCommand'] 'Invoke-AtmRecoverOneOperation @one') -eq 2) 'a operacao: so pelo comando (relancada ou no mesmo processo)'
+        Assert-True ((& $count $recCode 'Get-AtmRecoverActingIdentity -Source') -eq 2 -and (& $count $fn['Invoke-AtmRecoverCommand'] 'Get-AtmRecoverActingIdentity -Source') -eq 2) 'a identidade que age: lida pelo comando'
+        Assert-Eq (& $count $recCode 'Invoke-AtmRecoverCommand') 1 'ninguem no motor chama o comando (so a definicao)'
+        foreach ($pat in @(('Get-' + 'Credential'), ('Secure' + 'String'), ('save' + 'cred'), ('Register-' + 'ScheduledTask'), ('sch' + 'tasks'), ('New-' + 'Service'), 'CreateService', 'CreateProcessWithLogon', 'CreateProcessAsUser', 'LogonUser', 'OpenProcessToken', 'OpenProcess', 'DuplicateToken', 'Impersonate', 'Win32_Process', 'ParentProcessId', 'Get-Process')) {
+            foreach ($t in @(@('motor', $rec), @('lancador', $cli))) { Assert-True ($t[1].IndexOf($pat, [StringComparison]::OrdinalIgnoreCase) -lt 0) "$($t[0]) sem '$pat'" }
+        }
+        # The launcher: one call of the command, no seam, never the gate or the guard.
+        $cliCode = & $strip $cli
+        Assert-Eq (& $count $cliCode 'Invoke-AtmRecoverCommand @recCmd') 1 'o lancador chama o comando uma vez'
+        foreach ($p in @('ElevatedLauncherImpl', 'RequesterEvidence', 'LogDirBase', 'EngineArgs', $launchFn, 'AtmRecoveryEnabled =', 'AtmRecoverOperationTaken', 'ServiceControlImpl', 'ServiceStopImpl')) { Assert-True (-not $cli.Contains($p)) "lancador sem '$p'" }
+        Assert-True ($cliCode.Contains("Elevated = [bool]`$AtmElevatedRecovery") -and $cliCode.Contains('BoundNames = [string[]]@($PSBoundParameters.Keys)') -and $cliCode.Contains("LauncherListed = [bool]`$integrity.Listed.ContainsKey('bin\agent-temp.cmd')") -and $cliCode.Contains('InstallRoot = $here')) 'o lancador passa o marcador, os nomes ligados, a instalacao verificada e a propria pasta'
+        $cmd = $fn['Invoke-AtmRecoverCommand']
+        Assert-True ($cmd.Contains("'recover start -Operation ' + `$Operation + ' -Service `"' + `$Service + '`" -AtmElevatedRecovery'") -and $cmd.Contains("'recover undo -RunId ' + `$RunId + ' -AtmElevatedRecovery'") -and $cmd.Contains("Join-Path `$InstallRoot 'bin\agent-temp.cmd'")) 'argumentos fixos e o lancador instalado'
+        # The gate first, then the guard, then the sides.
+        $last = -1
+        foreach ($p in @("'RECOVER_VERB_INVALID'", "'RECOVER_ARGUMENTS_INVALID'", 'if (-not $script:AtmRecoveryEnabled)', "'RECUPERACAO_REAL_DESABILITADA'", 'if ($script:AtmRecoverOperationTaken)', '$script:AtmRecoverOperationTaken = $true', 'if ($Elevated)', "`$out.Side = 'SAME_PROCESS'", "`$out.Side = 'REQUESTER'")) {
+            $i = $cmd.IndexOf($p, $last + 1); Assert-True ($i -gt $last) "comando, na ordem: $p"; $last = $i
+        }
+        $g0 = $cmd.IndexOf('if (-not $script:AtmRecoveryEnabled)'); $g1 = $cmd.IndexOf('return (& $finish 27')
+        $gate = $cmd.Substring($g0, $g1 - $g0)
+        foreach ($p in @('Invoke-AtmRecoverOneOperation', $launchFn, '& $ElevatedLauncherImpl', 'KeyReader', 'ConfirmationReader', '-LogFile', 'InventoryArgs', 'AtmRecoverOperationTaken', 'Get-AtmRecoverActingIdentity')) { Assert-True (-not $gate.Contains($p)) "trava fechada sem '$p'" }
+        $e0 = $cmd.IndexOf('if ($Elevated)'); $e1 = $cmd.IndexOf("`$out.Side = 'SAME_PROCESS'")
+        $elev = $cmd.Substring($e0, $e1 - $e0)
+        $last = -1
+        foreach ($p in @('$script:AtmRecoverElevatedArguments[$Verb]', "'RECOVER_ELEVATED_ARGUMENTS'", 'Get-AtmRecoverActingIdentity', "'RECOVER_ELEVATED_NOT_ELEVATED'", "'RECOVER_NOT_INSTALLED'", 'Get-AtmRecoverRequesterEvidence', 'Invoke-AtmRecoverOneOperation', 'finally', "'waitKey'", '& $KeyReader')) {
+            $i = $elev.IndexOf($p, $last + 1); Assert-True ($i -gt $last) "copia relancada, na ordem: $p"; $last = $i
+        }
+        Assert-True (-not $elev.Contains($launchFn) -and -not $elev.Contains('& $ElevatedLauncherImpl')) 'a copia relancada nunca pede outra elevacao'
+        $req = $cmd.Substring($cmd.IndexOf("`$out.Side = 'REQUESTER'"))
+        $last = -1
+        foreach ($p in @('Get-AtmRecoverCollection', 'Get-AtmRecoverPlan -Collection', "'RECOVERY_NOT_DECLARED'", "'RECOVERY_REFUSED'", "'RECOVER_ELEVATION_NEEDS_INSTALL'", 'Join-Path $InstallRoot', "'elevationNotice'", '$out.Launches + 1', '& $ElevatedLauncherImpl', 'Get-AtmRecoverLaunchExitCode')) {
+            $i = $req.IndexOf($p, $last + 1); Assert-True ($i -gt $last) "lado que pede, na ordem: $p"; $last = $i
+        }
+        foreach ($p in @('Invoke-AtmRecover ', 'Invoke-AtmRecoverUndo', 'Invoke-AtmRecoverOneOperation', 'Test-AtmRecoverLogDir', 'Read-AtmRecoverRunLog', 'Open-AtmCleanLog', 'Invoke-AtmUnderSharedLock', 'Invoke-AtmInventory', 'Get-AtmEngineConsoleObservation', 'ConfirmationReader', 'KeyReader', 'LogDirBase')) { Assert-True (-not $req.Contains($p)) "lado que pede sem '$p'" }
+        $one = $fn['Invoke-AtmRecoverOneOperation']
+        $last = -1
+        foreach ($p in @("'identity'", 'Test-AtmRecoverLogDir -Base', 'ExitCode = 28', '[guid]::NewGuid().ToString()', "Join-Path `$ld.Dir (`$newRunId + '.log')", 'Invoke-AtmRecover -Operation', "'RECOVER_RUN_NOT_FOUND'", 'Invoke-AtmRecoverUndo -SourceLog', "'result'", 'Get-AtmRecoverResultExitCode')) {
+            $i = $one.IndexOf($p, $last + 1); Assert-True ($i -gt $last) "operacao, na ordem: $p"; $last = $i
+        }
+        Assert-True ((& $count $one '[guid]::NewGuid()') -eq 1 -and (& $count $one '-NewRunId $newRunId') -eq 2 -and (& $count $recCode '-NewRunId $newRunId') -eq 2) 'um run id gerado uma vez, na orquestracao, para start e undo'
+        Assert-Eq ([regex]::Matches($rec, '\$script:AtmRecoverOperationTaken\s*=').Count) 2 'guarda: carregada livre e tomada so na entrada'
+        # The fixed folder: never created, changed or fixed by the engine; only the installer's script creates it.
+        foreach ($pat in @('CreateDirectory', 'SetAccessControl', 'Set-Acl', 'SetOwner', 'SetAccessRule', 'AddAccessRule', 'SetSecurityDescriptor', 'FileSystemAclExtensions]::Create', 'icacls', 'takeown')) { Assert-Eq (& $count $recCode $pat) 0 "motor sem '$pat'" }
+        $root = Split-Path -Parent $testsDir
+        $inst = [IO.File]::ReadAllText((Join-Path $root 'install\Install-AgentTempManager.ps1'))
+        $unin = [IO.File]::ReadAllText((Join-Path $root 'install\Uninstall-AgentTempManager.ps1'))
+        $ic = [IO.File]::ReadAllText((Join-Path $root 'install\InstallCommon.ps1'))
+        $ast2 = [Management.Automation.Language.Parser]::ParseInput($ic, [ref]$tk, [ref]$er)
+        $icFn = @{}
+        foreach ($d in @($ast2.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] }, $false))) { $icFn[$d.Name] = $d.Extent.Text }
+        Assert-Eq (& $count $inst 'Initialize-AtmRecoverLogDir') 1 'o script de instalacao cria a pasta fixa (uma chamada)'
+        Assert-True (-not $unin.Contains('Initialize-AtmRecoverLogDir') -and $unin.Contains("'inst.recoverLogDirUninstallKept'") -and -not $unin.Contains('Remove-' + 'Item') -and -not $unin.Contains('Delete(')) 'o desinstalador nao a cria, nao apaga nada por si e diz que a mantem'
+        foreach ($name in @('Install-AtmProduct', 'Uninstall-AtmProduct')) { Assert-True ($icFn.ContainsKey($name) -and -not $icFn[$name].Contains('AtmRecoverLogDir') -and -not $icFn[$name].Contains('CommonApplicationData')) "$name nao toca a pasta fixa" }
+        Assert-Eq ([regex]::Matches($ic, 'Initialize-AtmRecoverLogDir').Count) 1 'InstallCommon: so a definicao (nenhuma chamada)'
+        # The suite: the default launcher only shadowed; the R4 area adds no stop-seam shadow (R3's count) and no real wait.
+        $self = [IO.File]::ReadAllText((Join-Path $testsDir 'Run-Tests.ps1'))
+        $a0 = $self.IndexOf('-----' + ' V0.4 R4 (assisted'); $a1 = $self.IndexOf('-----' + ' scale')
+        Assert-True ($a0 -gt 0 -and $a1 -gt $a0) 'area V0.4 R4 encontrada'
+        $area = $self.Substring($a0, $a1 - $a0)
+        Assert-True (-not $area.Contains('Start-' + 'Sleep')) 'area V0.4 R4 sem espera real'
+        Assert-True (-not $area.Contains("Remove('Service" + "StopImpl')") -and -not $area.Contains('function Invoke-AtmRecoverService' + 'StopDefault {')) 'area V0.4 R4 sem sombra nem remocao do seam de parada (contagem do R3)'
+        Assert-True (($self.Substring(0, $a0) + $self.Substring($a1)).IndexOf($launchFn) -lt 0 -and -not $area.Contains($launchFn + ' -FilePath')) 'o lancador padrao nunca e chamado pela suite (so sombreado na area V0.4 R4)'
+        $rmL = "Remove('Elevated" + "LauncherImpl')"; $shL = 'function ' + $launchFn + ' {'
+        $withRm = 0
+        foreach ($c in @([regex]::Split($area, "(?m)^\s*Test-Case 'V0\.4 R4' ") | Select-Object -Skip 1)) { if ($c.Contains($rmL)) { $withRm++; Assert-True ($c.Contains($shL)) 'um caso sem o lancador injetado sombreia o padrao' } }
+        Assert-True ($withRm -ge 1) "casos sem o lancador injetado: $withRm"
+    }
+    Test-Case 'V0.4 R4' 'R4 pedido real de elevacao (lancador padrao: ShellExecuteEx com o verbo de elevacao) e o prompt do UAC: NAO_TESTADO' {
+        $script:caseSkipped = $true
+        $script:caseNote = 'nenhum prompt do UAC e aberto nesta maquina nem na CI: o lancador padrao nunca e chamado pela suite (sombreado onde seria alcancado) e e conferido so pelos estaticos; o pedido real, o cancelamento (1223) e uma politica que bloqueia o UAC ficam para a VM do operador (R6)'
+    }
+    Test-Case 'V0.4 R4' 'R4 relancamento real do bin\agent-temp.cmd instalado numa janela elevada, a tecla e o codigo de saida devolvido ao lado que pede; UAC desligado numa maquina real: NAO_TESTADO' {
+        $script:caseSkipped = $true
+        $script:caseNote = 'exige uma copia instalada, um pedido real de elevacao e uma janela nova; a suite cobre os dois lados no mesmo processo com o lancador, a identidade, a tecla e a pasta injetados; fica para a VM do operador (R6)'
+    }
+    Test-Case 'V0.4 R4' 'R4 PRIV-5 verificacao real de quem pediu (o token do processo que pediu): NAO_TESTADO' {
+        $script:caseSkipped = $true
+        $script:caseNote = 'por desenho a copia elevada nao le o token de quem pediu (src nunca abre um handle de outro processo, e um id de processo pai pode ser forjado ou reutilizado): o padrao e UNVERIFIED e PRIV-5 continua Parcial; os estados SAME, DIFFERENT e ilegivel sao so injetados'
     }
 
     # ------------------------------------------------------------------ scale

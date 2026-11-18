@@ -1,6 +1,6 @@
 # ADR-0016: Assisted recovery (V0.4)
 
-Status: ACCEPTED (V04-D1 to V04-D8 decided 2026-11-17: D3 (b) elevation on demand through UAC; the others as recommended); R0, R1, R2 and R3 implemented
+Status: ACCEPTED (V04-D1 to V04-D8 decided 2026-11-17: D3 (b) elevation on demand through UAC; the others as recommended); R0, R1, R2, R3 and R4 implemented
 Date: 2026-11-17
 Phase: V0.4 (phases R0 to R6 below, each a future round with its own contract and tests)
 
@@ -158,7 +158,9 @@ Until then, the tool shows the process and tells the person how to close the age
     * **(b) On demand.** The non-elevated tool relaunches the installed launcher through UAC with fixed arguments: the
       operation id and the target's name or key, never a file or a plan. The elevated copy collects, plans, shows,
       asks, acts, logs and exits. The non-elevated side reads only the log's `run-end`. This adds PRIV-4 (prompt
-      outcomes), PRIV-5 (requester and acting identity) and PRIV-7 (trusted code only) as work items.
+      outcomes), PRIV-5 (requester and acting identity) and PRIV-7 (trusted code only) as work items. (R4 deviates on
+      one point: the non-elevated side reads no log at all and reports only by the elevated copy's exit code, because
+      its token cannot read the logs' fixed folder. See the R4 implementation record.)
     * **(c) A broker service or a scheduled task** is excluded by PRIV-3.
 
     Recommendation: (a) for V0.4, as ELEVATION.md recommends. (b) only later, as an explicit, opt-in option.
@@ -734,9 +736,10 @@ log goes to any `-LogFile` the caller chose, and the engine keeps no index of ru
 * `-RunId`: the run id, as a cross-check. The log must carry exactly this id (`UNDO_SOURCE_RUN_MISMATCH`).
 
 The log is a source of data, never of instructions. The target it names is used only if a provider still declares it
-today. The current state comes only from a fresh collection. Nothing else in the log reaches an action. R4's verb will
-receive the same two values from the operator (`recover undo -RunId <id> -SourceLog <path>`) and pass them through
-unchanged. R4 decides the verb's exact spelling, without changing this contract.
+today. The current state comes only from a fresh collection. Nothing else in the log reaches an action. R4 kept this
+contract and fixed the verb's spelling differently from what this record first expected: `recover undo -RunId <id>`
+takes no path from the operator. The engine's `-SourceLog` is always `<fixed folder>\<run id>.log`, built by the
+elevated copy (see the R4 implementation record).
 
 **Reading the source** (`Read-AtmRecoverRunLog`, `:933-1032`, read only). The checks, in order, each with its closed code
 (`AtmRecoveryUndoSourceCodes`, `:724-735`):
@@ -967,3 +970,235 @@ identities, service rows, dependencies, the console, the confirmation, the wait 
 * lock B8 between an elevated and a non-elevated holder: for the VM or the operator's e2e, as in R2;
 * the stop of a real service, because no shipped provider declares an `ExpectedImage`;
 * any command: no CLI verb calls `Invoke-AtmRecoverUndo` until R4.
+
+## R4 implementation record (2026-11-18)
+
+The line numbers in this record are those of the files as V04-R4 adds or changes them. R4 threads one parameter,
+`-NewRunId`, through `Invoke-AtmRecover`, `Invoke-AtmRecoverLocked`, `Invoke-AtmRecoverUndo` and
+`Invoke-AtmRecoverUndoLocked`, so lines after 497 of `Engine.Recover.ps1` moved by up to nine lines. The R2 and R3
+records keep the numbers of their own rounds. R4 appends from line 1379 on.
+
+R4 implements V04-D3 (b), elevation on demand through UAC, and two CLI verbs:
+
+* `agent-temp recover start -Operation REC-SVC-START -Service <exact declared name>`;
+* `agent-temp recover undo -RunId <run id>`.
+
+Their only entry is `Invoke-AtmRecoverCommand` (`Engine.Recover.ps1:1606-1741`), called once per process by the
+launcher (`agent-temp.ps1:492-510`). **The gate stays `$false` in every copy** (`Engine.Recover.ps1:15`, still its only
+assignment), and so do the other seven. With the gate closed, both verbs show what they would do and stop with exit 27:
+no copy requests elevation, asks, locks or logs. Only the suite opens the gate, in its own process, always with the
+elevated launcher seam injected. R4 changes no finding state, eligibility, B1 or RECENT rule, and changes neither the
+diagnose, the providers, `Native.cs`, `Engine.Clean.ps1` nor `src/bin/agent-temp.cmd`.
+
+**The arguments** (`agent-temp.ps1:485-501`, again in `Engine.Recover.ps1:1671-1673`). One operation and one target per
+call, from fixed sets:
+
+* the operation: an id of the catalog. The catalog holds `REC-SVC-START` only; `REC-SVC-STOP` exists only as the undo;
+* the service: 1 to 256 characters of `^[A-Za-z0-9_.\- ]+$`, then the exact name a provider declares today (the plan
+  refuses any other);
+* the run id: a GUID in the lower-case `D` form, exactly (`Test-AtmRecoverRunIdForm`, `:1412-1417`).
+
+Any other option, a missing one, or `-RunId` with `start` (or `-Operation` or `-Service` with `undo`) is a usage error,
+exit 2, before the engine is called.
+
+**The fixed folder of the logs.** An R4 run never takes a log path from anyone. Its log is
+`<CommonApplicationData>\AgentTempManager\recover\<run id>.log`:
+
+* **Created only by the installer.** `Initialize-AtmRecoverLogDir` (`InstallCommon.ps1:381-407`) is called by
+  `Install-AgentTempManager.ps1:50-52` before anything is installed. It creates the parent and then the folder, each
+  with its security descriptor in the same call, never secured afterwards:
+  `O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)` (owner Administrators, a protected DACL, full control for SYSTEM and
+  Administrators, nothing for anyone else; `:349`). An existing parent or folder is checked and kept as it is, never
+  changed. A reparse point, a file, another owner or another DACL refuses the installation
+  (`inst.recoverLogDirRefused`), because a standard user can create folders under CommonApplicationData before the
+  installer runs.
+* **The uninstaller keeps it** and says so (`Uninstall-AgentTempManager.ps1:27-29`): it is the record of what recovery
+  did on the machine.
+* **The engine checks it before every use and never creates or fixes it** (`Test-AtmRecoverLogDir`, `:1452-1479`).
+  The parent and the folder must each be on a fixed local drive with no reparse point in the path
+  (`AtmPathCheck.Chain`), be a directory, and pass `Test-AtmRecoverLogDirSecurity` (`:1430-1450`): owner Administrators,
+  a protected DACL, allow entries for SYSTEM and Administrators only, each with full control on the folder itself. Deny
+  entries only take rights away. Codes: `RECOVER_LOG_DIR_MISSING`, `_REPARSE`, `_OWNER`, `_DACL` and `_UNREADABLE`,
+  exit 28.
+* **The log writer is unchanged.** The run's log goes through `Open-AtmCleanLog` as in R2 and R3. The folder policy of
+  `AtmCleanLog.Pin` accepts the fixed folder as it is, so `Native.cs` and `Engine.Clean.ps1` are not touched.
+* **Deviation from section 3 (b).** A non-elevated token cannot read the fixed folder (Users have no access). So the
+  requester reads no log: not the `run-end`, as section 3 (b) said, and not the source of an undo. It reports only by the
+  elevated copy's exit code. With the gate closed, a non-elevated `recover undo` shows the request (the run id) and the
+  folder's code instead of the inverse plan.
+
+**The run id** is generated once per operation, by the copy that acts (`:1587`), and passed to the engine as
+`-NewRunId`. It is the log's file name and its `runId`. The result shows it only when the log was created.
+
+**The steps of the copy that acts** (`Invoke-AtmRecoverOneOperation`, `:1570-1604`), in this order:
+
+| # | Step | Where | Stops with (exit) |
+|---|---|---|---|
+| 1 | The acting identity is shown (name, elevation type, integrity), with what is known of the requester when relaunched (PRIV-5) | `:1583` | |
+| 2 | The fixed folder checked | `:1584-1586` | `RECOVER_LOG_DIR_*` (28) |
+| 3 | One new run id, and the log path `<folder>\<run id>.log` | `:1587-1588` | |
+| 4 | `start`: `Invoke-AtmRecover`, every R2 step (collection, criteria, plan, console, phrase in this console, lock B8, log, revalidation, seam, wait) | `:1590-1592` | the engine's result (below) |
+| 4 | `undo`: the source `<folder>\<run id>.log`, then `Invoke-AtmRecoverUndo`, every R3 step | `:1594-1597` | `RECOVER_RUN_NOT_FOUND` (3); the engine's result |
+| 5 | The result, then its exit code (`Get-AtmRecoverResultExitCode`, `:1559-1568`) | `:1599-1603` | |
+
+**The command, past the gate** (`Invoke-AtmRecoverCommand`). After the argument checks (`:1671-1673`) and the closed
+gate (`:1674-1685`), in this order:
+
+1. **One operation per process (PRIV-9).** `$script:AtmRecoverOperationTaken` is checked and set on entry, before any
+   other work (`:1689-1690`), and never cleared. A second call in the same process gives
+   `RECOVER_SECOND_OPERATION` (30), even after a first call that was refused.
+2. **The relaunched copy** (`-Elevated`, the launcher's marker `-AtmElevatedRecovery`; `:1693-1711`). The marker proves
+   nothing: it only makes the copy stricter.
+   1. Only the fixed arguments, as its launcher bound them (`AtmRecoverElevatedArguments`, `:1408`): anything else, or
+      no marker, is `RECOVER_ELEVATED_ARGUMENTS` (29). `-Lang`, `-DeadlineSeconds`, `-NoProgress` and `-Ascii` are
+      never relayed.
+   2. Its own token must be an elevated administrator: otherwise `RECOVER_ELEVATED_NOT_ELEVATED` (29). With UAC
+      turned off, `runas` starts a copy that is not elevated, and it stops here.
+   3. An installed, verified copy (`-Installed` and `bin\agent-temp.cmd` listed by the launcher's manifest check):
+      otherwise `RECOVER_NOT_INSTALLED` (31).
+   4. The requester evidence (PRIV-5, below), then the one operation.
+   5. In a `finally`: the "press a key" line and one key, so the elevated window shows how it ended. A key reader that
+      throws is ignored.
+3. **An elevated administrator token** (`:1713-1718`): the one operation in this process (the manual model (a)), with no
+   relaunch and no key.
+4. **Any other token, the requester** (`:1720-1740`). It is never elevated, changes nothing, takes no lock, reads no log
+   and passes no path but the installed launcher's own.
+   1. `start`: a fresh collection and the plan, shown (PRIV-2: the operator sees what will be asked for before UAC). Not
+      declared: `RECOVERY_NOT_DECLARED` (2). Refused: `RECOVERY_REFUSED` (3). In both, nothing is requested.
+   2. `undo`: the request, with the run id only (its token cannot read the fixed folder).
+   3. An installed, verified copy with its folder known: otherwise `RECOVER_ELEVATION_NEEDS_INSTALL` (31) (PRIV-7).
+   4. The file is `<InstallRoot>\bin\agent-temp.cmd`, the launcher of this installation. The argument line is fixed:
+      `recover start -Operation <id> -Service "<name>" -AtmElevatedRecovery`, or
+      `recover undo -RunId <run id> -AtmElevatedRecovery` (`:1729-1731`). The name's character set has no quote, so it
+      cannot leave its quotes.
+   5. The notice: UAC will be requested for this one operation, which one, on which target or run, and why (PRIV-2,
+      PRIV-6; `:1732`).
+   6. One call to the elevated launcher (`:1733-1736`), then its exit code (PRIV-4, below).
+
+An unexpected failure on any side is `RECOVER_UNEXPECTED` (10), recorded by its exception type only.
+
+**The elevated launcher seam.** `-ElevatedLauncherImpl` (a scriptblock that receives the file and the argument line and
+returns `Started`, `ExitCode` and `Win32Error`) replaces the default, `Invoke-AtmRecoverElevatedLaunchDefault`
+(`:1505-1531`): `ProcessStartInfo` with `UseShellExecute` and the verb `runas` (ShellExecuteEx, which shows the UAC
+prompt), then a wait for that process and its exit code. A refused or failed request comes back as the Win32 error of
+the failed start. The launcher never passes the seam, and the suite and the CI never reach the default: it is called
+only past the gate, when no seam is given. No credential, saved password, scheduled task, created service or other
+process's token is used (the static check below), and the requester relays nothing but the fixed argument line.
+
+**PRIV-4: the prompt's outcomes, by exit code only** (`Get-AtmRecoverLaunchExitCode`, `:1533-1557`). The requester never
+guesses a reason from one number:
+
+| What the launcher gave | Code | Exit |
+|---|---|---|
+| Not started, Win32 error 1223 (usually a cancelled or refused prompt, not proof of it) | `UAC_ERROR_1223` | 40 |
+| Not started, another Win32 error | `UAC_WIN32_ERROR` | 41 |
+| The launcher threw, or gave an unreadable result (by exception type only) | `UAC_LAUNCHER_EXCEPTION` | 42 |
+| Not started, no error | `UAC_NOT_STARTED` | 43 |
+| Started, an exit code in `AtmRecoverRelayedExitCodes` (`:1400`) | that code, relayed | 2, 3, 5, 20-31 |
+| Started, any other code or none (a crash, a closed window) | `ELEVATED_EXIT_UNKNOWN` | 44 |
+
+In 40 to 43 no elevated copy ran. Exit 44 says that the elevated copy may have acted before it ended, so the operator
+checks the service and the fixed folder.
+
+**The exit codes** (`AtmRecoverExitCodes`, `:1394-1399`; `docs/USAGE.md` lists them for the operator):
+
+| Exit | Meaning |
+|---|---|
+| 2 | Usage: an option, verb, operation, name or run id outside the fixed sets; a target no provider declares |
+| 3 | Refused before anything was asked: the plan or the undo's criteria, the undo's source, or no log for the run id |
+| 5 | Integrity: the launcher's own manifest check failed (as for every command) |
+| 10 | Unexpected failure, by exception type only |
+| 20 / 21 / 22 / 23 / 24 | The seam was called: `COMPLETE`, `PARTIAL`, `FAILED`, `REFUSED`, `EXCEPTION` |
+| 25 | Stopped before the seam, after the plan: console, phrase, lock, log, revalidation, intent |
+| 26 | The seam was called but the run did not end cleanly (a log or lock step after it failed) |
+| 27 | Recovery is disabled (the gate): the plan or the request was shown, nothing else |
+| 28 | The fixed folder is missing or differs |
+| 29 | A relaunched copy refused its arguments or its token |
+| 30 | A second operation in one process |
+| 31 | Not an installed, verified copy |
+| 40 / 41 / 42 / 43 / 44 | The requester's UAC outcomes (PRIV-4, above) |
+
+**PRIV-5: the requester and the acting identity.** The relaunched copy shows the identity that acts: the name, the
+elevation type and the integrity of its own token (`Get-AtmRecoverActingIdentity`, `:1481-1485`). That is the only
+identity it uses for decisions: every other profile is another user's. What it knows of its requester comes from
+`Get-AtmRecoverRequesterEvidence` (`:1487-1503`), whose default reads nothing and answers `UNVERIFIED`: the window says
+that the requester could not be verified. The suite injects `SAME`, `DIFFERENT` (with a name) and `UNREADABLE` (a
+throw or an invalid answer). **PRIV-5 stays Partial** ([ELEVATION.md](../ELEVATION.md)). Why the requester's token is
+not read:
+
+* reading another process's token needs a handle to that process. `Native.cs` has no `OpenProcess(` (a static check of
+  the suite), and R4's static check refuses `OpenProcess`, `OpenProcessToken`, `DuplicateToken`, `ParentProcessId`,
+  `Win32_Process` and `Get-Process` in the engine and the launcher;
+* the requester's identity would come from the parent process id, which can be forged (a process started with another
+  parent) or reused (the parent exited and another process got its id);
+* ShellExecuteEx with `runas` gives the elevated copy no channel from its requester other than the argument line, and
+  R4 keeps that line fixed.
+
+**Provenance of an undo's source.** R3's provenance check is unchanged: the log's owner must be this process's user or
+Administrators, with the protected DACL `Open-AtmCleanLog` gives. In the fixed folder that proves that **some
+administrator** wrote the log, not which one. An undo by administrator B of administrator A's start passes. That is not
+an escalation: B could stop the service anyway, and the undo still shows the inverse plan, asks for the phrase,
+revalidates and logs. A log whose owner is another user's SID is still refused (`UNDO_SOURCE_PROVENANCE`). The owner an
+elevated copy's log really gets (the user or Administrators) is measured by the suite on the CI's elevated runner, in
+the note of the fixed-folder case; this record does not assume it, and R4 does not harden the check.
+
+**The gate closed** (`:1674-1685`), in every copy:
+
+* `start`: `Invoke-AtmRecover` with the gate closed: a fresh read-only collection and the plan, then
+  `RECUPERACAO_REAL_DESABILITADA`;
+* `undo`: the fixed folder checked, read only. When it passes, `Invoke-AtmRecoverUndo` with the gate closed reads the
+  source and shows the inverse plan. When it does not (always for a non-elevated token, which cannot read it), the
+  request is shown with the folder's code;
+* then exit 27. Nothing is asked, locked or logged, no inventory is read for a lock, no launcher is called, and no
+  elevation is requested. The PRIV-9 guard is not taken.
+
+**What the operator sees** (`Show-AtmRecoverCommandOutput`, `Report.ps1:1421-1455`; `Wait-AtmRecoverKey`, `:1457-1461`): the
+plan or the inverse plan, the request, the acting identity, the UAC notice, the result (with the run id when its log
+was created), the end line with the exit code and its text, and, in a relaunched copy, the key prompt. Both languages
+(`I18n.ps1`, the `rec.*` keys and `help.recover3`, `help.recover4`).
+
+**Tests:** the area `V0.4 R4` of `tests/Run-Tests.ps1` (`:19725-20390`), in both shells. Providers, identities, service
+rows, the console, the confirmation, the key, the requester evidence, the elevated launcher and the seams are injected.
+The fixed folder is a folder of the sandbox (`-LogDirBase`), except in the case marked elevated.
+
+* The closed constants: exit codes, relayed codes, their texts in both languages, and "Nothing was changed" only where
+  no control call can have happened.
+* The gate closed: `start` and `undo` show the plan, the inverse plan, or the request with the folder's code, then 27,
+  by instrumentation (no console, inventory, lock, log, launcher or mutex), with positive
+  controls that open the gate in the suite's process.
+* The requester: the plan, the notice, one call with the exact file and argument line (a name with a dot, a hyphen, an
+  underscore and a space); no call for a name not declared (2), a refused plan (3) or a copy that is not installed
+  (31).
+* PRIV-4: one case per launcher outcome (40 to 44), and every relayed code.
+* PRIV-5: the evidence table (default, `SAME`, `DIFFERENT`, unreadable, a throw), and relaunched runs with each.
+* The relaunched copy: extra arguments, no marker, a token that is not elevated, not installed (29, 31), each with the
+  key read; a full run (20) with its outputs in order; a presenter failure (10) with the key still read.
+* The same process, and the cycle `start` then `undo`, each with its own new run id; `RECOVER_RUN_NOT_FOUND` (3); a
+  refused folder (28) for both verbs.
+* The exit code of every engine result (20 to 26, 3), with real flows.
+* PRIV-9: a second operation (30), also after a first that was refused.
+* The fixed folder: the security check over built descriptors; on disk, missing, a file, a junction, another owner or
+  DACL; the installer's refusals (`OWNER`, `DACL`, `NOT_A_FOLDER`, `REPARSE`).
+* Elevated only: the folder created by the installer's function in the sandbox, its exact owner and DACL, kept on a
+  second call, used by `start` and `undo`, and the log's owner measured.
+* Provenance across accounts: a log owned by Administrators is accepted from another user's process; a log owned by
+  another user's SID is refused.
+* The CLI, in a new process of each shell with every gate closed: `start` and `undo` exit 27 in both languages, with and
+  without the marker; usage errors exit 2; the help; the service's state is unchanged.
+* The install e2e: the installer creates the folder with its owner and DACL, keeps it on update, and the uninstaller
+  keeps it.
+* A static check: the elevation verb appears once in `src`, only in the default launcher, which only the command calls,
+  once; no credential, scheduled task or token API; the launcher passes no seam; the argument literals; the steps in
+  order on both sides; the engine never creates the folder; only the installer calls `Initialize-AtmRecoverLogDir`.
+
+**Not tested:**
+
+* the real elevation request (the default launcher, ShellExecuteEx with `runas`) and the UAC prompt: never called by the
+  suite or the CI;
+* the real relaunch of an installed `bin\agent-temp.cmd` in an elevated window, its key and the exit code returned to
+  the requester; and a machine with UAC turned off;
+* the real verification of the requester (PRIV-5): not implemented, by design;
+* a real service started or stopped by either verb: no CI test controls a real service (R6), and no shipped provider
+  declares an `ExpectedImage`;
+* the fixed folder on this machine and on the CI runner's own `ProgramData`: the suite uses a folder of its sandbox, and
+  the install e2e runs the installer only on the CI runner.

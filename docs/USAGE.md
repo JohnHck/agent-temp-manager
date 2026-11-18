@@ -888,26 +888,26 @@ it, with **Refresh** or `F5`, or when the live monitoring is on and its interval
 Closing it leaves no process, timer or file behind. The installed command always runs in Windows PowerShell 5.1, and
 there is no other entry point (no `bin\` script, no shortcut).
 
-## Recover (V0.4 R1 and R2, unreleased; list and plan only in every copy)
+## Recover (V0.4 R1 to R4, unreleased; nothing is changed in any copy)
 
 Assisted recovery of a service a provider declares ([ADR-0016](adr/ADR-0016-v04-assisted-recovery.md)). The recovery
 gate is closed in every copy, and `agent-temp version` shows it: `assisted recovery: DISABLED in this release (recover
 only lists and shows the plan)`. `recover list` and `recover plan` open, start, stop or change no service, whether the
 gate is open or closed. Nothing is asked, no lock is taken, and no log or file is written.
 
-Phase R2 added the start path to the engine (`Invoke-AtmRecover`, ADR-0016's R2 implementation record), but only the
-test suite reaches it, with the gate opened in its own process and the service control seam injected. No CLI verb runs
-it: the execution verb comes with the UAC relaunch, in phase R4. What a user sees and can do is unchanged.
-
-Phase R3 added the undo of one start to the engine (`Invoke-AtmRecoverUndo`, ADR-0016's R3 implementation record). It
-reads the run's log, checks that the service is still exactly as that run left it, `RUNNING`, with no dependent
-running, and stops that one service, never its dependents. Here too, only the test suite reaches it, with the gate opened
-in its own process and the stop seam injected. There is no `recover undo` verb until phase R4, and `REC-SVC-STOP` is
-never offered by `list` nor accepted by `plan`.
+Phase R2 added the start path to the engine (`Invoke-AtmRecover`, ADR-0016's R2 implementation record). Phase R3 added
+the undo of one start (`Invoke-AtmRecoverUndo`, ADR-0016's R3 implementation record): it reads the run's log, checks
+that the service is still exactly as that run left it, `RUNNING`, with no dependent running, and stops that one service,
+never its dependents. Phase R4 added the two verbs that reach them, `recover start` and `recover undo` (below), and the
+elevation through UAC that they need. With the gate closed, both verbs stop before acting. Only the test suite goes past
+the gate, in its own process, with the seams and the elevated launcher injected. `REC-SVC-STOP` is never offered by
+`list` nor accepted by `plan`.
 
 ```text
 agent-temp recover list
 agent-temp recover plan -Operation REC-SVC-START -Service <exact declared name>
+agent-temp recover start -Operation REC-SVC-START -Service <exact declared name>
+agent-temp recover undo -RunId <run id>
 ```
 
 Each run makes a fresh, read-only collection in its own process: the token, the providers' service hints, and one
@@ -960,13 +960,72 @@ Recovery is DISABLED in this release: recover only lists and shows the plan; not
 Nothing was changed.
 ```
 
-Exit codes of `recover`:
+Exit codes of `recover list` and `recover plan`:
 
 * `0`: the list was shown, or a plan was offered;
 * `3`: the plan was refused;
 * `2`: a usage error (a missing or other subcommand, `-Operation` or `-Service` on `list`, an operation outside the
   catalog, a target that is not a plain name or that no provider declares, or an option `recover` does not take);
 * `10`: the collection failed.
+
+### recover start and recover undo (V0.4 R4)
+
+`recover start` takes exactly `-Operation REC-SVC-START` and `-Service` with the exact name a provider declares (1 to
+256 letters, digits, `_`, `.`, `-` or spaces). `recover undo` takes exactly `-RunId`, the run id that a start showed: a
+GUID in lower case. Never a path, file, log or plan. Any other option is a usage error (exit 2). Each command does one
+operation.
+
+**In every copy (recovery disabled):**
+
+* `start` shows the plan, as `recover plan` does;
+* `undo` shows the inverse plan when this window can read the recovery log folder. Otherwise (a window without
+  elevation cannot) it shows only the request, with the folder's code;
+* then `Exit 27: recovery is DISABLED in this release`. Nothing is asked, locked or logged, no UAC prompt appears and no
+  service is changed.
+
+**What the verbs do past the gate** (not in any copy; ADR-0016, R4 implementation record):
+
+* **From an elevated administrator console**, the command acts in that window: the identity that acts, the plan, the
+  typed phrase, the run, the result with its run id.
+* **From any other window**, that window is only a request. `start` shows the plan first. Then the window says that it
+  asks Windows (UAC) to start the installed `agent-temp` elevated for this one operation, and why. If the prompt is
+  accepted, a new elevated window collects, checks and shows everything again, says which account acts (and that the
+  account that asked is not verified), asks for the typed phrase, acts once, shows the result and the run id, and waits
+  for a key. The first window then shows only the exit code. Only an installed copy, verified by its manifest, can ask
+  for elevation (exit 31 otherwise).
+* **The logs** go to `<CommonApplicationData>\AgentTempManager\recover\<run id>.log` (usually under `C:\ProgramData`),
+  a folder that only the installer creates, owned by Administrators and readable by SYSTEM and Administrators only. A
+  copy never creates or fixes it: a missing or different folder gives exit 28. Uninstalling keeps it, as the record of
+  what recovery did on the machine.
+
+Exit codes of `recover start` and `recover undo`:
+
+| Exit | Meaning |
+|---|---|
+| `2` | Usage: an option, operation, name or run id outside the fixed sets; past the gate, also a service no provider declares. Nothing was changed. |
+| `3` | Refused before anything was asked (the plan, the undo's criteria or its source, or no log for this run id). Nothing was changed. |
+| `5` | The installation failed its integrity check. Nothing was changed. |
+| `10` | Unexpected error (its type only). The result shown, if any, says what ran. |
+| `20` | `COMPLETE`: the service reached the expected state. |
+| `21` | `PARTIAL`: the service had not reached the expected state when the wait ended. |
+| `22` | `FAILED`: the operation was requested and failed. |
+| `23` | `REFUSED`: the service control manager denied access. |
+| `24` | `EXCEPTION`: the service control call failed with an exception; the service may have changed. |
+| `25` | Stopped before any service control call (console, phrase, lock, log, revalidation): the service was not changed. |
+| `26` | Stopped after the service control call: the run is incomplete and the service may have changed. |
+| `27` | Recovery is disabled in this release (every copy). Nothing was changed. |
+| `28` | The recovery log folder is missing or differs from what the installer creates. Nothing was changed. |
+| `29` | An elevated recovery copy refused its arguments or its token (for example with UAC turned off). Nothing was changed. |
+| `30` | This process already ran one recovery operation. Nothing was changed. |
+| `31` | Not an installed copy verified by its manifest. Nothing was changed. |
+| `40` | The UAC request ended with Windows error 1223 (usually a cancelled prompt, not proof of it). No elevated copy ran. |
+| `41` | The UAC request failed with another Windows error. No elevated copy ran. |
+| `42` | The UAC request failed with an exception. No elevated copy ran. |
+| `43` | No elevated process started. No elevated copy ran. |
+| `44` | The elevated copy ended without a known result: it may have acted. Check its window and `recover plan`. |
+
+From a window without elevation, codes `2`, `3`, `5` and `20` to `31` can also be the elevated copy's own, passed on as
+they are.
 
 ## Verify (installed copy)
 
@@ -1005,7 +1064,8 @@ deletion enabled (not in any published copy), stopped before completing (Clean l
 unreadable, a missing or unreadable `providers` directory, an unlisted library or provider, an unreadable or
 invalid manifest, or an installed copy without one; nothing is loaded) · `6` TUI, `authorize`, `quarantine schedule-autopurge` or `unschedule-autopurge`, or `clean` with real deletion enabled (not in any published copy) needs an interactive console · `7` `gui`: the desktop GUI gate is closed (`GUI_GATE_CLOSED`, every copy; no window) · `8` `gui`: no window can be shown here (`GUI_NOT_STA`, `GUI_NO_INTERACTIVE_DESKTOP`, `GUI_WINFORMS_UNAVAILABLE`) · `10` unexpected error,
 or a `diagnose` export refused or not written (nothing deleted because of it), or a failed `recover` collection
-(nothing changed).
+(nothing changed). `recover start` and `recover undo` also use `20` to `31` and `40` to `44`, listed under Recover
+(above); in every copy they end with `27`.
 
 ## Project names
 

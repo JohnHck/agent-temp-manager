@@ -47,6 +47,9 @@ $lockDir = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
 Enter-AtmOperationLock -InstallDir $lockDir -Operation $(if ($Update) { 'update' } else { 'install' })
 try {
     Assert-AtmNoRecoveryPending -InstallDir $lockDir
+    # V0.4 R4: the fixed folder of the recovery logs, created (or checked and kept) before anything is installed.
+    $recoverLogDir = Initialize-AtmRecoverLogDir
+    Write-Host (Get-AtmRecoveryText $(if ($recoverLogDir.Status -eq 'CREATED') { 'inst.recoverLogDirCreated' } else { 'inst.recoverLogDirKept' }) $recoverLogDir.Dir)
     Write-Host (Get-AtmText 'inst.source' ([IO.Path]::GetFullPath($SourceDir)))
     Write-Host (Get-AtmText 'inst.target' $InstallDir)
     $privateTemp = Enter-AtmPrivateTemp -InstallDir $InstallDir

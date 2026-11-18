@@ -125,17 +125,29 @@ layering:
   for clean.
 * The diagnose engine stays read-only and never uses the isolation engine.
 
-## Recovery engine (V0.4 phases R1 to R3; `lib\Engine.Recover.ps1`)
+## Recovery engine (V0.4 phases R1 to R4; `lib\Engine.Recover.ps1`)
 
 [ADR-0016](adr/ADR-0016-v04-assisted-recovery.md), assisted recovery of a service a provider declares. The eighth
 release gate (`AtmRecoveryEnabled`) is closed in every copy. With it closed, the engine only reads (R1). The execution
-path (R2) and the undo (R3) are in the engine too, but only the test suite reaches them, with the gate opened in its
-own process and the seams injected. No CLI verb calls them until R4.
+path (R2) and the undo (R3) are in the engine too. Since R4, the verbs `recover start` and `recover undo` call them
+through `Invoke-AtmRecoverCommand`, but only past the gate: with it closed, both show the plan or the request and stop
+(exit 27). Only the test suite goes past the gate, with it opened in its own process and the seams and the elevated
+launcher injected.
 
 * **Loading.** The launcher loads the engine only for `recover` and `version`. It is in the launcher's integrity
   check, `AtmRequiredFiles` and the manifest. It depends on `Engine.Audit.ps1`, `Engine.Diagnose.ps1` and, for the
   lock B8, the log writer and the console past the gate, `Engine.Clean.ps1`. It writes
-  nothing to the terminal: `Report.ps1` presents the list and the plan (`Show-AtmRecoverList`, `Show-AtmRecoverPlan`).
+  nothing to the terminal: `Report.ps1` presents the list and the plan (`Show-AtmRecoverList`, `Show-AtmRecoverPlan`),
+  and every line of `recover start` and `recover undo` through the presenter the launcher passes
+  (`Show-AtmRecoverCommandOutput`).
+* **The command (R4)** (`Invoke-AtmRecoverCommand`): one operation per process. Past the gate, an elevated
+  administrator token runs the operation in its own process. Any other token is a requester: it shows the plan (or,
+  for undo, the run id only) and relaunches the installed `bin\agent-temp.cmd` once through UAC, with fixed arguments
+  and a marker, through the elevated launcher seam (`Invoke-AtmRecoverElevatedLaunchDefault`, `ShellExecuteEx` with
+  `runas`). It reports only by that copy's exit code. The relaunched copy redoes everything and waits for a key. The
+  logs go to the fixed folder `<CommonApplicationData>\AgentTempManager\recover`, which only
+  `Install-AgentTempManager.ps1` creates (`Initialize-AtmRecoverLogDir` in `InstallCommon.ps1`) and which the engine
+  checks before every use (`Test-AtmRecoverLogDir`) and never creates or fixes.
 * **Collection** (`Get-AtmRecoverCollection`): fresh, in the command's own process, read only. It calls the diagnose's
   functions for the token identity, the providers' runtime hints, one services query (`Invoke-AtmServiceQuery`, with
   the R0 signals, dependencies and image comparison) and its findings (`Get-AtmServiceFindings`). The engine itself has
@@ -155,5 +167,7 @@ own process and the seams injected. No CLI verb calls them until R4.
   * with the gate closed (`list`, `plan`, and `Invoke-AtmRecover` or `Invoke-AtmRecoverUndo`), the engine asks nothing,
     takes no lock, and writes no log or file. Past the gate, in the suite only, it requires AUT-2, takes the lock B8
     and writes the log `atm.recoverlog/1`;
+  * the elevation verb (`runas`) appears once in `src/`, in the default elevated launcher, which only
+    `Invoke-AtmRecoverCommand` calls, once. The launcher calls the command once and passes it no seam;
   * `Engine.Diagnose.ps1`, `Tui.ps1` and `Gui*.ps1` neither load nor call it. The diagnose keeps its two
     `Win32_Service` queries.

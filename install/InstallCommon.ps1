@@ -323,6 +323,10 @@ $script:AtmRecoveryTexts = @{
     'inst.operationLocked'      = 'Another administrative operation (install, update, rollback or uninstall) is running on {0}, or its lock cannot be taken ({1}: {2}). Nothing was changed. Wait for it to finish and try again. / Outra operacao administrativa (instalacao, atualizacao, rollback ou desinstalacao) esta em andamento em {0}, ou o bloqueio nao pode ser obtido ({1}: {2}). Nada foi alterado. Aguarde o termino e tente de novo.'
     'inst.lockParentMissing'    = 'The directory {0} does not exist: there is nothing to update, roll back or uninstall, and nowhere to install. Nothing was changed. / O diretorio {0} nao existe: nao ha o que atualizar, reverter ou desinstalar, nem onde instalar. Nada foi alterado.'
     'inst.transactionForeign'   = 'The transaction marker {0} belongs to another operation; it was left as it is. / O marcador de transacao {0} pertence a outra operacao; ele foi mantido como esta.'
+    'inst.recoverLogDirCreated' = 'Recovery log folder created: {0} (owner Administrators; access for SYSTEM and Administrators only). / Pasta dos logs de recuperacao criada: {0} (dono Administrators; acesso so para SYSTEM e Administrators).'
+    'inst.recoverLogDirKept'    = 'Recovery log folder kept as it is, owner and access checked: {0} / Pasta dos logs de recuperacao mantida como esta, dono e acesso conferidos: {0}'
+    'inst.recoverLogDirRefused' = 'The recovery log folder {0} already exists and differs from what the installer creates ({1}): it was not changed, and nothing was installed or updated. Find out who created it, remove or fix it by hand (owner Administrators; a protected DACL with full control for SYSTEM and Administrators only), then run the installer again. / A pasta dos logs de recuperacao {0} ja existe e difere do que o instalador cria ({1}): ela nao foi alterada, e nada foi instalado nem atualizado. Descubra quem a criou, remova-a ou corrija-a manualmente (dono Administrators; DACL protegida com controle total so para SYSTEM e Administrators) e rode o instalador de novo.'
+    'inst.recoverLogDirUninstallKept' = 'The recovery log folder {0} was kept: it is the record of what recovery did on this machine. Delete it by hand only if you no longer need that record. / A pasta dos logs de recuperacao {0} foi mantida: ela e o registro do que a recuperacao fez nesta maquina. Apague-a manualmente so se nao precisar mais desse registro.'
     'inst.interruptedPrevious'  = 'No installation in {0}, but a previous version exists in {1} (an interrupted update or rollback?). Nothing was changed. Do not uninstall. Rename it to {0} by hand, or install without -Update. / Nenhuma instalacao em {0}, mas existe uma versao anterior em {1} (atualizacao ou rollback interrompido?). Nada foi alterado. Nao desinstale. Renomeie-a para {0} manualmente ou instale sem -Update.'
 }
 
@@ -333,6 +337,73 @@ function Get-AtmRecoveryText {
     $tpl = $script:AtmRecoveryTexts[$key]
     if ($fmtArgs.Count -eq 0) { return $tpl }
     return ($tpl -f $fmtArgs)
+}
+
+# V0.4 R4 (docs/adr/ADR-0016, R4 implementation record): the fixed folder of the CLI's assisted-recovery logs,
+# <CommonApplicationData>\AgentTempManager\recover. Only the installer creates it, never the product: owned by
+# Administrators, with a protected DACL giving full control to SYSTEM and Administrators and nothing to anyone else (the
+# elevated recovery copy refuses it otherwise, and never creates or fixes it). An existing parent or folder is checked and
+# kept, never changed: a reparse point, another owner or another DACL refuses the installation, because a standard user
+# can create folders under CommonApplicationData before the installer runs. Uninstalling keeps it (the record of what
+# recovery did on this machine).
+$script:AtmRecoverLogDirSddl = 'O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
+
+function Get-AtmRecoverLogDirPaths {
+    # -Base: the isolated test suite and the install e2e only, in place of the machine's CommonApplicationData folder.
+    param([string]$Base)
+    $root = $(if ($Base) { $Base } else { [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData) })
+    $parent = [IO.Path]::Combine([string]$root, 'AgentTempManager')
+    return [pscustomobject]@{ Parent = $parent; Dir = [IO.Path]::Combine($parent, 'recover') }
+}
+
+function Test-AtmRecoverLogDirItem {
+    # $null when the existing directory is what the installer creates; otherwise REPARSE, NOT_A_FOLDER, OWNER or DACL.
+    param([string]$Path)
+    $di = New-Object IO.DirectoryInfo($Path)
+    if (([int]$di.Attributes -ne -1) -and (($di.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { return 'REPARSE' }
+    if (-not $di.Exists) { return 'NOT_A_FOLDER' }
+    $sec = $(if ($null -ne ('System.IO.FileSystemAclExtensions' -as [type])) { [System.IO.FileSystemAclExtensions]::GetAccessControl($di) } else { $di.GetAccessControl() })
+    $owner = $sec.GetOwner([Security.Principal.SecurityIdentifier])
+    if ($null -eq $owner -or $owner.Value -ne 'S-1-5-32-544') { return 'OWNER' }
+    if (-not $sec.AreAccessRulesProtected) { return 'DACL' }
+    $fc = [Security.AccessControl.FileSystemRights]::FullControl
+    $full = @{}
+    foreach ($r in @($sec.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))) {
+        if ($r.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
+        $sid = $r.IdentityReference.Value
+        if ($sid -ne 'S-1-5-18' -and $sid -ne 'S-1-5-32-544') { return 'DACL' }
+        if (($r.FileSystemRights -band $fc) -eq $fc -and ($r.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -eq 0) { $full[$sid] = $true }
+    }
+    if (-not $full.ContainsKey('S-1-5-18') -or -not $full.ContainsKey('S-1-5-32-544')) { return 'DACL' }
+    return $null
+}
+
+function Initialize-AtmRecoverLogDir {
+    <#
+      Creates the parent and then the folder, each with its owner and DACL in one step (never created first and secured
+      later), or checks and keeps the existing ones without changing them; checks each again after creating it. Returns
+      the folder and CREATED or KEPT; throws inst.recoverLogDirRefused for a folder that differs. Called by
+      Install-AgentTempManager.ps1 only, before anything is installed (Install-AtmProduct never calls it, so the suite's
+      installs never create it).
+    #>
+    param([string]$Base)
+    $p = Get-AtmRecoverLogDirPaths -Base $Base
+    $created = $false
+    foreach ($d in @($p.Parent, $p.Dir)) {
+        if ([int](New-Object IO.DirectoryInfo($d)).Attributes -ne -1) {
+            $why = Test-AtmRecoverLogDirItem -Path $d
+            if ($null -ne $why) { throw (Get-AtmRecoveryText 'inst.recoverLogDirRefused' $d $why) }
+            continue
+        }
+        $sec = New-Object Security.AccessControl.DirectorySecurity
+        $sec.SetSecurityDescriptorSddlForm($script:AtmRecoverLogDirSddl)
+        if ($null -ne ('System.IO.FileSystemAclExtensions' -as [type])) { [System.IO.FileSystemAclExtensions]::Create((New-Object IO.DirectoryInfo($d)), $sec) }
+        else { [void][IO.Directory]::CreateDirectory($d, $sec) }
+        $why = Test-AtmRecoverLogDirItem -Path $d
+        if ($null -ne $why) { throw (Get-AtmRecoveryText 'inst.recoverLogDirRefused' $d $why) }
+        $created = $true
+    }
+    return [pscustomobject]@{ Dir = $p.Dir; Status = $(if ($created) { 'CREATED' } else { 'KEPT' }) }
 }
 
 if (-not (Test-Path variable:script:AtmLockDepth)) { $script:AtmLockDepth = 0; $script:AtmLockStream = $null; $script:AtmLockPath = $null }

@@ -6,7 +6,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)][string]$Command = 'tui',
-    # quarantine: list | inspect | verify | restore | purge. recover (V0.4, with -Operation and -Service): list | plan.
+    # quarantine: list | inspect | verify | restore | purge. recover (V0.4): list | plan | start (-Operation, -Service) | undo (-RunId).
     [Parameter(Position = 1)][string]$SubCommand,
     [string]$User,
     [string]$Project,
@@ -24,7 +24,9 @@ param(
     [switch]$Ascii,
     [string]$Lang,
     [int]$DeadlineSeconds = -1,
-    [string]$PseudonymKeyFile, [string]$Operation, [string]$Service
+    [string]$PseudonymKeyFile, [string]$Operation, [string]$Service, [string]$RunId,
+    # V0.4 R4: the marker of a recovery copy relaunched elevated through UAC. It proves nothing: that copy only gets stricter.
+    [switch]$AtmElevatedRecovery
 )
 
 $ErrorActionPreference = 'Stop'
@@ -228,7 +230,7 @@ $cliInvArgs['NoProgress'] = [bool]$NoProgress
 $cliInvArgs['ProgressCallback'] = { param($pct, $msg) $act = Get-AtmText 'cli.progressActivity'; if ($pct -ge 100) { Write-Progress -Activity $act -Completed } else { Write-Progress -Activity $act -Status $msg -PercentComplete $pct } }
 
 function Show-Help {
-    foreach ($k in @('help.title', 'help.blank', 'help.tui', 'help.audit', 'help.preview', 'help.diagnose', 'help.clean', 'help.clean2', 'help.isolate', 'help.isolate2', 'help.quarantine', 'help.quarantine2', 'help.quarantine3', 'help.authorize', 'help.verify', 'help.version', 'help.gui', 'help.recover', 'help.recover2', 'help.help', 'help.blank',
+    foreach ($k in @('help.title', 'help.blank', 'help.tui', 'help.audit', 'help.preview', 'help.diagnose', 'help.clean', 'help.clean2', 'help.isolate', 'help.isolate2', 'help.quarantine', 'help.quarantine2', 'help.quarantine3', 'help.authorize', 'help.verify', 'help.version', 'help.gui', 'help.recover', 'help.recover2', 'help.recover3', 'help.recover4', 'help.help', 'help.blank',
             'help.drill', 'help.export', 'help.diagOpts', 'help.cleanOpts', 'help.cleanOpts2', 'help.cleanOpts3', 'help.cleanOpts4', 'help.tuiOpts', 'help.lang', 'help.blank', 'help.examples')) { Write-Host (Get-AtmText $k) }
     Write-Host '  agent-temp'
     Write-Host '  agent-temp audit'
@@ -470,18 +472,42 @@ try {
             exit $(if ($authRes.Accepted) { 0 } else { 3 })
         }
         'recover' {
-            # V0.4 R1 (docs/adr/ADR-0016): list and plan only, from a fresh read-only collection made in this process. The
-            # recovery engine is loaded here (and by version) only. With the recovery gate closed (every copy), and in this
-            # phase even past it, nothing is asked, locked, logged or written and no service is opened. The operation comes
-            # only from the catalog and the service only from the exact name a provider declares: never a path, wildcard,
-            # file or plan. One operation and one target per call. Exit 0 list or plan shown, 3 target refused, 2 usage.
+            # V0.4 R1 (docs/adr/ADR-0016): list and plan, from a fresh read-only collection made in this process. The
+            # recovery engine is loaded here (and by version) only. list and plan never ask, lock, log or write anything and
+            # open no service. The operation comes only from the catalog and the service only from the exact name a provider
+            # declares: never a path, wildcard, file or plan. One operation and one target per call. Exit 0 list or plan
+            # shown, 3 target refused, 2 usage.
             . (Join-Path $here 'lib\Engine.Recover.ps1')
             $recSub = $(if ($SubCommand) { $SubCommand.ToLowerInvariant() } else { '' })
             foreach ($opt in @('User', 'Project', 'Root', 'Path', 'AllowListFile', 'IncludeOtherUsers', 'AcceptB1ResidualRisk', 'ExportJson', 'LogFile', 'RecordFile', 'Entry', 'All', 'PseudonymKeyFile')) {
                 if ($PSBoundParameters.ContainsKey($opt)) { Write-Host (Get-AtmText 'cli.recoverOptionRefused' $opt) -ForegroundColor Red; exit 2 }
             }
-            if ($recSub -cne 'list' -and $recSub -cne 'plan') { Write-Host (Get-AtmText 'cli.recoverUsage') -ForegroundColor Red; exit 2 }
+            if ($recSub -cne 'list' -and $recSub -cne 'plan' -and $recSub -cne 'start' -and $recSub -cne 'undo') { Write-Host (Get-AtmText 'cli.recoverUsage') -ForegroundColor Red; exit 2 }
             if ($recSub -ceq 'list' -and ($PSBoundParameters.ContainsKey('Operation') -or $PSBoundParameters.ContainsKey('Service'))) { Write-Host (Get-AtmText 'cli.recoverUsage') -ForegroundColor Red; exit 2 }
+            # The run id and the relaunch marker belong to start and undo only; undo takes no operation or service, start
+            # no run id.
+            if (($recSub -ceq 'list' -or $recSub -ceq 'plan') -and ($PSBoundParameters.ContainsKey('RunId') -or $PSBoundParameters.ContainsKey('AtmElevatedRecovery'))) { Write-Host (Get-AtmText 'cli.recoverUsage') -ForegroundColor Red; exit 2 }
+            if ($recSub -ceq 'undo' -and ($PSBoundParameters.ContainsKey('Operation') -or $PSBoundParameters.ContainsKey('Service'))) { Write-Host (Get-AtmText 'cli.recoverUsage') -ForegroundColor Red; exit 2 }
+            if ($recSub -ceq 'start' -and $PSBoundParameters.ContainsKey('RunId')) { Write-Host (Get-AtmText 'cli.recoverUsage') -ForegroundColor Red; exit 2 }
+            if ($recSub -ceq 'start' -or $recSub -ceq 'undo') {
+                # V0.4 R4 (ADR-0016, R4 implementation record): one operation per process, through the recovery engine
+                # (Invoke-AtmRecoverCommand). With the recovery gate closed (every copy): the plan, or the inverse plan, then
+                # exit 27, with no elevation requested and nothing asked, locked or logged. Past the gate: an elevated token
+                # acts here; any other relaunches this installation's own bin\agent-temp.cmd once, through UAC, with fixed
+                # arguments and never a path, and reports only by that copy's exit code. The exit codes are in docs/USAGE.md.
+                if ($recSub -ceq 'start') {
+                    if ($null -eq $(if ($Operation) { Get-AtmRecoveryOperation $Operation } else { $null })) { Write-Host (Get-AtmText 'cli.recoverOperationInvalid' (@($script:AtmRecoveryCatalog | ForEach-Object { $_.Id }) -join ', ')) -ForegroundColor Red; exit 2 }
+                    if (-not $Service -or $Service.Length -gt 256 -or $Service -cnotmatch '^[A-Za-z0-9_.\- ]+$') { Write-Host (Get-AtmText 'cli.recoverServiceInvalid') -ForegroundColor Red; exit 2 }
+                } elseif (-not (Test-AtmRecoverRunIdForm $RunId)) { Write-Host (Get-AtmText 'cli.recoverRunIdInvalid') -ForegroundColor Red; exit 2 }
+                $recCmd = @{ Verb = $recSub; Operation = $Operation; Service = $Service; RunId = $RunId; Elevated = [bool]$AtmElevatedRecovery; BoundNames = [string[]]@($PSBoundParameters.Keys)
+                    Installed = [bool]$integrity.Installed; LauncherListed = [bool]$integrity.Listed.ContainsKey('bin\agent-temp.cmd'); InstallRoot = $here; InventoryArgs = $invArgs
+                    Presenter = { param($kind, $data) Show-AtmRecoverCommandOutput -Kind $kind -Data $data }
+                    ConfirmationReader = { param($phrase, $kind, $rootPath, $choices, $info) Read-AtmCleanAnswer -Phrase $phrase -Kind $kind -RootPath $rootPath -Choices $choices -Info $info -LineReader { param($pr) Read-Host $pr } }
+                    KeyReader = { Wait-AtmRecoverKey } }
+                if ($DeadlineSeconds -ge 0) { $recCmd['DeadlineSeconds'] = $DeadlineSeconds }
+                $recOut = Invoke-AtmRecoverCommand @recCmd
+                exit ([int]$recOut.ExitCode)
+            }
             $recOp = $null
             if ($recSub -ceq 'plan') {
                 $recOp = $(if ($Operation) { Get-AtmRecoveryOperation $Operation } else { $null })

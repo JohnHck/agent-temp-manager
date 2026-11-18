@@ -494,8 +494,10 @@ function Invoke-AtmRecover {
         5. to 11. under the lock B8 (Invoke-AtmUnderSharedLock, without waiting: CLEAN_LOCK_<status> starts nothing):
            Invoke-AtmRecoverLocked.
       -ServiceControlImpl: test seam, scriptblock(name) returning a code of AtmRecoverySeamCodes; without it the default
-      seam runs. -SettleWait: test seam, scriptblock(milliseconds) in place of the real wait. Returns one object. Aborted:
-      the seam was never called; StoppedBy: a failure after it; Outcome: what the seam's call gave.
+      seam runs. -SettleWait: test seam, scriptblock(milliseconds) in place of the real wait. -NewRunId: the run id the
+      CLI generated (phase R4: its log is named after it), lower-case D form or RUN_ID_INVALID; without it, a new one.
+      Returns one object. Aborted: the seam was never called; StoppedBy: a failure after it; Outcome: what the seam's call
+      gave.
     #>
     [CmdletBinding()]
     param(
@@ -513,7 +515,8 @@ function Invoke-AtmRecover {
         [scriptblock]$ServiceWait = $null,
         [int]$DeadlineSeconds = $script:AtmRecoveryDeadlineSeconds,
         [scriptblock]$ServiceControlImpl,
-        [scriptblock]$SettleWait
+        [scriptblock]$SettleWait,
+        [string]$NewRunId
     )
     $logErrors = New-Object System.Collections.Generic.List[object]
     $res = [ordered]@{
@@ -527,6 +530,7 @@ function Invoke-AtmRecover {
     $op = Get-AtmRecoveryOperation $Operation
     if ($null -eq $op) { $res.Aborted = 'RECOVERY_OPERATION_INVALID'; return (& $done) }
     if (-not $PlanPresenter) { $res.Aborted = 'SEM_APRESENTACAO'; return (& $done) }
+    if ($NewRunId -and -not (Test-AtmRecoverRunIdForm $NewRunId)) { $res.Aborted = 'RUN_ID_INVALID'; return (& $done) }
     $collArgs = @{ Providers = $Providers; IdentitySource = $IdentitySource; ServiceSource = $ServiceSource; ServiceDependencySource = $ServiceDependencySource; ServiceWait = $ServiceWait; DeadlineSeconds = $DeadlineSeconds }
     if (-not $script:AtmRecoveryEnabled) {
         $coll = Get-AtmRecoverCollection @collArgs
@@ -553,7 +557,7 @@ function Invoke-AtmRecover {
     & $PlanPresenter $plan
     # No closure: the body runs in this session state, where the engine's functions are, and finds $recBound here.
     $recBound = @{ Res = $res; LogErrors = $logErrors; Collection = $coll; Plan = $plan; Inventory = $inv; CollectionArgs = $collArgs; LogFile = $LogFile
-        ConfirmationReader = $ConfirmationReader; Interaction = $Interaction; Console = $console; ServiceControlImpl = $ServiceControlImpl; SettleWait = $SettleWait }
+        ConfirmationReader = $ConfirmationReader; Interaction = $Interaction; Console = $console; ServiceControlImpl = $ServiceControlImpl; SettleWait = $SettleWait; NewRunId = $NewRunId }
     $u = Invoke-AtmUnderSharedLock -Body { Invoke-AtmRecoverLocked @recBound }
     if (-not $u.Acquired) { $res.Aborted = 'CLEAN_LOCK_' + $u.Status; $res.LockReleaseError = $u.ReleaseError; return (& $done) }
     # A failed release never replaces the main code; with none it makes the run incomplete.
@@ -583,13 +587,14 @@ function Invoke-AtmRecoverLocked {
       name or SID, a command line, a path outside a known program location or an exception message.
     #>
     param([System.Collections.IDictionary]$Res, $LogErrors, $Collection, $Plan, $Inventory, [hashtable]$CollectionArgs, [string]$LogFile, [scriptblock]$ConfirmationReader,
-        [hashtable]$Interaction = @{}, $Console, [scriptblock]$ServiceControlImpl, [scriptblock]$SettleWait)
+        [hashtable]$Interaction = @{}, $Console, [scriptblock]$ServiceControlImpl, [scriptblock]$SettleWait, [string]$NewRunId)
     $service = [string]$Plan.Target
     $op = $Plan.Operation
     $logFail = { param([string]$Stage, [string]$Code) $LogErrors.Add([pscustomobject]@{ Stage = $Stage; Code = $Code }) }
     $halt = { param([string]$Code) if (-not $Res.Aborted -and -not $Res.StoppedBy) { if ($Res.SeamCalled) { $Res.StoppedBy = $Code } else { $Res.Aborted = $Code } } }
     $me = Get-AtmCurrentIdentity
-    $runId = [guid]::NewGuid().ToString()
+    # R4: the CLI generates the run id once and names the log after it; any other caller gets a new one here.
+    $runId = $(if ($NewRunId) { $NewRunId } else { [guid]::NewGuid().ToString() })
     $Res.RunId = $runId; $Res.LogFile = $LogFile
     $Res.Phrase = 'INICIAR SERVICO ' + ([string]$Plan.PlanId).Substring(0, 8).ToUpperInvariant()
     $ls = @{ Id = $runId; Seq = 0 }
@@ -1154,8 +1159,8 @@ function Invoke-AtmRecoverUndo {
         4. the inverse plan through the mandatory -PlanPresenter;
         5. to 11. under the lock B8 (CLEAN_LOCK_<status> starts nothing): Invoke-AtmRecoverUndoLocked.
       -ServiceStopImpl: test seam, scriptblock(name) returning a code of AtmRecoveryStopSeamCodes; without it the default
-      stop seam runs. -SettleWait as Invoke-AtmRecover. Aborted: the seam was never called; StoppedBy: a failure after
-      it; Outcome: what the stop gave.
+      stop seam runs. -SettleWait and -NewRunId as Invoke-AtmRecover. Aborted: the seam was never called; StoppedBy: a
+      failure after it; Outcome: what the stop gave.
     #>
     [CmdletBinding()]
     param(
@@ -1173,7 +1178,8 @@ function Invoke-AtmRecoverUndo {
         [scriptblock]$ServiceWait = $null,
         [int]$DeadlineSeconds = $script:AtmRecoveryDeadlineSeconds,
         [scriptblock]$ServiceStopImpl,
-        [scriptblock]$SettleWait
+        [scriptblock]$SettleWait,
+        [string]$NewRunId
     )
     $logErrors = New-Object System.Collections.Generic.List[object]
     $res = [ordered]@{
@@ -1185,6 +1191,7 @@ function Invoke-AtmRecoverUndo {
     }
     $done = { $res.LogErrors = $logErrors.ToArray(); $res.Changed = (@($res.Diff).Count -gt 0); [pscustomobject]$res }
     if (-not $PlanPresenter) { $res.Aborted = 'SEM_APRESENTACAO'; return (& $done) }
+    if ($NewRunId -and -not (Test-AtmRecoverRunIdForm $NewRunId)) { $res.Aborted = 'RUN_ID_INVALID'; return (& $done) }
     $collArgs = @{ Providers = $Providers; IdentitySource = $IdentitySource; ServiceSource = $ServiceSource; ServiceDependencySource = $ServiceDependencySource; ServiceWait = $ServiceWait; DeadlineSeconds = $DeadlineSeconds }
     $plan = $null
     $build = {
@@ -1220,7 +1227,7 @@ function Invoke-AtmRecoverUndo {
     & $PlanPresenter $plan
     # No closure: the body runs in this session state, where the engine's functions are, and finds $undoBound here.
     $undoBound = @{ Res = $res; LogErrors = $logErrors; Collection = $b.Collection; Plan = $plan; Inventory = $inv; CollectionArgs = $collArgs; LogFile = $LogFile
-        ConfirmationReader = $ConfirmationReader; Interaction = $Interaction; Console = $console; ServiceStopImpl = $ServiceStopImpl; SettleWait = $SettleWait }
+        ConfirmationReader = $ConfirmationReader; Interaction = $Interaction; Console = $console; ServiceStopImpl = $ServiceStopImpl; SettleWait = $SettleWait; NewRunId = $NewRunId }
     $u = Invoke-AtmUnderSharedLock -Body { Invoke-AtmRecoverUndoLocked @undoBound }
     if (-not $u.Acquired) { $res.Aborted = 'CLEAN_LOCK_' + $u.Status; $res.LockReleaseError = $u.ReleaseError; return (& $done) }
     # A failed release never replaces the main code; with none it makes the run incomplete.
@@ -1249,13 +1256,14 @@ function Invoke-AtmRecoverUndoLocked {
       computed in every outcome. Nothing is compensated or retried: a failed undo starts nothing again.
     #>
     param([System.Collections.IDictionary]$Res, $LogErrors, $Collection, $Plan, $Inventory, [hashtable]$CollectionArgs, [string]$LogFile, [scriptblock]$ConfirmationReader,
-        [hashtable]$Interaction = @{}, $Console, [scriptblock]$ServiceStopImpl, [scriptblock]$SettleWait)
+        [hashtable]$Interaction = @{}, $Console, [scriptblock]$ServiceStopImpl, [scriptblock]$SettleWait, [string]$NewRunId)
     $service = [string]$Plan.Target
     $op = $Plan.Operation
     $logFail = { param([string]$Stage, [string]$Code) $LogErrors.Add([pscustomobject]@{ Stage = $Stage; Code = $Code }) }
     $halt = { param([string]$Code) if (-not $Res.Aborted -and -not $Res.StoppedBy) { if ($Res.SeamCalled) { $Res.StoppedBy = $Code } else { $Res.Aborted = $Code } } }
     $me = Get-AtmCurrentIdentity
-    $runId = [guid]::NewGuid().ToString()
+    # R4: the CLI generates the run id once and names the log after it; any other caller gets a new one here.
+    $runId = $(if ($NewRunId) { $NewRunId } else { [guid]::NewGuid().ToString() })
     $Res.RunId = $runId; $Res.LogFile = $LogFile
     $Res.Phrase = 'PARAR SERVICO ' + ([string]$Plan.PlanId).Substring(0, 8).ToUpperInvariant()
     $ls = @{ Id = $runId; Seq = 0 }
@@ -1366,4 +1374,368 @@ function Invoke-AtmRecoverUndoLocked {
     } finally {
         if ($null -ne $log) { try { $log.Dispose() } catch { $null = $_ } }
     }
+}
+
+# ---------------------------------------------------------------------------------------------
+# Phase R4 (ADR-0016 section 3, alternative (b), V04-D3 (b)): the CLI verbs recover start and recover undo, one operation
+# per process, and the elevation on demand through UAC. Invoke-AtmRecoverCommand is their only entry, called by the
+# launcher once per process. Gate closed (every copy): the plan, or the inverse plan read from the fixed folder, then
+# RECUPERACAO_REAL_DESABILITADA: no elevation is requested and nothing is asked, locked or logged. Past the gate (the
+# suite only): an elevated administrator token runs the engine in this process (the manual model (a)); any other token
+# relaunches the installed launcher once, elevated, with fixed arguments (the verb, the operation and the name or the run
+# id, and the marker), through the elevated launcher seam, and reports only by that copy's exit code: it reads no log and
+# receives no path. The elevated copy trusts nothing from its requester: its own launcher checked the installation, and
+# it collects, applies the criteria, shows the plan, asks for the phrase in its own console, takes the lock, logs and
+# revalidates again, does one operation and exits. Its logs live in a fixed machine folder that only the installer
+# creates; it refuses that folder when it differs, and never creates or fixes it.
+# ---------------------------------------------------------------------------------------------
+# The exit codes of the two verbs (ADR-0016, R4 implementation record; docs/USAGE.md). The requester relays an exit code
+# of the elevated copy that is in AtmRecoverRelayedExitCodes as its own; any other is ELEVATED_EXIT_UNKNOWN.
+$script:AtmRecoverExitCodes = [ordered]@{
+    USAGE = 2; PLAN_REFUSED = 3; INTEGRITY = 5; UNEXPECTED = 10
+    COMPLETE = 20; PARTIAL = 21; FAILED = 22; REFUSED = 23; EXCEPTION = 24; STOPPED_BEFORE_SEAM = 25; STOPPED_AFTER_SEAM = 26
+    GATE_CLOSED = 27; LOG_DIR_REFUSED = 28; ELEVATED_REFUSED = 29; SECOND_OPERATION = 30; NOT_INSTALLED = 31
+    UAC_ERROR_1223 = 40; UAC_WIN32_ERROR = 41; UAC_LAUNCHER_EXCEPTION = 42; UAC_NOT_STARTED = 43; ELEVATED_EXIT_UNKNOWN = 44
+}
+$script:AtmRecoverRelayedExitCodes = @(2, 3, 5, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31)
+$script:AtmRecoverOutcomeExitCodes = @{ COMPLETE = 20; PARTIAL = 21; FAILED = 22; REFUSED = 23; EXCEPTION = 24 }
+# The engine's refusals before anything is asked (exit PLAN_REFUSED).
+$script:AtmRecoverPlanRefusals = @('RECOVERY_REFUSED', 'UNDO_REFUSED', 'UNDO_SOURCE_REFUSED')
+$script:AtmRecoverLogDirCodes = @('RECOVER_LOG_DIR_MISSING', 'RECOVER_LOG_DIR_REPARSE', 'RECOVER_LOG_DIR_OWNER', 'RECOVER_LOG_DIR_DACL', 'RECOVER_LOG_DIR_UNREADABLE')
+$script:AtmRecoverRequesterStatuses = @('UNVERIFIED', 'SAME', 'DIFFERENT', 'UNREADABLE')
+# The only parameters a relaunched copy accepts, as its launcher bound them (the marker included); anything else is
+# ELEVATED_REFUSED. -Lang, -DeadlineSeconds, -NoProgress and -Ascii are never relayed.
+$script:AtmRecoverElevatedArguments = @{ start = @('Command', 'SubCommand', 'Operation', 'Service', 'AtmElevatedRecovery'); undo = @('Command', 'SubCommand', 'RunId', 'AtmElevatedRecovery') }
+# One operation past the gate per process (PRIV-9): set on entry, before any work; never cleared by the engine.
+$script:AtmRecoverOperationTaken = $false
+
+function Test-AtmRecoverRunIdForm {
+    # A run id as the engine writes it: a GUID in the lower-case D form, exactly (the undo compares it ordinally).
+    param([string]$Value)
+    $g = [guid]::Empty
+    return ([guid]::TryParseExact([string]$Value, 'D', [ref]$g) -and $g.ToString() -ceq $Value)
+}
+
+function Get-AtmRecoverLogDir {
+    <#
+      The fixed folder of the CLI's recovery logs, <CommonApplicationData>\AgentTempManager\recover, and its parent.
+      -Base: test seam in place of the machine's CommonApplicationData folder; the launcher never passes it.
+    #>
+    param([string]$Base)
+    $root = $(if ($Base) { $Base } else { [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData) })
+    $parent = [IO.Path]::Combine([string]$root, 'AgentTempManager')
+    return [pscustomobject]@{ Parent = $parent; Dir = [IO.Path]::Combine($parent, 'recover') }
+}
+
+function Test-AtmRecoverLogDirSecurity {
+    <#
+      The owner and DACL the installer gives the fixed folder and its parent: owned by Administrators, a protected DACL,
+      access allowed to SYSTEM and Administrators only, each with full control on the folder itself (nothing for Users or
+      anyone else). Deny entries only take rights away. Returns $null, RECOVER_LOG_DIR_OWNER or RECOVER_LOG_DIR_DACL.
+    #>
+    param($Security)
+    $owner = $Security.GetOwner([Security.Principal.SecurityIdentifier])
+    if ($null -eq $owner -or $owner.Value -cne 'S-1-5-32-544') { return 'RECOVER_LOG_DIR_OWNER' }
+    if (-not $Security.AreAccessRulesProtected) { return 'RECOVER_LOG_DIR_DACL' }
+    $fc = [Security.AccessControl.FileSystemRights]::FullControl
+    $full = @{}
+    foreach ($r in @($Security.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))) {
+        if ($r.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
+        $sid = $r.IdentityReference.Value
+        if ($sid -cne 'S-1-5-18' -and $sid -cne 'S-1-5-32-544') { return 'RECOVER_LOG_DIR_DACL' }
+        if (($r.FileSystemRights -band $fc) -eq $fc -and ($r.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -eq 0) { $full[$sid] = $true }
+    }
+    if (-not $full.ContainsKey('S-1-5-18') -or -not $full.ContainsKey('S-1-5-32-544')) { return 'RECOVER_LOG_DIR_DACL' }
+    return $null
+}
+
+function Test-AtmRecoverLogDir {
+    <#
+      The fixed folder, checked before every use by the copy that acts (and, read only, before the inverse plan with the
+      gate closed): its parent, then the folder, each on a fixed local drive with no reparse point in its path (AtmPathCheck),
+      a directory, and Test-AtmRecoverLogDirSecurity on its security descriptor. Never creates, changes or fixes anything:
+      that is the installer's (Install-AgentTempManager.ps1). Returns Code ($null or one of AtmRecoverLogDirCodes), Dir
+      and Parent. -Base as Get-AtmRecoverLogDir.
+    #>
+    param([string]$Base)
+    $d = Get-AtmRecoverLogDir -Base $Base
+    $out = [ordered]@{ Code = $null; Dir = $d.Dir; Parent = $d.Parent }
+    try {
+        Initialize-AtmNative
+        foreach ($p in @($d.Parent, $d.Dir)) {
+            $at = $null
+            $chain = [AgentTempManager.AtmPathCheck]::Chain($p, [ref]$at)
+            if ($chain -ceq 'NOT_FOUND') { $out.Code = 'RECOVER_LOG_DIR_MISSING'; break }
+            if ($chain -ceq 'REPARSE_IN_PATH') { $out.Code = 'RECOVER_LOG_DIR_REPARSE'; break }
+            if ($chain -cne 'OK') { $out.Code = 'RECOVER_LOG_DIR_UNREADABLE'; break }
+            $di = New-Object IO.DirectoryInfo($p)
+            if (-not $di.Exists) { $out.Code = 'RECOVER_LOG_DIR_MISSING'; break }
+            $sec = $(if ($null -ne ('System.IO.FileSystemAclExtensions' -as [type])) { [System.IO.FileSystemAclExtensions]::GetAccessControl($di) } else { $di.GetAccessControl() })
+            $code = Test-AtmRecoverLogDirSecurity -Security $sec
+            if ($null -ne $code) { $out.Code = $code; break }
+        }
+    } catch { $out.Code = 'RECOVER_LOG_DIR_UNREADABLE' }
+    return [pscustomobject]$out
+}
+
+function Get-AtmRecoverActingIdentity {
+    # PRIV-5: the identity of this process's own token, the only one that acts and decides (-Source as Get-AtmIdentityState).
+    param([scriptblock]$Source)
+    return (Get-AtmIdentityState -Source $Source)
+}
+
+function Get-AtmRecoverRequesterEvidence {
+    <#
+      PRIV-5: what a relaunched copy knows of who requested it. The default reads nothing and answers UNVERIFIED: the
+      elevated copy cannot verify its requester (ADR-0016, R4 record: a parent process id can be forged or reused, and
+      reading another process's token would need a process handle that src never opens). -Source: test seam returning an
+      object with Status (one of AtmRecoverRequesterStatuses) and, for DIFFERENT, Name; anything else, or a throw, is
+      UNREADABLE. Whatever it says, decisions use the acting identity only, and any other profile is another user's.
+    #>
+    param([scriptblock]$Source)
+    if (-not $Source) { return [pscustomobject]@{ Status = 'UNVERIFIED'; Name = $null } }
+    $e = $null
+    try { $e = & $Source } catch { return [pscustomobject]@{ Status = 'UNREADABLE'; Name = $null } }
+    $names = $(if ($null -ne $e) { @($e.PSObject.Properties.Name) } else { @() })
+    $st = $(if ($names -ccontains 'Status') { [string]$e.Status } else { '' })
+    if ($script:AtmRecoverRequesterStatuses -cnotcontains $st) { return [pscustomobject]@{ Status = 'UNREADABLE'; Name = $null } }
+    return [pscustomobject]@{ Status = $st; Name = $(if ($st -ceq 'DIFFERENT' -and $names -ccontains 'Name') { [string]$e.Name } else { $null }) }
+}
+
+function Invoke-AtmRecoverElevatedLaunchDefault {
+    <#
+      The default elevated launcher (PRIV-4, PRIV-7): ShellExecuteEx with the elevation verb, which shows the UAC prompt,
+      for the installed launcher (-FilePath) with the fixed arguments; waits for that process and reads its exit code.
+      Returns Started, ExitCode and Win32Error: a refused, cancelled or failed request gives the Win32 error of the failed
+      start; no process at all gives Started false with none. Called only by Invoke-AtmRecoverCommand, past the recovery
+      gate, when no -ElevatedLauncherImpl is given: the suite and the CI never reach it.
+    #>
+    param([string]$FilePath, [string]$Arguments)
+    $psi = New-Object Diagnostics.ProcessStartInfo($FilePath, $Arguments)
+    $psi.UseShellExecute = $true
+    $psi.Verb = 'runas'
+    $p = $null
+    try { $p = [Diagnostics.Process]::Start($psi) }
+    catch {
+        $b = $_.Exception.GetBaseException()
+        if ($b -is [ComponentModel.Win32Exception]) { return [pscustomobject]@{ Started = $false; ExitCode = $null; Win32Error = [int]$b.NativeErrorCode } }
+        throw
+    }
+    if ($null -eq $p) { return [pscustomobject]@{ Started = $false; ExitCode = $null; Win32Error = $null } }
+    try {
+        $p.WaitForExit()
+        $code = $null
+        try { $code = [int]$p.ExitCode } catch { $code = $null }
+        return [pscustomobject]@{ Started = $true; ExitCode = $code; Win32Error = $null }
+    } finally { $p.Dispose() }
+}
+
+function Get-AtmRecoverLaunchExitCode {
+    <#
+      PRIV-4: the requester's exit code from what the elevated launcher gave, never a reason guessed from one number.
+      Not started: with Win32 error 1223 (UAC_ERROR_1223: usually a cancelled prompt, not proof), with another error
+      (UAC_WIN32_ERROR), with none (UAC_NOT_STARTED); a launcher exception or an unreadable result
+      (UAC_LAUNCHER_EXCEPTION). In these four no elevated copy ran. Started: an exit code in AtmRecoverRelayedExitCodes is
+      relayed as is; any other, or none (a crash, a closed window, a run that ended without its result), is
+      ELEVATED_EXIT_UNKNOWN: that copy may have acted before it ended.
+    #>
+    param($Launch, [string]$ExceptionType)
+    $r = { param([int]$E, [string]$C, $D, [bool]$Rel) [pscustomobject]@{ ExitCode = $E; Code = $C; Detail = $D; Relayed = $Rel } }
+    if ($ExceptionType) { return (& $r 42 'UAC_LAUNCHER_EXCEPTION' $ExceptionType $false) }
+    $names = $(if ($null -ne $Launch) { @($Launch.PSObject.Properties.Name) } else { @() })
+    if ($names -cnotcontains 'Started' -or -not ($Launch.Started -is [bool])) { return (& $r 42 'UAC_LAUNCHER_EXCEPTION' 'LAUNCHER_RESULT_INVALID' $false) }
+    $w32 = $(if ($names -ccontains 'Win32Error') { $Launch.Win32Error } else { $null })
+    $ec = $(if ($names -ccontains 'ExitCode') { $Launch.ExitCode } else { $null })
+    if (-not $Launch.Started) {
+        if ($null -eq $w32) { return (& $r 43 'UAC_NOT_STARTED' $null $false) }
+        if (-not ($w32 -is [int])) { return (& $r 42 'UAC_LAUNCHER_EXCEPTION' 'LAUNCHER_RESULT_INVALID' $false) }
+        if ($w32 -eq 1223) { return (& $r 40 'UAC_ERROR_1223' 1223 $false) }
+        return (& $r 41 'UAC_WIN32_ERROR' $w32 $false)
+    }
+    if ($ec -is [int] -and $script:AtmRecoverRelayedExitCodes -contains $ec) { return (& $r $ec 'ELEVATED_EXIT' $ec $true) }
+    return (& $r 44 'ELEVATED_EXIT_UNKNOWN' $ec $false)
+}
+
+function Get-AtmRecoverResultExitCode {
+    # The exit code of one engine result: after the seam, STOPPED_AFTER_SEAM when the run is incomplete, else the
+    # outcome's; before it, GATE_CLOSED, PLAN_REFUSED (AtmRecoverPlanRefusals) or STOPPED_BEFORE_SEAM.
+    param($Result)
+    if ($null -ne $Result.StoppedBy -or ($Result.SeamCalled -and $null -eq $Result.Outcome)) { return [pscustomobject]@{ ExitCode = 26; Code = [string]$Result.StoppedBy } }
+    if ($null -ne $Result.Outcome) { return [pscustomobject]@{ ExitCode = [int]$script:AtmRecoverOutcomeExitCodes[[string]$Result.Outcome]; Code = [string]$Result.Outcome } }
+    if ($Result.Aborted -ceq 'RECUPERACAO_REAL_DESABILITADA') { return [pscustomobject]@{ ExitCode = 27; Code = 'RECUPERACAO_REAL_DESABILITADA' } }
+    if ($script:AtmRecoverPlanRefusals -ccontains [string]$Result.Aborted) { return [pscustomobject]@{ ExitCode = 3; Code = [string]$Result.Aborted } }
+    return [pscustomobject]@{ ExitCode = 25; Code = [string]$Result.Aborted }
+}
+
+function Invoke-AtmRecoverOneOperation {
+    <#
+      The one operation of an elevated copy (relaunched, or the manual model (a)), called only by Invoke-AtmRecoverCommand
+      past the gate; fills -Out (Result, RunId, LogDir) and returns ExitCode, Code and Detail. In this order: the identity
+      that acts and, for a relaunched copy, what is known of its requester (PRIV-5); the fixed folder (Test-AtmRecoverLogDir:
+      LOG_DIR_REFUSED); one run id, generated here and used as the new log's name; then Invoke-AtmRecover (start), or for
+      undo the source <folder>\<run id>.log (RECOVER_RUN_NOT_FOUND, exit PLAN_REFUSED, when there is none) and
+      Invoke-AtmRecoverUndo; each runs every step of its own (plan, phrase in this console, lock B8, log, revalidation,
+      seam, wait); then the result, with the run id only when its log was created.
+    #>
+    param([System.Collections.IDictionary]$Out, [string]$Verb, [string]$Operation, [string]$Service, [string]$RunId, $Acting, [hashtable]$InventoryArgs,
+        [scriptblock]$ConfirmationReader, [string]$LogDirBase, [hashtable]$EngineArgs, [scriptblock]$Presenter)
+    $atmRecShow = { param([string]$Kind, $Data) if ($Presenter) { $null = & $Presenter $Kind $Data } }
+    & $atmRecShow 'identity' ([pscustomobject]@{ Name = $Acting.Name; ElevationType = $Acting.ElevationType; IntegrityLevel = $Acting.IntegrityLevel; Requester = $Out.Requester; Relaunched = ($Out.Side -ceq 'ELEVATED') })
+    $ld = Test-AtmRecoverLogDir -Base $LogDirBase
+    $Out.LogDir = $ld.Code
+    if ($null -ne $ld.Code) { return [pscustomobject]@{ ExitCode = 28; Code = $ld.Code; Detail = $null } }
+    $newRunId = [guid]::NewGuid().ToString()
+    $logFile = Join-Path $ld.Dir ($newRunId + '.log')
+    $interaction = @{ Caller = 'CLI'; ConsoleRequired = $true }
+    if ($Verb -ceq 'start') {
+        $r = Invoke-AtmRecover -Operation $Operation -Service $Service -PlanPresenter { param($p) & $atmRecShow 'plan' $p } -ConfirmationReader $ConfirmationReader -InventoryArgs $InventoryArgs `
+            -LogFile $logFile -Interaction $interaction -NewRunId $newRunId @EngineArgs
+    } else {
+        $src = Join-Path $ld.Dir ($RunId + '.log')
+        if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { return [pscustomobject]@{ ExitCode = 3; Code = 'RECOVER_RUN_NOT_FOUND'; Detail = $RunId } }
+        $r = Invoke-AtmRecoverUndo -SourceLog $src -RunId $RunId -PlanPresenter { param($p) & $atmRecShow 'undoPlan' $p } -ConfirmationReader $ConfirmationReader -InventoryArgs $InventoryArgs `
+            -LogFile $logFile -Interaction $interaction -NewRunId $newRunId @EngineArgs
+    }
+    $Out.Result = $r
+    if ($r.LogCreated) { $Out.RunId = $r.RunId }
+    & $atmRecShow 'result' ([pscustomobject]@{ Verb = $Verb; Result = $r; RunId = $Out.RunId })
+    $x = Get-AtmRecoverResultExitCode -Result $r
+    return [pscustomobject]@{ ExitCode = $x.ExitCode; Code = $x.Code; Detail = $(if ($x.ExitCode -eq 3) { @($r.RefusalCodes) -join ',' } else { $null }) }
+}
+
+function Invoke-AtmRecoverCommand {
+    <#
+      recover start and recover undo (phase R4), called by the launcher once per process. All output goes through
+      -Presenter scriptblock(kind, data); kinds: plan, undoPlan, undoRequest, identity, elevationNotice, result, end and
+      waitKey. -Verb start (-Operation, -Service) or undo (-RunId), checked by the launcher and again here (USAGE).
+      -Elevated: the launcher's marker of a relaunched copy, as bound; it proves nothing and only makes the copy stricter.
+      -BoundNames: the parameter names the launcher bound (a relaunched copy accepts AtmRecoverElevatedArguments only).
+      -Installed, -LauncherListed (bin\agent-temp.cmd listed and verified by the launcher's manifest check) and
+      -InstallRoot (the launcher's own folder): the relaunch is only ever of the installed launcher, at its installed path.
+      -InventoryArgs and -DeadlineSeconds: for the engine. -ConfirmationReader: the typed phrase, in this console.
+      -KeyReader: the key a relaunched copy waits for before its window closes.
+      Test seams, never passed by the launcher: -ElevatedLauncherImpl scriptblock(filePath, arguments) returning Started,
+      ExitCode and Win32Error (without it, Invoke-AtmRecoverElevatedLaunchDefault); -RequesterEvidence
+      (Get-AtmRecoverRequesterEvidence); -LogDirBase (Get-AtmRecoverLogDir); -EngineArgs, passed as is to Invoke-AtmRecover
+      or Invoke-AtmRecoverUndo (providers, identity, services, seams, settle wait).
+      Gate closed: the plan, or the inverse plan when the fixed folder passes its check, then GATE_CLOSED. Past the gate,
+      once per process (SECOND_OPERATION, before anything else):
+        relaunched copy: the fixed arguments (ELEVATED_REFUSED), an elevated token (ELEVATED_REFUSED: with UAC off, the
+          relaunch is not elevated), an installed copy (NOT_INSTALLED), Invoke-AtmRecoverOneOperation, then the key, in a
+          finally;
+        elevated token: Invoke-AtmRecoverOneOperation in this process, with no key;
+        any other token, the requester: start: a fresh collection and the plan (not declared: USAGE; refused:
+          PLAN_REFUSED, and nothing is requested); undo: the run id only (this token cannot read the fixed folder); an
+          installed copy (NOT_INSTALLED); the notice that UAC is requested for this one operation and why (PRIV-2); one
+          call to the elevated launcher; its exit code (Get-AtmRecoverLaunchExitCode). It takes no lock, reads no log and
+          passes no path but the installed launcher's own.
+      Returns Side, ExitCode, Code, Detail, Relayed, Launches, LaunchFile, LaunchArguments, Result (the engine's), RunId,
+      LogDir and Requester. An unexpected failure is UNEXPECTED, by its exception type only.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Verb,
+        [string]$Operation,
+        [string]$Service,
+        [string]$RunId,
+        [switch]$Elevated,
+        [string[]]$BoundNames = @(),
+        [bool]$Installed = $false,
+        [bool]$LauncherListed = $false,
+        [string]$InstallRoot,
+        [hashtable]$InventoryArgs = @{},
+        [int]$DeadlineSeconds = $script:AtmRecoveryDeadlineSeconds,
+        [scriptblock]$Presenter,
+        [scriptblock]$ConfirmationReader,
+        [scriptblock]$KeyReader,
+        [scriptblock]$ElevatedLauncherImpl,
+        [scriptblock]$RequesterEvidence,
+        [string]$LogDirBase,
+        [hashtable]$EngineArgs = @{}
+    )
+    $out = [ordered]@{ Verb = $Verb; Side = $null; ExitCode = $null; Code = $null; Detail = $null; Relayed = $false; Launches = 0; LaunchFile = $null; LaunchArguments = $null
+        Result = $null; RunId = $null; LogDir = $null; Requester = $null }
+    $atmRecShow = { param([string]$Kind, $Data) if ($Presenter) { $null = & $Presenter $Kind $Data } }
+    $finish = {
+        param([int]$Exit, [string]$Code, $Detail)
+        $out.ExitCode = $Exit; $out.Code = $Code; $out.Detail = $Detail
+        & $atmRecShow 'end' ([pscustomobject]@{ ExitCode = $Exit; Code = $Code; Detail = $Detail; Relayed = [bool]$out.Relayed; Side = $out.Side; Verb = $Verb })
+        [pscustomobject]$out
+    }
+    $engine = @{} + $EngineArgs
+    if ($PSBoundParameters.ContainsKey('DeadlineSeconds')) { $engine['DeadlineSeconds'] = $DeadlineSeconds }
+    $collArgs = @{}
+    foreach ($k in @('Providers', 'IdentitySource', 'ServiceSource', 'ServiceDependencySource', 'ServiceWait', 'DeadlineSeconds')) { if ($engine.ContainsKey($k)) { $collArgs[$k] = $engine[$k] } }
+    $unexpected = { param($Err) & $finish 10 'RECOVER_UNEXPECTED' (ConvertTo-AtmExceptionCode $Err.Exception.GetBaseException().GetType().Name) }
+    try {
+        if ($Verb -cne 'start' -and $Verb -cne 'undo') { return (& $finish 2 'RECOVER_VERB_INVALID' $null) }
+        if ($Verb -ceq 'start' -and ($null -eq (Get-AtmRecoveryOperation $Operation) -or -not $Service -or $Service.Length -gt 256 -or $Service -cnotmatch '^[A-Za-z0-9_.\- ]+$')) { return (& $finish 2 'RECOVER_ARGUMENTS_INVALID' $null) }
+        if ($Verb -ceq 'undo' -and -not (Test-AtmRecoverRunIdForm $RunId)) { return (& $finish 2 'RECOVER_ARGUMENTS_INVALID' $null) }
+        if (-not $script:AtmRecoveryEnabled) {
+            $out.Side = 'GATE_CLOSED'
+            if ($Verb -ceq 'start') {
+                $out.Result = Invoke-AtmRecover -Operation $Operation -Service $Service -PlanPresenter { param($p) & $atmRecShow 'plan' $p } @collArgs
+            } else {
+                $ld = Test-AtmRecoverLogDir -Base $LogDirBase
+                $out.LogDir = $ld.Code
+                if ($null -eq $ld.Code) { $out.Result = Invoke-AtmRecoverUndo -SourceLog (Join-Path $ld.Dir ($RunId + '.log')) -RunId $RunId -PlanPresenter { param($p) & $atmRecShow 'undoPlan' $p } @collArgs }
+                else { & $atmRecShow 'undoRequest' ([pscustomobject]@{ RunId = $RunId; LogDir = $ld.Code; GateOpen = $false }) }
+            }
+            return (& $finish 27 'RECUPERACAO_REAL_DESABILITADA' $out.LogDir)
+        }
+    } catch { return (& $unexpected $_) }
+
+    # ---- past the recovery gate (the suite only, in its own process) ----
+    if ($script:AtmRecoverOperationTaken) { return (& $finish 30 'RECOVER_SECOND_OPERATION' $null) }
+    $script:AtmRecoverOperationTaken = $true
+    $one = @{ Out = $out; Verb = $Verb; Operation = $Operation; Service = $Service; RunId = $RunId; InventoryArgs = $InventoryArgs; ConfirmationReader = $ConfirmationReader
+        LogDirBase = $LogDirBase; EngineArgs = $engine; Presenter = $Presenter }
+    if ($Elevated) {
+        # The relaunched copy: every path ends with the key, so its window shows how it ended.
+        $out.Side = 'ELEVATED'
+        try {
+            $allowed = $script:AtmRecoverElevatedArguments[$Verb]
+            $extra = @(@($BoundNames) | Where-Object { $allowed -cnotcontains [string]$_ })
+            if ($extra.Count -gt 0 -or @($BoundNames) -cnotcontains 'AtmElevatedRecovery') { return (& $finish 29 'RECOVER_ELEVATED_ARGUMENTS' ($extra -join ',')) }
+            $acting = Get-AtmRecoverActingIdentity -Source $engine['IdentitySource']
+            if ($acting.IsElevatedAdministrator -ne $true) { return (& $finish 29 'RECOVER_ELEVATED_NOT_ELEVATED' $acting.ElevationType) }
+            if (-not $Installed -or -not $LauncherListed) { return (& $finish 31 'RECOVER_NOT_INSTALLED' $null) }
+            $out.Requester = Get-AtmRecoverRequesterEvidence -Source $RequesterEvidence
+            $x = Invoke-AtmRecoverOneOperation @one -Acting $acting
+            return (& $finish $x.ExitCode $x.Code $x.Detail)
+        } catch { return (& $unexpected $_) }
+        finally {
+            & $atmRecShow 'waitKey' ([pscustomobject]@{ RunId = $out.RunId })
+            if ($KeyReader) { try { $null = & $KeyReader } catch { $null = $_ } }
+        }
+    }
+    try {
+        $acting = Get-AtmRecoverActingIdentity -Source $engine['IdentitySource']
+        if ($acting.IsElevatedAdministrator -eq $true) {
+            $out.Side = 'SAME_PROCESS'
+            $x = Invoke-AtmRecoverOneOperation @one -Acting $acting
+            return (& $finish $x.ExitCode $x.Code $x.Detail)
+        }
+        # The requester: never elevated, it changes nothing and takes no lock.
+        $out.Side = 'REQUESTER'
+        if ($Verb -ceq 'start') {
+            $coll = Get-AtmRecoverCollection @collArgs
+            $plan = Get-AtmRecoverPlan -Collection $coll -Operation $Operation -Service $Service
+            & $atmRecShow 'plan' $plan
+            if (-not $plan.Declared) { return (& $finish 2 'RECOVERY_NOT_DECLARED' $null) }
+            if (-not $plan.Offered) { return (& $finish 3 'RECOVERY_REFUSED' (@($plan.Codes) -join ',')) }
+        } else { & $atmRecShow 'undoRequest' ([pscustomobject]@{ RunId = $RunId; LogDir = $null; GateOpen = $true }) }
+        if (-not $Installed -or -not $LauncherListed -or -not $InstallRoot) { return (& $finish 31 'RECOVER_ELEVATION_NEEDS_INSTALL' $null) }
+        $file = Join-Path $InstallRoot 'bin\agent-temp.cmd'
+        $argLine = $(if ($Verb -ceq 'start') { 'recover start -Operation ' + $Operation + ' -Service "' + $Service + '" -AtmElevatedRecovery' } else { 'recover undo -RunId ' + $RunId + ' -AtmElevatedRecovery' })
+        $out.LaunchFile = $file; $out.LaunchArguments = $argLine
+        & $atmRecShow 'elevationNotice' ([pscustomobject]@{ Verb = $Verb; Operation = $Operation; Target = $Service; RunId = $RunId })
+        $out.Launches = $out.Launches + 1
+        $launch = $null; $exType = $null
+        try { $launch = $(if ($ElevatedLauncherImpl) { & $ElevatedLauncherImpl $file $argLine } else { Invoke-AtmRecoverElevatedLaunchDefault -FilePath $file -Arguments $argLine }) }
+        catch { $exType = ConvertTo-AtmExceptionCode $_.Exception.GetBaseException().GetType().Name }
+        $m = Get-AtmRecoverLaunchExitCode -Launch $launch -ExceptionType $exType
+        $out.Relayed = $m.Relayed
+        return (& $finish $m.ExitCode $m.Code $m.Detail)
+    } catch { return (& $unexpected $_) }
 }

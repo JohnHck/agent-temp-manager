@@ -1315,8 +1315,9 @@ function Show-AtmRecoverPlan {
     # recover plan (V0.4 R1): one operation for one target. Offered: the "before" capture (codes and values as the
     # diagnose reduces them: no command line, no path outside a well-known program location, no account beyond the three
     # standard service accounts), the dependencies with their states, the undo path and what it does not undo, the likely
-    # elevation and the plan id. Refused: the codes. Always "nothing was changed".
-    param($Plan)
+    # elevation and the plan id. Refused: the codes. Always "nothing was changed" (-Pending, R4 past the gate: "nothing was
+    # changed yet", the phrase comes next).
+    param($Plan, [switch]$Pending)
     $op = $Plan.Operation
     Write-AtmHeader (Get-AtmText 'rec.planHeader' $op.Id $Plan.Target)
     Write-Host ('  ' + (Get-AtmText $op.DescriptionKey))
@@ -1342,5 +1343,119 @@ function Show-AtmRecoverPlan {
     }
     if (-not $Plan.GateOpen) { Write-Host ('  ' + (Get-AtmText 'rec.gateClosed')) -ForegroundColor Yellow }
     Write-Host ''
-    Write-Host ('  ' + (Get-AtmText 'rec.nothingChanged')) -ForegroundColor Black -BackgroundColor Yellow
+    Write-Host ('  ' + (Get-AtmText $(if ($Pending) { 'rec.planPending' } else { 'rec.nothingChanged' }))) -ForegroundColor Black -BackgroundColor Yellow
+}
+
+function Format-AtmRecoverValue {
+    # One value of a capture or a difference, as the plan shows it: a list joined, $null as '-'.
+    param($Value)
+    if ($null -eq $Value) { return '-' }
+    if ($Value -is [array]) { return $(if ($Value.Count -gt 0) { (@($Value | ForEach-Object { [string]$_ }) -join ', ') } else { '(none)' }) }
+    return [string]$Value
+}
+
+function Show-AtmRecoverUndoPlan {
+    # recover undo (V0.4 R4): the inverse plan of one recorded start (the engine's undo): REC-SVC-STOP for its one
+    # service, the source run and its outcome, the recorded state after the start, the capture now, what a pending start
+    # may still change, what the undo does not undo, the likely elevation and the plan id. Refused: the source's code or
+    # the criteria's codes, with the fields changed since the run.
+    param($Plan, [switch]$Pending)
+    $op = $Plan.Operation
+    $target = $(if ($Plan.Target) { $Plan.Target } else { '-' })
+    Write-AtmHeader (Get-AtmText 'rec.undoPlanHeader' $op.Id $target $Plan.SourceRunId)
+    Write-Host ('  ' + (Get-AtmText 'rec.undoOpDesc'))
+    if ($null -eq $Plan.SourceCode) {
+        $rec = $(if ($null -ne $Plan.Recorded) { [string]$Plan.Recorded.State } else { '-' })
+        Write-Host ('  ' + (Get-AtmText 'rec.undoSource' $Plan.SourceRunId $Plan.SourceOutcome $rec))
+    }
+    if (@($Plan.Providers).Count -gt 0) { Write-Host ('  ' + (Get-AtmText 'rec.declaredBy' (@($Plan.Providers) -join ', '))) }
+    if (-not $Plan.Offered) {
+        Write-AtmHeader (Get-AtmText 'rec.refusedHeader')
+        foreach ($r in @($Plan.Codes)) { Write-Host ('  - ' + $r) -ForegroundColor Yellow }
+        if (@($Plan.ChangedFields).Count -gt 0) { Write-Host ('  ' + (Get-AtmText 'rec.undoChanged' (@($Plan.ChangedFields) -join ', '))) -ForegroundColor Yellow }
+    } else {
+        $cap = $Plan.Capture
+        Write-Host ('  ' + (Get-AtmText 'rec.undoNow'))
+        $fields = @(@('STATE', $cap.State), @('START_MODE', $cap.StartMode), @('EXIT_CODE', $cap.ExitCode), @('SERVICE_SPECIFIC_EXIT_CODE', $cap.ServiceSpecificExitCode),
+            @('CHECKPOINT', $cap.CheckPoint), @('WAIT_HINT_MS', $cap.WaitHint), @('ACCEPT_STOP', $cap.AcceptStop), @('ACCOUNT_KIND', $cap.AccountKind), @('ACCOUNT', $cap.Account),
+            @('EXECUTABLE', $cap.Executable), @('IMAGE', $cap.Image))
+        foreach ($fv in $fields) { Write-Host ('    {0,-27} {1}' -f $fv[0], (Format-AtmRecoverValue $fv[1])) }
+        foreach ($x in @($cap.Dependents)) { Write-Host ('    {0,-27} {1}' -f 'DEPENDENT', $x) }
+        if (@($Plan.AcceptedTransition).Count -gt 0) { Write-Host ('  ' + (Get-AtmText 'rec.undoTransition' (@($Plan.AcceptedTransition) -join ', '))) }
+        Write-Host ('  ' + (Get-AtmText 'rec.notUndone'))
+        if ($Plan.Elevation) { Write-Host ('  ' + (Get-AtmText ('rec.elevation.' + $Plan.Elevation))) }
+        Write-Host ('  ' + (Get-AtmText 'rec.planId' $Plan.PlanId))
+    }
+    if (-not $Plan.GateOpen) { Write-Host ('  ' + (Get-AtmText 'rec.gateClosed')) -ForegroundColor Yellow }
+    Write-Host ''
+    Write-Host ('  ' + (Get-AtmText $(if ($Pending) { 'rec.planPending' } else { 'rec.nothingChanged' }))) -ForegroundColor Black -BackgroundColor Yellow
+}
+
+function Show-AtmRecoverResult {
+    # The result of one recover start or recover undo in the copy that acted: stopped before the seam (the code and any
+    # refusal codes), or the outcome, the seam's code or exception type, an incomplete run, every difference between
+    # before and after, log failures, and the run id when its log was created (the operator needs it for recover undo).
+    param($Data)
+    $r = $Data.Result
+    $target = $(if ($r.Target) { $r.Target } else { '-' })
+    Write-AtmHeader (Get-AtmText 'rec.resultHeader' $r.Operation $target)
+    if (-not $r.SeamCalled) {
+        Write-Host ('  ' + (Get-AtmText 'rec.resultAborted' $r.Aborted)) -ForegroundColor Yellow
+        if (@($r.RefusalCodes).Count -gt 0) { Write-Host ('  ' + (Get-AtmText 'rec.resultCodes' (@($r.RefusalCodes) -join ', '))) -ForegroundColor Yellow }
+        if (@($r.RevalidationCodes).Count + @($r.ChangedFields).Count -gt 0) { Write-Host ('  ' + (Get-AtmText 'rec.resultCodes' ((@($r.RevalidationCodes) + @($r.ChangedFields)) -join ', '))) -ForegroundColor Yellow }
+    } else {
+        $seam = $(if ($r.ExceptionType) { $r.ExceptionType } elseif ($r.SeamCode) { $r.SeamCode } else { '-' })
+        Write-Host ('  ' + (Get-AtmText 'rec.resultOutcome' $r.Outcome $seam)) -ForegroundColor $(if ($r.Outcome -ceq 'COMPLETE') { 'Green' } else { 'Yellow' })
+        if ($r.StoppedBy) { Write-Host ('  ' + (Get-AtmText 'rec.resultStoppedBy' $r.StoppedBy)) -ForegroundColor Red }
+        if (@($r.Diff).Count -eq 0) { Write-Host ('  ' + (Get-AtmText 'rec.resultNoDiff')) }
+        else {
+            Write-Host ('  ' + (Get-AtmText 'rec.resultDiffHeader'))
+            foreach ($d in @($r.Diff)) { Write-Host ('    {0,-27} {1} -> {2}' -f $d['field'], (Format-AtmRecoverValue $d['before']), (Format-AtmRecoverValue $d['after'])) }
+        }
+    }
+    foreach ($e in @($r.LogErrors)) { Write-Host ('  ' + (Get-AtmText 'rec.resultLogError' $e.Stage $e.Code)) -ForegroundColor Red }
+    if ($r.LockReleaseError) { Write-Host ('  ' + (Get-AtmText 'rec.resultLockRelease' $r.LockReleaseError)) -ForegroundColor Red }
+    if ($Data.RunId) { Write-Host ('  ' + (Get-AtmText $(if ($Data.Verb -ceq 'start') { 'rec.resultRunIdStart' } else { 'rec.resultRunIdUndo' }) $Data.RunId)) -ForegroundColor Cyan }
+}
+
+function Show-AtmRecoverCommandOutput {
+    # recover start and recover undo (V0.4 R4): every line of the engine's recover command, by kind. The exit line ('end')
+    # says only what its code proves: "nothing was changed" where no service control call can have been made.
+    param([string]$Kind, $Data)
+    switch ($Kind) {
+        'plan' { Show-AtmRecoverPlan -Plan $Data -Pending:([bool]$Data.GateOpen) }
+        'undoPlan' { Show-AtmRecoverUndoPlan -Plan $Data -Pending:([bool]$Data.GateOpen) }
+        'undoRequest' {
+            if ($Data.LogDir) { Write-Host ('  ' + (Get-AtmText 'rec.undoRequestLogDir' $Data.RunId $Data.LogDir)) -ForegroundColor Yellow }
+            else { Write-Host ('  ' + (Get-AtmText 'rec.undoRequest' $Data.RunId)) }
+        }
+        'identity' {
+            Write-Host ('  ' + (Get-AtmText 'rec.actingIdentity' $Data.Name $Data.ElevationType $Data.IntegrityLevel)) -ForegroundColor Cyan
+            if ($Data.Relaunched -and $null -ne $Data.Requester) {
+                $st = [string]$Data.Requester.Status
+                Write-Host ('  ' + (Get-AtmText ('rec.requester.' + $st) $Data.Requester.Name)) -ForegroundColor $(if ($st -ceq 'SAME') { 'Cyan' } else { 'Yellow' })
+            }
+        }
+        'elevationNotice' {
+            $what = $(if ($Data.Verb -ceq 'start') { Get-AtmText 'rec.uacWhatStart' $Data.Operation $Data.Target } else { Get-AtmText 'rec.uacWhatUndo' $Data.RunId })
+            Write-Host ''
+            Write-Host ('  ' + (Get-AtmText 'rec.uacNotice' $what)) -ForegroundColor Yellow
+            Write-Host ('  ' + (Get-AtmText 'rec.uacNotice2')) -ForegroundColor Yellow
+        }
+        'result' { Show-AtmRecoverResult -Data $Data }
+        'end' {
+            if ($Data.Relayed) { Write-Host ('  ' + (Get-AtmText 'rec.relayed')) }
+            $detail = $(if ($null -ne $Data.Detail -and [string]$Data.Detail -ne '') { [string]$Data.Detail } elseif ($Data.Code) { [string]$Data.Code } else { '-' })
+            $quiet = @(2, 3, 5, 25, 27, 28, 29, 30, 31, 40, 41, 42, 43) -contains [int]$Data.ExitCode
+            Write-Host ''
+            Write-Host ('  ' + (Get-AtmText ('rec.exit.' + [int]$Data.ExitCode) $detail)) -ForegroundColor $(if ($Data.ExitCode -eq 20) { 'Green' } elseif ($quiet) { 'Yellow' } else { 'Red' })
+        }
+        'waitKey' { Write-Host ''; Write-Host ('  ' + (Get-AtmText 'rec.waitKey')) }
+    }
+}
+
+function Wait-AtmRecoverKey {
+    # The key a relaunched elevated copy waits for before its window closes (no echo); a console that cannot be read
+    # (redirected) does not wait.
+    try { $null = [Console]::ReadKey($true) } catch { $null = $_ }
 }

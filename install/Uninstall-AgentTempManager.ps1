@@ -24,3 +24,6 @@ try {
 } finally { Exit-AtmOperationLock }
 Write-Host (Get-AtmText 'inst.pathRemoved' $removed)
 Write-Host (Get-AtmText 'inst.uninstalled') -ForegroundColor Green
+# V0.4 R4: the recovery log folder is never removed by the uninstaller; it says so when the folder exists.
+$recoverLogDir = (Get-AtmRecoverLogDirPaths).Dir
+if (Test-Path -LiteralPath $recoverLogDir) { Write-Host (Get-AtmRecoveryText 'inst.recoverLogDirUninstallKept' $recoverLogDir) -ForegroundColor Yellow }

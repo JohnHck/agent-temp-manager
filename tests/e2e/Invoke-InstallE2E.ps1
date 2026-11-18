@@ -6,7 +6,9 @@
   machine PATH, creates a temporary local standard user and creates a fake agent session under the current
   user's TEMP. Steps:
     build the release from the checkout; check SHA256SUMS; extract to an administrator-only folder; install (no
-    -ProjectsFile); verify / version / audit / preview / help / TUI refusal from a new process using the machine
+    -ProjectsFile); the fixed folder of the recovery logs (V0.4 R4: owner, DACL, recover start and undo stopped by the
+    closed gate with exit 27 and no UAC prompt; kept, with its content, by the update and by the uninstall);
+    verify / version / audit / preview / help / TUI refusal from a new process using the machine
     PATH; clean of a real-looking session root must stop without deleting it (V0.1); update; rollback; tamper
     detection and repair; audit / preview / verify as a real standard user, who cannot write the install
     directory; uninstall (directory and PATH entry removed); then the published 0.1.0 package (GitHub Release asset,
@@ -73,6 +75,25 @@ function Invoke-Agent([string]$ArgLine, [string]$Tag) {
 }
 
 function Assert([bool]$Cond, [string]$Msg) { if (-not $Cond) { throw $Msg } }
+
+function Get-E2ERecoverDirProblems {
+    # V0.4 R4: the fixed folder of the recovery logs and its parent, as the installer creates them: owner Administrators,
+    # a protected DACL, full control for SYSTEM and Administrators and nothing for anyone else (Users included).
+    $root = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    $problems = @()
+    foreach ($d in @((Join-Path $root 'AgentTempManager'), (Join-Path $root 'AgentTempManager\recover'))) {
+        if (-not [IO.Directory]::Exists($d)) { $problems += "$d ausente"; continue }
+        if (((Get-Item -LiteralPath $d -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $problems += "$d ponto de reparse" }
+        $acl = Get-Acl -LiteralPath $d
+        $o = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+        if ($o -ne 'S-1-5-32-544') { $problems += "$d dono $o" }
+        if (-not $acl.AreAccessRulesProtected) { $problems += "$d DACL nao protegida" }
+        $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object { $_.AccessControlType -eq 'Allow' } | ForEach-Object { '{0}:{1}' -f $_.IdentityReference.Value, [int]$_.FileSystemRights } | Sort-Object)
+        if (($rules -join ',') -ne 'S-1-5-18:2032127,S-1-5-32-544:2032127') { $problems += "$d DACL $($rules -join ',')" }
+    }
+    return $problems
+}
+$recoverDir = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) 'AgentTempManager\recover'
 
 function Invoke-PublishedFreshInstall([string]$Version, [string]$PkgDir) {
     # INSTALL-RACE (auditor's decision, option b). The published installers (0.1.0, 0.1.1, 0.2.0, 0.3.0; pinned by hash) compile
@@ -377,6 +398,25 @@ Step 'shipped-isolation-gate' {
     Assert (-not (Test-Path -LiteralPath $probe)) 'isolate criou o caminho pedido'
     'installed isolation gate = $false; version shows it disabled; isolate plan-only, exit 3'
 }
+Step 'recover-log-folder' {
+    # V0.4 R4: the installer created the fixed folder of the recovery logs with its owner and DACL; with the recovery gate
+    # closed, recover start shows the plan and exits 27 without asking for elevation, and recover undo reads the run's log
+    # from that folder (none exists: the inverse plan is refused) and exits 27 too. Never a UAC prompt: this driver is
+    # already elevated and the gate is closed in the installed copy. A marker file is left in the folder, for the update
+    # and uninstall steps.
+    $bad = @(Get-E2ERecoverDirProblems)
+    Assert ($bad.Count -eq 0) "pasta dos logs de recuperacao: $($bad -join '; ')"
+    $t = [IO.File]::ReadAllText((Join-Path $OutDir 'install.txt')) -replace '\s+', ''
+    Assert ($t.Contains('Recoverylogfoldercreated:')) 'o instalador nao disse que criou a pasta dos logs de recuperacao'
+    $r = Invoke-Agent 'recover start -Operation REC-SVC-START -Service CoworkVMService -Lang en-US -NoProgress' 'recover-start-gate-closed'
+    Assert ($r.Code -eq 27 -and $r.Text.Contains('RECUPERACAO_REAL_DESABILITADA') -and $r.Text.Contains('no elevation was requested')) "recover start: exit $($r.Code)"
+    $rid = [guid]::NewGuid().ToString()
+    $r = Invoke-Agent "recover undo -RunId $rid -Lang en-US -NoProgress" 'recover-undo-gate-closed'
+    Assert ($r.Code -eq 27 -and $r.Text.Contains('UNDO_SOURCE_UNREADABLE') -and $r.Text.Contains('RECUPERACAO_REAL_DESABILITADA')) "recover undo: exit $($r.Code)"
+    Assert (@(Get-ChildItem -LiteralPath $recoverDir -Force).Count -eq 0) 'recover criou arquivo na pasta com a trava fechada'
+    [IO.File]::WriteAllText((Join-Path $recoverDir 'e2e-keep.txt'), 'e2e')
+    'folder and parent: owner Administrators, protected DACL, SYSTEM and Administrators only; start and undo exit 27, nothing written'
+}
 Step 'shipped-purge-gate' {
     # 0.3.x isolation, phase P4: the purge gate of its own is a single assignment to $false in the installed copy, version
     # shows it disabled and the default quarantine policy (no policy file is installed), and quarantine purge from a new
@@ -611,6 +651,15 @@ Step 'update' {
     Assert (Test-Path (Join-Path $env:ProgramFiles 'AgentTempManager.previous')) 'versao anterior nao mantida'
     $r = Invoke-Agent 'verify' 'verify-after-update'; Assert ($r.Code -eq 0) "verify exit $($r.Code)"
     'ok'
+}
+Step 'recover-log-folder-kept-on-update' {
+    # V0.4 R4: the update checks the existing folder and keeps it as it is, with what it holds.
+    $bad = @(Get-E2ERecoverDirProblems)
+    Assert ($bad.Count -eq 0) "pasta dos logs de recuperacao depois da atualizacao: $($bad -join '; ')"
+    Assert ([IO.File]::Exists((Join-Path $recoverDir 'e2e-keep.txt'))) 'a atualizacao apagou o conteudo da pasta dos logs de recuperacao'
+    $t = [IO.File]::ReadAllText((Join-Path $OutDir 'update.txt')) -replace '\s+', ''
+    Assert ($t.Contains('Recoverylogfolderkeptasitis')) 'a atualizacao nao disse que manteve a pasta'
+    'kept, owner and DACL unchanged, marker file kept'
 }
 Step 'rollback' {
     & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pkg 'install\Restore-AgentTempManagerPrevious.ps1') *> (Join-Path $OutDir 'rollback.txt')
@@ -953,6 +1002,15 @@ Step 'uninstall' {
     Assert (-not (Test-Path $installDir)) 'diretorio ainda existe'
     Assert (-not (([Environment]::GetEnvironmentVariable('Path', 'Machine')) -match 'AgentTempManager')) 'PATH ainda contem o produto'
     'removed'
+}
+Step 'recover-log-folder-kept-on-uninstall' {
+    # V0.4 R4: the uninstaller never removes the folder of the recovery logs, and says so.
+    $bad = @(Get-E2ERecoverDirProblems)
+    Assert ($bad.Count -eq 0) "pasta dos logs de recuperacao depois da desinstalacao: $($bad -join '; ')"
+    Assert ([IO.File]::Exists((Join-Path $recoverDir 'e2e-keep.txt'))) 'a desinstalacao apagou o conteudo da pasta dos logs de recuperacao'
+    $t = [IO.File]::ReadAllText((Join-Path $OutDir 'uninstall.txt')) -replace '\s+', ''
+    Assert ($t.Contains('waskept:itistherecordofwhatrecoverydid')) 'a desinstalacao nao disse que manteve a pasta'
+    'kept with its content; the uninstaller said so'
 }
 Step 'autopurge-task-after-uninstall' {
     if (-not $script:apTaskPath) { throw 'tarefa desta conta nao foi criada antes da desinstalacao' }

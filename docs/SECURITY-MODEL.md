@@ -22,7 +22,8 @@
 | Delete | Every gate below. In practice deletion requires an **elevated administrator**: without elevation, processes of other accounts are unobservable, so the process-coverage gate always blocks. Other users' paths additionally require `-IncludeOtherUsers`. Permissive ACLs never count as authorization. |
 
 The tool never grants permissions, never changes ACLs or ownership, never enables privileges
-(backup/restore/take-ownership), and never elevates itself.
+(backup/restore/take-ownership), and no shipped copy elevates itself (the recovery relaunch through UAC of V0.4 R4 is
+reached only past the recovery gate, which is closed in every copy).
 
 ## Privileges and UAC
 
@@ -31,9 +32,10 @@ been validated, are in [ELEVATION.md](ELEVATION.md).
 
 Current behaviour (V0.1):
 
-* **Manual elevation.** The tool never elevates itself and never handles credentials; only the installer scripts
-  need an elevated PowerShell, which the user opens through the Windows UAC prompt, and they refuse to run without
-  it before changing anything.
+* **Manual elevation.** No shipped copy elevates itself, and the tool never handles credentials; only the installer
+  scripts need an elevated PowerShell, which the user opens through the Windows UAC prompt, and they refuse to run
+  without it before changing anything. The elevation on demand of `recover start` and `recover undo` (V0.4 R4) exists
+  only past the recovery gate, closed in every copy (see [Recovery gate](#recovery-gate-v04-phases-r1-to-r4)).
 * Everything else runs without administrative rights; missing rights reduce coverage and are reported, never
   guessed.
 * Decisions use the **process** identity. After elevating with another account's credentials, that is the
@@ -975,7 +977,7 @@ the mover; a static suite test checks it.
   after the measurement is caught by the second measurement (`VERIFY_REPARSE_POINT_FOUND`). The reparse point moves
   with the tree and is never followed.
 
-## Recovery gate (V0.4 phases R1 to R3)
+## Recovery gate (V0.4 phases R1 to R4)
 
 * **The eighth gate:** `$script:AtmRecoveryEnabled`, `$false` in every shipped copy
   ([ADR-0016](adr/ADR-0016-v04-assisted-recovery.md) section 5). It is a single assignment in
@@ -986,7 +988,10 @@ the mover; a static suite test checks it.
   * `version` shows it: `assisted recovery: DISABLED in this release (recover only lists and shows the plan)`.
 * **Closed** (every copy): `recover list` and `recover plan` collect, apply the criteria and present the list or the
   plan, then stop. Nothing is asked, the clean lock (B8) is not taken and its mutex is not opened, and no log or file is
-  written. The suite checks this by instrumentation, with the gate closed and with it opened in its own process.
+  written. `recover start` and `recover undo` (R4) show the plan, or for undo the inverse plan when the fixed log folder
+  can be read (otherwise the request and the folder's code), then stop with exit 27, with no elevation requested and
+  nothing asked, locked or logged. The suite checks this by instrumentation, with the gate closed and with it opened in
+  its own process.
 * **Two control paths, behind the gate (R2 and R3).** `src/` holds two service control APIs, each in one place and
   each reached only with the gate open:
   * the start (R2): `ServiceController`, only in `lib\Engine.Recover.ps1`, only in the default seam
@@ -1011,8 +1016,9 @@ the mover; a static suite test checks it.
     `Restart-Service`, `Suspend-Service`, `Resume-Service`, `sc.exe`, `Invoke-CimMethod` or `ChangeServiceConfig`;
   * the engine contains a stop, pause, continue or configuration method: `.Stop(`, `.Pause(`, `.Continue(`,
     `ExecuteCommand`, or the CIM control methods.
-* **The start path past the gate (R2), reached by no shipped copy.** The gate is closed, and no CLI verb calls the path
-  until the UAC relaunch (R4). Only the suite reaches it, with the gate opened in its own process and the seam injected.
+* **The start path past the gate (R2), reached by no shipped copy.** The gate is closed. Since R4, `recover start`
+  calls the path, but only past the gate. Only the suite reaches it, with the gate opened in its own process and the
+  seam injected.
   The path runs in this order:
   * AUT-2: a console observed by the engine, a new log outside every base, and the R1 criteria on a fresh collection
     (any refusal stops before anything is asked);
@@ -1029,9 +1035,11 @@ the mover; a static suite test checks it.
   holds the token's name or SID.
 * **The undo past the gate (R3), reached by no shipped copy.** `Invoke-AtmRecoverUndo` stops the service of one
   `REC-SVC-START` run. `REC-SVC-STOP` exists only as that undo: it is never in the catalog, never offered by `recover
-  list` and never accepted by `recover plan` or `Invoke-AtmRecover`. No CLI verb calls it until R4.
+  list` and never accepted by `recover plan` or `Invoke-AtmRecover`. Since R4, `recover undo` calls it, but only past
+  the gate.
   * **Its source is untrusted data.** The caller names the run's log (`-SourceLog`) and its run id (`-RunId`, a
-    cross-check). The log is read once, through a handle that follows no reparse point: a plain absolute local path
+    cross-check). Through `recover undo` (R4), the log is always `<fixed folder>\<run id>.log`, never a path from the
+    operator. The log is read once, through a handle that follows no reparse point: a plain absolute local path
     with no reparse point, a regular file of at most 1 MiB, and the owner and protected DACL that the log writer gives
     a log. Its lines must be strict JSON of one complete R2 run with the outcome `COMPLETE` or `PARTIAL`. Every failure
     has its own closed `UNDO_SOURCE_*` code, and nothing is asked. The owner and DACL show who could have written the
@@ -1047,6 +1055,32 @@ the mover; a static suite test checks it.
     own log field, a revalidation that also refuses a dependent that started, the stop seam called once with the name
     only, and a bounded wait until `STOPPED`, back to `RUNNING`, or the limit. Nothing is compensated or retried, and an
     undo has no undo: a second undo of the same run is refused because the state no longer matches.
+* **Elevation on demand (R4), reached by no shipped copy.** `recover start -Operation REC-SVC-START -Service <name>` and
+  `recover undo -RunId <run id>` run one operation per process (a second one exits 30), past the gate only (ADR-0016, R4
+  implementation record):
+  * **An elevated administrator token** acts in its own process (the manual model).
+  * **Any other token is only a requester.** It shows the plan (for undo, only the run id: it cannot read the log
+    folder) and a notice that names the operation and why UAC is requested. Then it relaunches `bin\agent-temp.cmd` of
+    its own verified installation once, through UAC (`ShellExecuteEx` with `runas`, in one default launcher), with a
+    fixed argument line: the verb, the operation and the name or the run id, and a marker. It passes no path, file or
+    plan, takes no lock, reads no log, and reports only by that copy's exit code (40 to 44 for the prompt's outcomes,
+    never a reason guessed from one number).
+  * **The relaunched copy trusts nothing from its requester.** It refuses any other argument, a token that is not an
+    elevated administrator (UAC turned off), and a copy that is not installed and verified. Then it collects, plans,
+    asks for the phrase in its own console, locks, logs, revalidates and acts as above, and waits for a key before its
+    window closes. It shows the identity that acts. It does not verify its requester (`UNVERIFIED`): reading the
+    requester's token would rely on a parent process id, which can be forged or reused (PRIV-5 stays partial).
+  * **The fixed log folder.** Every R4 run logs to `<CommonApplicationData>\AgentTempManager\recover\<run id>.log`.
+    Only `Install-AgentTempManager.ps1` creates the folder: owned by Administrators, with a protected DACL that gives
+    full control to SYSTEM and Administrators and nothing to anyone else. The installer refuses an existing folder that
+    differs (a standard user could have created it first), and the uninstaller keeps it. The engine checks it before
+    every use (owner, DACL, no reparse point) and never creates or fixes it.
+  * **Provenance between administrators.** A log in that folder proves that some administrator wrote it, not which
+    one: an undo by one administrator of another administrator's start passes. That is no escalation, since either can
+    control the service directly, and the undo still shows its plan, asks for its phrase and revalidates. A log owned by
+    another user's account is refused.
+  * **What is not tested:** the real UAC prompt and relaunch, a machine with UAC turned off, and a real requester. The
+    suite and the CI always inject the launcher.
 * **Read only, in the command's own process.** The collection reuses the diagnose's functions: the own token, the
   providers' hints, one `Win32_Service` query with the R0 signals, the dependencies and the image check. The engine
   itself runs no CIM query. The diagnose, the TUI and the GUI do not load or call it, and the diagnose still has
@@ -1064,10 +1098,11 @@ the mover; a static suite test checks it.
   before asking anything, with the gate open too. `CoworkVMService` stays refused until a provider declares its
   executable.
 * **Elevation is only estimated.** It is read from the process's own token (`LIKELY_HAS_RIGHT`, `NEEDS_ELEVATION`,
-  `UNKNOWN`), never by probing the service's security, and nothing is elevated.
+  `UNKNOWN`), never by probing the service's security, and `recover list` and `recover plan` elevate nothing.
 * **Privacy.** The plan keeps the diagnose's reductions: the account kind plus one of the three standard service
   accounts, the executable as a full path only under a well-known program location, never a command line, and `*` for
-  a related service that is neither declared nor a system service. The token's identity is never shown. The plan id
+  a related service that is neither declared nor a system service. The plan never shows the token's identity (the
+  window of an R4 run shows the identity that acts, outside the plan and the log). The plan id
   hashes the plan's inputs and leaves out the token.
 
 ## Execution policy
