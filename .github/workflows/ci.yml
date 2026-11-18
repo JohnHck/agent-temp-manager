@@ -20,7 +20,7 @@ jobs:
     # HKCU\Software\AgentTempManagerTest. They never touch real agent temporary directories, never delete
     # outside the sandbox and never change machine PATH or ACLs outside the sandbox.
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -65,10 +65,11 @@ jobs:
   # FINAL-A: the suite on Windows 11 ARM64 (the native safe-creation code and its fixture tests run there too).
   # A separate job, so the names of the existing checks do not change. Informative: not a required check, but a FAIL
   # here is still a FAILURE of the job and is reported as such (continue-on-error only keeps the workflow running; it
-  # is never evidence of a PASS). Windows PowerShell 5.1 runs the whole suite (45 minutes bound a hang, with room
-  # for GUI cases). PowerShell 7 runs the suite without the launcher-heavy cases (-Except, FINAL-B): there each Windows
-  # PowerShell 5.1 child spends about 22 s in its own module analysis (release/V0.2-FINAL-B-VALIDATION.md, section C),
-  # so those cases alone take over 50 minutes; the cases left out are listed in the log and NOT TESTED there.
+  # is never evidence of a PASS). Windows PowerShell 5.1 runs the whole suite (70 minutes bound a hang; raised from
+  # 45 in CI-BUDGET, when the measured margin fell under 10 minutes: 37m52s to 39m06s of 45). PowerShell 7 runs the
+  # suite without the launcher-heavy cases (-Except, FINAL-B): there each Windows PowerShell 5.1 child spends about
+  # 22 s in its own module analysis (release/V0.2-FINAL-B-VALIDATION.md, section C), so those cases alone take over
+  # 50 minutes; the cases left out are listed in the log and NOT TESTED there.
   test-arm64:
     name: test ARM64 (${{ matrix.label }})
     runs-on: windows-11-arm
@@ -80,10 +81,10 @@ jobs:
         include:
           - shell: powershell
             label: powershell
-            timeout: 45
+            timeout: 70
           - shell: pwsh
             label: pwsh, subset
-            timeout: 55
+            timeout: 75
     env:
       ATM_PWSH: C:\Program Files\PowerShell\7\pwsh.exe
     steps:

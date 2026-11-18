@@ -457,11 +457,11 @@ eligibility, B1 or RECENT rule, and changes neither the diagnose nor the provide
 **The gate.** `$script:AtmRecoveryEnabled = $false` (`Engine.Recover.ps1:15`), its only assignment in `src/`. Like the
 seventh gate, nothing opens it but a code change in that administrator-owned, manifest-verified file. It is checked:
 
-* by the build, which refuses an archive without the eight gates each assigned once to `$false`
+* by the build, which refuses an archive without the eight gates (nine since V0.5 M1, ADR-0017) each assigned once to `$false`
   (`tools/Build-Release.ps1`);
 * by the launcher's integrity check and the installer (`lib\Engine.Recover.ps1` is in `$loadedLibs` and in
   `AtmRequiredFiles`);
-* by the install and isolation e2e, which read the eight installed gates;
+* by the install and isolation e2e, which read the eight installed gates (nine since V0.5 M1);
 * by `agent-temp version`, which prints `assisted recovery: DISABLED in this release (recover only lists and shows the
   plan)`.
 
@@ -1433,9 +1433,9 @@ and the uninstall.
   * `-Interaction`, with `Caller = 'E2E'`;
   * the in-memory console source `$script:AtmCleanConsoleSource = { $true }` (`:379`).
 
-  None of them is a gate: the eight gates are `AtmRealDeletionEnabled`, `AtmWorktreeDiagnosticsEnabled`,
+  None of them is a gate: the gates are `AtmRealDeletionEnabled`, `AtmWorktreeDiagnosticsEnabled`,
   `AtmHandleDiagnosticsEnabled`, `AtmIsolationEnabled`, `AtmQuarantinePurgeEnabled`, `AtmRecoveryEnabled`,
-  `AtmGuiEnabled` and `AtmDiagnoseExportEnabled`. No other engine parameter or seam is passed: no service source, wait,
+  `AtmGuiEnabled` and `AtmDiagnoseExportEnabled` (eight at R6), and since V0.5 M1 also `AtmMonitoringEnabled`. No other engine parameter or seam is passed: no service source, wait,
   lock name, run id or deadline.
 * **The guard wrappers** (`$recStartGuard` and `$recStopGuard`, `:177-188`) are the only places where the default seams
   appear. Each:
@@ -1447,7 +1447,7 @@ and the uninstall.
 * **Every other service control** by the harness goes through `Invoke-OwnSc` (`:115-125`). It accepts the verbs `query`,
   `qc`, `create`, `start` and `stop` only, and only after `Assert-OwnName` (`:111-114`) accepts the name.
 * **Before and after** (`installed-before`, `installed-after`, `:322` and `:661-673`), the harness checks:
-  * the eight installed gates, each `$false`;
+  * the installed gates (eight at R6, nine since V0.5 M1), each `$false`;
   * `agent-temp verify` exits 0;
   * the SHA-256 of every installed file is unchanged.
 * **The end state.** Leg B ends with `B-final-stop` (`:643-657`). It stops every own service that is not STOPPED, by its
