@@ -538,7 +538,19 @@ eligibility. The line numbers are those of the files as V05-M1 leaves them.
   * the CLI in both languages, and the statics.
 * **Measured cost** (CI only; planted trees of 2,000 files on every job and 10,000 more on the x64 jobs; information,
   not a timing assertion). Each job prints the audit's and the whole collection's durations in its log (`V0.5 M1
-  custo:`). The per-runner figures come from this phase's PR CI run and are recorded here by the phase's final commit.
+  custo:`). The figures of CI run 44402312363 (2026-11-18, the phase's green run), per job; "12,000" is the 2,000
+  plus the 10,000 planted on the x64 jobs:
+
+  | Job (run 44402312363) | Runner, shell | 2,000 files: audit / whole collection | 12,000 files: audit / whole collection |
+  |---|---|---|---|
+  | `test (powershell)` | x64, Windows PowerShell 5.1 | 70 ms / 109 ms | 318 ms / 350 ms |
+  | `test (pwsh)` | x64, PowerShell 7.6.9 | 32 ms / 82 ms | 167 ms / 179 ms |
+  | `test ARM64 (powershell)` | ARM64, Windows PowerShell 5.1 | 87 ms / 150 ms | not run (2,000 only on ARM64) |
+  | `test ARM64 (pwsh, subset)` | ARM64, PowerShell 7.6.10 | 72 ms / 104 ms | not run (2,000 only on ARM64) |
+
+  The run before the fix (44394992914) gave the same order of magnitude, at most 313 ms for a whole collection. At
+  these sizes a collection takes well under a second on every runner, far below V05-D2's shortest interval (1 hour).
+  The figures are of planted trees on CI runners, not of a real user's profile; V05-D2 is revisited with them in M3.
 * **NAO_TESTADO.**
   * The real folder under `%LOCALAPPDATA%`: the suite uses its sandbox through the seam and checks that the real folder
     is never created.
