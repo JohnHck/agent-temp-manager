@@ -27,6 +27,9 @@ foreach ($rel in @('src', 'install', 'docs', 'tests', 'tools')) { Copy-AtmTree -
 $ciOnly = @('tests\e2e\Invoke-CleanE2E.ps1')
 # 0.3.x ISO-P5: the harness of the real isolation, restore and purge (it opens those gates in its own process).
 $ciOnly += 'tests\e2e\Invoke-IsolateE2E.ps1'
+# V0.4 R6: the harness of the real start and undo of recovery (it opens that gate in its own process and creates its own
+# services).
+$ciOnly += 'tests\e2e\Invoke-RecoverE2E.ps1'
 foreach ($rel in $ciOnly) { $st = Join-Path $stage $rel; if ([IO.File]::Exists($st)) { [IO.File]::Delete($st) } }
 foreach ($f in @('README.md', 'LICENSE', 'CHANGELOG.md', 'SECURITY.md', 'CONTRIBUTING.md')) { Copy-Item -LiteralPath (Join-Path $repo $f) -Destination $stage }
 Write-AtmManifest -Root (Join-Path $stage 'src') -Version $version
@@ -83,7 +86,7 @@ try {
     $ciLeaves = @($ciOnly | ForEach-Object { Split-Path -Leaf $_ })
     if (@($za.Entries | Where-Object { $ciLeaves -contains (Split-Path -Leaf $_.FullName.Replace('/', '\')) }).Count -gt 0) {
         $za.Dispose(); $za = $null; [IO.File]::Delete($zip)
-        throw 'Release recusada: o arquivo gerado contem um arquivo exclusivo da CI (Invoke-CleanE2E.ps1 ou Invoke-IsolateE2E.ps1).'
+        throw 'Release recusada: o arquivo gerado contem um arquivo exclusivo da CI (Invoke-CleanE2E.ps1, Invoke-IsolateE2E.ps1 ou Invoke-RecoverE2E.ps1).'
     }
 } finally { if ($za -and -not $script:zaClosed) { $za.Dispose() } }
 $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()

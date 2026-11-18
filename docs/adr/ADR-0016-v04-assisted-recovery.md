@@ -1,6 +1,6 @@
 # ADR-0016: Assisted recovery (V0.4)
 
-Status: ACCEPTED (V04-D1 to V04-D8 decided 2026-11-17: D3 (b) elevation on demand through UAC; the others as recommended); R0, R1, R2, R3, R4 and R5 implemented
+Status: ACCEPTED (V04-D1 to V04-D8 decided 2026-11-17: D3 (b) elevation on demand through UAC; the others as recommended); R0, R1, R2, R3, R4, R5 and R6 implemented (R6 in CI only)
 Date: 2026-11-17
 Phase: V0.4 (phases R0 to R6 below, each a future round with its own contract and tests)
 
@@ -139,7 +139,8 @@ Until then, the tool shows the process and tells the person how to close the age
 
   How the lock behaves between an elevated holder and a non-elevated one is tested in phase R2 (R2 left it NAO_TESTADO,
   because it needs two tokens on one machine; see the R2 implementation record). V04-D6 keeps the
-  alternative of a lock of its own.
+  alternative of a lock of its own. (R6 note, 2026-11-18: R6 did not take its optional B8 case either; it stays
+  NAO_TESTADO for recovery. See the R6 implementation record.)
 * **The log: a recovery log with T1's contract.** It is written by the same pinned writer (`Open-AtmCleanLog`,
   `Engine.Clean.ps1:316-344`), with its own schema `atm.recoverlog/1`:
   * a new file per run, never appended to;
@@ -279,6 +280,9 @@ None is decided by this record.
 
   (R2 left both NAO_TESTADO: its seam is always injected, and the second needs two tokens on one machine. See the R2
   implementation record.)
+
+  (R6 note, 2026-11-18: the first is measured in R6, on the CI's own test services, per runner and leg; the second
+  stays NAO_TESTADO. See the R6 implementation record.)
 
 ## Rejected alternatives
 
@@ -718,6 +722,12 @@ rows, dependencies, the console, the confirmation, the wait and the seam are inj
 * the start of a real service, because no shipped provider declares an `ExpectedImage`;
 * any command: no CLI verb calls `Invoke-AtmRecover` until R4.
 
+(R6 note, 2026-11-18: in the CI only, R6 now calls the default start seam through a guard wrapper, on services its own
+harness creates, and measures whether a real start starts a stopped declared dependency. The other lines above still
+hold for the suite and for every other service. The sentence "Only the suite opens the gate" at the start of this record
+now has one more exception, the R6 harness, in its own process on a disposable runner, with a guard wrapper as the
+seam. See the R6 implementation record.)
+
 ## R3 implementation record (2026-11-17)
 
 The line numbers in this record are those of the files as V04-R3 adds or changes them. Lines 9 to 700 of
@@ -975,6 +985,12 @@ identities, service rows, dependencies, the console, the confirmation, the wait 
 * the stop of a real service, because no shipped provider declares an `ExpectedImage`;
 * any command: no CLI verb calls `Invoke-AtmRecoverUndo` until R4.
 
+(R6 note, 2026-11-18: in the CI only, R6 now calls the default stop seam through a guard wrapper, on services its own
+harness creates; the R2 start before each undo reads a real service's state after a real start, so the outcome rule
+runs on real rows there (the intermediate pending states are not recorded). The seam's own
+`DEPENDENT_SERVICES_RUNNING` stays unreached: R3 refuses first. The sentence "Only the suite opens the gate" at the
+start of this record now has the same R6 exception as R2's. See the R6 implementation record.)
+
 ## R4 implementation record (2026-11-18)
 
 The line numbers in this record are those of the files as V04-R4 adds or changes them. R4 threads one parameter,
@@ -1203,7 +1219,10 @@ The fixed folder is a folder of the sandbox (`-LogDirBase`), except in the case 
   the requester; and a machine with UAC turned off;
 * the real verification of the requester (PRIV-5): not implemented, by design;
 * a real service started or stopped by either verb: no CI test controls a real service (R6), and no shipped provider
-  declares an `ExpectedImage`;
+  declares an `ExpectedImage`; (R6 note, 2026-11-18: R6 controls only its own test services, and through the engine
+  functions, not through either CLI verb; this line still holds for the verbs. It also opens the gate in its own
+  process, so "Only the suite opens the gate" at the start of this record now has that exception; it never reaches the
+  launcher, so the launcher part still holds);
 * the fixed folder on this machine and on the CI runner's own `ProgramData`: the suite uses a folder of its sandbox, and
   the install e2e runs the installer only on the CI runner.
 
@@ -1335,7 +1354,175 @@ copy. R5 changes no engine function, finding state, eligibility, B1 or RECENT ru
 * **A real GUI window.** A window where `S` or its button is pressed, with the real collection, is never opened. The P6
   window case checks the button's place in the tab order only.
 * **A real console.** The TUI never runs in a real console with a keyboard and the real collection.
-* **Who covers it.** Both are left for the operator's VM (R6).
+* **Who covers it.** Both are left for the operator's VM (R6). (R6 note, 2026-11-18: R6 as implemented is a CI-only
+  e2e of the engine's start and undo; it opens no GUI window and no console, so both stay NAO_TESTADO, for the
+  operator.)
 
 **Limit.** The GUI's collection blocks its window for up to the engine's deadline (120 s), with a fixed progress text.
 That is the same as the preview.
+
+## R6 implementation record (2026-11-18)
+
+R6 is the e2e of the real recovery (V04-D8 (a)), in CI only. It changes no product file: nothing in `src/` or
+`install/`, no gate, no provider, no eligibility rule, no diagnose. The line numbers in this record are those of the
+files as V04-R6 adds or changes them.
+
+**The harness.** `tests/e2e/Invoke-RecoverE2E.ps1` is CI-only and never shipped. It has three modes: `-Leg Setup`,
+`-Leg A` and `-Leg B`. It refuses to run outside a GitHub-hosted runner unless `-DisposableMachine` is passed
+(`:50-52`). That check is an accident guard only; the containment is the run root, the nonce and the guard wrappers.
+
+**The test services.** They are created in `Setup`, which runs elevated, before leg A.
+
+* **The executable** is an inert `ServiceBase` (`AutoLog` off, `CanStop` on; it does nothing while it runs). The harness
+  compiles it from source in a service root it creates (`:207-256`). The compiler is always Windows PowerShell 5.1:
+  `System32\WindowsPowerShell\v1.0\powershell.exe` runs `Add-Type -TypeDefinition ... -ReferencedAssemblies
+  System.ServiceProcess -OutputAssembly ... -OutputType ConsoleApplication` (`:234-236`). It is the same in every job,
+  whatever the installer's shell. `TEMP` and `TMP` point inside the root.
+* **The service root** is `<SystemDrive>\ATM-E2E-REC-S-<first 12 hex of the nonce>`. It is created atomically with a
+  protected DACL and refused if the name exists (`New-RunRoot`, `:156-171`). The DACL has:
+  * the elevated account as owner, with full control;
+  * SYSTEM and Administrators;
+  * read and execute for leg A's account only.
+* **Seven services,** named `AtmRecE2E-<12 hex>-<key>`, with the keys `start`, `undecl`, `mism`, `dis`, `run`, `x` and
+  `y` (`:257-282`).
+  * Each is checked absent first (`sc query` exit 1060, and no CIM row).
+  * Each is created by exact name with `sc.exe create`, `start= demand` (`dis`: `disabled`), and the default account,
+    LocalSystem. `y` gets `depend= x`.
+  * Each is then checked STOPPED, in its start mode, with LocalSystem and the generated executable.
+  * Their security descriptors are never changed.
+* **The names file.** `services.json` (schema `atm.e2e-recover-names/1`) holds the prefix, the nonce, the executable's
+  name and SHA-256, and the seven names. The path of the root goes to a state file for the next steps (`:283-291`).
+
+**The legs.** The order is `Setup` (elevated), then leg A (the VM's standard user), then leg B (elevated). In the install
+e2e they are the steps `rec-r6-setup-elevated`, `rec-r6-recover-leg-A-standard-user` and
+`rec-r6-recover-leg-B-elevated` (`tests/e2e/Invoke-InstallE2E.ps1:921-981`). They run after the ISO legs and before X2
+and the uninstall.
+
+* **The names.** Each leg reads the names only from the protected service root (`:330-359`). It checks:
+  * the root's name and drive;
+  * no reparse point;
+  * the root's owner;
+  * the schema, the prefix and the nonce;
+  * every name;
+  * the executable's SHA-256;
+  * each service's account and executable.
+
+  For leg A, opening the names file for writing must fail.
+* **The installed engine** is loaded in the CLI's order (`:364-371`). Only `AtmRecoveryEnabled` is set to `$true`, in
+  the harness's own process memory (`:378`). The case `loaded` checks two things (`:383-387`):
+  * every gate of the loaded engine files was `$false` as loaded from the installation;
+  * every other gate is still `$false` in the process.
+* **The run root** of each leg is `ATM-E2E-REC-<leg>-<12 hex>`, created the same way (`:388-394`). The recovery logs
+  stay there; only the summary is uploaded.
+
+**Containment.**
+
+* **Every engine call.** There is exactly one call to `Invoke-AtmRecover` (`:440`) and one to `Invoke-AtmRecoverUndo`
+  (`:455`). Each passes:
+  * `-Providers` with an in-memory test provider (`New-RecProvider`, `:397`), which declares only the keys a case
+    names, with the generated executable as `ExpectedImage` (or another name, for the mismatch case);
+  * its guard wrapper, as `-ServiceControlImpl` or `-ServiceStopImpl`.
+
+  The R4 launcher, `recover start`, `recover undo` and any elevation request are never used.
+* **What else is injected,** because no human sits at a runner's console:
+  * `-PlanPresenter`: it prints nothing, checks the target's name first, and keeps the plan for the comparison with
+    `recover plan`;
+  * `-ConfirmationReader`: it answers with the exact phrase the engine generated;
+  * `-InventoryArgs`: the installation's self markers and config folder;
+  * `-Interaction`, with `Caller = 'E2E'`;
+  * the in-memory console source `$script:AtmCleanConsoleSource = { $true }` (`:379`).
+
+  None of them is a gate: the eight gates are `AtmRealDeletionEnabled`, `AtmWorktreeDiagnosticsEnabled`,
+  `AtmHandleDiagnosticsEnabled`, `AtmIsolationEnabled`, `AtmQuarantinePurgeEnabled`, `AtmRecoveryEnabled`,
+  `AtmGuiEnabled` and `AtmDiagnoseExportEnabled`. No other engine parameter or seam is passed: no service source, wait,
+  lock name, run id or deadline.
+* **The guard wrappers** (`$recStartGuard` and `$recStopGuard`, `:177-188`) are the only places where the default seams
+  appear. Each:
+  * checks the name the engine passes against this run's seven names, exactly;
+  * counts the call;
+  * calls `Invoke-AtmRecoverServiceStartDefault` or `Invoke-AtmRecoverServiceStopDefault` with exactly that name.
+
+  Any other name increments a refusal counter and throws, and the case fails. The final case asserts the counter is 0.
+* **Every other service control** by the harness goes through `Invoke-OwnSc` (`:115-125`). It accepts the verbs `query`,
+  `qc`, `create`, `start` and `stop` only, and only after `Assert-OwnName` (`:111-114`) accepts the name.
+* **Before and after** (`installed-before`, `installed-after`, `:322` and `:659-671`), the harness checks:
+  * the eight installed gates, each `$false`;
+  * `agent-temp verify` exits 0;
+  * the SHA-256 of every installed file is unchanged.
+* **The end state.** Leg B ends with `B-final-stop` (`:641-655`). It stops every own service that is not STOPPED, by its
+  own name, dependents first, and then checks all seven are STOPPED. None is removed: they stay registered on the
+  disposable runner.
+* **The package.** The harness is on the build's CI-only list (`tools/Build-Release.ps1:32`), and the refusal message
+  names the three harnesses (`:89`). The install e2e's `package-excludes-ci-harness` checks it is absent from the
+  package (`tests/e2e/Invoke-InstallE2E.ps1:164-166`).
+
+**Cases.** Each one-run case checks against a reference. For a start, the reference is `Get-AtmRecoverPlan` on a fresh
+collection. For an undo, it is `Get-AtmRecoverUndoPlan` on `Read-AtmRecoverRunLog`. For a start or undo that completes,
+`Assert-Completed` checks:
+
+* the reference plan is offered, and the presented plan has the same plan id and codes, so the plan equals
+  `recover plan`;
+* one call through the guard, with seam code `OK`;
+* the outcome `COMPLETE`, with the expected end state in the engine and in CIM;
+* the diff has `State` and only state fields;
+* the log holds the nine records of a run in order, with the intent seam `TEST_SEAM` (a seam was passed in).
+
+A refusal before the seam (`Assert-RefusedBeforeSeam`) checks the expected code, the same codes as the reference, zero
+seam calls, nothing asked, no log and no state change.
+
+* **Leg A (standard user):**
+  * `A-start-standard-user`: the start of `start`. Expected: the real seam gives `ACCESS_DENIED` and the outcome is
+    `REFUSED`. Whatever the runner gives is recorded, and nothing may change.
+  * `A-undo-own-refused-log`: the undo of its own log, which must be refused before the seam.
+  * `A-provenance-cross-leg` and `A-b8-integrity-levels`: NAO_TESTADO (below).
+* **Leg B (elevated):**
+  * `B-start` and `B-undo`: a real start and its real undo.
+  * Four refusals before the seam: `RECOVERY_NOT_DECLARED`, `RECOVERY_IMAGE_MISMATCH` and `RECOVERY_START_MODE_DISABLED`,
+    then `RECOVERY_NOT_STOPPED`. For the last one, the harness starts `run` itself, and stops it again after the
+    refusal.
+  * The dependencies:
+    * `y` started with `x` undeclared: `RECOVERY_DEPENDENCY_STOPPED`;
+    * `y` started with `x` declared and STOPPED: the start completes, and the harness measures whether the service
+      control manager started `x`;
+    * the undo of `y`, then the state of `x`;
+    * `x` started by its own run (the harness stops it first if the SCM had started it), then `y`;
+    * the undo of `x` while `y` runs: R3 refuses before the seam, with `UNDO_REFUSED` and `UNDO_DEPENDENT_ACTIVE`;
+    * the undo of `y`, then of `x`.
+  * `B-provenance-cross-leg`: the undo of the log leg A wrote, which must be refused before the seam with
+    `UNDO_SOURCE_PROVENANCE` (the log's owner is leg A's account) and the reference codes.
+  * `B-final-stop`.
+
+**Measured results.** The results per runner and leg, taken from the six CI summaries, are added to this record after
+the PR's first CI run.
+
+**Tests in the suite.** The area `V0.4 R6` of `tests/Run-Tests.ps1` (`:20756-20848`), in both shells:
+
+* **The refusal path.** Each of `Setup`, `A` and `B` refuses outside a disposable machine and creates nothing. There is
+  no summary, work folder or state file, and the counts of `ATM-E2E-REC-*` roots and `AtmRecE2E-*` services are
+  unchanged. This is the only part of R6 that runs outside the CI.
+* **Statics on the harness:**
+  * only `AtmRecoveryEnabled` is assigned, once, after the engine is loaded;
+  * nothing from the R4 launcher and no elevation verb;
+  * every engine call passes `-Providers` and its guard;
+  * the default seams appear only in the guards, after the name check;
+  * `sc.exe` appears once, in `Invoke-OwnSc`, after `Assert-OwnName`;
+  * the roots are created atomically with a protected DACL;
+  * the build lists the three harnesses, and the install e2e checks each is absent from the package;
+  * no file in `src` cites the harness.
+* **The CI-only static at `:18553`** now covers the three harnesses.
+* **One NAO_TESTADO case:** the real run, which is CI only.
+
+**Not tested:**
+
+* **`DEPENDENT_SERVICES_RUNNING` from the stop seam.** R3 refuses an undo while a dependent runs, from the capture,
+  before the seam is called. The seam's own code cannot be produced through the engine, and calling the wrapper
+  directly would not be the engine.
+* **Cross-leg provenance from leg A.** Leg A runs before leg B, so leg B's log does not exist yet. Leg B undoes leg A's
+  log instead.
+* **B8 between integrity levels (optional, not done).** No new seam was added. The install e2e step
+  `v3-x2-lock-across-identities` already holds the real B8 lock and tries it across the standard user and the elevated
+  account, for the clean.
+* **Any service other than the harness's own seven,** on any runner or on this machine.
+* **The CLI verbs** `recover start` and `recover undo`, the R4 launcher and a real UAC prompt.
+* **A real GUI window or console (R5).**
+* **Host Compute Service VMs and the real Cowork service.**

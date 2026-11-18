@@ -762,10 +762,11 @@ second read are injected. No service is started, stopped or changed, and no case
   * a real failed service;
   * a provider's real `ExpectedImage`, because no shipped provider declares one.
 
-## Assisted recovery in the suite (V0.4 R1 to R5)
+## Assisted recovery in the suite (V0.4 R1 to R6)
 
-Phases R1 to R5 of [ADR-0016](adr/ADR-0016-v04-assisted-recovery.md), each tested in its own area of the suite
-(`V0.4 R1` to `V0.4 R5`), in both shells. Each phase's implementation record in the ADR lists every case and what is
+Phases R1 to R6 of [ADR-0016](adr/ADR-0016-v04-assisted-recovery.md), each tested in its own area of the suite
+(`V0.4 R1` to `V0.4 R6`), in both shells. R6 also runs a CI-only harness in the install e2e, described after the area
+list. Each phase's implementation record in the ADR lists every case and what is
 not tested. The recovery gate `AtmRecoveryEnabled` is loaded closed. A case that needs it open opens it in the suite's
 process only and closes it again. In the in-process cases, providers, identities, service rows and dependencies are
 injected. The CLI cases of R1 and R4 run in a new process with every gate closed, and they compare the real
@@ -820,10 +821,31 @@ a control right, requests elevation or opens a UAC prompt.
       in the tick (each planted in a copy);
     * a new TUI static covers the same names;
     * each read is called only in its expected place.
+* **`V0.4 R6`: the CI-only harness of the real recovery, in the suite.**
+  * its refusal path: outside a disposable machine, `Setup`, `A` and `B` refuse and create nothing (no summary, work
+    folder, state file, `ATM-E2E-REC-*` root or `AtmRecE2E-*` service);
+  * statics on the harness: the recovery gate is opened in its own process memory only, after the installed engine is
+    loaded, and nothing from the R4 launcher or elevation is used; every engine call passes `-Providers` and the guard
+    wrappers; the default seams are called only inside the wrappers, after the name check; services are touched only
+    through one helper that accepts only this run's names; roots are created atomically with a protected DACL; the
+    harness stays out of the package; `src` never cites it;
+  * the real run is not tested in the suite: it runs only in the install e2e.
+* **R6 in the install e2e (CI only, disposable runners).** After the ISO legs, the elevated context runs the harness's
+  `Setup`: it compiles an inert service executable (through Windows PowerShell 5.1 `Add-Type`) in a run root it
+  creates, and creates seven own services `AtmRecE2E-<nonce>-<key>`, manual or disabled, with the default account.
+  Leg A (the VM's standard user) then leg B (elevated) load the installed engine, open the recovery gate in memory only,
+  and run `Invoke-AtmRecover` and `Invoke-AtmRecoverUndo` with an in-memory provider and guard wrappers around the
+  default seams. Leg B covers the start and its undo, the four refusals before the seam with zero seam calls, the
+  dependencies, the undo of leg A's log (provenance), and ends by stopping every own service that is not stopped; none
+  is removed. The eight installed gates and the SHA-256 of every installed file are compared before and after. Only a
+  summary with codes and counts is uploaded. The measured results per runner and leg are in the ADR's R6 record.
 * **Not tested here:**
-  * the default start and stop seams: never called by the suite or the CI;
-  * a real service started or stopped, by any verb: no CI test controls a real service (R6), and no shipped provider
-    declares an `ExpectedImage`;
+  * the default start and stop seams: never called by the suite; the CI calls them only in the R6 harness, on its own
+    services;
+  * a real service started or stopped, by any verb, outside the R6 harness's own services: no CI test controls any
+    other service, and no shipped provider declares an `ExpectedImage`;
+  * the seam's own `DEPENDENT_SERVICES_RUNNING`: R3 refuses an undo while a dependent runs before the seam is called,
+    so the R6 harness cannot reach it;
   * the real UAC prompt and relaunch: never called by the suite or the CI;
   * the real verification of the requester (PRIV-5): not implemented, by design;
   * B8 between an elevated and a non-elevated holder: for the VM or the operator's e2e;

@@ -20,6 +20,9 @@
     roots planted by tests\e2e\Invoke-CleanE2E.ps1 (CI-only, never shipped), as the standard user (leg A) and elevated
     (leg B); only the harness summaries are kept. Then 0.3.x ISO-P5a: the REAL isolation, restore and purge of roots
     planted by tests\e2e\Invoke-IsolateE2E.ps1 (CI-only, never shipped), in the same two legs; only its summaries are kept.
+    Then V0.4 R6: the REAL start and undo of recovery (R2 and R3) on services that tests\e2e\Invoke-RecoverE2E.ps1 (CI-only,
+    never shipped) creates itself: Setup elevated, then leg A (standard user), then leg B (elevated, ending with the
+    final stop of its own services); only its summaries are kept.
   Writes summary.json and raw outputs to -OutDir. Exit code = number of failed steps (NOT TESTED is not a failure
   and not a pass).
 #>
@@ -157,7 +160,10 @@ Step 'package-excludes-ci-harness' {
     # 0.3.x ISO-P5: nor the CI-only harness of the real isolation, restore and purge.
     $foundIso = @(Get-ChildItem -LiteralPath $pkg -Recurse -File -Filter 'Invoke-IsolateE2E.ps1')
     Assert ($foundIso.Count -eq 0) 'pacote contem o harness da CI (Invoke-IsolateE2E.ps1)'
-    'tests\e2e\Invoke-CleanE2E.ps1 and tests\e2e\Invoke-IsolateE2E.ps1 absent from the package'
+    # V0.4 R6: nor the CI-only harness of the real start and undo of recovery.
+    $foundRec = @(Get-ChildItem -LiteralPath $pkg -Recurse -File -Filter 'Invoke-RecoverE2E.ps1')
+    Assert ($foundRec.Count -eq 0) 'pacote contem o harness da CI (Invoke-RecoverE2E.ps1)'
+    'tests\e2e\Invoke-CleanE2E.ps1, tests\e2e\Invoke-IsolateE2E.ps1 and tests\e2e\Invoke-RecoverE2E.ps1 absent from the package'
 }
 
 Step 'install' {
@@ -911,6 +917,67 @@ Step 'iso-p5-isolate-leg-B-elevated' {
     $con = Join-Path $work 'iso-p5-B-console.txt'
     & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Invoke-IsolateE2E.ps1') -Leg B -InstallDir $installDir -SummaryFile $sum -WorkDir (Join-Path $work 'iso-B') -DisposableMachine *> $con
     Read-IsoSummary $sum $LASTEXITCODE $con
+}
+# V0.4 R6: the REAL REC-SVC-START and its undo (R2 and R3) on services created by tests\e2e\Invoke-RecoverE2E.ps1 itself,
+# against this installation, in the installer's shell. Setup (elevated) creates them and writes their names in its
+# protected root (read only for the standard user); leg A runs before leg B, so leg B can undo leg A's log (provenance
+# across legs); leg B ends with the final stop of its own services. The harness opens the recovery gate only in its own
+# process memory; the installed copy stays closed (eight gates and the SHA-256 of every installed file checked by the
+# harness before and after). Only its summaries are kept here (codes, counts and labels; the raw recovery logs stay in
+# the harness's run roots, never uploaded).
+function Read-RecSummary([string]$File, [int]$Exit, [string]$Console) {
+    if (-not (Test-Path -LiteralPath $File)) {
+        $tail = $(if (Test-Path -LiteralPath $Console) { (@(Get-Content -LiteralPath $Console -Tail 15) -join ' / ') } else { '' })
+        $tail = [regex]::Replace([regex]::Replace($tail, 'S-1-5-21-[0-9-]+', '<sid>'), [regex]::Escape($userName), '<account>', 'IgnoreCase')
+        throw "harness de recuperacao sem resumo (exit $Exit): $tail"
+    }
+    [IO.File]::Copy($File, (Join-Path $OutDir (Split-Path -Leaf $File)), $true)
+    $s = [IO.File]::ReadAllText($File) | ConvertFrom-Json
+    $bad = @($s.cases.PSObject.Properties | Where-Object { $_.Value.status -eq 'FAIL' } | ForEach-Object { "$($_.Name): $($_.Value.detail)" })
+    $nt = @($s.cases.PSObject.Properties | Where-Object { $_.Value.status -eq 'NOT_TESTED' } | ForEach-Object { $_.Name })
+    Assert ($bad.Count -eq 0 -and $Exit -eq 0) ("REC FAIL (exit $Exit): " + ($bad -join ' | '))
+    "$($s.passed) PASS / 0 FAIL / $($s.notTested) NOT_TESTED [$($nt -join ', ')]; $($s.shell); seam calls start $($s.seamCalls.start), stop $($s.seamCalls.stop)"
+}
+$recRoot = $null
+Step 'rec-r6-setup-elevated' {
+    $work = Join-Path ([IO.Path]::GetTempPath()) ('atm-e2e-rec-S-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    [void][IO.Directory]::CreateDirectory($work)
+    $sum = Join-Path $work 'rec-r6-setup-summary.json'
+    $con = Join-Path $work 'rec-r6-setup-console.txt'
+    $state = Join-Path $work 'rec-r6-service-root.txt'
+    $recArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'Invoke-RecoverE2E.ps1'), '-Leg', 'Setup', '-InstallDir', $installDir, '-SummaryFile', $sum, '-WorkDir', (Join-Path $work 'rec-S'), '-StateFile', $state, '-DisposableMachine')
+    # The standard user of leg A gets read access (never write) to the names file in the service root.
+    if ($cred) { $recArgs += @('-ReaderAccount', $userName) }
+    & $installerExe @recArgs *> $con
+    $code = $LASTEXITCODE
+    if (Test-Path -LiteralPath $state) { $script:recRoot = ([IO.File]::ReadAllText($state)).Trim() }
+    Read-RecSummary $sum $code $con
+}
+$recRoot = $script:recRoot
+Step 'rec-r6-recover-leg-A-standard-user' {
+    # Leg A: the standard user of this VM (not elevated). The harness is copied to a folder that user can read; the guard
+    # is passed explicitly.
+    if (-not $cred) { throw 'usuario de teste indisponivel' }
+    if (-not $recRoot) { throw 'raiz dos servicos indisponivel (Setup falhou)' }
+    $copy = Join-Path $userDir 'Invoke-RecoverE2E.ps1'
+    [IO.File]::Copy((Join-Path $PSScriptRoot 'Invoke-RecoverE2E.ps1'), $copy, $true)
+    $sum = Join-Path $userDir 'rec-r6-A-summary.json'
+    $con = Join-Path $userDir 'rec-r6-A-console.txt'
+    $cmdLine = "/c `"`"$installerExe`" -NoProfile -ExecutionPolicy Bypass -File `"$copy`" -Leg A -InstallDir `"$installDir`" -SummaryFile `"$sum`" -WorkDir `"$(Join-Path $userDir 'rec-A')`" -ServiceRoot `"$recRoot`" -DisposableMachine > `"$con`" 2>&1`""
+    try {
+        $p = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') -ArgumentList $cmdLine -Credential $cred -LoadUserProfile -WorkingDirectory $userDir -WindowStyle Hidden -PassThru -Wait
+    } catch { $script:notTested = $true; return "processo como usuario comum nao iniciou neste runner: $($_.Exception.Message)" }
+    Read-RecSummary $sum $p.ExitCode $con
+}
+Step 'rec-r6-recover-leg-B-elevated' {
+    # Leg B: the elevated runner account; it ends with the final stop of its own services (none is removed).
+    if (-not $recRoot) { throw 'raiz dos servicos indisponivel (Setup falhou)' }
+    $work = Join-Path ([IO.Path]::GetTempPath()) ('atm-e2e-rec-B-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    [void][IO.Directory]::CreateDirectory($work)
+    $sum = Join-Path $work 'rec-r6-B-summary.json'
+    $con = Join-Path $work 'rec-r6-B-console.txt'
+    & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Invoke-RecoverE2E.ps1') -Leg B -InstallDir $installDir -SummaryFile $sum -WorkDir (Join-Path $work 'rec-B') -ServiceRoot $recRoot -DisposableMachine *> $con
+    Read-RecSummary $sum $LASTEXITCODE $con
 }
 # V0.3 V3c X2 (CI evidence; it does not replace the V4 row of the operator, J5): the REAL clean lock held by one identity
 # and tried by the other, in both orders: the standard user (not elevated) and this elevated account. Taking this lock

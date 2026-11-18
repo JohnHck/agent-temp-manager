@@ -18550,7 +18550,7 @@ if ($null -eq $res.env) {
         $root = Split-Path -Parent $testsDir
         $br = [IO.File]::ReadAllText((Join-Path $root 'tools\Build-Release.ps1'))
         Assert-True ($br.Contains("`$recTxt = & `$read 'src/lib/Engine.Recover.ps1'") -and $br.Contains("@(`$recTxt, 'AtmRecoveryEnabled')")) 'build recusa o pacote sem a oitava trava fechada'
-        foreach ($e in @('Invoke-InstallE2E.ps1', 'Invoke-IsolateE2E.ps1')) {
+        foreach ($e in @('Invoke-InstallE2E.ps1', 'Invoke-IsolateE2E.ps1', 'Invoke-RecoverE2E.ps1')) {
             $t = [IO.File]::ReadAllText((Join-Path $testsDir "e2e\$e"))
             Assert-True ($t.Contains("AtmRecoveryEnabled = 'lib\Engine.Recover.ps1'") -and $t.Contains('eight installed gates') -and -not $t.Contains('seven installed gates')) "$e confere as oito travas instaladas"
         }
@@ -20751,6 +20751,100 @@ if ($null -eq $res.env) {
     Test-Case 'V0.4 R5' 'R5 janela real da GUI (S e o botao ScreenS numa sessao interativa, com a coleta real do motor) e TUI num console real com teclado: NAO_TESTADO' {
         $script:caseSkipped = $true
         $script:caseNote = 'a suite cobre a TUI headless e a GUI pelas funcoes da sessao e do modelo de vista, com a coleta injetada (e o caminho padrao com a coleta do motor sombreada); a janela de P6 confere o botao ScreenS na ordem de tabulacao, mas ninguem pressiona S numa janela real nem coleta os servicos reais pela TUI ou pela GUI; fica para a VM do operador (R6)'
+    }
+
+    # ------------------------------------------------------------------ V0.4 R6 (assisted recovery: the real start and undo on the CI's own services, CI-only harness, ADR-0016)
+    # The harness tests\e2e\Invoke-RecoverE2E.ps1 runs only in the install e2e of the CI. Here: its refusal path (it creates
+    # nothing) and its statics. Sensitive names are built by concatenation, so the area adds no count to the statics of
+    # the R2 to R5 areas, which read this file up to the scale area.
+    Test-Case 'V0.4 R6' 'R6: harness da recuperacao real na CI recusa rodar fora de maquina descartavel (Setup, A e B) e nao cria nada (nenhum resumo, pasta, arquivo de estado, raiz ATM-E2E-REC nem servico AtmRecE2E)' {
+        $h = Join-Path $testsDir 'e2e\Invoke-RecoverE2E.ps1'
+        $shell = (Get-Process -Id $PID).Path
+        $roots = { @(Get-ChildItem -LiteralPath ($env:SystemDrive + '\') -Directory -Filter 'ATM-E2E-REC-*' -ErrorAction SilentlyContinue).Count }
+        $svcs = { @(Get-CimInstance -ClassName Win32_Service -Filter "Name LIKE 'AtmRecE2E-%'" -Property Name -ErrorAction Stop).Count }
+        $r0 = & $roots; $s0 = & $svcs
+        foreach ($leg in @('Setup', 'A', 'B')) {
+            $sum = Join-Path $sandbox "r6-$leg-summary.json"; $work = Join-Path $sandbox "r6-$leg-work"; $state = Join-Path $sandbox "r6-$leg-state.txt"
+            # The runner markers are cleared in the child, so the refusal is verified in CI too.
+            $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            try {
+                $o = @(& $shell -NoProfile -ExecutionPolicy Bypass -Command "`$env:GITHUB_ACTIONS = ''; `$env:RUNNER_ENVIRONMENT = ''; & '$($h.Replace("'", "''"))' -Leg $leg -InstallDir '$($sandbox.Replace("'", "''"))' -SummaryFile '$($sum.Replace("'", "''"))' -WorkDir '$($work.Replace("'", "''"))' -StateFile '$($state.Replace("'", "''"))'" 2>&1 | ForEach-Object { "$_" })
+                $code = $LASTEXITCODE
+            } finally { $ErrorActionPreference = $eap }
+            Assert-True ($code -ne 0) "$leg`: recusa com codigo de saida diferente de zero"
+            Assert-True (($o -join ' ') -match 'Recusado') "$leg`: mensagem de recusa: $($o -join ' ')"
+            Assert-True (-not (Test-Path -LiteralPath $sum) -and -not (Test-Path -LiteralPath $work) -and -not (Test-Path -LiteralPath $state)) "$leg`: nada criado"
+        }
+        Assert-Eq (& $roots) $r0 'nenhuma raiz ATM-E2E-REC criada'
+        Assert-Eq (& $svcs) $s0 'nenhum servico AtmRecE2E criado'
+    }
+    Test-Case 'V0.4 R6' 'R6 (estatico): harness so da CI - so a trava da recuperacao, na memoria do proprio processo, depois do motor instalado; nada do lancador do R4 nem elevacao; toda chamada ao motor com -Providers e o envoltorio de guarda; seams padrao so no envoltorio, depois da conferencia do nome; servicos so por Invoke-OwnSc com nome desta execucao; raizes atomicas e protegidas; fora do pacote; src sem referencia' {
+        $root = Split-Path -Parent $testsDir
+        $h = [IO.File]::ReadAllText((Join-Path $testsDir 'e2e\Invoke-RecoverE2E.ps1'))
+        # The code without its header and its comment lines (the counts below are of code).
+        $code = (@($h.Substring($h.IndexOf('#>') + 2) -split "`r?`n" | Where-Object { $_ -notmatch '^\s*#' })) -join "`n"
+        $openRec = '$script:AtmRecoveryEnabled = ' + '$true'
+        # The gate: one in-memory assignment of a gate in the whole harness, the recovery one, after the installed engine.
+        $opens = [regex]::Matches($h, '\$script:(Atm\w+Enabled)\s*=')
+        Assert-True ($opens.Count -eq 1 -and $opens[0].Groups[1].Value -ceq 'AtmRecoveryEnabled' -and $h.Contains($openRec)) "uma unica atribuicao de trava, a da recuperacao ($($opens.Count))"
+        $loadRec = ". (Join-Path `$lib 'Engine.Recover.ps1')"
+        Assert-True ($h.IndexOf($loadRec) -gt 0 -and $h.IndexOf($loadRec) -lt $h.IndexOf($openRec)) 'trava aberta so depois de carregar o motor instalado'
+        Assert-True ($h.Contains("`$lib = Join-Path `$InstallDir 'lib'") -and -not $h.Contains("'src'") -and -not $h.Contains('\src\')) 'motor carregado da instalacao, nunca da fonte'
+        Assert-True ($code.Contains('$script:AtmCleanConsoleSource = { $true }') -and $code.Contains("throw 'Recusado:")) 'console pelo ponto de teste; guarda contra execucao acidental'
+        # R6 is R2 and R3: nothing of the R4 launcher, no elevation, no other override or seam of the engine.
+        foreach ($pat in @('run' + 'as', 'Shell' + 'Execute', 'Invoke-AtmRecover' + 'Command', 'Invoke-AtmRecover' + 'ElevatedLaunchDefault', 'ElevatedLauncher' + 'Impl', 'AtmElevated' + 'Recovery',
+                'SettleWait', 'ServiceSource', 'IdentitySource', 'ServiceDependencySource', 'ServiceWait', 'AtmCleanLockName', 'NewRunId', 'DeadlineSeconds')) {
+            Assert-True ($h.IndexOf($pat, [StringComparison]::OrdinalIgnoreCase) -lt 0) "harness sem '$pat'"
+        }
+        # Every engine call: one start and one undo, each with -Providers and its guard wrapper, never splatted.
+        $starts = @([regex]::Matches($code, 'Invoke-AtmRecover\s[^\n]*') | ForEach-Object { $_.Value })
+        $undos = @([regex]::Matches($code, 'Invoke-AtmRecoverUndo\s[^\n]*') | ForEach-Object { $_.Value })
+        Assert-True ($starts.Count -eq 1 -and $starts[0].Contains('-Providers $Providers') -and $starts[0].Contains('-ServiceControlImpl $recStartGuard')) "uma chamada ao inicio, com -Providers e o envoltorio ($($starts.Count))"
+        Assert-True ($undos.Count -eq 1 -and $undos[0].Contains('-Providers $Providers') -and $undos[0].Contains('-ServiceStopImpl $recStopGuard')) "uma chamada ao undo, com -Providers e o envoltorio ($($undos.Count))"
+        Assert-True (-not [regex]::IsMatch($code, 'Invoke-AtmRecover(Undo)?\s+@') -and [regex]::Matches($code, 'ServiceControlImpl').Count -eq 1 -and [regex]::Matches($code, 'ServiceStopImpl').Count -eq 1) 'nenhum splatting; os envoltorios so nessas chamadas'
+        # The default seams: once each, only inside its guard, after the check of the name against this run's list.
+        foreach ($g in @(@('$recStartGuard = {', ('Invoke-AtmRecoverService' + 'StartDefault')), @('$recStopGuard = {', ('Invoke-AtmRecoverService' + 'StopDefault')))) {
+            Assert-Eq ([regex]::Matches($h, [regex]::Escape($g[1])).Count) 1 "um uso de $($g[1]) no harness"
+            $b0 = $code.IndexOf($g[0]); $b1 = $code.IndexOf("`n}", $b0)
+            Assert-True ($b0 -gt 0 -and $b1 -gt $b0) "envoltorio $($g[0]) encontrado"
+            $body = $code.Substring($b0, $b1 - $b0)
+            $thr = $body.IndexOf("throw 'GUARD_NAME_NOT_OWN'")
+            Assert-True ($body.Contains($g[1] + ' -Name $Name') -and $body.Contains('$script:own.Names -cnotcontains $Name') -and $thr -gt 0 -and $thr -lt $body.IndexOf($g[1])) "$($g[1]) so dentro do envoltorio, com o argumento do motor, depois da conferencia do nome"
+        }
+        # Services: sc.exe once, in Invoke-OwnSc, after the name check, with no delete or config verb; no service cmdlet,
+        # removal, ACL or security descriptor change anywhere.
+        $i0 = $code.IndexOf('function Invoke-OwnSc {'); $i1 = $code.IndexOf('function Get-OwnService')
+        Assert-True ($i0 -gt 0 -and $i1 -gt $i0) 'Invoke-OwnSc encontrado'
+        $sc = $code.Substring($i0, $i1 - $i0)
+        Assert-True ([regex]::Matches($code, 'sc\.exe').Count -eq 1 -and $sc.Contains('System32\sc.exe') -and $sc.IndexOf('Assert-OwnName $Name') -gt 0 -and $sc.IndexOf('Assert-OwnName $Name') -lt $sc.IndexOf('sc.exe') -and $sc.Contains("[ValidateSet('query', 'qc', 'create', 'start', 'stop')]")) 'sc.exe so em Invoke-OwnSc, depois da conferencia do nome, sem delete nem config'
+        foreach ($pat in @('New-' + 'Service', 'Set-' + 'Service', 'Stop-' + 'Service', 'Start-' + 'Service', 'Remove-' + 'Service', 'Restart-' + 'Service', 'Suspend-' + 'Service', 'Service' + 'Controller',
+                'Remove-' + 'Item', '.Delete' + '(', 'Delete' + 'Value', 'Set-' + 'Acl', 'sd' + 'set', 'SetAccess' + 'Control')) {
+            Assert-True ($h.IndexOf($pat, [StringComparison]::OrdinalIgnoreCase) -lt 0) "harness sem '$pat'"
+        }
+        # Names: the fixed prefix and this run's nonce, each checked absent before its one creation; every function that
+        # names a service checks it first; the presenter checks the target before anything.
+        Assert-True ($code.Contains("`$prefix = 'AtmRecE2E'") -and $code.Contains("`$byKey[`$k] = 'AtmRecE2E-' + `$short + '-' + `$k") -and $code.Contains('Assert ($q.Exit -eq 1060')) 'nomes com prefixo e nonce, conferidos ausentes antes de criar'
+        Assert-Eq ([regex]::Matches($code, "Invoke-OwnSc 'create'").Count) 1 'uma unica criacao'
+        foreach ($fn in @('function Invoke-OwnSc {', 'function Get-OwnService(', 'function New-RecProvider {', 'function Invoke-E2ERecStart(', 'function Invoke-E2ERecUndo(')) {
+            $i = $code.IndexOf($fn)
+            Assert-True ($i -gt 0 -and $code.IndexOf('Assert-OwnName', $i) -gt $i -and $code.IndexOf('Assert-OwnName', $i) -lt $code.IndexOf("`n}", $i)) "$fn confere o nome"
+        }
+        Assert-True ($code.Contains('$recPresenter = { param($plan) Assert-OwnName ([string]$plan.Target);')) 'o apresentador confere o alvo antes de tudo'
+        # Run roots: atomic, protected, refused if present; the standard user only reads the service root.
+        Assert-True ($code.Contains("Assert (-not (Test-Path -LiteralPath `$Path)) 'RUN_ROOT_EXISTS'") -and $code.Contains('D:PAI(') -and $code.Contains('AreAccessRulesProtected') -and $code.Contains('(A;OICI;0x1200a9;;;$ReaderSid)')) 'raizes atomicas e protegidas; a perna A so le a raiz dos servicos'
+        Assert-True ($code.Contains('detail = (Protect-Text "$d")') -and $code.Contains('detail = (Protect-Text $_.Exception.Message)')) 'resumo so por Protect-Text'
+        # Never in the release package; the install e2e checks the package and runs Setup, A and B in that order.
+        $br = [IO.File]::ReadAllText((Join-Path $root 'tools\Build-Release.ps1'))
+        Assert-True ($br.Contains("`$ciOnly += 'tests\e2e\Invoke-RecoverE2E.ps1'") -and $br.IndexOf("Invoke-RecoverE2E.ps1'") -lt $br.IndexOf('foreach ($rel in $ciOnly)') -and $br.Contains('(Invoke-CleanE2E.ps1, Invoke-IsolateE2E.ps1 ou Invoke-RecoverE2E.ps1)')) 'build: os tres harnesses fora do stage e na mensagem de recusa'
+        $e2e = [IO.File]::ReadAllText((Join-Path $testsDir 'e2e\Invoke-InstallE2E.ps1'))
+        foreach ($leaf in @('Invoke-CleanE2E.ps1', 'Invoke-IsolateE2E.ps1', 'Invoke-RecoverE2E.ps1')) { Assert-True ($e2e.Contains("-Filter '$leaf'")) "e2e: pacote conferido sem $leaf" }
+        $iS = $e2e.IndexOf("Step 'rec-r6-setup-elevated'"); $iA = $e2e.IndexOf("Step 'rec-r6-recover-leg-A-standard-user'"); $iB = $e2e.IndexOf("Step 'rec-r6-recover-leg-B-elevated'"); $iU = $e2e.IndexOf("Step 'uninstall'")
+        Assert-True ($iS -gt 0 -and $iS -lt $iA -and $iA -lt $iB -and $iB -lt $iU) 'e2e: Setup, perna A e perna B, nesta ordem, antes da desinstalacao'
+        foreach ($f in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File)) { Assert-True (-not ([IO.File]::ReadAllText($f.FullName)).Contains('Invoke-RecoverE2E')) "$($f.Name) sem referencia ao harness" }
+    }
+    Test-Case 'V0.4 R6' 'R6 execucao real do harness (servicos criados, inicio e undo reais pelos seams padrao): NAO_TESTADO nesta suite' {
+        $script:caseSkipped = $true
+        $script:caseNote = 'so na CI, no install e2e (Setup elevado, perna A usuario padrao, perna B elevada), em runners descartaveis; nesta suite so o caminho de recusa (que nao cria nada) e os estaticos'
     }
 
     # ------------------------------------------------------------------ scale
