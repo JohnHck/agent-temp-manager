@@ -18488,22 +18488,24 @@ if ($null -eq $res.env) {
         $after = @(Get-ChildItem -LiteralPath $sandbox -Force | ForEach-Object { '{0}|{1}' -f $_.Name, $_.LastWriteTimeUtc.Ticks }) -join ';'
         Assert-Eq $after $before 'sandbox inalterado'
     }
-    Test-Case 'V0.4 R1' 'R1 (estatico): uma unica atribuicao da trava; nenhuma API de controle de servico em src; motor sem consulta CIM, escrita, log, lock, pergunta nem espera; diagnose, TUI e GUI nao chamam o motor; Win32_Service segue com duas consultas; lancador, instalador, manifesto, build e e2e com a oitava trava' {
+    Test-Case 'V0.4 R1' 'R1 (estatico): uma unica atribuicao da trava; nenhuma API de controle de servico em src (a do seam padrao do R2 e conferida na area V0.4 R2); motor sem consulta CIM, escrita direta, pergunta nem console proprio (lock, log e espera so depois da trava: V0.4 R2); diagnose, TUI e GUI nao chamam o motor; Win32_Service segue com duas consultas; lancador, instalador, manifesto, build e e2e com a oitava trava' {
         $all = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Rel = $_.FullName.Substring($srcDir.Length + 1); Text = [IO.File]::ReadAllText($_.FullName) } })
         $rec = @($all | Where-Object { $_.Rel -ceq 'lib\Engine.Recover.ps1' })[0].Text
         Assert-True ([regex]::Matches($rec, '\$script:AtmRecoveryEnabled\s*=').Count -eq 1 -and $rec -match '(?m)^\$script:AtmRecoveryEnabled = \$false\r?$') 'uma unica atribuicao, a $false'
         foreach ($f in $all) { if ($f.Rel -cne 'lib\Engine.Recover.ps1') { Assert-True (-not [regex]::IsMatch($f.Text, 'AtmRecoveryEnabled\s*=')) "$($f.Rel) nao altera a trava" } }
         Assert-True (-not $rec.Contains('$env:') -and -not $rec.Contains('ConvertFrom-Json') -and -not $rec.Contains('Get-Content')) 'nenhuma variavel de ambiente, configuracao ou arquivo abre a trava'
+        # ServiceController: R2's default seam, in Engine.Recover.ps1 only (its placement is checked by the V0.4 R2 statics).
         foreach ($api in @('Start-Service', 'Stop-Service', 'Set-Service', 'Restart-Service', 'ServiceController', 'Invoke-CimMethod', 'OpenService', 'ControlService')) {
-            $hits = @($all | Where-Object { $_.Text.IndexOf($api, [StringComparison]::OrdinalIgnoreCase) -ge 0 } | ForEach-Object { $_.Rel })
+            $hits = @($all | Where-Object { $_.Text.IndexOf($api, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and -not ($api -ceq 'ServiceController' -and $_.Rel -ceq 'lib\Engine.Recover.ps1') } | ForEach-Object { $_.Rel })
             Assert-Eq ($hits -join ',') '' "nenhum '$api' em src"
         }
         Assert-Eq (@($all | Where-Object { $_.Text -match '(?i)(?<![A-Za-z0-9_])sc\.exe' } | ForEach-Object { $_.Rel }) -join ',') '' "nenhum 'sc.exe' em src"
         $sleep = 'Start-' + 'Sleep'
-        # The code only (comments name the diagnose functions the collection follows).
+        # The code only (comments name the diagnose functions the collection follows). The lock, the log writer, its JSON,
+        # the inventory of the bases and the real wait are R2's, past the gate: the V0.4 R2 statics confine them.
         $recCode = [regex]::Replace([regex]::Replace($rec, '(?s)<#.*?#>', ''), '(?m)#.*$', '')
-        foreach ($pat in @('Get-CimInstance', 'Get-WmiObject', 'Read-Host', 'Write-Host', 'Invoke-AtmUnderSharedLock', 'AtmCleanLock', 'Mutex', 'Open-AtmCleanLog', 'Write-AtmCleanLogRecord', 'New-AtmPinnedTextFile', 'Write-AtmNewTextFile',
-                '[IO.File]', 'Set-Content', 'Add-Content', 'Out-File', 'New-Item', 'ConvertTo-Json', 'Read-AtmPseudonymKeyFile', 'Invoke-AtmDiagnose', 'Invoke-AtmInventory', 'Start-Process', $sleep, 'Add-Type')) { Assert-True (-not $recCode.Contains($pat)) "motor de recuperacao sem '$pat'" }
+        foreach ($pat in @('Get-CimInstance', 'Get-WmiObject', 'Read-Host', 'Write-Host', 'AtmCleanLock', 'Mutex', 'Write-AtmCleanLogRecord', 'New-AtmPinnedTextFile', 'Write-AtmNewTextFile',
+                '[IO.File]', 'Set-Content', 'Add-Content', 'Out-File', 'New-Item', 'Read-AtmPseudonymKeyFile', 'Invoke-AtmDiagnose', 'Start-Process', 'Add-Type')) { Assert-True (-not $recCode.Contains($pat)) "motor de recuperacao sem '$pat'" }
         Assert-True ([regex]::Matches($recCode, 'Invoke-AtmServiceQuery ').Count -eq 1 -and [regex]::Matches($recCode, 'Get-AtmServiceFindings ').Count -eq 1 -and [regex]::Matches($recCode, 'Get-AtmIdentityState ').Count -eq 1) 'coleta pelas funcoes do diagnose: uma consulta de servicos, seus achados e a identidade'
         $fns = @([regex]::Matches($rec, '(?m)^function\s+([A-Za-z]+-[A-Za-z0-9]+)') | ForEach-Object { $_.Groups[1].Value })
         Assert-True ($fns.Count -ge 8 -and $fns -ccontains 'Get-AtmRecoverPlan') "funcoes do motor ($($fns -join ','))"
@@ -18530,7 +18532,7 @@ if ($null -eq $res.env) {
             Assert-True ($t.Contains("AtmRecoveryEnabled = 'lib\Engine.Recover.ps1'") -and $t.Contains('eight installed gates') -and -not $t.Contains('seven installed gates')) "$e confere as oito travas instaladas"
         }
         $self = [IO.File]::ReadAllText((Join-Path $testsDir 'Run-Tests.ps1'))
-        $a0 = $self.IndexOf('-----' + ' V0.4 R1 (assisted'); $a1 = $self.IndexOf('-----' + ' scale')
+        $a0 = $self.IndexOf('-----' + ' V0.4 R1 (assisted'); $a1 = $self.IndexOf('-----' + ' V0.4 R2 (assisted')
         Assert-True ($a0 -gt 0 -and $a1 -gt $a0 -and -not $self.Substring($a0, $a1 - $a0).Contains($sleep)) 'area V0.4 R1 sem espera real'
     }
     Test-Case 'V0.4 R1' 'R1: CLI (processo novo deste shell) - recover list 0; plan do CoworkVMService 3 com RECOVERY_IMAGE_NOT_DECLARED; uso errado 2 (sem subcomando, operacao fora do catalogo, caminho, curinga, nome com outra grafia, opcoes recusadas); sempre "nada foi alterado"; estado do servico igual antes e depois' {
@@ -18566,6 +18568,475 @@ if ($null -eq $res.env) {
         Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('agent-temp recover  list | plan -Operation REC-SVC-START -Service <exact declared name> (V0.4).') -and $r.Text.Contains('PLAN ONLY - lists and shows the plan; recovery disabled: no service is changed.')) "help en-US: saida $($r.Exit)"
         $r = & $launch 'help -Lang pt-BR'
         Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('agent-temp recover  list | plan -Operation REC-SVC-START -Service <nome declarado exato> (V0.4).') -and $r.Text.Contains('SOMENTE PLANO - lista e mostra o plano')) "help pt-BR: saida $($r.Exit)"
+    }
+
+    # ------------------------------------------------------------------ V0.4 R2 (assisted recovery: REC-SVC-START past the gate, through the seam, ADR-0016)
+    # The recovery gate is opened only around each call (Invoke-R2Open) and closed again. Providers, identities, service
+    # rows, dependencies, the service control seam and the settle wait come from one table per case (New-R2Sim), which
+    # every closure captures as a local (never the area's helpers). No service is opened, started, stopped or changed: the
+    # seam is the case's stand-in, the default seam is never reached (shadowed with a counter where a case checks it), no
+    # CIM query runs and nothing waits (with an injected source a pending row's second read is not collected). The log
+    # folder follows the T1 folder policy (NAO_TESTADO where the sandbox cannot get it).
+    function New-R2Sim {
+        param([string]$Name)
+        $dir = New-TestCleanLogDir ('r2-' + $Name)
+        if (-not $dir) { return $null }
+        $p = New-TestProfile ('r2' + $Name)
+        $sim = @{
+            Name = $Name; Dir = $dir; Profile = $p; IA = (Get-InvArgs -Profiles @($p)); Log = (Join-Path $dir 'recover.jsonl'); Service = 'R'; Img = $r1Img; SysPath = $r1SysPath
+            Row = [ordered]@{ Name = 'R'; State = 'Stopped'; StartMode = 'Manual'; DelayedAutoStart = $false; StartName = 'LocalSystem'; ProcessId = 0; PathName = $svcSys
+                ExitCode = [uint32]1077; ServiceSpecificExitCode = [uint32]0; CheckPoint = [uint32]0; WaitHint = [uint32]0; AcceptStop = $false }
+            Hints = @([pscustomobject]@{ Name = 'R'; Role = $null; ExpectedImage = $r1Img }); Links = @(); Related = @(); Id = (& $diagIdUser)
+            SeamResult = 'OK'; OnSeam = @{ State = 'Running'; ProcessId = 4321; ExitCode = [uint32]0; AcceptStop = $true }; OnWait = (New-Object System.Collections.ArrayList)
+            SeamCalls = (New-Object System.Collections.Generic.List[object]); Waits = (New-Object System.Collections.Generic.List[int]); Presented = (New-Object System.Collections.Generic.List[object]); Reads = 0
+        }
+        $sim.Source = { param($Names) $sim.Reads++; @([pscustomobject]$sim.Row) }.GetNewClosure()
+        $sim.Deps = { param($Names) [pscustomobject]@{ Links = @($sim.Links); Related = @($sim.Related); RelatedFailed = $null; Capped = @() } }.GetNewClosure()
+        $sim.IdSource = { $sim.Id }.GetNewClosure()
+        $sim.Provider = [pscustomobject]@{ Id = 'test-rec'; DisplayName = 'Test recovery'; ContractVersion = 2; Capabilities = @('runtime'); GetServiceHints = { @($sim.Hints) }.GetNewClosure() }
+        # The stand-in seam: records the call (name, extra arguments, state at the call), then gives SeamResult (a
+        # scriptblock is run instead: a throw) and applies OnSeam to the row.
+        $sim.Seam = {
+            param($Name)
+            $sim.SeamCalls.Add([pscustomobject]@{ Name = $Name; Extra = $args.Count; StateAtCall = $sim.Row.State })
+            $r = $sim.SeamResult
+            if ($r -is [scriptblock]) { return (& $r) }
+            foreach ($k in @($sim.OnSeam.Keys)) { $sim.Row[$k] = $sim.OnSeam[$k] }
+            return $r
+        }.GetNewClosure()
+        # The injected settle wait: records the milliseconds and applies the next OnWait change to the row.
+        $sim.Wait = { param($Ms) $sim.Waits.Add([int]$Ms); if ($sim.OnWait.Count -gt 0) { $c = $sim.OnWait[0]; $sim.OnWait.RemoveAt(0); foreach ($k in @($c.Keys)) { $sim.Row[$k] = $c[$k] } } }.GetNewClosure()
+        $sim.Presenter = { param($Plan) $sim.Presented.Add($Plan) }.GetNewClosure()
+        return $sim
+    }
+    function Invoke-R2Open {
+        param([hashtable]$Arguments)
+        $script:AtmRecoveryEnabled = $true
+        try { return (Invoke-AtmRecover @Arguments) } finally { $script:AtmRecoveryEnabled = $false }
+    }
+    function Get-R2Args {
+        param($Sim, $Operator, [hashtable]$Extra = @{})
+        $a = @{ Operation = 'REC-SVC-START'; Service = $Sim.Service; PlanPresenter = $Sim.Presenter; ConfirmationReader = $Operator.Reader; InventoryArgs = $Sim.IA; LogFile = $Sim.Log
+            Interaction = @{ Caller = 'TEST'; ConsoleRequired = $true }; Providers = @($Sim.Provider); IdentitySource = $Sim.IdSource; ServiceSource = $Sim.Source
+            ServiceDependencySource = $Sim.Deps; ServiceControlImpl = $Sim.Seam; SettleWait = $Sim.Wait }
+        foreach ($k in $Extra.Keys) { $a[$k] = $Extra[$k] }
+        return $a
+    }
+    function Get-R2Types { param([string]$Path) return (@((Read-TestCleanLogFile $Path).Records | ForEach-Object { $_.type }) -join ',') }
+    function Get-R2Record { param([string]$Path, [string]$Type) return @((Read-TestCleanLogFile $Path).Records | Where-Object { $_.type -ceq $Type }) }
+    function Assert-R2NotStarted {
+        # A run stopped before the seam: the code, no seam call, no wait, no outcome and no difference.
+        param($Res, $Sim, [string]$Code, [string]$Label)
+        Assert-True ($Res.Aborted -ceq $Code -and -not $Res.SeamCalled -and $null -eq $Res.Outcome -and $null -eq $Res.StoppedBy -and $Sim.SeamCalls.Count -eq 0 -and $Sim.Waits.Count -eq 0 -and @($Res.Diff).Count -eq 0 -and -not $Res.Changed) "${Label}: $($Res.Aborted) (esperado $Code), seam nao chamado"
+    }
+    $r2Types = 'run-start,plan,before,confirmation,plan-check,intent,result,after,run-end'
+    Test-Case 'V0.4 R2' 'R2: constantes fechadas - esquema atm.recoverlog/1, codigos do seam (ACCESS_DENIED e erros Win32 por numero), cinco desfechos, espera de 500 ms com limite 5 s a 30 s; trava ainda carregada fechada; operacao fora do catalogo recusada sem coleta' {
+        Assert-Eq $shippedRecoveryGate $false 'trava da recuperacao carregada fechada'
+        Assert-Eq $script:AtmRecoveryEnabled $false 'trava fechada entre os casos'
+        Assert-Eq $script:AtmRecoverLogSchema 'atm.recoverlog/1' 'esquema do log'
+        Assert-Eq (@($script:AtmRecoveryOutcomes) -join ',') 'COMPLETE,PARTIAL,FAILED,REFUSED,EXCEPTION' 'cinco desfechos (secao 4)'
+        Assert-True ($script:AtmRecoverySeamCodes[0] -ceq 'OK' -and $script:AtmRecoverySeamCodes -ccontains 'ACCESS_DENIED' -and $script:AtmRecoverySeamCodes -ccontains 'SERVICE_WIN32_OTHER') 'codigos do seam: OK, ACCESS_DENIED, SERVICE_WIN32_OTHER'
+        foreach ($c in $script:AtmRecoverySeamCodes) { Assert-True ($c -cmatch '^(OK|ACCESS_DENIED|SERVICE_[A-Z0-9_]+)$') "codigo fechado: $c" }
+        $want = @{ 5 = 'ACCESS_DENIED'; 1056 = 'SERVICE_ALREADY_RUNNING'; 1058 = 'SERVICE_DISABLED'; 1068 = 'SERVICE_DEPENDENCY_FAIL'; 1060 = 'SERVICE_DOES_NOT_EXIST'; 1069 = 'SERVICE_LOGON_FAILED'; 1053 = 'SERVICE_REQUEST_TIMEOUT' }
+        foreach ($k in $want.Keys) { Assert-Eq $script:AtmRecoveryWin32Codes[[int]$k] $want[$k] "Win32 $k" }
+        foreach ($v in $script:AtmRecoveryWin32Codes.Values) { Assert-True ($script:AtmRecoverySeamCodes -ccontains $v) "mapeado para um codigo do seam: $v" }
+        Assert-True ($script:AtmRecoverySettlePollMs -eq 500 -and $script:AtmRecoverySettleMinMs -eq 5000 -and $script:AtmRecoverySettleCapMs -eq 30000) 'espera: 500 ms entre leituras, limite de 5 s a 30 s'
+        $s = New-R2Sim 'const'
+        if (-not $s) { return }
+        $op = New-TestCleanOperator
+        foreach ($x in @('REC-SVC-STOP', 'rec-svc-start', '')) {
+            $res = Invoke-R2Open (Get-R2Args $s $op @{ Operation = $x })
+            Assert-R2NotStarted $res $s 'RECOVERY_OPERATION_INVALID' "operacao '$x'"
+        }
+        Assert-True ($s.Presented.Count -eq 0 -and $s.Reads -eq 0 -and $op.Calls.Count -eq 0 -and -not (Test-Path -LiteralPath $s.Log)) 'nada coletado, apresentado, perguntado nem registrado'
+    }
+    Test-Case 'V0.4 R2' 'R2: trava fechada - devolve o plano e RECUPERACAO_REAL_DESABILITADA; nada perguntado, travado nem registrado; nenhum inventario, console, espera nem seam (injetado ou padrao); controle positivo com a trava aberta neste processo' {
+        $s = New-R2Sim 'closed'
+        if (-not $s) { return }
+        $calls = New-Object System.Collections.Generic.List[string]
+        $realInv = ${function:Invoke-AtmInventory}; $realLock = ${function:Invoke-AtmUnderSharedLock}; $realLog = ${function:Open-AtmCleanLog}; $realCon = ${function:Get-AtmEngineConsoleObservation}
+        function Invoke-AtmInventory { $calls.Add('inventory'); & $realInv @args }
+        function Invoke-AtmUnderSharedLock { $calls.Add('lock'); & $realLock @args }
+        function Open-AtmCleanLog { $calls.Add('log'); & $realLog @args }
+        function Get-AtmEngineConsoleObservation { $calls.Add('console'); & $realCon @args }
+        function Invoke-AtmRecoverServiceStartDefault { $calls.Add('default-seam'); 'OK' }
+        function Wait-AtmRecoverSettle { $calls.Add('wait') }
+        $prevLock = $script:AtmCleanLockName
+        $lockName = New-TestLockName
+        $script:AtmCleanLockName = $lockName
+        try {
+            $op = New-TestCleanOperator
+            $a = Get-R2Args $s $op
+            $res = Invoke-AtmRecover @a
+            Assert-True ($res.Aborted -ceq 'RECUPERACAO_REAL_DESABILITADA' -and -not $res.GateOpen -and $res.Plan.Offered -and $res.PlanId -cmatch '^[0-9a-f]{64}$' -and $res.PlanId -ceq $res.Plan.PlanId -and $res.Before.State -ceq 'STOPPED') "trava fechada: plano e codigo de parada ($($res.Aborted))"
+            Assert-True ($null -eq $res.Phrase -and $null -eq $res.RunId -and $null -eq $res.LogFile -and -not $res.LogCreated -and -not $res.SeamCalled -and $null -eq $res.Outcome -and -not $res.Changed) 'sem frase, execucao, log, seam nem desfecho'
+            Assert-True ($s.Presented.Count -eq 1 -and $op.Calls.Count -eq 0 -and $s.SeamCalls.Count -eq 0 -and $s.Waits.Count -eq 0) 'plano apresentado; nada perguntado; seam injetado e espera em 0'
+            Assert-Eq ($calls -join ',') '' 'nenhum inventario, console, lock, log, seam padrao nem espera'
+            Assert-True (-not (Test-Path -LiteralPath $s.Log)) 'nenhum log criado'
+            $m = $null
+            Assert-True (-not [Threading.Mutex]::TryOpenExisting($lockName, [ref]$m)) 'mutex B8 nao existe depois da chamada'
+            # Positive controls, gate open in this process: the injected seam counts one call; without it the default seam
+            # (shadowed above: no service is touched) is reached once, after the console, the inventory, the lock and the log.
+            $op = New-TestCleanOperator
+            $res = Invoke-R2Open (Get-R2Args $s $op @{ LogFile = ($s.Log + '.seam') })
+            Assert-True ($res.GateOpen -and $res.SeamCalled -and $s.SeamCalls.Count -eq 1 -and $res.Outcome -ceq 'COMPLETE' -and ($op.Calls -join ',') -ceq 'confirm|') "controle positivo: seam injetado chamado uma vez ($($res.Aborted) $($res.Outcome))"
+            Assert-Eq ($calls -join ',') 'console,inventory,lock,log' 'controle positivo: console, inventario, lock e log so com a trava aberta'
+            $calls.Clear(); $s.Row.State = 'Stopped'
+            $a = Get-R2Args $s (New-TestCleanOperator) @{ LogFile = ($s.Log + '.default') }; $a.Remove('ServiceControlImpl')
+            $res = Invoke-R2Open $a
+            Assert-True ($res.SeamCalled -and $res.SeamCode -ceq 'OK' -and $s.SeamCalls.Count -eq 1) "sem seam injetado: o padrao, nunca o injetado ($($res.SeamCode))"
+            Assert-Eq ($calls -join ',') 'console,inventory,lock,log,default-seam' 'seam padrao alcancado uma vez, so com a trava aberta'
+            Assert-Eq @(Get-R2Record ($s.Log + '.default') 'intent')[0].seam 'DEFAULT' 'intent registra o seam padrao'
+        } finally { $script:AtmRecoveryEnabled = $false; $script:AtmCleanLockName = $prevLock }
+        Assert-Eq $script:AtmRecoveryEnabled $false 'trava fechada de novo'
+    }
+    Test-Case 'V0.4 R2' 'R2 desfecho COMPLETE: seam chamado uma vez so com o nome; pendente e depois RUNNING pela espera injetada; captura after, diferenca campo a campo e os nove registros do log, nesta ordem; DACL protegida' {
+        $s = New-R2Sim 'complete'
+        if (-not $s) { return }
+        $s.OnSeam = @{ State = 'Start Pending'; CheckPoint = [uint32]1; WaitHint = [uint32]2000 }
+        [void]$s.OnWait.Add(@{ CheckPoint = [uint32]2 })
+        [void]$s.OnWait.Add(@{ State = 'Running'; ProcessId = 4321; ExitCode = [uint32]0; CheckPoint = [uint32]0; WaitHint = [uint32]0; AcceptStop = $true })
+        $op = New-TestCleanOperator
+        $res = Invoke-R2Open (Get-R2Args $s $op)
+        Assert-True ($null -eq $res.Aborted -and $null -eq $res.StoppedBy -and $res.Outcome -ceq 'COMPLETE' -and $res.SeamCode -ceq 'OK' -and $null -eq $res.ExceptionType -and $res.Changed -and @($res.LogErrors).Count -eq 0) "COMPLETE ($($res.Aborted)$($res.StoppedBy) $($res.Outcome))"
+        Assert-True ($res.Phrase -cmatch '^INICIAR SERVICO [0-9A-F]{8}$' -and $res.Phrase -ceq ('INICIAR SERVICO ' + $res.PlanId.Substring(0, 8).ToUpperInvariant()) -and ($op.Calls -join ',') -ceq 'confirm|' -and ($op.Phrases -join ',') -ceq $res.Phrase) "frase ligada ao plan id ($($res.Phrase))"
+        Assert-True ($s.SeamCalls.Count -eq 1 -and $s.SeamCalls[0].Name -ceq 'R' -and $s.SeamCalls[0].Extra -eq 0 -and $s.SeamCalls[0].StateAtCall -ceq 'Stopped') 'seam chamado uma vez, so com o nome do servico'
+        Assert-True (($s.Waits -join ',') -ceq '500,500' -and $res.WaitedMs -eq 1000 -and $res.Reads -eq 3 -and $s.Presented.Count -eq 1) "espera injetada: duas pausas de 500 ms, tres leituras ($($s.Waits -join ',') / $($res.Reads))"
+        Assert-True ($res.Before.State -ceq 'STOPPED' -and $res.After.State -ceq 'RUNNING' -and $res.After.ExitCode -ceq '0' -and $res.After.AcceptStop -ceq 'TRUE' -and $res.After.Executable -ceq $res.Before.Executable) 'captura before e after'
+        $df = @($res.Diff | ForEach-Object { $_.field })
+        foreach ($fld in @('state', 'exitCode', 'acceptStop')) { Assert-True ($df -ccontains $fld) "diferenca campo a campo: $fld ($($df -join ','))" }
+        foreach ($fld in @('startMode', 'executable', 'image', 'account')) { Assert-True ($df -cnotcontains $fld) "campo igual fora da diferenca: $fld" }
+        $st = @($res.Diff | Where-Object { $_.field -ceq 'state' })[0]
+        Assert-True ($st.before -ceq 'STOPPED' -and $st.after -ceq 'RUNNING') 'diferenca do estado: antes e depois'
+        $lg = Read-TestCleanLogFile $s.Log
+        Assert-Eq (@($lg.Records | ForEach-Object { $_.type }) -join ',') $r2Types 'registros do log (secao 3), nesta ordem'
+        Assert-True (@($lg.Records | Where-Object { $_.schema -cne 'atm.recoverlog/1' -or $_.runId -cne $res.RunId }).Count -eq 0 -and -not $lg.Bom -and $lg.EndsLf -and -not $lg.Cr) 'esquema, run id, UTF-8 sem BOM, LF'
+        Assert-Eq (@($lg.Records | ForEach-Object { $_.recSeq }) -join ',') '1,2,3,4,5,6,7,8,9' 'recSeq consecutivo'
+        $rec = @{}; foreach ($r in $lg.Records) { $rec[$r.type] = $r }
+        Assert-True ($rec['run-start'].planId -ceq $res.PlanId -and $rec['run-start'].operation -ceq 'REC-SVC-START' -and $rec['run-start'].target -ceq 'R' -and $rec['run-start'].elevation -ceq 'NEEDS_ELEVATION' -and $rec['run-start'].gateOpen -eq $true) 'run-start'
+        Assert-True ($rec['plan'].undo -ceq 'REC-SVC-STOP' -and $rec['plan'].undoScope -ceq 'SERVICE_STATE_ONLY' -and $rec['plan'].notUndone -ceq 'WHAT_THE_SERVICE_DID_WHILE_RUNNING' -and $rec['plan'].provider -ceq 'test-rec') 'plan: desfazer e o que nao se desfaz'
+        Assert-True ($rec['before'].state -ceq 'STOPPED' -and $rec['before'].exitCode -ceq '1077' -and $rec['after'].state -ceq 'RUNNING' -and $rec['after'].exitCode -ceq '0' -and $rec['before'].executable -ceq $res.Before.Executable) 'before e after no log'
+        $cf = $rec['confirmation']
+        Assert-True ($cf.accepted -eq $true -and $cf.planId -ceq $res.PlanId -and $cf.interaction.observedBy -ceq 'TEST_SEAM' -and $cf.interaction.caller -ceq 'DIRECT_CALL' -and $cf.interaction.consoleRequiredByCaller -eq $true -and $cf.interaction.identifiesRespondent -eq $false) 'confirmation: console observado pelo motor (ponto de teste)'
+        Assert-True ($rec['plan-check'].matched -eq $true -and @($rec['plan-check'].reasons).Count -eq 0 -and @($rec['plan-check'].changedFields).Count -eq 0) 'plan-check sem mudanca'
+        Assert-True ($rec['intent'].seam -ceq 'TEST_SEAM' -and $rec['intent'].target -ceq 'R' -and $rec['intent'].planId -ceq $res.PlanId) 'intent antes do seam'
+        $rr = $rec['result']
+        Assert-True ($rr.outcome -ceq 'COMPLETE' -and $rr.seamCode -ceq 'OK' -and $rr.waitedMs -eq 1000 -and $rr.reads -eq 3 -and $rr.limitMs -eq 5000 -and $rr.exitCode -ceq '0' -and (@($rr.diff | ForEach-Object { $_.field }) -join ',') -ceq ($df -join ',')) 'result com a diferenca'
+        Assert-True ($rec['run-end'].outcome -ceq 'COMPLETE' -and $rec['run-end'].seamCalled -eq $true -and $null -eq $rec['run-end'].stoppedBy) 'run-end'
+        Assert-True ((Get-Acl -LiteralPath $s.Log).AreAccessRulesProtected) 'DACL protegida (escritor do T1)'
+    }
+    Test-Case 'V0.4 R2' 'R2 desfecho PARTIAL: ainda pendente no fim da espera; limite pelo WaitHint (8 s) e teto de 30 s; after pendente, diferenca e registros' {
+        $s = New-R2Sim 'partial'
+        if (-not $s) { return }
+        $s.OnSeam = @{ State = 'Start Pending'; CheckPoint = [uint32]1; WaitHint = [uint32]8000 }
+        $res = Invoke-R2Open (Get-R2Args $s (New-TestCleanOperator))
+        Assert-True ($null -eq $res.Aborted -and $null -eq $res.StoppedBy -and $res.Outcome -ceq 'PARTIAL' -and $res.SeamCode -ceq 'OK' -and $res.After.State -ceq 'PENDING') "PARTIAL ($($res.Aborted)$($res.StoppedBy) $($res.Outcome) $($res.After.State))"
+        Assert-True ($res.WaitedMs -eq 8000 -and $s.Waits.Count -eq 16 -and @($s.Waits | Where-Object { $_ -ne 500 }).Count -eq 0 -and $res.Reads -eq 17) "espera ate o limite do WaitHint ($($res.WaitedMs) ms, $($res.Reads) leituras)"
+        Assert-True (@($res.Diff | ForEach-Object { $_.field }) -ccontains 'state' -and @($res.Diff | ForEach-Object { $_.field }) -ccontains 'waitHint') 'diferenca: estado e WaitHint'
+        Assert-Eq (Get-R2Types $s.Log) $r2Types 'registros do log'
+        $rr = @(Get-R2Record $s.Log 'result')[0]
+        Assert-True ($rr.outcome -ceq 'PARTIAL' -and $rr.limitMs -eq 8000 -and $rr.waitedMs -eq 8000 -and @(Get-R2Record $s.Log 'after')[0].state -ceq 'PENDING') 'result e after'
+        $s2 = New-R2Sim 'partialcap'
+        $s2.OnSeam = @{ State = 'Start Pending'; CheckPoint = [uint32]1; WaitHint = [uint32]600000 }
+        $res2 = Invoke-R2Open (Get-R2Args $s2 (New-TestCleanOperator))
+        Assert-True ($res2.Outcome -ceq 'PARTIAL' -and $res2.WaitedMs -eq 30000 -and $s2.Waits.Count -eq 60 -and @(Get-R2Record $s2.Log 'result')[0].limitMs -eq 30000) "teto de 30 s ($($res2.Outcome) $($res2.WaitedMs) ms)"
+    }
+    Test-Case 'V0.4 R2' 'R2 desfecho FAILED: voltou a STOPPED com o codigo de saida; outro codigo do seam (dependencia, ja em execucao) e FAILED sem espera, nunca COMPLETE' {
+        $s = New-R2Sim 'failed'
+        if (-not $s) { return }
+        $s.OnSeam = @{ State = 'Start Pending'; CheckPoint = [uint32]1; WaitHint = [uint32]2000 }
+        [void]$s.OnWait.Add(@{ State = 'Stopped'; ExitCode = [uint32]1067; CheckPoint = [uint32]0; WaitHint = [uint32]0 })
+        $res = Invoke-R2Open (Get-R2Args $s (New-TestCleanOperator))
+        Assert-True ($res.Outcome -ceq 'FAILED' -and $res.SeamCode -ceq 'OK' -and $res.After.State -ceq 'STOPPED' -and $res.After.ExitCode -ceq '1067' -and $res.WaitedMs -eq 500) "FAILED pelo estado ($($res.Outcome) $($res.After.State) $($res.After.ExitCode))"
+        $ec = @($res.Diff | Where-Object { $_.field -ceq 'exitCode' })
+        Assert-True ($ec.Count -eq 1 -and $ec[0].before -ceq '1077' -and $ec[0].after -ceq '1067' -and @($res.Diff | ForEach-Object { $_.field }) -cnotcontains 'state') 'diferenca: so o codigo de saida (o estado voltou a STOPPED)'
+        $rr = @(Get-R2Record $s.Log 'result')[0]
+        Assert-True ($rr.outcome -ceq 'FAILED' -and $rr.exitCode -ceq '1067' -and (Get-R2Types $s.Log) -ceq $r2Types) 'result com o codigo de saida; registros'
+        foreach ($c in @(@('SERVICE_DEPENDENCY_FAIL', @{}), @('SERVICE_DISABLED', @{}), @('SERVICE_ALREADY_RUNNING', @{ State = 'Running'; ProcessId = 99 }))) {
+            $x = New-R2Sim ('failed-' + $c[0].ToLowerInvariant())
+            $x.SeamResult = $c[0]; $x.OnSeam = $c[1]
+            $r = Invoke-R2Open (Get-R2Args $x (New-TestCleanOperator))
+            Assert-True ($r.Outcome -ceq 'FAILED' -and $r.SeamCode -ceq $c[0] -and $x.Waits.Count -eq 0 -and $r.WaitedMs -eq 0 -and $r.Reads -eq 1 -and $null -ne $r.After) "$($c[0]): FAILED sem espera, after lido ($($r.Outcome))"
+            Assert-True (@(Get-R2Record $x.Log 'result')[0].seamCode -ceq $c[0] -and (Get-R2Types $x.Log) -ceq $r2Types) "$($c[0]): registrado"
+        }
+        Assert-True (@($r.Diff | ForEach-Object { $_.field }) -ccontains 'state' -and $r.Changed) 'ja em execucao: a diferenca mostra o estado, o desfecho nao e COMPLETE'
+    }
+    Test-Case 'V0.4 R2' 'R2 desfecho REFUSED: acesso negado pelo seam, nada mudou; after lido, diferenca vazia, registros completos' {
+        $s = New-R2Sim 'refused'
+        if (-not $s) { return }
+        $s.SeamResult = 'ACCESS_DENIED'; $s.OnSeam = @{}
+        $res = Invoke-R2Open (Get-R2Args $s (New-TestCleanOperator))
+        Assert-True ($res.Outcome -ceq 'REFUSED' -and $res.SeamCode -ceq 'ACCESS_DENIED' -and $null -eq $res.Aborted -and $null -eq $res.StoppedBy -and $s.SeamCalls.Count -eq 1 -and $s.Waits.Count -eq 0) "REFUSED ($($res.Outcome))"
+        Assert-True ($null -ne $res.After -and $res.After.State -ceq 'STOPPED' -and @($res.Diff).Count -eq 0 -and -not $res.Changed -and $res.Reads -eq 1) 'nada mudou: after igual ao before'
+        $rr = @(Get-R2Record $s.Log 'result')[0]
+        Assert-True ($rr.outcome -ceq 'REFUSED' -and $rr.seamCode -ceq 'ACCESS_DENIED' -and @($rr.diff).Count -eq 0 -and (Get-R2Types $s.Log) -ceq $r2Types) 'result e registros'
+    }
+    Test-Case 'V0.4 R2' 'R2 desfecho EXCEPTION: o seam lancou (ou deu um resultado fora dos codigos); after ainda lido; so o tipo da excecao, nunca a mensagem' {
+        $s = New-R2Sim 'exception'
+        if (-not $s) { return }
+        $s.SeamResult = { throw (New-Object InvalidOperationException('r2-exception-text')) }
+        $res = Invoke-R2Open (Get-R2Args $s (New-TestCleanOperator))
+        Assert-True ($res.Outcome -ceq 'EXCEPTION' -and $res.ExceptionType -ceq 'InvalidOperationException' -and $null -eq $res.SeamCode -and $s.SeamCalls.Count -eq 1 -and $s.Waits.Count -eq 0) "EXCEPTION ($($res.Outcome) $($res.ExceptionType))"
+        Assert-True ($null -ne $res.After -and $res.After.State -ceq 'STOPPED' -and $res.Reads -eq 1 -and @($res.Diff).Count -eq 0) 'after lido; diferenca campo a campo (vazia)'
+        $txt = [IO.File]::ReadAllText($s.Log)
+        $rr = @(Get-R2Record $s.Log 'result')[0]
+        Assert-True ($rr.outcome -ceq 'EXCEPTION' -and $rr.exceptionType -ceq 'InvalidOperationException' -and -not $txt.Contains('r2-exception-text') -and (Get-R2Types $s.Log) -ceq $r2Types) 'registrado so o tipo, sem a mensagem'
+        foreach ($bad in @('WHATEVER', 'ok', 7)) {
+            $x = New-R2Sim ('exc-' + [string]$bad)
+            $x.SeamResult = $bad; $x.OnSeam = @{}
+            $r = Invoke-R2Open (Get-R2Args $x (New-TestCleanOperator))
+            Assert-True ($r.Outcome -ceq 'EXCEPTION' -and $r.ExceptionType -ceq 'SEAM_RESULT_INVALID' -and $null -eq $r.SeamCode -and $null -ne $r.After) "resultado fora dos codigos ($bad): EXCEPTION"
+        }
+    }
+    Test-Case 'V0.4 R2' 'R2 AUT-2: frase errada, vazia, cancelada, de outro plano, com outra grafia ou espaco; sem console observado; sem leitor; sem -LogFile, log ja existente, log dentro de uma base - todos param antes do seam' {
+        $s = New-R2Sim 'aut2'
+        if (-not $s) { return }
+        $phraseOf = { param([string]$Id) 'INICIAR SERVICO ' + $Id.Substring(0, 8).ToUpperInvariant() }
+        $right = & $phraseOf (Get-AtmRecoverPlan -Collection (Get-AtmRecoverCollection -Providers @($s.Provider) -IdentitySource $s.IdSource -ServiceSource $s.Source -ServiceDependencySource $s.Deps) -Operation 'REC-SVC-START' -Service 'R').PlanId
+        $o = New-R2Sim 'aut2other'
+        $o.Row.StartMode = 'Auto'
+        $other = & $phraseOf (Get-AtmRecoverPlan -Collection (Get-AtmRecoverCollection -Providers @($o.Provider) -IdentitySource $o.IdSource -ServiceSource $o.Source -ServiceDependencySource $o.Deps) -Operation 'REC-SVC-START' -Service 'R').PlanId
+        Assert-True ($other -cne $right) "outro plano, outra frase ($other / $right)"
+        $n = 0
+        foreach ($c in @(@('errada', 'INICIAR SERVICO 00000000', 'DECLINED'), @('vazia', '', 'CANCELLED'), @('cancelada', $null, 'CANCELLED'), @('de outro plano', $other, 'DECLINED'),
+                @('outra grafia', $right.ToLowerInvariant(), 'DECLINED'), @('com espaco', ($right + ' '), 'DECLINED'))) {
+            $n++
+            $log = $s.Log + '.p' + $n
+            $op = New-TestCleanOperator -Answers @{ confirm = $c[1] }
+            $res = Invoke-R2Open (Get-R2Args $s $op @{ LogFile = $log })
+            Assert-R2NotStarted $res $s 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE' "frase $($c[0])"
+            Assert-True ($res.ConfirmationCode -ceq $c[2] -and $res.Phrase -ceq $right -and ($op.Calls -join ',') -ceq 'confirm|') "frase $($c[0]): $($res.ConfirmationCode)"
+            $cf = @(Get-R2Record $log 'confirmation')
+            Assert-True ($cf.Count -eq 1 -and $cf[0].accepted -eq $false -and $cf[0].refusal -ceq 'CONFIRMACAO_AUSENTE_OU_DIVERGENTE' -and $cf[0].reason -ceq $c[2]) "frase $($c[0]): confirmation recusada no log"
+            Assert-Eq (Get-R2Types $log) 'run-start,plan,before,confirmation,run-end' "frase $($c[0]): sem plan-check, intent nem result"
+        }
+        $p0 = $s.Presented.Count
+        $early = {
+            param($Res, $Op, [string]$Code, [string]$Log, [string]$Label)
+            Assert-R2NotStarted $Res $s $Code $Label
+            Assert-True ($Op.Calls.Count -eq 0 -and $s.Presented.Count -eq $p0 -and $null -eq $Res.RunId -and $null -eq $Res.Plan) "${Label}: nada coletado, apresentado nem perguntado"
+            if ($Log) { Assert-True (-not (Test-Path -LiteralPath $Log)) "${Label}: nenhum log" }
+        }
+        $script:AtmCleanConsoleSource = { $false }
+        try { $op = New-TestCleanOperator; $res = Invoke-R2Open (Get-R2Args $s $op @{ LogFile = ($s.Log + '.noconsole') }) } finally { $script:AtmCleanConsoleSource = { $true } }
+        & $early $res $op 'CONSOLE_NOT_OBSERVED' ($s.Log + '.noconsole') 'sem console observado'
+        $op = New-TestCleanOperator; $a = Get-R2Args $s $op @{ LogFile = ($s.Log + '.noreader') }; $a.Remove('ConfirmationReader')
+        & $early (Invoke-R2Open $a) $op 'SEM_APRESENTACAO_OU_CONFIRMACAO' ($s.Log + '.noreader') 'sem leitor da confirmacao'
+        $op = New-TestCleanOperator; $a = Get-R2Args $s $op; $a.Remove('LogFile')
+        & $early (Invoke-R2Open $a) $op 'LOG_REQUIRED' $null 'sem -LogFile'
+        $ex = $s.Log + '.exists'
+        [IO.File]::WriteAllText($ex, 'x')
+        $op = New-TestCleanOperator
+        & $early (Invoke-R2Open (Get-R2Args $s $op @{ LogFile = $ex })) $op 'LOG_ALREADY_EXISTS' $null 'log ja existente'
+        Assert-Eq ([IO.File]::ReadAllText($ex)) 'x' 'log existente intacto'
+        $inBase = Join-Path (Get-Base $s.Profile) 'r2.jsonl'
+        $op = New-TestCleanOperator
+        & $early (Invoke-R2Open (Get-R2Args $s $op @{ LogFile = $inBase })) $op 'LOG_DESTINATION_NOT_ALLOWED' $inBase 'log dentro de uma base'
+        $op = New-TestCleanOperator; $a = Get-R2Args $s $op; $a.Remove('PlanPresenter')
+        $res = Invoke-R2Open $a
+        Assert-R2NotStarted $res $s 'SEM_APRESENTACAO' 'sem apresentacao'
+    }
+    # Revalidation: one case per field changed between the confirmation and the action (inside the confirmation answer).
+    # Setup runs before the call; Change runs while the phrase is asked.
+    $r2Changes = @(
+        @{ Key = 'target'; Field = 'target'; Why = 'o nome deixa de ser declarado'; Change = { param($x) $x.Hints = @([pscustomobject]@{ Name = 'R9'; Role = $null; ExpectedImage = $x.Img }) } }
+        @{ Key = 'provider'; Field = 'provider'; Why = 'o papel declarado pelo provider'; Change = { param($x) $x.Hints = @([pscustomobject]@{ Name = 'R'; Role = 'helper'; ExpectedImage = $x.Img }) } }
+        @{ Key = 'executable'; Field = 'executable'; Why = 'outro executavel'; Change = { param($x) $x.Row.PathName = "`"$env:SystemRoot\System32\other.exe`" -k test" } }
+        @{ Key = 'image'; Field = 'image'; Why = 'a imagem declarada nao casa mais'; Change = { param($x) $x.Hints = @([pscustomobject]@{ Name = 'R'; Role = $null; ExpectedImage = '%SystemRoot%\System32\other.exe' }) } }
+        @{ Key = 'state'; Field = 'state'; Why = 'o servico foi iniciado por outro'; Change = { param($x) $x.Row.State = 'Running'; $x.Row.ProcessId = 77 } }
+        @{ Key = 'startmode'; Field = 'startMode'; Why = 'o modo de inicio'; Change = { param($x) $x.Row.StartMode = 'Auto' } }
+        @{ Key = 'delayed'; Field = 'delayedAutoStart'; Why = 'o inicio atrasado'; Change = { param($x) $x.Row.DelayedAutoStart = $true } }
+        @{ Key = 'dependson'; Field = 'dependsOn'; Why = 'uma dependencia nova'; Change = { param($x) $x.Links = @([pscustomobject]@{ Antecedent = 'SysDep'; Dependent = 'R' }); $x.Related = @([pscustomobject]@{ Name = 'SysDep'; State = 'Running'; PathName = $x.SysPath }) } }
+        @{ Key = 'depstate'; Field = 'dependsOn'; Why = 'o estado de uma dependencia'
+            Setup = { param($x) $x.Links = @([pscustomobject]@{ Antecedent = 'SysDep'; Dependent = 'R' }); $x.Related = @([pscustomobject]@{ Name = 'SysDep'; State = 'Running'; PathName = $x.SysPath }) }
+            Change = { param($x) $x.Related = @([pscustomobject]@{ Name = 'SysDep'; State = 'Paused'; PathName = $x.SysPath }) } }
+        @{ Key = 'dependents'; Field = 'dependents'; Why = 'um dependente novo'; Change = { param($x) $x.Links = @([pscustomobject]@{ Antecedent = 'R'; Dependent = 'SysUser' }); $x.Related = @([pscustomobject]@{ Name = 'SysUser'; State = 'Stopped'; PathName = $x.SysPath }) } }
+        @{ Key = 'depdstate'; Field = 'dependents'; Why = 'o estado de um dependente'
+            Setup = { param($x) $x.Links = @([pscustomobject]@{ Antecedent = 'R'; Dependent = 'SysUser' }); $x.Related = @([pscustomobject]@{ Name = 'SysUser'; State = 'Stopped'; PathName = $x.SysPath }) }
+            Change = { param($x) $x.Related = @([pscustomobject]@{ Name = 'SysUser'; State = 'Running'; PathName = $x.SysPath }) } }
+        @{ Key = 'account'; Field = 'account'; Why = 'a conta do servico'; Change = { param($x) $x.Row.StartName = 'NT AUTHORITY\LocalService' } }
+        @{ Key = 'exitcode'; Field = 'exitCode'; Why = 'o codigo de saida'; Change = { param($x) $x.Row.ExitCode = [uint32]1066 } }
+        @{ Key = 'identity'; Field = 'identity'; Why = 'outro usuario no token'; Change = { param($x) $x.Id = [pscustomobject]@{ Name = 'TEST\bob'; Sid = 'S-1-5-21-1-2-3-1002'; IsAdmin = $false; ElevationTypeRaw = 3; IntegrityRid = 0x2000; SessionId = 1 } } }
+        @{ Key = 'elevation'; Field = 'elevation'; Why = 'o mesmo usuario, token elevado'; Change = { param($x) $x.Id = [pscustomobject]@{ Name = 'TEST\alice'; Sid = 'S-1-5-21-1-2-3-1001'; IsAdmin = $true; ElevationTypeRaw = 2; IntegrityRid = 0x3000; SessionId = 1 } } }
+    )
+    foreach ($r2Chg in $r2Changes) {
+        Test-Case 'V0.4 R2' ('R2 revalidacao: {0} ({1}) muda entre a confirmacao e a acao -> REVALIDATION_REFUSED com o campo em changedFields; seam nao chamado' -f $r2Chg.Field, $r2Chg.Why) {
+            $s = New-R2Sim ('rv-' + $r2Chg.Key)
+            if (-not $s) { return }
+            if ($r2Chg.ContainsKey('Setup')) { $null = & $r2Chg.Setup $s }
+            $chg = $r2Chg.Change
+            $op = New-TestCleanOperator -Answers @{ confirm = { param($ph) $null = & $chg $s; $null }.GetNewClosure() }
+            $res = Invoke-R2Open (Get-R2Args $s $op)
+            Assert-R2NotStarted $res $s 'REVALIDATION_REFUSED' $r2Chg.Field
+            Assert-True (@($res.ChangedFields) -ccontains $r2Chg.Field) "changedFields com $($r2Chg.Field) ($(@($res.ChangedFields) -join ','); motivos $(@($res.RevalidationCodes) -join ','))"
+            $names = @(@($script:AtmRecoveryCaptureFields.Values) + @($script:AtmRecoveryChangedFieldsExtra))
+            foreach ($f in @($res.ChangedFields)) { Assert-True ($names -ccontains $f) "so nomes de campo ($f)" }
+            $pc = @(Get-R2Record $s.Log 'plan-check')
+            Assert-True ($pc.Count -eq 1 -and $pc[0].matched -eq $false -and @($pc[0].changedFields) -ccontains $r2Chg.Field) 'plan-check registra o campo'
+            Assert-Eq (Get-R2Types $s.Log) 'run-start,plan,before,confirmation,plan-check,run-end' 'sem intent nem result'
+            $txt = [IO.File]::ReadAllText($s.Log)
+            Assert-True (-not $txt.Contains('S-1-5-21') -and -not $txt.Contains('alice') -and -not $txt.Contains('bob')) 'identidade comparada em memoria, nunca registrada'
+        }
+    }
+    Test-Case 'V0.4 R2' 'R2 lock B8 ocupado: CLEAN_LOCK_BUSY (o mesmo lock do clean); nada perguntado, nenhum log, seam nao chamado' {
+        $s = New-R2Sim 'busy'
+        if (-not $s) { return }
+        $h = Start-TestLockHolder -Name $script:AtmCleanLockName -Mode release
+        try { $op = New-TestCleanOperator; $res = Invoke-R2Open (Get-R2Args $s $op) } finally { $end = Stop-TestLockHolderByGo $h }
+        Assert-True ($h.Status -ceq 'ACQUIRED' -and $end.Exited -and $end.Exit -eq 0) "portador do lock ($($h.Status), saida $($end.Exit))"
+        Assert-R2NotStarted $res $s 'CLEAN_LOCK_BUSY' 'lock ocupado'
+        Assert-True ($op.Calls.Count -eq 0 -and -not (Test-Path -LiteralPath $s.Log) -and $null -eq $res.RunId -and $s.Presented.Count -eq 1) 'nada perguntado nem registrado (o plano foi apresentado no passo 4, antes do lock)'
+    }
+    Test-Case 'V0.4 R2' 'R2 lock B8 abandonado: CLEAN_LOCK_ABANDONED, nada perguntado nem registrado, posse liberada; nova tentativa comeca do zero e completa' {
+        $s = New-R2Sim 'aband'
+        if (-not $s) { return }
+        Initialize-AtmTestMutex
+        $n = New-TestLockName
+        $prev = $script:AtmCleanLockName
+        $script:AtmCleanLockName = $n
+        $obs = $null
+        try {
+            $h = Start-TestLockHolder -Name $n -Mode abandon
+            Assert-Eq $h.Status 'ACQUIRED' 'o filho adquiriu'
+            # An observer handle (not an owner) keeps the object alive after the child ends, so its abandoned state remains.
+            $obs = [AtmTestMutex]::OpenSync($n)
+            $end = Stop-TestLockHolderByGo $h
+            Assert-True ($end.Exited -and $end.Exit -eq 0) "o filho terminou sozinho sem liberar (saida $($end.Exit))"
+            $op = New-TestCleanOperator
+            $res = Invoke-R2Open (Get-R2Args $s $op)
+            Assert-R2NotStarted $res $s 'CLEAN_LOCK_ABANDONED' 'lock abandonado'
+            Assert-True ($op.Calls.Count -eq 0 -and -not (Test-Path -LiteralPath $s.Log) -and $null -eq $res.RunId) 'nada perguntado nem registrado'
+            Assert-True (-not [AgentTempManager.AtmCleanLock]::IsHeld) 'posse recebida liberada'
+            $res2 = Invoke-R2Open (Get-R2Args $s (New-TestCleanOperator) @{ LogFile = ($s.Log + '.retry') })
+            Assert-True ($null -eq $res2.Aborted -and $res2.Outcome -ceq 'COMPLETE' -and $s.SeamCalls.Count -eq 1 -and (Get-R2Types ($s.Log + '.retry')) -ceq $r2Types) "nova tentativa do zero ($($res2.Aborted) $($res2.Outcome))"
+        } finally {
+            if ($null -ne $obs) { $obs.Dispose() }
+            $script:AtmCleanLockName = $prev
+        }
+    }
+    Test-Case 'V0.4 R2' 'R2 lock B8 entre portador elevado e nao elevado (operator-only): NAO_TESTADO' {
+        $script:caseSkipped = $true
+        $script:caseNote = 'a suite cobre portadores da mesma identidade e do mesmo nivel (ocupado e abandonado acima); um portador elevado contra um chamador nao elevado, e o inverso, exigem dois tokens na mesma maquina e ficam para a VM ou o e2e do operador, como a matriz B8 do clean'
+    }
+    Test-Case 'V0.4 R2' 'R2 privacidade do log: sem nome nem SID do token, conta alem das tres padrao, caminho fora do local conhecido, linha de comando, nome oculto nem mensagem de excecao (COMPLETE e EXCEPTION); DACL protegida' {
+        $s = New-R2Sim 'priv'
+        if (-not $s) { return }
+        $prep = {
+            param($x)
+            $x.Row.StartName = 'CORPDOM\r2-acct'; $x.Row.PathName = "`"$svcUser\AppData\Local\Vendor\svc.exe`" --token=r2-secret"
+            $x.Hints = @([pscustomobject]@{ Name = 'R'; Role = $null; ExpectedImage = 'svc.exe' })
+            $x.Links = @([pscustomobject]@{ Antecedent = 'SecretDep'; Dependent = 'R' })
+            $x.Related = @([pscustomobject]@{ Name = 'SecretDep'; State = 'Running'; PathName = "`"$svcUser\x\secretdep.exe`" -k r2-secret" })
+        }
+        & $prep $s
+        $res = Invoke-R2Open (Get-R2Args $s (New-TestCleanOperator))
+        Assert-True ($res.Outcome -ceq 'COMPLETE' -and $res.Before.Executable -ceq 'svc.exe' -and $res.Before.AccountKind -ceq 'USER' -and $null -eq $res.Before.Account -and (@($res.Before.DependsOn) -join ',') -ceq '*|RUNNING') "reducoes do diagnose ($($res.Aborted) $($res.Outcome) $(@($res.RefusalCodes) -join ','))"
+        $e = New-R2Sim 'privexc'
+        & $prep $e
+        $e.SeamResult = { throw (New-Object InvalidOperationException('r2-exception-text p2a-person')) }
+        $res2 = Invoke-R2Open (Get-R2Args $e (New-TestCleanOperator))
+        Assert-True ($res2.Outcome -ceq 'EXCEPTION') "excecao ($($res2.Outcome))"
+        foreach ($lp in @($s.Log, $e.Log)) {
+            $txt = [IO.File]::ReadAllText($lp)
+            foreach ($x in @('alice', 'TEST\\', 'S-1-5-21', 'r2-acct', 'CORPDOM', '--token', 'r2-secret', 'p2a-person', 'AppData', 'SecretDep', 'secretdep', 'r2-exception-text', [string]$me.Sid)) { Assert-True (-not $txt.Contains($x)) "log sem '$x'" }
+            if ($me.Name) { Assert-True (-not $txt.Contains([string]$me.Name) -and -not $txt.Contains(([string]$me.Name).Replace('\', '\\'))) 'log sem o nome do usuario do processo' }
+            Assert-True ((Get-Acl -LiteralPath $lp).AreAccessRulesProtected) 'DACL protegida'
+            $b = @(Get-R2Record $lp 'before')[0]
+            Assert-True ($b.accountKind -ceq 'USER' -and $null -eq $b.account -and $b.executable -ceq 'svc.exe') 'before so com o tipo da conta e o nome do executavel'
+        }
+    }
+    Test-Case 'V0.4 R2' 'R2 SERVICE_IMAGE_NOT_DECLARED (decisao de 2026-11-17): com a trava aberta, recusa antes de perguntar (RECOVERY_REFUSED com RECOVERY_IMAGE_NOT_DECLARED), inclusive o CoworkVMService real; nada apresentado, travado nem registrado' {
+        $s = New-R2Sim 'noimage'
+        if (-not $s) { return }
+        $s.Hints = @([pscustomobject]@{ Name = 'R'; Role = $null; ExpectedImage = $null })
+        $prevLock = $script:AtmCleanLockName
+        $lockName = New-TestLockName
+        $script:AtmCleanLockName = $lockName
+        try {
+            $op = New-TestCleanOperator
+            $res = Invoke-R2Open (Get-R2Args $s $op)
+            Assert-R2NotStarted $res $s 'RECOVERY_REFUSED' 'imagem nao declarada'
+            Assert-True ((@($res.RefusalCodes) -join ',') -ceq 'RECOVERY_IMAGE_NOT_DECLARED' -and $null -eq $res.PlanId -and -not $res.Plan.Offered -and $res.GateOpen) "so RECOVERY_IMAGE_NOT_DECLARED ($(@($res.RefusalCodes) -join ','))"
+            Assert-True ($op.Calls.Count -eq 0 -and $s.Presented.Count -eq 0 -and -not (Test-Path -LiteralPath $s.Log) -and $null -eq $res.RunId) 'nada perguntado, apresentado nem registrado'
+            $m = $null
+            Assert-True (-not [Threading.Mutex]::TryOpenExisting($lockName, [ref]$m)) 'lock B8 nao tomado'
+            $c = New-R2Sim 'cowork'
+            $c.Service = 'CoworkVMService'
+            $c.Row.Name = 'CoworkVMService'
+            $c.Row.PathName = "`"C:\Program Files\WindowsApps\Claude_1.2.3.0_x64__pzs8sxrjxfjjc\cowork-svc.exe`""
+            $op = New-TestCleanOperator
+            $res = Invoke-R2Open (Get-R2Args $c $op @{ Providers = @($cdProvider) })
+            Assert-R2NotStarted $res $c 'RECOVERY_REFUSED' 'CoworkVMService'
+            Assert-True ((@($res.RefusalCodes) -join ',') -ceq 'RECOVERY_IMAGE_NOT_DECLARED' -and $res.Plan.Provider -ceq 'claude-desktop' -and $op.Calls.Count -eq 0 -and $c.Presented.Count -eq 0) "CoworkVMService parado do provider real: recusado antes de perguntar ($(@($res.RefusalCodes) -join ','))"
+        } finally { $script:AtmCleanLockName = $prevLock }
+    }
+    Test-Case 'V0.4 R2' 'R2 (estatico): API de controle de servico so no Engine.Recover.ps1 e so no seam padrao; nenhum outro verbo de controle; lock, log, inventario, console e JSON so depois da trava; espera real so na funcao de espera; os passos na ordem; funcoes de leitura sem efeito; um seam, uma operacao, nenhum chamador fora do motor; area sem espera real' {
+        $all = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | ForEach-Object { [pscustomobject]@{ Rel = $_.FullName.Substring($srcDir.Length + 1); Text = [IO.File]::ReadAllText($_.FullName) } })
+        $rec = @($all | Where-Object { $_.Rel -ceq 'lib\Engine.Recover.ps1' })[0].Text
+        $strip = { param([string]$T) [regex]::Replace([regex]::Replace($T, '(?s)<#.*?#>', ''), '(?m)#.*$', '') }
+        $count = { param([string]$Text, [string]$Pat) [regex]::Matches($Text, [regex]::Escape($Pat), [Text.RegularExpressions.RegexOptions]::IgnoreCase).Count }
+        $tk = $null; $er = $null
+        $ast = [Management.Automation.Language.Parser]::ParseInput($rec, [ref]$tk, [ref]$er)
+        Assert-Eq @($er).Count 0 'motor sem erro de sintaxe'
+        $fn = @{}; $fnRaw = @{}
+        foreach ($d in @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] }, $false))) { $fnRaw[$d.Name] = $d.Extent.Text; $fn[$d.Name] = & $strip $d.Extent.Text }
+        $recCode = & $strip $rec
+        $seamFn = 'Invoke-AtmRecoverServiceStartDefault'
+        # The service control API: only in this file, only inside the default seam (comments included).
+        foreach ($api in @('ServiceController', 'System.ServiceProcess')) {
+            foreach ($f in $all) { if ($f.Rel -cne 'lib\Engine.Recover.ps1') { Assert-True ($f.Text.IndexOf($api, [StringComparison]::OrdinalIgnoreCase) -lt 0) "$($f.Rel) sem '$api'" } }
+            $in = & $count $fnRaw[$seamFn] $api
+            Assert-True ($in -gt 0 -and (& $count $rec $api) -eq $in) "'$api' so dentro do seam padrao ($in de $(& $count $rec $api))"
+        }
+        Assert-True ((& $count $recCode '.Start(') -eq 1 -and (& $count $fn[$seamFn] '.Start(') -eq 1) 'um unico .Start(), no seam padrao'
+        # No other control verb: the cmdlets and APIs nowhere in src; the methods nowhere in the engine (src uses Stop() only
+        # on its own timers and stopwatches, never on a service object, which exists only in the seam).
+        foreach ($api in @('Start-Service', 'Stop-Service', 'Set-Service', 'Restart-Service', 'Suspend-Service', 'Resume-Service', 'Invoke-CimMethod', 'OpenService', 'ControlService', 'ChangeServiceConfig')) {
+            Assert-Eq (@($all | Where-Object { $_.Text.IndexOf($api, [StringComparison]::OrdinalIgnoreCase) -ge 0 } | ForEach-Object { $_.Rel }) -join ',') '' "nenhum '$api' em src"
+        }
+        Assert-Eq (@($all | Where-Object { $_.Text -match '(?i)(?<![A-Za-z0-9_])sc\.exe' } | ForEach-Object { $_.Rel }) -join ',') '' "nenhum 'sc.exe' em src"
+        foreach ($verb in @('.Stop(', '.Pause(', '.Continue(', 'ExecuteCommand', 'WaitForStatus')) { Assert-Eq (& $count $rec $verb) 0 "motor sem '$verb'" }
+        Assert-True (-not ($rec -match '(?i)\b(StopService|PauseService|ResumeService|ChangeStartMode|UserControlService|DeleteService)\b')) 'motor sem metodo de controle do CIM'
+        # Past-gate calls and the real wait: each only in the functions named.
+        $sleep = 'Start-' + 'Sleep'
+        $placement = [ordered]@{
+            'Get-AtmEngineConsoleObservation' = @('Invoke-AtmRecover'); 'Invoke-AtmInventory' = @('Invoke-AtmRecover'); 'Test-AtmOutputPathOutsideBases' = @('Invoke-AtmRecover')
+            'Invoke-AtmUnderSharedLock' = @('Invoke-AtmRecover'); 'Invoke-AtmRecoverLocked @' = @('Invoke-AtmRecover')
+            'Open-AtmCleanLog' = @('Invoke-AtmRecoverLocked'); 'Get-AtmCurrentIdentity' = @('Invoke-AtmRecoverLocked'); 'Test-AtmTypedPhrase' = @('Invoke-AtmRecoverLocked')
+            'Write-AtmRecoverRecord -Log' = @('Invoke-AtmRecoverLocked'); ($seamFn + ' -Name') = @('Invoke-AtmRecoverLocked'); '& $ServiceControlImpl' = @('Invoke-AtmRecoverLocked')
+            'Wait-AtmRecoverSettle -Milliseconds' = @('Invoke-AtmRecoverLocked'); 'ConvertTo-Json' = @('Write-AtmRecoverRecord'); 'AppendLine' = @('Write-AtmRecoverRecord'); $sleep = @('Wait-AtmRecoverSettle')
+        }
+        foreach ($p in $placement.Keys) {
+            $total = & $count $recCode $p
+            $inside = 0; foreach ($a in $placement[$p]) { $inside += (& $count $fn[$a] $p) }
+            Assert-True ($total -gt 0 -and $total -eq $inside) "'$p' so em $($placement[$p] -join ', ') ($inside de $total)"
+        }
+        foreach ($p in @(($seamFn + ' -Name'), '& $ServiceControlImpl', 'Invoke-AtmRecoverLocked @', 'Invoke-AtmUnderSharedLock')) { Assert-Eq (& $count $recCode $p) 1 "uma unica chamada: $p" }
+        # The gate is read first; nothing past it runs before.
+        $ir = $fn['Invoke-AtmRecover']
+        $g = $ir.IndexOf('if (-not $script:AtmRecoveryEnabled)')
+        Assert-True ($g -gt 0 -and $ir.IndexOf("'RECUPERACAO_REAL_DESABILITADA'") -gt $g) 'a trava e lida em Invoke-AtmRecover'
+        foreach ($p in @('Get-AtmEngineConsoleObservation', 'Invoke-AtmInventory', 'Invoke-AtmUnderSharedLock', 'Invoke-AtmRecoverLocked')) { Assert-True ($ir.IndexOf($p) -gt $g) "$p so depois da trava" }
+        # The order of the steps (section 3 records around the seam).
+        $lk = $fn['Invoke-AtmRecoverLocked']
+        $steps = @('Open-AtmCleanLog', "-Type 'run-start'", "-Type 'plan'", "-Type 'before'", 'Test-AtmTypedPhrase', "-Type 'confirmation'", 'Get-AtmRecoverPlanCheck', "-Type 'plan-check'", "-Type 'intent'", '& $ServiceControlImpl', 'Wait-AtmRecoverSettle', "-Type 'result'", "-Type 'after'", "-Type 'run-end'", '$log.Close()')
+        $last = -1
+        foreach ($p in $steps) { $i = $lk.IndexOf($p); Assert-True ($i -gt $last) "passo na ordem: $p"; $last = $i }
+        # One operation per call, fixed in code: one service name, no loop, no list.
+        Assert-True ($ir.Contains('[string]$Service') -and $ir.Contains('[string]$Operation') -and -not $ir.Contains('foreach') -and -not $lk.Contains('foreach')) 'um servico e uma operacao por chamada, sem lista nem lote'
+        # The read-only functions keep R1's rules.
+        $r1Ban = @('Get-CimInstance', 'Read-Host', 'Write-Host', 'Invoke-AtmUnderSharedLock', 'Mutex', 'Open-AtmCleanLog', 'Write-AtmCleanLogRecord', 'New-AtmPinnedTextFile', 'Write-AtmNewTextFile', '[IO.File]', 'Set-Content', 'Add-Content', 'Out-File', 'New-Item',
+            'ConvertTo-Json', 'AppendLine', 'Invoke-AtmInventory', 'Start-Process', $sleep, 'Add-Type', 'Get-AtmEngineConsoleObservation', 'Test-AtmTypedPhrase', 'ServiceControlImpl', $seamFn, 'ServiceController')
+        foreach ($name in @('Get-AtmRecoveryOperation', 'Get-AtmRecoveryElevation', 'Get-AtmRecoverCollection', 'Get-AtmRecoverDeclaredImages', 'Split-AtmRecoverDependencyLabel', 'Get-AtmRecoverEvidenceDetails', 'Test-AtmRecoverEvidence', 'Get-AtmRecoverRefusals',
+                'Get-AtmRecoverCapture', 'Get-AtmRecoverPlanId', 'Get-AtmRecoverList', 'Get-AtmRecoverPlan', 'ConvertTo-AtmRecoverCaptureRecord', 'Get-AtmRecoverFieldKey', 'Compare-AtmRecoverCapture', 'Get-AtmRecoverPlanCheck')) {
+            Assert-True $fn.ContainsKey($name) "funcao $name"
+            foreach ($pat in $r1Ban) { Assert-True (-not $fn[$name].Contains($pat)) "$name sem '$pat'" }
+        }
+        # Nobody outside the engine calls it (no execution verb before phase R4).
+        foreach ($f in $all) { if ($f.Rel -cne 'lib\Engine.Recover.ps1') { Assert-True (-not $f.Text.Contains('Invoke-AtmRecover')) "$($f.Rel) nao chama Invoke-AtmRecover" } }
+        $self = [IO.File]::ReadAllText((Join-Path $testsDir 'Run-Tests.ps1'))
+        $a0 = $self.IndexOf('-----' + ' V0.4 R2 (assisted'); $a1 = $self.IndexOf('-----' + ' scale')
+        Assert-True ($a0 -gt 0 -and $a1 -gt $a0 -and -not $self.Substring($a0, $a1 - $a0).Contains($sleep)) 'area V0.4 R2 sem espera real'
     }
 
     # ------------------------------------------------------------------ scale

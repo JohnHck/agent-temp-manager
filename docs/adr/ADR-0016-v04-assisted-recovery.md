@@ -1,6 +1,6 @@
 # ADR-0016: Assisted recovery (V0.4)
 
-Status: ACCEPTED (V04-D1 to V04-D8 decided 2026-11-17: D3 (b) elevation on demand through UAC; the others as recommended); R0 and R1 implemented
+Status: ACCEPTED (V04-D1 to V04-D8 decided 2026-11-17: D3 (b) elevation on demand through UAC; the others as recommended); R0, R1 and R2 implemented
 Date: 2026-11-17
 Phase: V0.4 (phases R0 to R6 below, each a future round with its own contract and tests)
 
@@ -534,8 +534,9 @@ identity of the token is never shown.
 
 **`SERVICE_IMAGE_NOT_DECLARED`: R1's behavior, and an open question for R2.** R1 refuses a service whose providers
 declare no `ExpectedImage`, with `RECOVERY_IMAGE_NOT_DECLARED`. That is the reading consistent with V04-D5 (b). So the
-real `CoworkVMService` of the Claude Desktop provider is never offered in R1, whatever its state. This is R1's
-behavior only: how R2 treats an undeclared image is the maintainer's decision, and it is still open.
+real `CoworkVMService` of the Claude Desktop provider is never offered in R1, whatever its state. The maintainer decided
+on 2026-11-17 that this stays a refusal from R2 on; `CoworkVMService` stays refused until a provider declares its
+executable (see the R2 implementation record).
 
 **Tests:** the area `V0.4 R1` of `tests/Run-Tests.ps1`, in both shells. Providers, identities, service rows and
 dependencies are injected, as in R0.
@@ -568,3 +569,133 @@ dependencies are injected, as in R0.
   always refuses;
 * `LIKELY_HAS_RIGHT` and `NEEDS_ELEVATION` from a real token in the CLI, only from injected tokens;
 * exit 10 (a failed collection) through the CLI.
+
+## R2 implementation record (2026-11-17)
+
+The line numbers in this record are those of the files as V04-R2 adds or changes them. Lines 1 to 329 of
+`Engine.Recover.ps1` keep the numbers the R1 record cites; R2 appends from line 331 on.
+
+R2 adds `REC-SVC-START` past the recovery gate, in the engine, through a service control seam: `Invoke-AtmRecover`
+(`Engine.Recover.ps1:479-565`) and its locked part `Invoke-AtmRecoverLocked` (`:567-700`). **The gate stays `$false` in
+every copy** (`:15`, still its only assignment). No command calls `Invoke-AtmRecover` yet: the CLI verb comes with the
+UAC relaunch (R4). Only the suite opens the gate, in its own process, and always with the seam injected. R2 changes no
+finding state, eligibility, B1 or RECENT rule, and changes neither the diagnose nor the providers.
+
+**`SERVICE_IMAGE_NOT_DECLARED` (decided 2026-11-17).** The maintainer decided that it stays a refusal from R2 on. A
+service whose providers declare no `ExpectedImage` is refused with `RECOVERY_IMAGE_NOT_DECLARED`, with the gate open
+too, before anything is presented or asked (`RECOVERY_REFUSED`, `:552`). The real `CoworkVMService` stays refused until a
+provider declares its executable. This supersedes the "Open point for R2" of the R0 record.
+
+**With the gate closed** (`:531-538`): the fresh collection, the plan, the presenter, then `RECUPERACAO_REAL_DESABILITADA`.
+No console check, inventory, lock, log, phrase, wait or seam (injected or default).
+
+**The steps past the gate, in this order** (one operation and one service per call; there is no list or batch form):
+
+| # | Step | Where | Stops with |
+|---|---|---|---|
+| 1 | The console, observed by the engine (`Get-AtmEngineConsoleObservation`); then a confirmation reader is required | `:541-543` | `CONSOLE_NOT_OBSERVED`, `SEM_APRESENTACAO_OU_CONFIRMACAO` |
+| 2 | A new `-LogFile`, outside every base (`Test-AtmOutputPathOutsideBases` on an inventory without progress) and not existing | `:544-548` | `LOG_REQUIRED`, `LOG_DESTINATION_NOT_ALLOWED`, `LOG_ALREADY_EXISTS` |
+| 3 | A fresh collection and the R1 criteria (`Get-AtmRecoverCollection`, `Get-AtmRecoverPlan`) | `:549-552` | `RECOVERY_REFUSED` (the codes in `RefusalCodes`) |
+| 4 | The presenter shows the plan | `:553` | |
+| 5 | Lock B8 (`Invoke-AtmUnderSharedLock`, the clean's own mutex, without waiting); the log (`Open-AtmCleanLog`: a new file through the pinned folder, protected DACL); `run-start`, `plan`, `before` | `:557-558`, `:598-609` | `CLEAN_LOCK_BUSY`, `CLEAN_LOCK_ABANDONED`, `LOG_OPEN_FAILED`, `LOG_WRITE_FAILED` |
+| 6 | The typed phrase (`Test-AtmTypedPhrase`, exact); `confirmation` | `:594`, `:612-624` | `CONFIRMACAO_AUSENTE_OU_DIVERGENTE` (reason `CANCELLED` or `DECLINED`) |
+| 7 | The revalidation on a fresh collection (`Get-AtmRecoverPlanCheck`, `:399-424`); `plan-check` with `reasons` and `changedFields` | `:627-635` | `REVALIDATION_REFUSED` |
+| 8 | `intent`, written and flushed; then the seam, with the service name and nothing else | `:638-650` | `LOG_INTENT_FAILED` (no call) |
+| 9 | The settle wait, bounded and injectable, after `OK` only | `:652-669` | |
+| 10 | The outcome, the diff, `result` and `after` | `:670-685` | `LOG_RESULT_FAILED`, `LOG_AFTER_FAILED` |
+| 11 | `run-end` (only while the log has not failed), the log closed; the lock released by the caller | `:690-696`, `:559-563` | `LOG_END_FAILED`, `LOG_CLOSE_FAILED`, `LOCK_RELEASE_FAILED` |
+
+Before the seam is called, a stop code goes to `Aborted`; after it, to `StoppedBy`. A failed release never replaces the
+main code. An operation outside the catalog gives `RECOVERY_OPERATION_INVALID` before any collection; no presenter gives
+`SEM_APRESENTACAO`.
+
+**The phrase:** `INICIAR SERVICO <the first 8 characters of the plan id, upper case>` (`:594`). It binds the
+confirmation to the presented plan: another plan's phrase, another spelling, a trailing space, empty or cancelled are all
+refused.
+
+**The revalidation** (`changedFields`, names only): `target` (no longer declared or listed), `provider` (the declaring
+providers' ids, roles and images), every capture field by its log name (`state`, `startMode`, `delayedAutoStart`,
+`exitCode`, `serviceSpecificExitCode`, `checkPoint`, `waitHint`, `acceptStop`, `condition`, `accountKind`, `account`,
+`executable`, `executableForm`, `image`, `dependsOn`, `dependents`; `:355-359`), `identity` (the token's SID, compared in
+memory and never written) and `elevation` (the code and the elevation type) (`:362`). Any reason or changed field
+refuses.
+
+**The seam.** `-ServiceControlImpl` (a scriptblock that receives the service name) replaces the default, which is
+`Invoke-AtmRecoverServiceStartDefault` (`:443-477`). The default uses `System.ServiceProcess.ServiceController.Start()`,
+because it opens the service control manager with connect access and the service with the start right only
+(`SERVICE_START`): no other right is asked, nothing but the start is requested, and no arguments are passed. The type is
+loaded lazily, on the first default call only (Windows PowerShell 5.1 does not load the assembly by default; PowerShell 7
+ships it as a package). A Win32 error of the start is mapped by number (`:340-344`); anything else is thrown again. The
+service control API appears only in this function, in this file. The seam is called once (`:647`), past the gate, after
+`intent` only. The suite never reaches the default; it injects the seam in every case past the gate.
+
+**The seam's closed results** (`:345-346`). `OK`, or one of these Win32 errors:
+
+| Win32 | Code | Outcome |
+|---|---|---|
+| 5 | `ACCESS_DENIED` | `REFUSED` |
+| 1053 | `SERVICE_REQUEST_TIMEOUT` | `FAILED` |
+| 1054 | `SERVICE_NO_THREAD` | `FAILED` |
+| 1055 | `SERVICE_DATABASE_LOCKED` | `FAILED` |
+| 1056 | `SERVICE_ALREADY_RUNNING` | `FAILED` (never `COMPLETE`) |
+| 1058 | `SERVICE_DISABLED` | `FAILED` |
+| 1060 | `SERVICE_DOES_NOT_EXIST` | `FAILED` |
+| 1068 | `SERVICE_DEPENDENCY_FAIL` | `FAILED` |
+| 1069 | `SERVICE_LOGON_FAILED` | `FAILED` |
+| 1072 | `SERVICE_MARKED_FOR_DELETE` | `FAILED` |
+| 1075 | `SERVICE_DEPENDENCY_DELETED` | `FAILED` |
+| any other | `SERVICE_WIN32_OTHER` | `FAILED` |
+
+A result that is not one of these strings (exact case) is `SEAM_RESULT_INVALID`, recorded as the exception type. An
+exception is recorded by its type only (`GetBaseException()`), never its message.
+
+**The wait** (`:348-353`, `:652-669`). After `OK` only: one read right after the seam, then one every 500 ms, until the
+service is `RUNNING`, back to `STOPPED`, or past the limit. The limit is the largest `WaitHint` read meanwhile, at least
+5 s and at most 30 s. It is counted in waited milliseconds and on the clock, whichever ends first. `-SettleWait`
+replaces the real wait (`Wait-AtmRecoverSettle`, `:437-441`, the only `Start-Sleep` of the file). Any other seam code
+reads "after" once, with no wait.
+
+**The outcomes** (`:675-676`), in this order: `EXCEPTION` (the seam threw or gave no closed code); `REFUSED`
+(`ACCESS_DENIED`); `FAILED` (another seam code, or back to `STOPPED`); `COMPLETE` (`RUNNING`); `PARTIAL` (anything else at
+the end of the wait). In every outcome "after" is read and compared field by field with "before" (`Diff`, `:386-397`).
+Nothing is compensated or retried; the undo (`REC-SVC-STOP`) is never run by R2.
+
+**The log** `atm.recoverlog/1` (`:337`, `Write-AtmRecoverRecord` `:426-435`): one JSON line per record, written and
+flushed through the clean's log writer, with `schema`, `type`, `runId`, `recSeq` and `utc`. The records of a complete run,
+in order: `run-start`, `plan`, `before`, `confirmation`, `plan-check`, `intent`, `result` (outcome, seam code, exception
+type, waited milliseconds, limit, reads, exit codes, diff), `after`, `run-end`. It never holds the token's name or SID,
+a command line, a path outside a known program location, a hidden related name or an exception message.
+
+**Tests:** the area `V0.4 R2` of `tests/Run-Tests.ps1` (`:18573-19041`), in both shells. Providers, identities, service
+rows, dependencies, the console, the confirmation, the wait and the seam are injected.
+
+* The closed constants, and an operation outside the catalog.
+* The closed gate by instrumentation: no inventory, console, lock, log, wait or seam, with positive controls for the
+  injected and the default seam.
+* One case per outcome: `COMPLETE` (pending, then `RUNNING`), `PARTIAL` (the `WaitHint` limit and the 30 s cap),
+  `FAILED` (back to `STOPPED`, and seam codes with no wait), `REFUSED`, `EXCEPTION` (and invalid results); each checks
+  the diff, the records and their order.
+* AUT-2: every wrong phrase, no console, no reader, no `-LogFile`, an existing log, a log inside a base, no presenter;
+  the seam is never called.
+* The revalidation: one case per changed field (all the names above), each `REVALIDATION_REFUSED` with the field in
+  `changedFields`.
+* B8 busy and abandoned (and a retry that completes after an abandoned lock).
+* The log's privacy (`COMPLETE` and `EXCEPTION`).
+* `SERVICE_IMAGE_NOT_DECLARED`, synthetic and with the real `CoworkVMService` declaration: refused before anything is
+  asked; the mutex is not taken.
+* A static check: the service control API only in `Engine.Recover.ps1`, only in the default seam, and one `.Start(`; no
+  control cmdlet anywhere in `src/` and no other control verb in the engine; lock, log, inventory, console and JSON only
+  past the gate; the real wait only in its function; the steps in order; the R1 read-only functions unchanged in
+  effect; one seam, one operation, no caller outside the engine; no real wait in the area. The R1 static check now
+  exempts `Engine.Recover.ps1` from its `ServiceController` ban and leaves to the R2 check the functions that only R2
+  may call past the gate.
+
+**Not tested:**
+
+* the default seam (`ServiceController.Start()`) and its Win32 mapping: never called, by the suite or the CI; no real
+  service is started, stopped or opened with a control right;
+* lock B8 between an elevated and a non-elevated holder (two tokens on one machine): for the VM or the operator's e2e,
+  as in the clean's B8 matrix;
+* the real timing of a pending start, so the wait runs only with injected reads and an injected wait;
+* the start of a real service, because no shipped provider declares an `ExpectedImage`;
+* any command: no CLI verb calls `Invoke-AtmRecover` until R4.

@@ -1002,8 +1002,10 @@ the mover; a static suite test checks it.
   Its dependencies must be read, and a stopped dependency must itself be declared. Anything else is refused with a
   closed `RECOVERY_*` code.
 * **No declared image, no offer.** A service whose providers declare no `ExpectedImage` is refused
-  (`RECOVERY_IMAGE_NOT_DECLARED`). No shipped provider declares one, so every real plan is refused. How R2 treats an
-  undeclared image is an open decision for the maintainer.
+  (`RECOVERY_IMAGE_NOT_DECLARED`). No shipped provider declares one, so every real plan is refused. The maintainer
+  decided on 2026-11-17 that this stays a refusal from phase R2 on, where the start path exists: the engine refuses it
+  before asking anything, with the gate open too. `CoworkVMService` stays refused until a provider declares its
+  executable.
 * **Elevation is only estimated.** It is read from the process's own token (`LIKELY_HAS_RIGHT`, `NEEDS_ELEVATION`,
   `UNKNOWN`), never by probing the service's security, and nothing is elevated.
 * **Privacy.** The plan keeps the diagnose's reductions: the account kind plus one of the three standard service

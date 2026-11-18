@@ -929,7 +929,9 @@ The refusal codes, closed:
 * `RECOVERY_DEPENDENCY_STOPPED`, `RECOVERY_DEPENDENCIES_UNREADABLE`, `RECOVERY_DEPENDENCIES_CAPPED`.
 
 No shipped provider declares an expected image, so every real plan is refused, at least with
-`RECOVERY_IMAGE_NOT_DECLARED`. That includes Claude Desktop's `CoworkVMService`.
+`RECOVERY_IMAGE_NOT_DECLARED`. That includes Claude Desktop's `CoworkVMService`. This refusal is the maintainer's
+decision (2026-11-17), and it holds from phase R2 on, where the start path exists: a service whose providers declare no
+executable is never started. `CoworkVMService` stays refused until a provider declares its executable.
 
 Example (synthetic; the rule lines are shortened):
 
