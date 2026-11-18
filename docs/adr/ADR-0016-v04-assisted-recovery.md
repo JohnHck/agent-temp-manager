@@ -1104,7 +1104,7 @@ checks the service and the fixed folder.
 
 | Exit | Meaning |
 |---|---|
-| 2 | Usage: an option, verb, operation, name or run id outside the fixed sets; a target no provider declares |
+| 2 | Usage: an option, verb, operation, name or run id outside the fixed sets; for the requester only, a target no provider declares (a copy that acts refuses it through the engine, 3) |
 | 3 | Refused before anything was asked: the plan or the undo's criteria, the undo's source, or no log for the run id |
 | 5 | Integrity: the launcher's own manifest check failed (as for every command) |
 | 10 | Unexpected failure, by exception type only |

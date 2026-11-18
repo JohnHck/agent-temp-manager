@@ -1002,7 +1002,7 @@ Exit codes of `recover start` and `recover undo`:
 
 | Exit | Meaning |
 |---|---|
-| `2` | Usage: an option, operation, name or run id outside the fixed sets; past the gate, also a service no provider declares. Nothing was changed. |
+| `2` | Usage: an option, operation, name or run id outside the fixed sets; past the gate, in a window without elevation, also a service no provider declares (an elevated window refuses it with `3`). Nothing was changed. |
 | `3` | Refused before anything was asked (the plan, the undo's criteria or its source, or no log for this run id). Nothing was changed. |
 | `5` | The installation failed its integrity check. Nothing was changed. |
 | `10` | Unexpected error (its type only). The result shown, if any, says what ran. |
