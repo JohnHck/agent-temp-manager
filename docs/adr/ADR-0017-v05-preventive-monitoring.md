@@ -1,8 +1,8 @@
 # ADR-0017: Persistent preventive monitoring (V0.5)
 
-Status: ACCEPTED in part: V05-D1 to V05-D7 decided 2026-11-17 as recommended; V05-D8, V05-D9 and V05-D10 open; M0
-implemented (documentation only); nothing else implemented; no gate opened. (Until 2026-11-17: PROPOSED, with V05-D1 to
-V05-D10 open.)
+Status: ACCEPTED: V05-D1 to V05-D10 decided (D1-D7 2026-11-17, D8-D10 2026-11-18, as recommended); M0 and M1
+implemented; gate closed in every copy. (Until 2026-11-17: PROPOSED, with V05-D1 to V05-D10 open. From 2026-11-17 to
+2026-11-18: ACCEPTED in part, with V05-D8, V05-D9 and V05-D10 open and only M0 implemented.)
 Date: 2026-11-17
 Phase: V0.5 (phases M0 to M6 below, each a future round with its own contract and tests)
 
@@ -87,7 +87,8 @@ A machine-wide view needs an elevated collection, which V0.5 does not do.
 is `VM_UNATTRIBUTED` (`Engine.Diagnose.ps1:4167`; [ADR-0016](ADR-0016-v04-assisted-recovery.md), inventory row 3). A VM
 count says a VM ran, not that an agent's VM ran.
 
-**Cost: not measured.**
+**Cost: not measured** when this record was written. (Phase M1 measured it: see the M1 implementation record. V05-D8
+(a), decided 2026-11-18, keeps row 7 out of every collection: a collection runs the audit only.)
 
 * The audit walks every file under each agent temporary base. Its cost grows with the number of files.
 * The audit has no deadline today (`ADR-0014:124-126`, GUI-D9); the diagnose has one.
@@ -202,7 +203,8 @@ Recommendation (V05-D1): (A), with the PRIV-3 amendment in M0.
   * This is not an agent removing files. Tests run the commands only against a sandbox folder and a test task name,
     and the real scheduler only on a disposable CI runner.
   * The uninstaller today only reads the auto-purge task folder and warns (`docs/ARCHITECTURE.md:107-108`). V05-D9
-    decides whether it does more.
+    decides whether it does more. (Decided 2026-11-18, V05-D9 (a) plus (c): the uninstaller warns and names the two
+    commands, and the unschedule commands remove the task folder when it is empty. Phase M4 implements it.)
 
 ### 4. Trends, thresholds and alerts
 
@@ -217,7 +219,7 @@ Recommendation (V05-D1): (A), with the PRIV-3 amendment in M0.
 * **Thresholds** live in a per-user file, `monitor.json`, in the same folder. Each value has fixed bounds in code. A
   file with a value outside them is refused as a whole: the defaults apply, and the alert `MON_CONFIG_INVALID` says so.
 
-  Proposed defaults (V05-D10):
+  Proposed defaults (V05-D10; decided 2026-11-18, (a): these defaults, in the per-user file. Phase M2 implements them):
 
   | Alert code | Fires when | Default | Recommended command (never executed) |
   |---|---|---|---|
@@ -281,8 +283,8 @@ Each phase is a future round with its own contract and tests, and names the file
 ### 7. Decisions for the maintainer
 
 None was decided by this record when it was written. The column "Decided" was added by phase M0 (2026-11-18). It
-records the maintainer's decisions of 2026-11-17 ("approved as recommended", V05-D1 to V05-D7). The recommendation
-column is left as it was.
+records the maintainer's decisions of 2026-11-17 ("approved as recommended", V05-D1 to V05-D7) and, since phase M1, of
+2026-11-18 (V05-D8 to V05-D10, as recommended). The recommendation column is left as it was.
 
 | Id | Question | Evidence | Alternatives | Technical recommendation | Decided |
 |---|---|---|---|---|---|
@@ -293,9 +295,9 @@ column is left as it was.
 | V05-D5 | Names or pseudonyms in the history | ADR-0010 D-7 = K1; the audit already shows project names locally | (a) display names as the audit shows them; (b) K2 HMAC with a per-user key (amends ADR-0010); (c) totals per provider only | **(a)** | **(a)**, 2026-11-17: the project's display name as the audit shows it, with no persistent key. ADR-0010 stays unchanged. |
 | V05-D6 | A system notification | NotifyIcon needs a running process; toast requirements not confirmed | (a) none in V0.5; (b) balloon from the open GUI; (c) toast after a study | **(a)** | **(a)**, 2026-11-17: no system notification in V0.5, so M6 is out of V0.5 |
 | V05-D7 | Does V0.5 go ahead behind its gate without waiting for V0.3 and V0.4 (D-A)? | V0.5 changes nothing. Its alerts only name commands: V0.3's and 0.3.x's exist behind their gates; V0.4's is proposed. | (a) go ahead behind `AtmMonitoringEnabled`; an alert names only a command present in that copy; (b) wait | **(a)** | **(a)**, 2026-11-17: V0.5 goes ahead behind `AtmMonitoringEnabled`, and an alert names only a command present in that copy |
-| V05-D8 | Does a collection include the diagnose? | Diagnose cost: deadline 300 s, CPU sample, CIM queries. VMs are unattributed. Worktrees and handles are behind closed gates. | (a) the audit only; (b) the audit plus diagnose counts (row 7), with no CPU sample and a short deadline | **(a)** first; (b) once a provider attributes VMs | **Pending**: open, with the maintainer |
-| V05-D9 | What the uninstaller does, and the shared task folder | The uninstaller only reads and warns today. `\AgentTempManager` stays after `unschedule-autopurge` (`tests/Run-Tests.ps1:5644`). | (a) the uninstaller warns and names the two commands; the empty folder stays as declared residue; (b) the uninstaller runs the removal with its own confirmation; (c) the unschedule commands remove the task folder when it is empty (changes the auto-purge behaviour and its test) | **(a)** plus (c): the folder goes when empty, so "removed completely" holds | **Pending**: open, with the maintainer |
-| V05-D10 | Threshold defaults, and who sets them | Section 4 | (a) the per-user file with the defaults of section 4; (b) the installation's policy, set by the administrator, like `quarantine.policy.json` | **(a)** | **Pending**: open, with the maintainer |
+| V05-D8 | Does a collection include the diagnose? | Diagnose cost: deadline 300 s, CPU sample, CIM queries. VMs are unattributed. Worktrees and handles are behind closed gates. | (a) the audit only; (b) the audit plus diagnose counts (row 7), with no CPU sample and a short deadline | **(a)** first; (b) once a provider attributes VMs | **(a)**, 2026-11-18: the audit only; row 7 is not collected. (Pending until then.) |
+| V05-D9 | What the uninstaller does, and the shared task folder | The uninstaller only reads and warns today. `\AgentTempManager` stays after `unschedule-autopurge` (`tests/Run-Tests.ps1:5644`). | (a) the uninstaller warns and names the two commands; the empty folder stays as declared residue; (b) the uninstaller runs the removal with its own confirmation; (c) the unschedule commands remove the task folder when it is empty (changes the auto-purge behaviour and its test) | **(a)** plus (c): the folder goes when empty, so "removed completely" holds | **(a)** plus **(c)**, 2026-11-18: the uninstaller warns and names the two commands; the unschedule commands remove the task folder when it is empty. Implemented in M4. (Pending until then.) |
+| V05-D10 | Threshold defaults, and who sets them | Section 4 | (a) the per-user file with the defaults of section 4; (b) the installation's policy, set by the administrator, like `quarantine.policy.json` | **(a)** | **(a)**, 2026-11-18: the per-user file `monitor.json` with the defaults of section 4. Implemented in M2. (Pending until then.) |
 
 ### 8. Risks and limits
 
@@ -396,9 +398,22 @@ The maintainer approved V05-D1 to V05-D7 as recommended on 2026-11-17. Section 7
   * **D5 (a):** the project's display name, as the audit shows it, with no persistent key. ADR-0010 stays unchanged;
   * **D6 (a):** no system notification in V0.5, so phase M6 is out of V0.5;
   * **D7 (a):** V0.5 goes ahead behind `AtmMonitoringEnabled`, and an alert names only a command present in that copy.
-* **Open, with the maintainer:** V05-D8 (does a collection include the diagnose), V05-D9 (the uninstaller and the
-  shared task folder) and V05-D10 (the threshold defaults and who sets them). No phase decides or presumes them. Where
-  a text depends on one, it says "pending".
+* **Open, with the maintainer, until 2026-11-18:** V05-D8 (does a collection include the diagnose), V05-D9 (the
+  uninstaller and the shared task folder) and V05-D10 (the threshold defaults and who sets them). No phase decided or
+  presumed them. Where a text depended on one, it said "pending".
+
+### Decision record (2026-11-18)
+
+The maintainer decided V05-D8, V05-D9 and V05-D10 as recommended on 2026-11-18. Section 7's "Decided" column records
+each. With them, every decision of this record is taken.
+
+* **D8 (a):** a collection runs the audit only. Row 7 of section 1 (the diagnose counts) is not collected, and the
+  collector calls no diagnose. Phase M1 implements it.
+* **D9 (a) plus (c):** the uninstaller warns and names `monitor disable` and `monitor remove-history`; the unschedule
+  commands remove the shared task folder `\AgentTempManager` when it is empty, so "removed completely" holds. Phase M4
+  implements it; until then the uninstaller is unchanged.
+* **D10 (a):** the thresholds live in the per-user file `monitor.json` with the defaults of section 4. Phase M2
+  implements it.
 
 ## M0 implementation record (V05-M0, 2026-11-18)
 
@@ -419,13 +434,13 @@ V05-M0 leaves them.
     * the deliberate difference: the purge registers its task with its gate closed, while `monitor enable` needs the
       monitoring gate open and its own phrase;
     * the shared folder `\AgentTempManager`;
-    * removal, **pending V05-D9** (`:951-953`);
+    * removal, **pending V05-D9** (`:951-953`; decided 2026-11-18, (a) plus (c), and written there by M1);
     * what the task never does.
 * **ARCHITECTURE.** New section "The scheduler layer: two tasks (V0.5 planned, ADR-0017)" (`:110-133`).
   * A table of who builds the definition, who registers, who reads back and checks, and who removes, for each task.
   * The collector's entry point, `src/bin/agent-temp-monitor.ps1` (future), reads the gate on every run.
   * Moving `Connect-AtmTaskScheduler` to a shared place is recorded as an **option of phase M3, not decided**.
-  * The folder's removal is **pending V05-D9** (`:133`).
+  * The folder's removal is **pending V05-D9** (`:133`; decided 2026-11-18, (a) plus (c), and written there by M1).
 * **ADR-0014 section 3** (`:90-94`, `:111`).
   * The closed list gains one future read function of the monitoring history, provisionally `Get-AtmMonitorHistory`,
     marked "future, V0.5 phase M5". Phase M5 adds it to the test's list; the list stays at 28 until then.
@@ -447,12 +462,90 @@ V05-M0 leaves them.
 
 * **M1:** the collector, the storage and the gate `AtmMonitoringEnabled` in `src/lib/Engine.Monitor.ps1`. Also the
   cost measurement, and the gate in the build, the installer and the e2e.
-* **M2:** trends, thresholds and alerts. The threshold defaults and who sets them are **pending V05-D10**.
+* **M2:** trends, thresholds and alerts. The threshold defaults and who sets them are **pending V05-D10** (decided
+  2026-11-18: (a), the per-user file with the defaults of section 4).
 * **M3:** the scheduler entry. That includes the choice of how the monitoring engine reaches the Task Scheduler, the
   entry point and the CI-only scheduler harness.
 * **M4:** `monitor disable`, `monitor remove-history` and the uninstaller. The uninstaller and the shared folder are
-  **pending V05-D9**.
+  **pending V05-D9** (decided 2026-11-18: (a) plus (c)).
 * **M5:** the TUI and the GUI. The one read function joins the GUI's closed list.
 * **Whether a collection includes the diagnose** is **pending V05-D8**. Row 7 of section 1 is neither in nor out of M1
-  until it is decided.
+  until it is decided. (Decided 2026-11-18: (a), the audit only; row 7 is out of M1.)
 * **M6** is out of V0.5 (V05-D6 (a)).
+
+## M1 implementation record (V05-M1, 2026-11-18)
+
+The collector and the storage, behind the ninth gate, closed in every copy. Nothing is scheduled (M3), no trend,
+threshold or alert is computed (M2), nothing removes the history on request (M4), and the TUI and the GUI are unchanged
+(M5). `Engine.Audit.ps1` is unchanged: no audit deadline (GUI-D9 is not decided), no change to B1, `RECENT` or
+eligibility. The line numbers are those of the files as V05-M1 leaves them.
+
+* **The gate.** `$script:AtmMonitoringEnabled = $false`, a single assignment in `src/lib/Engine.Monitor.ps1:22`. The
+  nine gates in `src/` are each a single `$false` assignment. The build (`tools/Build-Release.ps1:73-74`), the installer's
+  required files (`install/InstallCommon.ps1:61`) and the three e2e harnesses check the ninth.
+* **The collector** (`Invoke-AtmMonitorCollection`, `src/lib/Engine.Monitor.ps1:575`, and its core `:620`).
+  * It reads the gate first. Closed, it returns `MONITORING_GATE_CLOSED` with no mutex, no audit and no folder.
+  * It runs the audit only (V05-D8 (a)), through `Invoke-AtmInventory`, and never the diagnose.
+  * The per-user mutex `Global\AgentTempManager.Monitor-<16 hex digits of SHA-256(SID)>` (`:109`) is tried without
+    waiting. Busy: `MONITOR_BUSY`, nothing written. An abandoned mutex is taken and the collection goes on.
+  * A failed audit still writes a record, outcome `AUDIT_FAILED`, with the exception's type name only.
+  * Seams, `$null` in every copy (`:58-63`): the clock, the folder, the audit, the random suffix, the mutex name and the
+    file owner.
+* **The record** (`New-AtmMonitorRecord`, `:259`; `ConvertTo-AtmMonitorRecordText`, `:284`).
+  * Schema `atm.monitor/1`: the header (UTC time, durations, outcome `OK`, `INCOMPLETE` or `AUDIT_FAILED`, tool
+    version, the previous record's name), the coverage counts, the base states counted per provider, and per group
+    (provider, project display name, class) the sizes, the age and the flag counts. Rows 1 to 6 of section 1. Row 8 is
+    `NOT_OBSERVABLE`, never zero; rows 7 and 9 are not collected.
+  * At most 64 groups, the largest first; the rest summed into one "other" group. At most 16 KB, else
+    `MONITOR_RECORD_TOO_LARGE` and nothing written. 64 groups with 100-character project names measured 13,163 bytes.
+  * A SHA-256 of the text, checked on the stored bytes. It detects damage, not forgery.
+* **The folder and the file** (`Open-AtmMonitorFolder`, `:405`; `Write-AtmMonitorRecordFile`, `:439`).
+  * `%LOCALAPPDATA%\AgentTempManager\Monitor`, pinned with the T1 log's folder policy, created with a protected DACL.
+  * Each record is created new as `<name>.partial`, flushed, renamed and read back. An existing name is refused.
+* **Rotation** (`Invoke-AtmMonitorRotation`, `:496`) after each write: 90 days, 400 files and 8 MB, whichever comes
+  first, and `.partial` files older than a day (V05-D3 (a), V05-D4 (a)). A strange name, a reparse point or another
+  owner refuses the whole rotation, and nothing is removed.
+* **The single removal** is in `Invoke-AtmMonitorPrune` (`:469`). It checks the gate, the name pattern, the product's
+  folder, that the item is a file and not a reparse point, and its owner, immediately before removing it by exact name.
+  A static of the suite proves that no other function of the file removes anything.
+* **The reader** (`Get-AtmMonitorHistory`, `:659`; `Get-AtmMonitorStatus`, `:727`) needs no gate and takes no lock.
+  * An absent folder is an empty history, and it is never created.
+  * It lists final names only and never reads a `.partial`.
+  * A file that fails the schema, the bounds or the hash is `HISTORY_RECORD_INVALID` and skipped, never read as zero.
+  * A record whose time is earlier than its previous record's is flagged `CLOCK_SKEW`. The trend is M2's.
+* **The CLI.**
+  * `agent-temp monitor status` (`src/agent-temp.ps1:536`; presentation `src/lib/Report.ps1:1528-1559`) reads the
+    history and exits `0`. Closed, it says monitoring is not available in this release, shows the history the reader
+    found, and promises no command this copy lacks (V05-D7 (a)).
+  * Any other `monitor` subverb, or none, is a usage error, `2`. No new exit code.
+  * `version` shows the ninth gate (`:561-562`).
+  * The engine is loaded exactly in the `monitor` and `version` blocks, and listed in `$loadedLibs` (`:44`).
+* **New codes:**
+  * collector: `MONITORING_GATE_CLOSED`, `MONITOR_BUSY`, `MONITOR_IDENTITY_UNAVAILABLE`, `MONITOR_MUTEX_*`,
+    `MONITOR_FOLDER_UNKNOWN`, `MONITOR_RECORD_TOO_LARGE`;
+  * folder and file: `MONITOR_FOLDER_*`, `MONITOR_NAME_INVALID`, `MONITOR_NAME_EXISTS`, `MONITOR_WRITE_*`,
+    `MONITOR_RENAME_*`, `MONITOR_RENAMED_NOT_VERIFIED`;
+  * rotation: `MONITOR_ROTATION_LIST_FAILED`, `MONITOR_ROTATION_REPARSE`, `MONITOR_ROTATION_FOREIGN_OWNER`,
+    `MONITOR_ROTATION_UNEXPECTED_ITEM`, and the removal's `MONITOR_PRUNE_*`;
+  * reader: `HISTORY_RECORD_INVALID`, `CLOCK_SKEW`.
+* **Tests.** The suite's area "V0.5 M1" (`tests/Run-Tests.ps1`). It opens the gate only inside its own process, around
+  each call, with the folder in its sandbox and a mutex name of its own. It covers:
+  * the gate closed, with a positive control;
+  * the record, its bounds and privacy: a real audit of a planted profile, scanned by `tools/Test-AtmPrivacy.ps1` with
+    the planted values as needles, with a positive control;
+  * each rotation limit alone, the refusals, the `.partial`, the reader, the clock, two collectors, and no write
+    outside the folder;
+  * the CLI in both languages, and the statics.
+* **Measured cost** (CI only; planted trees of 2,000 files on every job and 10,000 more on the x64 jobs; information,
+  not a timing assertion). Each job prints the audit's and the whole collection's durations in its log (`V0.5 M1
+  custo:`). The per-runner figures come from this phase's PR CI run and are recorded here by the phase's final commit.
+* **NAO_TESTADO.**
+  * The real folder under `%LOCALAPPDATA%`: the suite uses its sandbox through the seam and checks that the real folder
+    is never created.
+  * A run really ended by the scheduler's time limit: a planted `.partial` stands in for it.
+  * Where the sandbox cannot get a single-owner ACL (a standard session whose TEMP lets other accounts change it), the
+    cases that need the folder are NAO_TESTADO. On CI the ACL is adjusted, so a refusal there is a failure.
+
+**Left for M2 to M5:** trends, thresholds and alerts (M2, V05-D10 (a)); the scheduler entry and its CI-only harness
+(M3), which then revisits V05-D2 with the cost above; `monitor disable`, `monitor remove-history` and the uninstaller
+(M4, V05-D9 (a) plus (c)); and the TUI and the GUI (M5).

@@ -61,9 +61,10 @@ isolated sandbox.
   environment variable or configuration file. The current list of release gates, each a single `$false` assignment:
   `AtmRealDeletionEnabled` (`Engine.Clean.ps1`), `AtmWorktreeDiagnosticsEnabled` and `AtmHandleDiagnosticsEnabled`
   (`Engine.Diagnose.ps1`), `AtmDiagnoseExportEnabled` (`Report.ps1`), `AtmIsolationEnabled` and
-  `AtmQuarantinePurgeEnabled` (`Engine.Isolate.ps1`), `AtmGuiEnabled` (`Gui.ps1`), and `AtmRecoveryEnabled` (V0.4, below).
+  `AtmQuarantinePurgeEnabled` (`Engine.Isolate.ps1`), `AtmGuiEnabled` (`Gui.ps1`), `AtmRecoveryEnabled` (V0.4, below),
+  and `AtmMonitoringEnabled` (`Engine.Monitor.ps1`, V0.5, below).
   * The build refuses an archive without it, and without both GUI files.
-  * The suite and the install e2e check all eight gates.
+  * The suite and the install e2e check all nine gates.
   * `version` shows it.
 * **Closed** (every copy), `agent-temp gui` prints `GUI_GATE_CLOSED` and exits with code `7`. It opens no window, and no
   Windows Forms assembly is loaded: the suite checks this in a new process, after the libraries are loaded and after
@@ -927,8 +928,9 @@ credential. What a run may do is still decided only by `autoPurge = true` in the
 Decision V05-D1 (2026-11-17, [ADR-0017](adr/ADR-0017-v05-preventive-monitoring.md) section 2): V0.5's persistent
 collection uses a **per-user scheduled task**, like the automatic purge's: interactive, limited, with no password, and
 with no elevation needed to create it. PRIV-3 ([ELEVATION.md](ELEVATION.md)) admits these two tasks and no other.
-**Nothing of it is implemented.** The task, the commands that would register and remove it, and its gate
-`AtmMonitoringEnabled` (the ninth gate, not yet in the code; it lands `$false` in every copy) come in phases M1 to M4.
+**The task is not implemented.** Its gate `AtmMonitoringEnabled` (the ninth gate) is in the code since phase M1,
+`$false` in every copy, with the collector and the history (section "Monitoring gate" below). The task and the commands
+that register and remove it come in phases M3 and M4.
 
 * **The two tasks.**
   * The automatic purge's (above), implemented.
@@ -948,9 +950,11 @@ with no elevation needed to create it. PRIV-3 ([ELEVATION.md](ELEVATION.md)) adm
     collecting.
 * **The shared folder.** Both tasks live in the Task Scheduler folder `\AgentTempManager`. The declared risks of the
   shared folder above apply to the monitoring task as well.
-* **Removal.** What happens to the folder when the product is removed or the last task is unscheduled is **pending
-  V05-D9** (the uninstaller and the shared task folder). Today the folder stays after `unschedule-autopurge`, and the
-  uninstaller only reads and warns.
+* **Removal.** What happens to the folder when the product is removed or the last task is unscheduled was **pending
+  V05-D9** (the uninstaller and the shared task folder) until 2026-11-18. Decided then, (a) plus (c): the uninstaller
+  warns and names `monitor disable` and `monitor remove-history`, and the unschedule commands remove the folder
+  `\AgentTempManager` when it is empty. Phase M4 implements it. Until then the folder stays after
+  `unschedule-autopurge`, and the uninstaller only reads and warns.
 * **Never.** The monitoring task never deletes, recovers or changes the user's system or the agents' data. It never
   elevates, and it never stores a credential. The only files it removes are the oldest files of its own history, by
   exact name, in its pinned folder (V05-D4 (a); ADR-0017 section 3).
@@ -1013,14 +1017,46 @@ the mover; a static suite test checks it.
   after the measurement is caught by the second measurement (`VERIFY_REPARSE_POINT_FOUND`). The reparse point moves
   with the tree and is never followed.
 
+## Monitoring gate (V0.5 phase M1)
+
+* **The ninth gate:** `$script:AtmMonitoringEnabled`, `$false` in every shipped copy
+  ([ADR-0017](adr/ADR-0017-v05-preventive-monitoring.md) section 5). It is a single assignment in
+  `lib\Engine.Monitor.ps1`, with no option, environment variable or configuration file.
+  * The build refuses an archive without it, each of the nine gates a single `$false` assignment.
+  * The launcher's integrity check and the installer require the file.
+  * The suite, the install e2e, the isolation e2e and the recovery e2e check all nine gates.
+  * `version` shows it: `preventive monitoring: DISABLED in this release (monitor status only reads the history;
+    nothing is collected or scheduled)`.
+* **Closed** (every copy): nothing is collected, created or written. The collector, the folder, the writer, the
+  rotation and the single removal function return `MONITORING_GATE_CLOSED` before anything else; the collector takes no
+  mutex and calls no audit. Nothing is scheduled in any state of the gate (phase M3). `monitor status` only reads.
+* **The history folder:** `%LOCALAPPDATA%\AgentTempManager\Monitor`, per user, pinned with the T1 log's folder policy
+  (no reparse point in its chain, owned by the user, created with a protected DACL, refused otherwise). Each collection
+  is one new file, written as `.partial`, flushed and renamed; an existing name is refused. A reader never creates the
+  folder: an absent folder is an empty history.
+* **What a record never holds:** a SID, an account name, a profile, temporary, base or partition path, a slug, a
+  partition name, the machine name, the identity block, an error or reparse sample, a command line, a process id, a
+  service account or a VM name. It holds aggregates per provider, project display name (V05-D5 (a)) and class. A
+  collection runs the audit only (V05-D8 (a)), never the diagnose.
+* **Integrity, not authenticity.** A SHA-256 inside each record detects damage, not forgery: anyone with the user's
+  rights can write the folder. The history authorizes nothing, so that is acceptable. A record that fails its schema,
+  bounds or hash is `HISTORY_RECORD_INVALID` and skipped, never read as zero.
+* **The only removal** is of the product's own history files (V05-D4 (a)): after each write, the oldest by 90 days,
+  400 files and 8 MB, and `.partial` files older than a day. One function removes, by exact name, in the pinned folder,
+  after checking the name pattern, the item and its owner. A strange name, a reparse point or another owner refuses the
+  whole rotation.
+* **Concurrency.** A per-user mutex, `Global\AgentTempManager.Monitor-<16 hex digits of SHA-256(SID)>`, tried without
+  waiting: busy, `MONITOR_BUSY` and nothing written. It is not the clean lock (B8), which monitoring never takes or
+  waits for.
+
 ## Recovery gate (V0.4 phases R1 to R5)
 
 * **The eighth gate:** `$script:AtmRecoveryEnabled`, `$false` in every shipped copy
   ([ADR-0016](adr/ADR-0016-v04-assisted-recovery.md) section 5). It is a single assignment in
   `lib\Engine.Recover.ps1`, with no option, environment variable or configuration file.
-  * The build refuses an archive without it, each of the eight gates a single `$false` assignment.
+  * The build refuses an archive without it, each of the nine gates (since V0.5 M1) a single `$false` assignment.
   * The launcher's integrity check and the installer require the file.
-  * The suite, the install e2e and the isolation e2e check all eight gates.
+  * The suite, the install e2e and the isolation e2e check all nine gates (eight until V0.5 M1).
   * `version` shows it: `assisted recovery: DISABLED in this release (recover only lists and shows the plan)`.
 * **Closed** (every copy): `recover list` and `recover plan` collect, apply the criteria and present the list or the
   plan, then stop. Nothing is asked, the clean lock (B8) is not taken and its mutex is not opened, and no log or file is

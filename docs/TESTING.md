@@ -837,7 +837,7 @@ a control right, requests elevation or opens a UAC prompt.
   and run `Invoke-AtmRecover` and `Invoke-AtmRecoverUndo` with an in-memory provider and guard wrappers around the
   default seams. Leg B covers the start and its undo, the four refusals before the seam with zero seam calls, the
   dependencies, the undo of leg A's log (provenance), and ends by stopping every own service that is not stopped; none
-  is removed. The eight installed gates and the SHA-256 of every installed file are compared before and after. Only a
+  is removed. The installed gates (eight in R6; nine since V0.5 M1) and the SHA-256 of every installed file are compared before and after. Only a
   summary with codes and counts is uploaded. The measured results per runner and leg are in the ADR's R6 record. In
   the first CI run, all six jobs agreed:
   * leg A got `ACCESS_DENIED` from the real seam, with nothing changed;
@@ -856,6 +856,44 @@ a control right, requests elevation or opens a UAC prompt.
   * the real verification of the requester (PRIV-5): not implemented, by design;
   * B8 between an elevated and a non-elevated holder: for the VM or the operator's e2e;
   * a real GUI window, or a real console, where `S` collects the real services.
+
+## Preventive monitoring in the suite (V0.5 M1)
+
+The area "V0.5 M1" of `tests/Run-Tests.ps1` ([ADR-0017](adr/ADR-0017-v05-preventive-monitoring.md) phase M1) tests the
+collector and the history storage. The monitoring gate stays closed in the suite's scope; each case opens it only
+around its own calls, inside the suite's process. The folder is a folder of the sandbox (seam), the mutex has a test name
+of the suite's own, and the clock, the audit, the random suffix and the file owner are injected where a case needs them.
+The user's real folder `%LOCALAPPDATA%\AgentTempManager\Monitor` is never created: the cases check it before and after.
+
+* **The gate closed:** the collector, the folder, the writer, the rotation and the removal return
+  `MONITORING_GATE_CLOSED`, with zero calls to the audit, the folder and the mutex; a positive control with the gate
+  open.
+* **The record:** `atm.monitor/1`, its members in order, `OK`, `INCOMPLETE` and `AUDIT_FAILED`; at most 64 groups and
+  "other"; 16 KB.
+* **Privacy:** a real audit of a planted profile, then `tools/Test-AtmPrivacy.ps1` over the folder with the planted
+  SIDs, user names, paths, slugs and partition names as needles: no finding. A positive control proves the scanner
+  finds them. The needles are distinct from the planted display names, which the record keeps by design (V05-D5 (a)).
+* **Rotation:** 90 days, 400 files and 8 MB, each alone; a `.partial` removed only after a day; the whole rotation
+  refused, with nothing removed, on a strange name, a reparse point or another owner; the single removal's own
+  refusals.
+* **The reader:** an absent folder is an empty history and is never created; damaged, wrong-hash and out-of-schema
+  files are `HISTORY_RECORD_INVALID` and skipped; `.partial` files are never read; `CLOCK_SKEW`.
+* **Two collectors:** a child process holds the per-user mutex: `MONITOR_BUSY`, nothing written; an abandoned mutex is
+  taken.
+* **No write outside the folder:** a snapshot of the sandbox before and after collections with rotation.
+* **Cost (CI only):** a planted tree of 2,000 files on every job and 10,000 more on the x64 jobs; the audit's and the
+  whole collection's durations are printed as information (`V0.5 M1 custo:` in the job log), with no timing assertion.
+  The numbers are in the ADR's M1 record.
+* **The CLI,** in a new process of the same shell: `monitor status` exits `0` in both languages; `monitor` and
+  `monitor collect` exit `2`; `version` shows the ninth gate.
+* **Statics:** a single assignment of the gate and of each seam; every writing function reads the gate first; no
+  diagnose, clean, isolation, recovery, scheduler, lock B8 or network name in the engine; the removal of a file in one
+  function only; the engine loaded exactly in the `monitor` and `version` blocks, in the integrity check, the installer
+  and the manifest; the nine gates in the suite, the build, the e2e and the GUI's list of other gates.
+
+NAO_TESTADO: the real folder under `%LOCALAPPDATA%` (seam only); a run really ended by the scheduler (a planted
+`.partial` stands in for it); and, outside CI, the cases that need the folder where the sandbox cannot get a
+single-owner ACL.
 
 ## Future: isolation, quarantine and Recovery Mode (0.3.x and V0.4)
 

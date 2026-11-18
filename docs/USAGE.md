@@ -1054,6 +1054,42 @@ that only shows. Executing stays in the CLI (T-ISO-6), as restore does.
 * **Nothing else:** no service name is typed, and no key, button or menu starts, undoes, relaunches, elevates, takes the
   lock or writes a log.
 
+## Monitor (V0.5 M1, unreleased; nothing is collected in any copy)
+
+Preventive monitoring ([ADR-0017](adr/ADR-0017-v05-preventive-monitoring.md)) will keep a small local history of what
+the audit shows, one history per user. Phase M1 adds the collector and the history storage behind the **ninth release
+gate**, `AtmMonitoringEnabled`, closed in every copy. `agent-temp version` shows it: `preventive monitoring: DISABLED in
+this release (monitor status only reads the history; nothing is collected or scheduled)`. Nothing is scheduled in this
+version, in any copy: there is no command to turn monitoring on yet.
+
+```powershell
+agent-temp monitor status
+```
+
+`monitor status` only reads. It says whether monitoring is available, and what it finds in the history folder
+`%LOCALAPPDATA%\AgentTempManager\Monitor`:
+
+* **No folder:** an empty history. The command never creates the folder.
+* **Records** (left by another copy, since this one writes none): how many, and the latest one's time, outcome, number
+  of groups and size measured. A record that is damaged or not of this schema is counted as `HISTORY_RECORD_INVALID`
+  and skipped, never read as zero; one whose time is earlier than the record before it is counted as `CLOCK_SKEW`;
+  unfinished `.partial` files and other items are counted and not read.
+* **A folder the product refuses** (a reparse point in its chain, another owner, or an ACL that lets other accounts
+  change it): its code, and the folder is left as it is.
+
+It ends with "Nothing was collected, created or changed." Example, with the gate closed and no history:
+
+```
+Monitoring is not available in this release: nothing is collected, scheduled or written.
+It is opt-in: a later release may offer a command for you to turn it on yourself. This one has no such command.
+History: none (the folder %LOCALAPPDATA%\AgentTempManager\Monitor does not exist; this command never creates it).
+Nothing was collected, created or changed.
+```
+
+Exit codes of `monitor`: `0` for `monitor status`; `2` usage (no subverb, a subverb other than `status`, or an option
+`monitor` does not take). `monitor status` takes no option other than `-Lang` and the display switches `-NoProgress`
+and `-Ascii`.
+
 ## Verify (installed copy)
 
 `agent-temp verify` checks every file the installation's `manifest.json` lists (SHA-256) before any product code is
@@ -1080,9 +1116,9 @@ Version x.y.z; 0 mismatching file(s).
 
 ## Exit codes
 
-`0` ok (for `diagnose`, partial coverage included) · `1` unknown command · `2` invalid clean invocation, or a refused
+`0` ok (for `diagnose`, partial coverage included; `monitor status`) · `1` unknown command · `2` invalid clean invocation, or a refused
 `-PseudonymKeyFile`, or `authorize` without `-Path`/`-RecordFile`, or `isolate` without a path or with
-`-IncludeOtherUsers`, or a `recover` usage error (`RECOVERY_NOT_DECLARED` included) · `3` clean aborted (nothing
+`-IncludeOtherUsers`, or a `recover` usage error (`RECOVERY_NOT_DECLARED` included), or a `monitor` usage error · `3` clean aborted (nothing
 deleted), `isolate`, `quarantine restore` or `quarantine purge` stopped
 after the plan (nothing moved or purged), `quarantine schedule-autopurge` or `unschedule-autopurge` refused or not
 confirmed (nothing scheduled or removed), `recover plan` refused (nothing changed), or, only with

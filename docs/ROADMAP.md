@@ -17,7 +17,7 @@ its gates closed or open, and no gate opens without the maintainer's decision.
 | [V0.3](#v03--selective-real-cleanup) | Selective real cleanup | Yes: deletes approved temporary paths only | Published (0.3.0); deletion gate closed |
 | [0.3.x](#03x--isolation-and-quarantine-of-the-own-profile) | Isolation and quarantine of the own profile (ADR-0013; after 0.3.0 is published) | Yes: moves approved temporary paths into a quarantine and back; purge deletes behind the purge gate of its own (J-ISO-1 (C)) | On `main`, isolation and purge gates closed; not published |
 | [V0.4](#v04--assisted-recovery) | Assisted recovery of services and environments; Recovery Mode for another user's profile (ADR-0013) | Yes: reversible operations, each authorized individually | Accepted in ADR-0016; R0 (read-only service fault signals in the diagnose) and R1 (`recover list` and `recover plan`, read only, eighth gate closed) implemented; R2 (start engine), R3 (undo engine) and R4 (`recover start` and `recover undo`, elevation on demand through UAC) implemented only past the gate, closed in every copy, so no recovery operation can be executed; R5 (the TUI and the GUI show `list` and `plan`, read only; executing stays CLI-only) implemented; R6 (a CI-only harness runs the real start and undo, through the default seams, on services it creates itself on disposable runners; never shipped) implemented |
-| [V0.5](#v05--preventive-monitoring) | Persistent preventive monitoring, alerts, growth trends | No (observes and alerts) | ADR-0017 accepted in part (V05-D1 to V05-D7 decided; D8 to D10 pending); M0 (documentation amendments) done; M1 to M5 not implemented; M6 out of V0.5 (V05-D6 (a)); monitoring gate (ninth) not yet in the code |
+| [V0.5](#v05--preventive-monitoring) | Persistent preventive monitoring, alerts, growth trends | No (observes and alerts) | ADR-0017 accepted (V05-D1 to V05-D10 decided); M0 (documentation amendments) and M1 (the collector and the history storage) done; M2 to M5 not implemented; M6 out of V0.5 (V05-D6 (a)); monitoring gate (ninth) closed in every copy; nothing scheduled |
 | [V1.0](#v10--stabilization-and-multi-agent-support) | Stabilization and extensible multi-agent support | Same limits as V0.3 and V0.4 | Not started |
 
 ## Principles that apply to every version
@@ -405,11 +405,13 @@ and a log. These points need an explicit amendment of V0.4's limits before it is
 
 ## V0.5 — Preventive monitoring
 
-**Status: [ADR-0017](adr/ADR-0017-v05-preventive-monitoring.md) accepted in part.** V05-D1 to V05-D7 were decided on
-2026-11-17, as recommended; V05-D8, V05-D9 and V05-D10 are pending.
-* **Phases:** M0, the documentation amendments, is done. M1 to M5 are not implemented. M6, a system notification, is out
-  of V0.5 (V05-D6 (a)).
-* **The gate:** the monitoring gate `AtmMonitoringEnabled` (the ninth) is not yet in the code, and no gate is opened.
+**Status: [ADR-0017](adr/ADR-0017-v05-preventive-monitoring.md) accepted.** V05-D1 to V05-D7 were decided on
+2026-11-17 and V05-D8 to V05-D10 on 2026-11-18, all as recommended (until 2026-11-18, V05-D8 to V05-D10 were pending).
+* **Phases:** M0, the documentation amendments, is done. M1, the collector and the history storage, is done: a
+  collection runs the audit only (V05-D8 (a)), and `agent-temp monitor status` reads the history. M2 to M5 are not
+  implemented. M6, a system notification, is out of V0.5 (V05-D6 (a)).
+* **The gate:** the monitoring gate `AtmMonitoringEnabled` (the ninth) is in the code since M1, `$false` in every copy.
+  Nothing is collected, written or scheduled in any copy, and no gate is opened.
 
 It lands on `main` under the order rule above: dark, with its acceptance proven in CI.
 

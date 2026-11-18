@@ -110,8 +110,9 @@ Collection -> normalization -> evidence -> correlation -> presentation:
 ### The scheduler layer: two tasks (V0.5 planned, ADR-0017)
 
 The Task Scheduler will hold at most two tasks per user, both in the folder `\AgentTempManager`: the automatic purge's
-(implemented, P6b above) and the preventive monitoring's (V05-D1, **planned; nothing implemented**, gate
-`AtmMonitoringEnabled` closed in every copy). Each follows the same four steps:
+(implemented, P6b above) and the preventive monitoring's (V05-D1, **planned; the task is not implemented**, gate
+`AtmMonitoringEnabled` closed in every copy; since phase M1 the collector and the history exist, below). Each follows
+the same four steps:
 
 | Step | Automatic purge (implemented, `Engine.Isolate.ps1`) | Monitoring (planned, `Engine.Monitor.ps1`, phase M3) |
 |---|---|---|
@@ -129,8 +130,10 @@ The Task Scheduler will hold at most two tasks per user, both in the folder `\Ag
   is closed, for example in a copy updated after the task was registered.
 * **Presentation.** The TUI and the GUI never register, remove or run either task (T-ISO-6). In phase M5 they read the
   monitoring history through one read function (ADR-0014 section 3).
-* **Removal.** Whether the uninstaller or the unschedule commands do more than today about the shared folder is
-  **pending V05-D9**.
+* **Removal.** Whether the uninstaller or the unschedule commands do more than today about the shared folder was
+  **pending V05-D9** until 2026-11-18. Decided then, (a) plus (c): the uninstaller warns and names `monitor disable` and
+  `monitor remove-history`, and the unschedule commands remove the folder `\AgentTempManager` when it is empty. Phase
+  M4 implements it.
 
 ### Planned layering (ADR-0013)
 
@@ -206,3 +209,26 @@ default seams (ADR-0016's R6 record).
   `Invoke-AtmGuiRecover`), never per frame, from a view model or from the GUI's ticker; a plan is computed on `Enter`
   from that collection, for a service of its list. Executing stays in the CLI (T-ISO-6): the GUI's closed list
   ([ADR-0014](adr/ADR-0014-desktop-gui-winforms.md) section 3) refuses the execution names.
+
+## Monitoring engine (V0.5 phase M1; `lib\Engine.Monitor.ps1`)
+
+[ADR-0017](adr/ADR-0017-v05-preventive-monitoring.md), persistent preventive monitoring. The ninth release gate
+(`AtmMonitoringEnabled`) is closed in every copy. Phase M1 adds the collector and the history storage; nothing is
+scheduled (M3), and trends, thresholds and alerts are M2's.
+
+* **Loading.** The launcher loads the engine only for `monitor` and `version`. It is in the launcher's integrity check,
+  `AtmRequiredFiles` and the manifest. It depends on `Engine.Audit.ps1` and on the native pinned writer and folder
+  policy of `Native.cs`. It writes nothing to the terminal: `Report.ps1` presents `monitor status`
+  (`Show-AtmMonitorStatus`).
+* **The collector** (`Invoke-AtmMonitorCollection`) reads the gate first; closed, it returns `MONITORING_GATE_CLOSED`
+  with no mutex, no audit and no folder. Past the gate, in the suite only: a per-user mutex tried without waiting
+  (never the clean lock B8), the audit and nothing else (V05-D8 (a)), one new record file in the pinned folder
+  `%LOCALAPPDATA%\AgentTempManager\Monitor`, then the rotation of the product's own history files.
+* **The reader** (`Get-AtmMonitorHistory`, `Get-AtmMonitorStatus`) needs no gate and takes no lock. It never creates
+  the folder, never reads a `.partial`, and skips an invalid record as `HISTORY_RECORD_INVALID`.
+* **Enforced by tests** (the suite's area "V0.5 M1", static case):
+  * a single assignment of the gate and of each seam;
+  * every writing function reads the gate before anything else; the readers write nothing;
+  * no diagnose, clean, isolation, recovery, scheduler, lock B8 or network name in the engine;
+  * the removal of a file appears in one function only (`Invoke-AtmMonitorPrune`);
+  * the engine is loaded exactly in the `monitor` and `version` blocks.
