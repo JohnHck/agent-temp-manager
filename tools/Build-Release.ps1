@@ -30,6 +30,9 @@ $ciOnly += 'tests\e2e\Invoke-IsolateE2E.ps1'
 # V0.4 R6: the harness of the real start and undo of recovery (it opens that gate in its own process and creates its own
 # services).
 $ciOnly += 'tests\e2e\Invoke-RecoverE2E.ps1'
+# V0.5 M3b: the harness of the real scheduler for the monitoring task (it opens that gate in its own process and
+# registers, runs and removes a test task).
+$ciOnly += 'tests\e2e\Invoke-MonitorE2E.ps1'
 foreach ($rel in $ciOnly) { $st = Join-Path $stage $rel; if ([IO.File]::Exists($st)) { [IO.File]::Delete($st) } }
 foreach ($f in @('README.md', 'LICENSE', 'CHANGELOG.md', 'SECURITY.md', 'CONTRIBUTING.md')) { Copy-Item -LiteralPath (Join-Path $repo $f) -Destination $stage }
 Write-AtmManifest -Root (Join-Path $stage 'src') -Version $version

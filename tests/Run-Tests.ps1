@@ -22662,6 +22662,112 @@ exit 0
             Assert-True ((($m1 - $m0) / 1MB) -lt 200) 'memoria controlada'
         }
     }
+
+    # ------------------------------------------------------------------ V0.5 M3b (preventive monitoring: the real scheduler for the collector's task, CI-only harness, ADR-0017)
+    # The harness tests\e2e\Invoke-MonitorE2E.ps1 runs only in the install e2e of the CI. Here: its refusal path (it
+    # touches nothing) and its statics. This area is after the scale area, outside every area read up to it, and the names
+    # of the engine's task functions are built by concatenation.
+    Test-Case 'V0.5 M3b' 'M3b: harness do agendador real na CI recusa rodar fora de maquina descartavel (pernas A e B) e nao cria nada (nenhum resumo)' {
+        $h = Join-Path $testsDir 'e2e\Invoke-MonitorE2E.ps1'
+        $shell = (Get-Process -Id $PID).Path
+        foreach ($leg in @('A', 'B')) {
+            $sum = Join-Path $sandbox "m3b-$leg-summary.json"
+            # The runner markers are cleared in the child, so the refusal is verified in CI too.
+            $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            try {
+                $o = @(& $shell -NoProfile -ExecutionPolicy Bypass -Command "`$env:GITHUB_ACTIONS = ''; `$env:RUNNER_ENVIRONMENT = ''; & '$($h.Replace("'", "''"))' -Leg $leg -InstallDir '$($sandbox.Replace("'", "''"))' -SummaryFile '$($sum.Replace("'", "''"))'" 2>&1 | ForEach-Object { "$_" })
+                $code = $LASTEXITCODE
+            } finally { $ErrorActionPreference = $eap }
+            Assert-True ($code -ne 0) "$leg`: recusa com codigo de saida diferente de zero"
+            Assert-True (($o -join ' ') -match 'Recusado') "$leg`: mensagem de recusa: $($o -join ' ')"
+            Assert-True (-not (Test-Path -LiteralPath $sum)) "$leg`: nenhum resumo criado"
+        }
+    }
+    Test-Case 'V0.5 M3b' 'M3b (estatico): harness so da CI - fora do pacote ($ciOnly antes da exclusao; o e2e confere o pacote e roda as pernas A e B depois do R6 e antes do X2, com o usuario padrao existente, sem remover tarefa nem criar conta); guarda antes de tudo; so a trava do monitoramento, na memoria do proprio processo, depois do motor instalado, e so a costura do nome de teste; toda chamada ao agendador so dentro dos envoltorios, cada um com Assert-TestName como primeira instrucao; DeleteTask uma vez, no Remove-TestTask, sobre o nome de teste; nada de definicao, tipo de logon, conta, senha ou escrita alem do resumo; resumo so por Protect-Text; prazo do run once declarado; src sem referencia' {
+        $root = Split-Path -Parent $testsDir
+        $h = [IO.File]::ReadAllText((Join-Path $testsDir 'e2e\Invoke-MonitorE2E.ps1'))
+        $tokens = $null; $perr = $null
+        $ast = [Management.Automation.Language.Parser]::ParseInput($h, [ref]$tokens, [ref]$perr)
+        Assert-Eq @($perr).Count 0 'harness sem erro de sintaxe'
+        # The code: the text with every comment blanked (the offsets are kept, so the AST extents still apply).
+        $chars = $h.ToCharArray()
+        foreach ($tk in @($tokens | Where-Object { $_.Kind -eq [Management.Automation.Language.TokenKind]::Comment })) {
+            for ($i = $tk.Extent.StartOffset; $i -lt $tk.Extent.EndOffset; $i++) { if ($chars[$i] -ne [char]10 -and $chars[$i] -ne [char]13) { $chars[$i] = ' ' } }
+        }
+        $code = -join $chars
+        Assert-Eq $code.Length $h.Length 'texto sem comentarios com os mesmos deslocamentos'
+        # The guard first: nothing is defined, named or touched before it.
+        $iGuard = $code.IndexOf("throw 'Recusado:")
+        Assert-True ($iGuard -gt 0 -and $iGuard -lt $code.IndexOf('function ') -and $iGuard -lt $code.IndexOf('$script:testName =')) 'guarda contra execucao acidental antes de tudo'
+        # The gate: one in-memory assignment of a gate in the whole harness, the monitoring one, after the installed engine.
+        $openMon = '$script:AtmMonitoringEnabled = ' + '$true'
+        $gates = [regex]::Matches($code, '\$script:(Atm\w+Enabled)\s*=')
+        Assert-True ($gates.Count -eq 1 -and $gates[0].Groups[1].Value -ceq 'AtmMonitoringEnabled' -and $code.Contains($openMon)) "uma unica atribuicao de trava, a do monitoramento ($($gates.Count))"
+        $loadMon = ". (Join-Path `$lib 'Engine.Monitor.ps1')"
+        Assert-True ($code.IndexOf($loadMon) -gt 0 -and $code.IndexOf($loadMon) -lt $code.IndexOf($openMon)) 'trava aberta so depois de carregar o motor instalado'
+        Assert-True ($code.Contains("`$lib = Join-Path `$InstallDir 'lib'") -and -not $h.Contains("'src'") -and -not $h.Contains('\src\')) 'motor carregado da instalacao, nunca da fonte'
+        # The seams: only the test task name, once, this run's name in the exact form; no other seam of the engine (the
+        # token, the console, the clock, the folder, the audit, the random part, the mutex or the owner).
+        $seams = @([regex]::Matches($code, '\$script:(Atm\w+)\s*=') | ForEach-Object { $_.Groups[1].Value } | Sort-Object)
+        Assert-Eq ($seams -join ',') 'AtmMonitoringEnabled,AtmMonitorTaskNameOverride' 'so a trava e o nome de teste atribuidos, uma vez cada'
+        Assert-True ($code.Contains('$script:AtmMonitorTaskNameOverride = $script:testName') -and $code.Contains("`$script:testName = 'MonitorTest-' + [guid]::NewGuid().ToString('N').Substring(0, 8)")) 'nome de teste desta execucao: MonitorTest- e 8 hex aleatorios, como o do motor'
+        foreach ($pat in @('ElevationSource', 'ConsoleSource', 'ClockSource', 'FolderPath', 'AuditSource', 'RandomSource', 'MutexName', 'OwnerSource')) { Assert-True (-not $h.Contains('AtmMonitor' + $pat) -and -not $h.Contains('AtmClean' + $pat)) "harness sem a costura $pat" }
+        # The test name check, and the wrappers: each one checks it as its first statement.
+        $fns = @{}
+        foreach ($f in @($ast.FindAll({ param($a) $a -is [Management.Automation.Language.FunctionDefinitionAst] }, $true))) { $fns[$f.Name] = $f }
+        Assert-True ($fns.ContainsKey('Assert-TestName') -and $fns['Assert-TestName'].Extent.Text.Contains("-cmatch '^MonitorTest-[0-9a-f]{8}\z'") -and $fns['Assert-TestName'].Extent.Text.Contains('[string]$script:AtmMonitorTaskNameOverride -ceq [string]$script:testName')) 'Assert-TestName: a forma exata e o nome desta execucao como o do motor'
+        $wrappers = @('Get-TestTask', 'Get-TestState', 'Invoke-TestRegister', 'Invoke-TestEnable', 'Invoke-TestTaskRun', 'Remove-TestTask', 'Get-TestFolderListing', 'Invoke-TestCliEnable')
+        foreach ($w in $wrappers) {
+            Assert-True $fns.ContainsKey($w) "envoltorio $w encontrado"
+            $first = @($fns[$w].Body.EndBlock.Statements)[0]
+            Assert-True ($null -ne $first -and $first.Extent.Text -ceq 'Assert-TestName') "${w}: a primeira instrucao e Assert-TestName"
+        }
+        # Every call to the scheduler (the engine's task functions, the scheduler objects' methods and the CLI's enable) is
+        # inside a wrapper, so after its Assert-TestName.
+        $schedPats = @(('Connect-AtmTask' + 'Scheduler'), ('Register-AtmMonitor' + 'Task'), ('Get-AtmMonitor' + 'TaskState'), ('Invoke-AtmMonitor' + 'Enable'), ('Get-AtmMonitor' + 'TaskObject'), '\.Run\(', '\.DeleteTask\(', '\.GetTasks?\(', '\.GetFolder\(', 'monitor enable -Lang')
+        $spans = @($wrappers | ForEach-Object { , @($fns[$_].Extent.StartOffset, $fns[$_].Extent.EndOffset) })
+        $outside = New-Object System.Collections.Generic.List[string]; $count = 0
+        foreach ($p in $schedPats) {
+            foreach ($m in [regex]::Matches($code, $p)) {
+                $count++
+                if (@($spans | Where-Object { $m.Index -ge $_[0] -and $m.Index -lt $_[1] }).Count -eq 0) { $outside.Add($m.Value + '@' + $m.Index) }
+            }
+        }
+        Assert-Eq ($outside -join ', ') '' 'toda chamada ao agendador so dentro dos envoltorios'
+        Assert-True ($count -ge 10) "controle positivo: chamadas ao agendador encontradas ($count)"
+        # The removal: once, in Remove-TestTask, after the check, of the test name only.
+        $rt = $fns['Remove-TestTask'].Extent.Text
+        Assert-True ([regex]::Matches($code, '\.DeleteTask\(').Count -eq 1 -and $rt.Contains('.DeleteTask($script:testName, 0)') -and $rt.IndexOf('Assert-TestName') -lt $rt.IndexOf('.DeleteTask(') -and $rt.Contains('[string]$o.Task.Name -ceq $script:testName')) 'DeleteTask uma vez, no Remove-TestTask, depois da conferencia, sobre o nome de teste'
+        # Nothing of a definition, a folder, an account, a password, a logon type or a file other than the summary.
+        foreach ($pat in @(('Schedule.' + 'Service'), ('-Com' + 'Object'), ('RegisterTask' + 'Definition'), ('.New' + 'Task('), ('Create' + 'Folder'), ('Delete' + 'Folder'), ('sch' + 'tasks'), ('Register-Scheduled' + 'Task'), ('Unregister-Scheduled' + 'Task'),
+                ('New-Local' + 'User'), ('Add-LocalGroup' + 'Member'), ('PS' + 'Credential'), ('-Cred' + 'ential'), ('Remove-' + 'Item'), ('.Delete' + '('), ('Set-' + 'Content'), ('Add-' + 'Content'), ('Out-' + 'File'), ('Append' + 'AllText'), ('WriteAll' + 'Bytes'),
+                ('Copy-' + 'Item'), ('Move-' + 'Item'), ('New-' + 'Item'), ('Set-' + 'Acl'), ('run' + 'as'))) {
+            Assert-True ($code.IndexOf($pat, [StringComparison]::OrdinalIgnoreCase) -lt 0) "harness sem '$pat'"
+        }
+        Assert-True (-not [regex]::IsMatch($code, '\.(LogonType|RunLevel|UserId|Password)\s*=(?!=)')) 'nenhuma mudanca de tipo de logon, nivel, usuario ou senha'
+        Assert-True ([regex]::Matches($code, 'WriteAllText\(').Count -eq 1 -and $code.Contains('[IO.File]::WriteAllText($SummaryFile, ')) 'uma unica escrita: o resumo'
+        Assert-True ($code.Contains('detail = (Protect-Text "$d")') -and $code.Contains('detail = (Protect-Text $_.Exception.Message)')) 'resumo so por Protect-Text'
+        Assert-True ($code.Contains('$runWaitSeconds = 45') -and $code.Contains('if ($sw.Elapsed.TotalSeconds -ge $runWaitSeconds) { break }')) 'run once com prazo curto e declarado (45 s)'
+        # Never in the release package; the install e2e checks the package and runs leg A, then leg B, after R6 and
+        # before X2, with the standard user it already has, removing no task and creating no account.
+        $br = [IO.File]::ReadAllText((Join-Path $root 'tools\Build-Release.ps1'))
+        $ciLine = "`$ciOnly += 'tests\e2e\Invoke-MonitorE2E.ps1'"
+        Assert-True ($br.Contains($ciLine) -and $br.IndexOf($ciLine) -lt $br.IndexOf('foreach ($rel in $ciOnly)') -and $br.Contains('$ciLeaves = @($ciOnly | ForEach-Object { Split-Path -Leaf $_ })')) 'build: harness em $ciOnly antes da exclusao do stage, e o arquivo recusado pelas folhas de $ciOnly'
+        $e2e = [IO.File]::ReadAllText((Join-Path $testsDir 'e2e\Invoke-InstallE2E.ps1'))
+        Assert-True ($e2e.Contains("-Filter 'Invoke-MonitorE2E.ps1'")) 'e2e: pacote conferido sem o harness'
+        $iR = $e2e.IndexOf("Step 'rec-r6-recover-leg-B-elevated'"); $iMA = $e2e.IndexOf("Step 'monitor-m3b-leg-A-standard-user'"); $iMB = $e2e.IndexOf("Step 'monitor-m3b-leg-B-elevated'"); $iX = $e2e.IndexOf("Step 'v3-x2-lock-across-identities'"); $iU = $e2e.IndexOf("Step 'uninstall'")
+        Assert-True ($iR -gt 0 -and $iR -lt $iMA -and $iMA -lt $iMB -and $iMB -lt $iX -and $iX -lt $iU) 'e2e: perna A e perna B do monitoramento depois do R6, antes do X2 e da desinstalacao'
+        $iF = $e2e.IndexOf('function Read-MonSummary')
+        Assert-True ($iF -gt $iR -and $iF -lt $iMA) 'e2e: Read-MonSummary antes das pernas'
+        $monSteps = $e2e.Substring($iF, $iX - $iF)
+        foreach ($pat in @(('Delete' + 'Task'), ('Schedule.' + 'Service'), ('AtmMonitoring' + 'Enabled'), ('New-Local' + 'User'), ('PS' + 'Credential'), ('Remove-' + 'Item'))) { Assert-True ($monSteps.IndexOf($pat, [StringComparison]::OrdinalIgnoreCase) -lt 0) "e2e, passos do monitoramento sem '$pat'" }
+        Assert-True ($monSteps.Contains('-Credential $cred -LoadUserProfile') -and $monSteps.Contains('-File `"$copy`" -Leg A') -and $monSteps.Contains("'Invoke-MonitorE2E.ps1') -Leg B")) 'e2e: perna A com o usuario padrao existente, perna B na conta do runner'
+        foreach ($f in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File)) { Assert-True (-not ([IO.File]::ReadAllText($f.FullName)).Contains('Invoke-MonitorE2E')) "$($f.Name) sem referencia ao harness" }
+    }
+    Test-Case 'V0.5 M3b' 'M3b execucao real do harness (tarefa de teste registrada, relida, rodada uma vez e removida no agendador real): NAO_TESTADO nesta suite' {
+        $script:caseSkipped = $true
+        $script:caseNote = 'so na CI, no install e2e (perna A usuario padrao, perna B elevada), em runners descartaveis; nesta suite so o caminho de recusa (que nao toca nada) e os estaticos'
+    }
 } finally {
     # The console encoding of this process is restored, even when the suite aborts (a redirected console may refuse it).
     if ($null -ne $prevOutputEncoding) { try { [Console]::OutputEncoding = $prevOutputEncoding } catch { $null = $_ } }

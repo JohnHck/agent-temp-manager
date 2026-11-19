@@ -22,7 +22,10 @@
     planted by tests\e2e\Invoke-IsolateE2E.ps1 (CI-only, never shipped), in the same two legs; only its summaries are kept.
     Then V0.4 R6: the REAL start and undo of recovery (R2 and R3) on services that tests\e2e\Invoke-RecoverE2E.ps1 (CI-only,
     never shipped) creates itself: Setup elevated, then leg A (standard user), then leg B (elevated, ending with the
-    final stop of its own services); only its summaries are kept.
+    final stop of its own services); only its summaries are kept. Then V0.5 M3b: the REAL Task Scheduler for the
+    collector's task under a test name, through tests\e2e\Invoke-MonitorE2E.ps1 (CI-only, never shipped): leg A (the
+    standard user: register, read back, run once, remove, read back absent) and leg B (elevated: monitor enable refused
+    for the elevated token); only its summaries are kept.
   Writes summary.json and raw outputs to -OutDir. Exit code = number of failed steps (NOT TESTED is not a failure
   and not a pass).
 #>
@@ -163,7 +166,10 @@ Step 'package-excludes-ci-harness' {
     # V0.4 R6: nor the CI-only harness of the real start and undo of recovery.
     $foundRec = @(Get-ChildItem -LiteralPath $pkg -Recurse -File -Filter 'Invoke-RecoverE2E.ps1')
     Assert ($foundRec.Count -eq 0) 'pacote contem o harness da CI (Invoke-RecoverE2E.ps1)'
-    'tests\e2e\Invoke-CleanE2E.ps1, tests\e2e\Invoke-IsolateE2E.ps1 and tests\e2e\Invoke-RecoverE2E.ps1 absent from the package'
+    # V0.5 M3b: nor the CI-only harness of the real scheduler for the monitoring task.
+    $foundMon = @(Get-ChildItem -LiteralPath $pkg -Recurse -File -Filter 'Invoke-MonitorE2E.ps1')
+    Assert ($foundMon.Count -eq 0) 'pacote contem o harness da CI (Invoke-MonitorE2E.ps1)'
+    'tests\e2e\Invoke-CleanE2E.ps1, tests\e2e\Invoke-IsolateE2E.ps1, tests\e2e\Invoke-RecoverE2E.ps1 and tests\e2e\Invoke-MonitorE2E.ps1 absent from the package'
 }
 
 Step 'install' {
@@ -978,6 +984,50 @@ Step 'rec-r6-recover-leg-B-elevated' {
     $con = Join-Path $work 'rec-r6-B-console.txt'
     & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Invoke-RecoverE2E.ps1') -Leg B -InstallDir $installDir -SummaryFile $sum -WorkDir (Join-Path $work 'rec-B') -ServiceRoot $recRoot -DisposableMachine *> $con
     Read-RecSummary $sum $LASTEXITCODE $con
+}
+# V0.5 M3b: the REAL Task Scheduler for the collector's task, under a test name (MonitorTest-<8 hex digits>), through
+# tests\e2e\Invoke-MonitorE2E.ps1 against this installation, in the installer's shell. Leg A is the standard user of this
+# VM (the mechanism above, no new account): register, read back, run once, remove, read back absent. Leg B is the
+# elevated runner account: monitor enable refused for its token, nothing registered, then its own test task. The harness
+# opens the monitoring gate only in its own process memory; the installed copy stays closed (nine gates and the SHA-256
+# of every installed file checked by the harness before and after). Only its summaries are kept here (booleans, codes
+# and counts).
+function Read-MonSummary([string]$File, [int]$Exit, [string]$Console) {
+    if (-not (Test-Path -LiteralPath $File)) {
+        $tail = $(if (Test-Path -LiteralPath $Console) { (@(Get-Content -LiteralPath $Console -Tail 15) -join ' / ') } else { '' })
+        $tail = [regex]::Replace([regex]::Replace($tail, 'S-1-5-21-[0-9-]+', '<sid>'), [regex]::Escape($userName), '<account>', 'IgnoreCase')
+        throw "harness do monitoramento sem resumo (exit $Exit): $tail"
+    }
+    [IO.File]::Copy($File, (Join-Path $OutDir (Split-Path -Leaf $File)), $true)
+    $s = [IO.File]::ReadAllText($File) | ConvertFrom-Json
+    $bad = @($s.cases.PSObject.Properties | Where-Object { $_.Value.status -eq 'FAIL' } | ForEach-Object { "$($_.Name): $($_.Value.detail)" })
+    $nt = @($s.cases.PSObject.Properties | Where-Object { $_.Value.status -eq 'NOT_TESTED' } | ForEach-Object { $_.Name })
+    Assert ($bad.Count -eq 0 -and $Exit -eq 0) ("MON FAIL (exit $Exit): " + ($bad -join ' | '))
+    $ro = $(if ($s.runOnce.PSObject.Properties['lastResult']) { "; run once: finished $($s.runOnce.finished), state $($s.runOnce.state), last result $($s.runOnce.lastResult), run code $($s.runOnce.runCode)" } else { '' })
+    "$($s.passed) PASS / 0 FAIL / $($s.notTested) NOT_TESTED [$($nt -join ', ')]; $($s.shell)$ro"
+}
+Step 'monitor-m3b-leg-A-standard-user' {
+    # Leg A: the standard user of this VM (not elevated). The harness is copied to a folder that user can read; the guard
+    # is passed explicitly.
+    if (-not $cred) { throw 'usuario de teste indisponivel' }
+    $copy = Join-Path $userDir 'Invoke-MonitorE2E.ps1'
+    [IO.File]::Copy((Join-Path $PSScriptRoot 'Invoke-MonitorE2E.ps1'), $copy, $true)
+    $sum = Join-Path $userDir 'mon-m3b-A-summary.json'
+    $con = Join-Path $userDir 'mon-m3b-A-console.txt'
+    $cmdLine = "/c `"`"$installerExe`" -NoProfile -ExecutionPolicy Bypass -File `"$copy`" -Leg A -InstallDir `"$installDir`" -SummaryFile `"$sum`" -DisposableMachine > `"$con`" 2>&1`""
+    try {
+        $p = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') -ArgumentList $cmdLine -Credential $cred -LoadUserProfile -WorkingDirectory $userDir -WindowStyle Hidden -PassThru -Wait
+    } catch { $script:notTested = $true; return "processo como usuario comum nao iniciou neste runner: $($_.Exception.Message)" }
+    Read-MonSummary $sum $p.ExitCode $con
+}
+Step 'monitor-m3b-leg-B-elevated' {
+    # Leg B: the elevated runner account.
+    $work = Join-Path ([IO.Path]::GetTempPath()) ('atm-e2e-mon-B-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    [void][IO.Directory]::CreateDirectory($work)
+    $sum = Join-Path $work 'mon-m3b-B-summary.json'
+    $con = Join-Path $work 'mon-m3b-B-console.txt'
+    & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Invoke-MonitorE2E.ps1') -Leg B -InstallDir $installDir -SummaryFile $sum -DisposableMachine *> $con
+    Read-MonSummary $sum $LASTEXITCODE $con
 }
 # V0.3 V3c X2 (CI evidence; it does not replace the V4 row of the operator, J5): the REAL clean lock held by one identity
 # and tried by the other, in both orders: the standard user (not elevated) and this elevated account. Taking this lock

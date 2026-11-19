@@ -202,6 +202,10 @@ jobs:
   # V0.4 R6: also the REAL start and undo of recovery (ADR-0016 R2 and R3) on services that tests/e2e/Invoke-RecoverE2E.ps1
   # creates itself (Setup elevated, then leg A as the standard user, then leg B elevated, which ends with their final
   # stop); the recovery gate opened only in its own process memory; never shipped; only its summaries uploaded.
+  # V0.5 M3b: also the REAL Task Scheduler for the monitoring collector's task under a test name, through
+  # tests/e2e/Invoke-MonitorE2E.ps1 (leg A as the standard user: register, read back, run once, remove, read back absent;
+  # leg B elevated: monitor enable refused for its token); the monitoring gate opened only in its own process memory;
+  # never shipped; only its summaries uploaded.
   install-e2e:
     name: install e2e (${{ matrix.os }}, installer ${{ matrix.installer }})
     needs: build-package
