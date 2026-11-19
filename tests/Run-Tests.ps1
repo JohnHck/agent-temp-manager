@@ -21478,7 +21478,7 @@ exit 0
         Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('Monitoramento preventivo (V0.5)') -and $r.Text.Contains('Nada foi coletado, criado ou alterado.')) "status pt-BR: saida $($r.Exit)"
         foreach ($u in @('monitor', 'monitor collect')) {
             $r = & $launch "$u -Lang en-US"
-            Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('Usage: agent-temp monitor status | agent-temp monitor enable [-IntervalHours 1|2|4|6|12|24]. Nothing was changed.')) "${u}: uso 2 ($($r.Exit))"
+            Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('Usage: agent-temp monitor status | agent-temp monitor enable [-IntervalHours 1|2|4|6|12|24] | agent-temp monitor disable. Nothing was changed.')) "${u}: uso 2 ($($r.Exit))"
         }
         $r = & $launch 'version -Lang en-US'
         Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('preventive monitoring: DISABLED in this release (monitor status only reads the history; nothing is collected or scheduled)')) "version: saida $($r.Exit)"
