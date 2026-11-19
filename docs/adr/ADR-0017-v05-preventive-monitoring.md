@@ -856,8 +856,9 @@ V05-M3b leaves them.
   * `Invoke-AtmMonitorEnable`, with the gate open in memory, refuses with `MONITOR_TASK_REQUIRES_STANDARD_TOKEN`. The
     plan is not shown, the phrase is not asked, and nothing is registered (read back `ABSENT`). The token is recorded
     as a readable elevated one, so the refusal is not an unreadable token's.
-  * Then, optionally, the same cycle for a test task of that account. The task runs with the limited token of run
-    level 0, to prove the exit code 3 on a runner where the scheduler starts it.
+  * Then, optionally, the same cycle for a test task of that account, registered with run level 0 (the product's
+    definition), to prove the exit code 3 on a runner where the scheduler starts it. The runners have UAC enabled, so
+    run level 0 gives the filtered token; the run's own token is not read.
 * **The gate closed, from outside (both legs).** The installed `agent-temp monitor enable -Lang en-US`, through
   `cmd /c` as a new process, exits `3` with `MONITORING_GATE_CLOSED`, asking no phrase. The product's task folder lists
   the same tasks before and after; the harness compares a count and a hash of the names.
@@ -870,7 +871,22 @@ V05-M3b leaves them.
   * the steps `monitor-m3b-leg-A-standard-user` and `monitor-m3b-leg-B-elevated`, after the R6 legs and before X2 and
     the uninstall.
 
-  Only the harness summaries are kept. The results per runner are in the CI run's install e2e summaries.
+  Only the harness summaries are kept.
+* **Measured** (first CI run 44452989213). All six install e2e jobs agreed: windows-2025, windows-2022 and
+  windows-11-arm, each with the installer in powershell and in pwsh.
+  * Leg A: 12 PASS and 2 NOT_TESTED.
+    * The token, the registration, the read-back, the duplicate, the removal and the absence all held.
+    * **The run once was NOT_TESTED.** `Run` was accepted with no error, but within the 45 seconds the task stayed
+      Ready (state 3) with last result `0x00041303` (never run). The likely cause, not observed directly: the scheduler
+      does not start an interactive task for a user with no interactive session, and that user exists on the runner
+      only as a secondary-logon process.
+    * The window was NOT_TESTED, as above.
+  * Leg B: 15 PASS and 1 NOT_TESTED (the window).
+    * The refusal held, and nothing was registered.
+    * **Its own test task ran once and ended with last result 3**, the installed gate closed, with the account's
+      history folder unchanged.
+  * Both legs: the installed `monitor enable` exited 3, and the installed copy was unchanged.
+  * The artifact privacy step (FINAL-B) scanned the summaries with no finding.
 * **Tests.** The suite's area "V0.5 M3b" (`tests/Run-Tests.ps1`), after the scale area. It covers:
   * the harness's refusal outside a disposable machine, in a child process with the runner markers cleared, which
     creates no summary;
@@ -887,8 +903,8 @@ V05-M3b leaves them.
   * the real run, NOT_TESTED in the suite.
 * **NOT_TESTED.**
   * The hidden window, as above.
-  * The run once on a runner where the scheduler does not start an interactive task for a user with no interactive
-    session, with the observed state and code per runner.
+  * A scheduled run by the standard user: the scheduler did not start it on any runner (state 3, `0x00041303`). The
+    only real scheduled run proven is in the runner's own account.
   * The real scheduler of any machine other than a disposable CI runner.
 
 **Left for M4 and M5:** `monitor disable`, `monitor remove-history` and the uninstaller (M4, V05-D9 (a) plus (c)); and

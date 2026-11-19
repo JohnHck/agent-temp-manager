@@ -415,8 +415,10 @@ and a log. These points need an explicit amendment of V0.4's limits before it is
   asking anything, and the entry point exits without collecting. M3b, the CI-only harness with the real scheduler
   (`tests/e2e/Invoke-MonitorE2E.ps1`, never shipped), is done. On disposable runners, under a test task name and with
   the gate opened only in the harness's memory, it covers:
-  * the install e2e's standard user registers, reads back, runs once and removes the task;
-  * the elevated runner account is refused.
+  * the install e2e's standard user registers the task, reads it back and removes it. Its run once was NOT_TESTED on
+    every runner: the scheduler did not start an interactive task for a user with no interactive session;
+  * the elevated runner account is refused by `monitor enable`. Its own test task ran once with last result 3, the
+    installed gate closed.
 
   M4 is next; M4 and M5 are not implemented. M6, a system notification, is out of V0.5 (V05-D6 (a)).
 * **The gate:** the monitoring gate `AtmMonitoringEnabled` (the ninth) is in the code since M1, `$false` in every copy.

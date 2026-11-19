@@ -1041,9 +1041,13 @@ harness `tests/e2e/Invoke-MonitorE2E.ps1` it covers runs only in the install e2e
   * Both legs: the installed `monitor enable` exits 3 with `MONITORING_GATE_CLOSED`, and the task folder's listing is
     unchanged. The nine installed gates and the SHA-256 of every installed file are compared before and after.
   * Only a summary with booleans, codes and counts is uploaded.
+  * In the first CI run (44452989213), all six jobs agreed:
+    * leg A: 12 PASS and 2 NOT_TESTED. The run once was NOT_TESTED: the scheduler accepted the run request but did not
+      start the task (state Ready, last result `0x00041303`, never run). The window was NOT_TESTED too;
+    * leg B: 15 PASS and 1 NOT_TESTED (the window). The refusal held, and its own test task ran once with last result 3.
 * **Not tested here:**
   * the console window of a scheduled run (the action carries `-WindowStyle Hidden`; no window is captured);
-  * a run the scheduler does not start for a user with no interactive session (NOT_TESTED, with its code);
+  * a scheduled run by the standard user, who has no interactive session (NOT_TESTED, with its code);
   * the real scheduler of any machine other than a disposable runner.
 
 ## Future: isolation, quarantine and Recovery Mode (0.3.x and V0.4)
