@@ -1,6 +1,6 @@
 # ADR-0017: Persistent preventive monitoring (V0.5)
 
-Status: ACCEPTED: V05-D1 to V05-D10 decided (D1-D7 2026-11-17, D8-D10 2026-11-18, as recommended); M0 and M1
+Status: ACCEPTED: V05-D1 to V05-D10 decided (D1-D7 2026-11-17, D8-D10 2026-11-18, as recommended); M0, M1 and M2
 implemented; gate closed in every copy. (Until 2026-11-17: PROPOSED, with V05-D1 to V05-D10 open. From 2026-11-17 to
 2026-11-18: ACCEPTED in part, with V05-D8, V05-D9 and V05-D10 open and only M0 implemented.)
 Date: 2026-11-17
@@ -172,8 +172,9 @@ Recommendation (V05-D1): (A), with the PRIV-3 amendment in M0.
   does not cover the history files the product itself created. The alternatives:
   * **(a) Remove the oldest history files after a new one is written.** Only files whose name matches the product's
     pattern, in the pinned folder, are removed, by exact name. A file with another name, a reparse point or another
-    owner refuses the rotation and raises an alert. Leftover `.partial` files older than a day are removed the same
-    way.
+    owner refuses the rotation and raises an alert. (As implemented in M1 and M2, the refusal is a code in the
+    collector's result only; no M2 alert reads it. See the M2 implementation record.) Leftover `.partial` files older
+    than a day are removed the same way.
   * **(b) A fixed ring of N files, overwritten in place.**
   * **(c) Stop collecting at the limit and alert.** The person then removes the history with the command below.
 
@@ -561,3 +562,135 @@ eligibility. The line numbers are those of the files as V05-M1 leaves them.
 **Left for M2 to M5:** trends, thresholds and alerts (M2, V05-D10 (a)); the scheduler entry and its CI-only harness
 (M3), which then revisits V05-D2 with the cost above; `monitor disable`, `monitor remove-history` and the uninstaller
 (M4, V05-D9 (a) plus (c)); and the TUI and the GUI (M5).
+
+## M2 implementation record (V05-M2, 2026-11-18)
+
+Trends, thresholds and alerts, behind the same ninth gate, closed in every copy. They are computed only when the history
+is read with the gate open, which happens only inside the test suite's process. Nothing new is scheduled (M3), nothing
+removes the history on request (M4), and the TUI and the GUI are unchanged (M5). `src/agent-temp.ps1`,
+`Engine.Audit.ps1`, B1, `RECENT` and eligibility are unchanged. The line numbers are those of the files as V05-M2 leaves
+them. Besides the files of section 6's M2 row, M2 changes the `monitor status` lines in `src/lib/Report.ps1`.
+
+* **`monitor.json` in the history folder.** The rotation (`src/lib/Engine.Monitor.ps1:549`) and the reader (`:728`)
+  accept exactly the name `monitor.json` when it is a plain file, not a reparse point, with the expected owner (the
+  user, or the token's default owner). The reader does not count it, and the rotation passes it.
+  * A `monitor.json` with another owner, or a folder or a junction with that name, refuses as before. The rotation
+    refuses as a whole and removes nothing, and the reader counts it as unexpected.
+  * The rotation never removes it: the file is never in the rotation's plan, and `Invoke-AtmMonitorPrune` (`:498`)
+    refuses the name because it is neither a record name nor a `.partial` name. A case of the suite proves both.
+  * What `monitor remove-history` does with the user's `monitor.json` (leave it and report it, or remove it with the
+    rest) is M4's to decide, with V05-D9.
+* **The thresholds** (`Get-AtmMonitorConfig`, `:883`, with `Get-AtmMonitorConfigFile`, `:806`, and
+  `Get-AtmMonitorConfigValues`, `:853`). Read only: the product never writes, creates or fixes `monitor.json`.
+  * No file: the defaults, no alert.
+  * A present file is refused as a whole, with the defaults, `MON_CONFIG_INVALID` and the reason of the first check
+    that failed. The checks, in order, with their reasons:
+    * a reparse point in the folder's chain or on the file: `REPARSE`;
+    * a folder with the name: `NOT_A_FILE`;
+    * another owner: `OWNER`;
+    * more than 4 KB: `SIZE`;
+    * not strict UTF-8: `ENCODING`;
+    * not JSON: `JSON`;
+    * JSON but not an object: `TYPE`;
+    * an unknown member, with names compared case-sensitively: `UNKNOWN_KEY`;
+    * a value that is not a JSON number, or a `failedCollections` that is not whole: `TYPE`;
+    * a value outside its bounds, both ends included: `RANGE`. A number too large for either shell's reader is also
+      `RANGE`.
+
+    A read error is `READ`, and a folder that cannot be known or checked is `FOLDER`.
+  * A missing member takes its default. The bounds (`:55-61`) are the round's, unchanged:
+
+    | Member | Default | Bounds |
+    |---|---|---|
+    | `totalGiB` | 20 | 1 to 4096 |
+    | `growthGiBPerDay` | 2 | 0.1 to 1024 |
+    | `orphanSuspectedGiB` | 5 | 1 to 4096 |
+    | `livenessUnknownGiB` | 5 | 1 to 4096 |
+    | `failedCollections` | 3 | 2 to 30, whole |
+  * One leading UTF-8 byte order mark is accepted and dropped, because Windows PowerShell 5.1's `Out-File -Encoding
+    utf8` writes one.
+  * `3.0` counts as a whole number for `failedCollections`; `3.5` does not.
+  * The trend window is fixed at 7 days, with no member.
+* **The trends** (`Get-AtmMonitorTrends`, `:958`; the slope, `Get-AtmMonitorSlope`, `:918`).
+  * The least-squares slope of bytes per day, rounded to whole bytes per day. The window is the 7 days up to the newest
+    record that is not `CLOCK_SKEW`, both ends included.
+  * The total sums every group, "other" included. Its points come only from `OK` records.
+  * A group is keyed by provider, project, identified and class; "other" has no trend.
+    * A group's points come from a record that is not `AUDIT_FAILED`, whose coverage is complete, and in which that
+      group's flag is complete.
+    * So an `INCOMPLETE` record with complete coverage still gives the points of its complete groups.
+    * The reason: the writer marks a record `OK` only when every group is complete (`:306-308`). If only `OK` records
+      gave group points, one incomplete group could never be a gap for its own trend alone.
+    * A record with incomplete coverage gives no group point, because a missing profile can hide part of any group.
+  * Gaps are never points, and never a decrease: `INCOMPLETE` and `AUDIT_FAILED` records for the total, invalid files,
+    `CLOCK_SKEW` records, an incomplete group, and a record with incomplete coverage for the groups.
+  * Fewer than 4 points, or points spanning less than 24 hours, give `INSUFFICIENT_DATA`. Exactly 4 points spanning
+    24 hours are enough.
+  * The delta compares the newest entry (a record or an invalid file, by name) with the entry before it. It is a value
+    only when both are valid `OK` records and neither is `CLOCK_SKEW`. Otherwise it is a gap, never a decrease or
+    "resolved"; with no entry before, it is none.
+  * At most 5 groups with a trend are listed, the largest slope first.
+* **The alerts** (`Get-AtmMonitorAlerts`, `:1040`; the commands they name, `:70-77`). A pure function: it calls no
+  engine, process, command, scheduler or network. Each alert has a code, a catalog text in both languages, and the names
+  of the commands it recommends; it never runs them. A value fires only when it is strictly greater than its threshold:
+
+  | Code | Fires when | Names |
+  |---|---|---|
+  | `MON_TOTAL` | the total of the newest `OK` record > `totalGiB` | `agent-temp preview`, then `agent-temp clean` |
+  | `MON_GROWTH` | the slope of the total > `growthGiBPerDay`; never with `INSUFFICIENT_DATA` | `agent-temp audit` |
+  | `MON_ORPHAN_SUSPECTED` | the `ORPHAN_SUSPECTED` groups of the newest `OK` record > `orphanSuspectedGiB` | `agent-temp preview`, then `agent-temp isolate` |
+  | `MON_LIVENESS_UNKNOWN` | the same, `LIVENESS_UNKNOWN` > `livenessUnknownGiB` | `agent-temp diagnose` |
+  | `MON_COLLECTION` | none of the `failedCollections` newest entries is an `OK` record (an invalid file counts as not `OK`) | `agent-temp monitor status` |
+  | `MON_CONFIG_INVALID` | `monitor.json` was refused | no command; the text names the format in `docs/USAGE.md` |
+
+  * The groups summed into "other" have no class, so the two class sums are a lower bound when a record summed any
+    groups.
+  * `MON_RECOVERY` is out of V0.5 (V05-D8 (a)), so the table of section 4 is not implemented for it.
+  * A static of the suite checks that each command named is a verb the launcher accepts.
+* **Only with the gate open.** `Get-AtmMonitorStatus` (`:776`) computes the thresholds, the trends and the alerts only
+  inside `if ($script:AtmMonitoringEnabled)`.
+  * With the gate closed, `monitor.json` is not read, and no trend or alert is computed: a history left by another copy
+    feeds no alert in a copy that does not collect.
+  * `monitor status` then shows what it showed in M1: the notice, and the residue count when records are present.
+* **`monitor status` with the gate open** (only in the suite; `src/lib/Report.ps1:1557-1594`) shows:
+  * the latest complete total and the delta;
+  * the trend of the total;
+  * up to 5 groups with the largest trend;
+  * the state of the thresholds: the defaults, the file, or refused with the code and the reason;
+  * the alerts, each followed by the command it names.
+
+  The exit code stays `0`, and there is no new exit code.
+* **Not in M2.**
+  * The line under the header of `audit` (section 4) is deferred to M5, with the TUI and the GUI.
+  * A refused rotation raises no alert. Section 3 says it "raises an alert", but no M2 code exists for it. The
+    rotation's code lives only in the collector's result, and the alerts are computed from the history as the reader
+    finds it.
+    * What the user sees instead: the item that refused it is counted as unexpected by the reader (`monitor status`
+      says how many other items the folder holds), and a reparse point in the folder's chain makes the history unread.
+    * Whether a refused rotation needs an alert of its own, perhaps from M3's scheduled run, is left open for the
+      maintainer.
+* **New codes:**
+  * alerts: `MON_TOTAL`, `MON_GROWTH`, `MON_ORPHAN_SUSPECTED`, `MON_LIVENESS_UNKNOWN`, `MON_COLLECTION`,
+    `MON_CONFIG_INVALID`;
+  * reasons of a refused `monitor.json`: `REPARSE`, `NOT_A_FILE`, `OWNER`, `SIZE`, `ENCODING`, `JSON`, `TYPE`,
+    `UNKNOWN_KEY`, `RANGE`, `READ`, `FOLDER`;
+  * trend state: `INSUFFICIENT_DATA`.
+* **Tests.** The suite's area "V0.5 M2" (`tests/Run-Tests.ps1`), in both shells. Histories are planted as record text
+  in a sandbox folder through the folder seam, and the gate is opened only around a status or a rotation call. It
+  covers:
+  * the slope: linear, constant and decreasing series, points off whole days, and "other";
+  * `INSUFFICIENT_DATA` at 3 points, at 4 points in 24 hours less 1 ms, and at the exact boundary;
+  * the gaps and the delta;
+  * `CLOCK_SKEW` and the window's two edges;
+  * every check of `monitor.json`, each bound at and just past it, and a snapshot proving the file is never written;
+  * `monitor.json` in the folder, for the rotation, the reader and the single removal;
+  * each alert at its threshold and just above, with its command;
+  * instrumentation showing that nothing is run, with a positive control;
+  * the gate closed, with a positive control;
+  * the `monitor status` lines in both languages;
+  * the statics. The M1 static also lists the new functions among the readers.
+* **NAO_TESTADO.**
+  * `monitor status` through the CLI with the gate open: the gate opens only inside the suite's process, and the
+    launcher runs in a child process with the copy's closed gate. The lines are checked through the presentation
+    function in the suite's process.
+  * The real folder under `%LOCALAPPDATA%`, as in M1.

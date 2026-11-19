@@ -1017,7 +1017,7 @@ the mover; a static suite test checks it.
   after the measurement is caught by the second measurement (`VERIFY_REPARSE_POINT_FOUND`). The reparse point moves
   with the tree and is never followed.
 
-## Monitoring gate (V0.5 phase M1)
+## Monitoring gate (V0.5 phases M1 and M2)
 
 * **The ninth gate:** `$script:AtmMonitoringEnabled`, `$false` in every shipped copy
   ([ADR-0017](adr/ADR-0017-v05-preventive-monitoring.md) section 5). It is a single assignment in
@@ -1048,6 +1048,20 @@ the mover; a static suite test checks it.
 * **Concurrency.** A per-user mutex, `Global\AgentTempManager.Monitor-<16 hex digits of SHA-256(SID)>`, tried without
   waiting: busy, `MONITOR_BUSY` and nothing written. It is not the clean lock (B8), which monitoring never takes or
   waits for.
+* **The thresholds file (M2), `monitor.json`,** in the same folder, is the user's own file.
+  * The product never writes, creates or fixes it, and the rotation never removes it.
+  * It is read only where the gate is open, so in no copy; it cannot open the gate.
+  * It is refused as a whole, with the defaults applied and `MON_CONFIG_INVALID` shown, when:
+    * it or the folder's chain holds a reparse point;
+    * it is not a plain file, or its owner is not the user (or the token's default owner);
+    * it is over 4 KB, not strict UTF-8 or not a JSON object;
+    * it has an unknown member, a value of the wrong type, or a value outside its fixed bounds.
+  * Anyone with the user's rights can change it, as with the history itself. Changing it changes only which alerts
+    show.
+  * An alert authorizes nothing and runs nothing. It names a command, such as `agent-temp preview` or
+    `agent-temp diagnose`, which the person runs, and that command makes its own collection, plan and confirmation.
+  * The trends and the alerts are pure functions of what the reader found. The suite checks by instrumentation and by a
+    static that they call no engine, process, command, scheduler or network.
 
 ## Recovery gate (V0.4 phases R1 to R5)
 

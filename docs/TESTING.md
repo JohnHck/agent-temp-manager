@@ -895,6 +895,61 @@ NAO_TESTADO: the real folder under `%LOCALAPPDATA%` (seam only); a run really en
 `.partial` stands in for it); and, outside CI, the cases that need the folder where the sandbox cannot get a
 single-owner ACL.
 
+### Trends, thresholds and alerts (V0.5 M2)
+
+The area "V0.5 M2" of `tests/Run-Tests.ps1` (ADR-0017 phase M2) runs in both shells.
+* **The setup.** Histories are planted as record text by the case (no gate needed) in a sandbox folder read through the
+  folder seam, with the suite's fixed time. `monitor.json` is written only by the case. The gate is opened only around
+  a status or a rotation call, inside the suite's process.
+* **The slope:** linear, constant and decreasing series, in the total and in groups, with a declared tolerance of 1 byte
+  per day (the rounding to whole bytes); points off whole days; the "other" group in the total, with no trend; the
+  groups in order of slope.
+* **`INSUFFICIENT_DATA`:** 3 points; 4 points spanning 24 hours less 1 ms; exactly 4 points spanning 24 hours is
+  enough.
+* **Gaps:**
+  * an `INCOMPLETE` or `AUDIT_FAILED` record in the middle gives no point and no decrease;
+  * an incomplete group is out of its own trend only;
+  * a record with incomplete coverage gives no group point;
+  * the delta is a gap for an incomplete newest or previous collection and for an invalid previous file, none without
+    a previous one, and a real decrease only between two `OK` records.
+* **`CLOCK_SKEW` and the window:** a skewed record is left out; a point exactly 7 days old is in, and one 7 days and
+  1 ms old is out.
+* **`monitor.json`:**
+  * absent, valid and partial;
+  * each bound at and just past it; `3.0` and `3.5`; a byte order mark;
+  * an unknown member, a wrong type, not an object, broken JSON, not UTF-8, over 4 KB and a huge number;
+  * a junction on the file and in the folder's chain, a folder with the name, and another owner (seam);
+  * each refusal gives the defaults and `MON_CONFIG_INVALID`;
+  * a snapshot of the folder shows the product never writes the file.
+* **`monitor.json` in the history folder:**
+  * the rotation passes and does not remove it, removing only an old record;
+  * the reader does not count it;
+  * the single removal refuses its name;
+  * another owner, a folder or a junction with the name refuse as before.
+* **Each alert** at its threshold (does not fire) and just above (fires), with the command it names. `MON_GROWTH` never
+  fires with `INSUFFICIENT_DATA`, `MON_COLLECTION` takes N from the file and counts an invalid file as not `OK`, and
+  `MON_CONFIG_INVALID` names no command. The texts exist in both languages.
+* **Nothing is run:** with the gate open, a history that fires all six alerts and the whole status call no engine,
+  process, command (`agent-temp`, `powershell`, `pwsh`, `cmd`), scheduler or network. Every one is shadowed with a
+  counter. The positive control is a shadow reached from inside the engine.
+* **The gate closed:** with a planted history and a refused `monitor.json`, the status computes no trend or alert and
+  does not read the file; only the notice and the residue show. The positive control opens the gate.
+* **`monitor status` lines** with the gate open, in both languages: the total and the delta, the trend, exactly 5 groups
+  in order, the alerts with their commands, and the thresholds' three states.
+* **Statics:**
+  * the M2 functions call only a closed list of read functions, with no `&`, no dot and no write, engine, process,
+    scheduler or network name (with a positive control);
+  * they are called only by the status, inside the gate's `if`;
+  * the closed list of alerts has no `MON_RECOVERY`, and each command named is a launcher verb (with a positive
+    control);
+  * the name `monitor.json` appears once in the code, and only the readers and the rotation use it;
+  * the single removal stays as it was, and the TUI and the GUI have none of M2;
+  * the new texts have the same placeholders in both languages;
+  * the M1 static also lists the new functions among the readers.
+
+NAO_TESTADO: `monitor status` through the CLI with the gate open. The gate opens only inside the suite's process; the
+lines are checked through the presentation function there.
+
 ## Future: isolation, quarantine and Recovery Mode (0.3.x and V0.4)
 
 Criteria proposed by [ADR-0013](adr/ADR-0013-isolation-quarantine-recovery-mode.md) for accepting an implementation.

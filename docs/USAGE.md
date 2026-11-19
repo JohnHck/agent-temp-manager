@@ -1054,7 +1054,7 @@ that only shows. Executing stays in the CLI (T-ISO-6), as restore does.
 * **Nothing else:** no service name is typed, and no key, button or menu starts, undoes, relaunches, elevates, takes the
   lock or writes a log.
 
-## Monitor (V0.5 M1, unreleased; nothing is collected in any copy)
+## Monitor (V0.5 M1 and M2, unreleased; nothing is collected in any copy)
 
 Preventive monitoring ([ADR-0017](adr/ADR-0017-v05-preventive-monitoring.md)) will keep a small local history of what
 the audit shows, one history per user. Phase M1 adds the collector and the history storage behind the **ninth release
@@ -1085,6 +1085,95 @@ It is opt-in: a later release may offer a command for you to turn it on yourself
 History: none (the folder %LOCALAPPDATA%\AgentTempManager\Monitor does not exist; this command never creates it).
 Nothing was collected, created or changed.
 ```
+
+With the gate closed, as in every copy, `monitor status` shows no trend and no alert, and it does not read `monitor.json`
+(below): a history left by another copy feeds no alert in a copy that does not collect.
+
+### Trends and alerts (V0.5 M2; only where monitoring is on)
+
+Phase M2 adds trends, thresholds and alerts. They are computed when the history is read, and only where the monitoring
+gate is open, which no copy has. With the gate open, `monitor status` also shows:
+
+* **The latest complete total** (the newest record with outcome `OK`) and the **difference since the collection
+  before**. The difference is a value only when both collections are complete. Otherwise it is a gap, never a decrease.
+* **The trend of the total:** the least-squares slope in GB per day over the 7 days up to the newest record. It uses
+  complete values only, and needs at least 4 points spanning at least 24 hours. Otherwise it is `INSUFFICIENT_DATA`.
+  * An incomplete or failed collection, a damaged record and a record marked `CLOCK_SKEW` are gaps.
+  * A group's trend uses the collections in which that group was measured completely.
+  * The "other" group (the groups summed past the 64 largest) counts in the total and has no trend of its own.
+* **Up to 5 groups** (provider / project / class) with the largest trend.
+* **The thresholds:** the defaults, the file `monitor.json`, or the file refused with its code and reason.
+* **The alerts,** each followed by the command it names. **An alert never runs anything.** It only says which command
+  to run yourself, and that command then makes its own collection, plan and confirmation.
+
+| Alert | Fires when the value is strictly greater than | Command it names |
+|---|---|---|
+| `MON_TOTAL` | the latest complete total > `totalGiB` | `agent-temp preview`, then `agent-temp clean` |
+| `MON_GROWTH` | the trend of the total > `growthGiBPerDay` (never with `INSUFFICIENT_DATA`) | `agent-temp audit` |
+| `MON_ORPHAN_SUSPECTED` | the bytes in `ORPHAN_SUSPECTED` groups of the latest complete record > `orphanSuspectedGiB` | `agent-temp preview`, then `agent-temp isolate` |
+| `MON_LIVENESS_UNKNOWN` | the bytes in `LIVENESS_UNKNOWN` groups of the latest complete record > `livenessUnknownGiB` | `agent-temp diagnose` |
+| `MON_COLLECTION` | none of the `failedCollections` newest collections is complete (a damaged record counts as not complete) | `agent-temp monitor status` |
+| `MON_CONFIG_INVALID` | `monitor.json` was refused; the defaults are in use | this section |
+
+The two class sums leave out the "other" group, so they are a lower bound when a record summed any groups. A synthetic
+example with the gate open (planted values, not a real profile):
+
+```
+Monitoring is available in this copy. No collection is scheduled by this release.
+History: 6 record(s) in %LOCALAPPDATA%\AgentTempManager\Monitor.
+Latest: 2026-11-18 12:00 UTC, outcome OK, 2 group(s), 15360 MB measured.
+Latest complete total: 15 GB (2026-11-18 12:00 UTC).
+Since the collection before: +1 GB.
+Trend of the total (7 days, 5 complete points): 1 GB per day.
+Groups with the largest trend (at most 5):
+  claude-code / proj / RECENT: 1 GB per day.
+  claude-code / other / ORPHAN_SUSPECTED: 0 GB per day.
+Thresholds: from monitor.json.
+MON_TOTAL: the latest complete total, 15 GB, is over the threshold of 14.5 GB.
+  To look further, run it yourself: agent-temp preview, then agent-temp clean. This alert ran nothing.
+MON_GROWTH: the total grows 1 GB per day, over the threshold of 0.5 GB per day.
+  To look further, run it yourself: agent-temp audit. This alert ran nothing.
+Nothing was collected, created or changed.
+```
+
+### `monitor.json`: the thresholds
+
+The thresholds live in `monitor.json`, in the history folder `%LOCALAPPDATA%\AgentTempManager\Monitor`, one per user.
+**You write it yourself; the product never writes, creates or fixes it** (V0.5 has no command for it). Without the file,
+the defaults apply and there is no alert about it. Every member is optional; a missing member takes its default:
+
+| Member | Default | Bounds (both ends included) |
+|---|---|---|
+| `totalGiB` | 20 | 1 to 4096 |
+| `growthGiBPerDay` | 2 | 0.1 to 1024 |
+| `orphanSuspectedGiB` | 5 | 1 to 4096 |
+| `livenessUnknownGiB` | 5 | 1 to 4096 |
+| `failedCollections` | 3 | 2 to 30, a whole number (`3.0` is accepted, `3.5` is not) |
+
+The trend window is fixed at 7 days and has no member. A synthetic example:
+
+```json
+{ "totalGiB": 30, "growthGiBPerDay": 1.5, "failedCollections": 4 }
+```
+
+The file is refused **as a whole**, and then the defaults apply and `MON_CONFIG_INVALID` shows the reason, when:
+
+* it, or a folder in the history folder's path, is a reparse point: `REPARSE`;
+* it is a folder: `NOT_A_FILE`;
+* its owner is not you (or your token's default owner, the Administrators group for an elevated administrator):
+  `OWNER`;
+* it is over 4 KB (4096 bytes): `SIZE`;
+* it is not strict UTF-8: `ENCODING`. One leading byte order mark is accepted, since Windows PowerShell 5.1's
+  `Out-File -Encoding utf8` writes one;
+* it is not JSON: `JSON`;
+* it is JSON, but not an object: `TYPE`;
+* it has a member not in the table: `UNKNOWN_KEY`. Names are case-sensitive, so `TotalGiB` is unknown;
+* a value is not a number (a string, `true`, `null`, an array): `TYPE`;
+* a value is outside its bounds: `RANGE`.
+
+A refused file is left exactly as it is. Changing the file changes only which alerts show; an alert authorizes nothing.
+The rotation of the history never removes `monitor.json`. A `monitor.json` with another owner, or a folder or junction
+with that name, makes the rotation refuse, as any other unexpected item does.
 
 Exit codes of `monitor`: `0` for `monitor status`; `2` usage (no subverb, a subverb other than `status`, or an option
 `monitor` does not take). `monitor status` takes no option other than `-Lang` and the display switches `-NoProgress`

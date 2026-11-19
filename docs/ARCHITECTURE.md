@@ -210,11 +210,11 @@ default seams (ADR-0016's R6 record).
   from that collection, for a service of its list. Executing stays in the CLI (T-ISO-6): the GUI's closed list
   ([ADR-0014](adr/ADR-0014-desktop-gui-winforms.md) section 3) refuses the execution names.
 
-## Monitoring engine (V0.5 phase M1; `lib\Engine.Monitor.ps1`)
+## Monitoring engine (V0.5 phases M1 and M2; `lib\Engine.Monitor.ps1`)
 
 [ADR-0017](adr/ADR-0017-v05-preventive-monitoring.md), persistent preventive monitoring. The ninth release gate
-(`AtmMonitoringEnabled`) is closed in every copy. Phase M1 adds the collector and the history storage; nothing is
-scheduled (M3), and trends, thresholds and alerts are M2's.
+(`AtmMonitoringEnabled`) is closed in every copy. Phase M1 adds the collector and the history storage, and phase M2 the
+trends, the thresholds and the alerts; nothing is scheduled (M3).
 
 * **Loading.** The launcher loads the engine only for `monitor` and `version`. It is in the launcher's integrity check,
   `AtmRequiredFiles` and the manifest. It depends on `Engine.Audit.ps1` and on the native pinned writer and folder
@@ -225,10 +225,22 @@ scheduled (M3), and trends, thresholds and alerts are M2's.
   (never the clean lock B8), the audit and nothing else (V05-D8 (a)), one new record file in the pinned folder
   `%LOCALAPPDATA%\AgentTempManager\Monitor`, then the rotation of the product's own history files.
 * **The reader** (`Get-AtmMonitorHistory`, `Get-AtmMonitorStatus`) needs no gate and takes no lock. It never creates
-  the folder, never reads a `.partial`, and skips an invalid record as `HISTORY_RECORD_INVALID`.
-* **Enforced by tests** (the suite's area "V0.5 M1", static case):
+  the folder, never reads a `.partial`, and skips an invalid record as `HISTORY_RECORD_INVALID`. It leaves out the
+  user's thresholds file `monitor.json` (a plain file with the expected owner), which the rotation passes and never
+  removes.
+* **Trends, thresholds and alerts (M2)** are read-only functions over what the reader found. They are computed only by
+  `Get-AtmMonitorStatus`, and only with the gate open, so in no copy:
+  * `Get-AtmMonitorConfig` reads `monitor.json` and never writes it;
+  * `Get-AtmMonitorTrends` computes the 7-day least-squares slopes, the gaps and the delta;
+  * `Get-AtmMonitorAlerts` computes the alerts, each naming a command (`AtmMonitorAlertCommands`) that is never run.
+
+  `Report.ps1` adds their lines to `monitor status`. With the gate closed, `monitor.json` is not read and nothing is
+  computed.
+* **Enforced by tests** (the suite's areas "V0.5 M1" and "V0.5 M2", static cases):
   * a single assignment of the gate and of each seam;
   * every writing function reads the gate before anything else; the readers write nothing;
   * no diagnose, clean, isolation, recovery, scheduler, lock B8 or network name in the engine;
   * the removal of a file appears in one function only (`Invoke-AtmMonitorPrune`);
-  * the engine is loaded exactly in the `monitor` and `version` blocks.
+  * the engine is loaded exactly in the `monitor` and `version` blocks;
+  * the M2 functions call only a closed list of read functions, with no `&` and no write. They are called only by the
+    status, inside the gate's `if`. Each command an alert names is a verb the launcher accepts.
