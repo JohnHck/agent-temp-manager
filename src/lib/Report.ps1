@@ -1530,11 +1530,13 @@ function Get-AtmMonitorStatusLines {
     # (each item: Text and Color). Display only. The folder is always named by its environment form, never resolved.
     # Since M2, with trends in the status (gate open): the latest complete total and the delta, the trend of the total,
     # at most 5 groups with the largest trend, the thresholds' state and the alerts, each with the command it names.
-    param($Status)
+    # Since M3a, -Task (Get-AtmMonitorTaskState, read only): the collection task's lines, right after the gate's.
+    param($Status, $Task = $null)
     $lines = New-Object System.Collections.Generic.List[object]
     $add = { param([string]$Text, [string]$Color) $lines.Add([pscustomobject]@{ Text = $Text; Color = $Color }) }
     if ($Status.GateOpen) { & $add (Get-AtmText 'mon.gateOpen') 'Cyan' }
     else { & $add (Get-AtmText 'mon.gateClosed') 'Yellow'; & $add (Get-AtmText 'mon.optIn') 'Gray' }
+    foreach ($tl in @(Get-AtmMonitorTaskLines -Task $Task)) { $lines.Add($tl) }
     $h = $Status.History
     switch ([string]$h.FolderState) {
         'ABSENT' { & $add (Get-AtmText 'mon.historyAbsent') 'Gray' }
@@ -1594,7 +1596,64 @@ function Get-AtmMonitorStatusLines {
 }
 
 function Show-AtmMonitorStatus {
-    param($Status)
+    param($Status, $Task = $null)
     Write-AtmHeader (Get-AtmText 'mon.header')
-    foreach ($l in (Get-AtmMonitorStatusLines -Status $Status)) { Write-Host ('  ' + $l.Text) -ForegroundColor $l.Color }
+    foreach ($l in (Get-AtmMonitorStatusLines -Status $Status -Task $Task)) { Write-Host ('  ' + $l.Text) -ForegroundColor $l.Color }
+}
+
+function Get-AtmMonitorTaskLines {
+    # The state of the user's collection task (Get-AtmMonitorTaskState, V0.5 M3a), as lines for version and monitor status
+    # (each item: Text and Color). Display only: the task path, the next run and the last result; never the SID or the
+    # account name. A task that exists while this copy's gate is closed is a leftover: it is said so, and that this
+    # version has no command that removes it.
+    param($Task)
+    if ($null -eq $Task) { return @() }
+    $lines = New-Object System.Collections.Generic.List[object]
+    $add = { param([string]$Text, [string]$Color) $lines.Add([pscustomobject]@{ Text = $Text; Color = $Color }) }
+    $state = [string]$Task.State
+    switch ($state) {
+        'ABSENT' {
+            & $add (Get-AtmText 'mon.task.absent') 'Gray'
+            if ($Task.GateOpen) { & $add (Get-AtmText 'mon.task.howEnable') 'Gray' }
+        }
+        'PRESENT' {
+            $last = $(if ($null -ne $Task.LastRunTime) { Get-AtmText 'mon.task.lastResult' ($Task.LastRunTime.ToString('yyyy-MM-dd HH:mm')) $Task.LastResult } else { Get-AtmText 'mon.task.never' })
+            $next = $(if ($null -ne $Task.NextRunTime) { $Task.NextRunTime.ToString('yyyy-MM-dd HH:mm') } else { '-' })
+            & $add (Get-AtmText 'mon.task.present' $Task.TaskPath $(if ($Task.Enabled) { Get-AtmText 'mon.task.enabled' } else { Get-AtmText 'mon.task.disabled' }) $Task.IntervalHours $next $last) 'Cyan'
+        }
+        'DIVERGENT' { & $add (Get-AtmText 'mon.task.divergent' $Task.TaskPath (@($Task.Reasons) -join ', ')) 'Yellow' }
+        default { & $add (Get-AtmText 'mon.task.unreadable' (@($Task.Reasons) -join ', ')) 'Yellow' }
+    }
+    if ($state -ceq 'PRESENT' -or $state -ceq 'DIVERGENT') {
+        if (-not $Task.GateOpen) { & $add (Get-AtmText 'mon.task.residue') 'Yellow' }
+        & $add (Get-AtmText 'mon.task.noRemove') 'Gray'
+    }
+    return $lines.ToArray()
+}
+
+function Show-AtmMonitorEnablePlan {
+    # monitor enable: the plan of the engine, before its phrase. The task, the trigger, the action, who it runs as, and the
+    # history it writes (named by its environment form, never resolved) with what a collection never writes.
+    param($Plan)
+    $min = [int][Xml.XmlConvert]::ToTimeSpan([string]$Plan.TimeLimit).TotalMinutes
+    Write-AtmHeader (Get-AtmText 'mon.plan.header')
+    Write-Host ('  ' + (Get-AtmText 'mon.plan.task' $Plan.TaskPath))
+    Write-Host ('  ' + (Get-AtmText 'mon.plan.trigger' $Plan.IntervalHours ($Plan.FirstRun -replace 'T', ' ') $min))
+    Write-Host ('  ' + (Get-AtmText 'mon.plan.action' $Plan.ActionPath $Plan.ActionArguments))
+    Write-Host ('  ' + (Get-AtmText 'mon.plan.principal')) -ForegroundColor Green
+    Write-Host ('  ' + (Get-AtmText 'mon.plan.history')) -ForegroundColor Cyan
+}
+
+function Show-AtmMonitorEnableResult {
+    # The result of monitor enable: the task created, or the refusal (its code and why), then the task's state when the
+    # engine read it.
+    param($Result)
+    if ($Result.Done) { Write-Host (Get-AtmText 'mon.task.created' $Result.Task.TaskPath) -ForegroundColor Green }
+    else {
+        Write-Host (Get-AtmText 'mon.task.notEnabled' $Result.Aborted) -ForegroundColor Yellow
+        $why = 'mon.task.why.' + [string]$Result.Aborted
+        if ($script:AtmMessages['en-US'].ContainsKey($why)) { Write-Host ('  ' + (Get-AtmText $why)) }
+        if ($Result.Aborted -ceq 'MONITOR_TASK_NOT_VERIFIED') { Write-Host ('  ' + (Get-AtmText 'mon.task.notVerified')) -ForegroundColor Yellow }
+    }
+    foreach ($tl in (Get-AtmMonitorTaskLines -Task $Result.Task)) { Write-Host ('  ' + $tl.Text) -ForegroundColor $tl.Color }
 }

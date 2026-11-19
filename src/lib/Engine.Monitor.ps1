@@ -1,8 +1,11 @@
 # AgentTempManager MONITORING ENGINE (V0.5, docs/adr/ADR-0017, phase M1): the collector and the storage of the preventive
 # monitoring history. Depends on Engine.Audit.ps1: a collection runs the audit and nothing else (V05-D8 (a)). No terminal
-# output of its own; presentation lives in Report.ps1. Nothing here schedules anything (phase M3) or removes the history
-# or the folder on request (phase M4). Phase M2 adds the trends, the thresholds (monitor.json, read only) and the alerts:
-# pure functions over what the reader found, computed only with the gate open; an alert NAMES a command and runs none.
+# output of its own; presentation lives in Report.ps1. Nothing here removes the history, the task or the folder on request
+# (phase M4). Phase M2 adds the trends, the thresholds (monitor.json, read only) and the alerts: pure functions over what
+# the reader found, computed only with the gate open; an alert NAMES a command and runs none. Phase M3a adds the user's
+# own scheduled task of the collector (monitor enable, past the gate only) and the entry point's run
+# (bin\agent-temp-monitor.ps1). The Task Scheduler is reached only through the isolation engine's generic helpers
+# (Connect-AtmTaskScheduler and the code, absence and user helpers next to it), which are not moved.
 #
 # With the monitoring gate closed (every distributed copy) nothing is collected, created or written: the collector, the
 # folder, the writer, the rotation and the single removal function return MONITORING_GATE_CLOSED before anything else,
@@ -75,6 +78,17 @@ $script:AtmMonitorAlertCommands = [ordered]@{
     MON_COLLECTION       = @('agent-temp monitor status')
     MON_CONFIG_INVALID   = @()
 }
+# The scheduled task of the collector (phase M3a; V05-D1 (A): one per user, interactive token, no password, run level
+# Limited). It lives in the product's task folder, shared with the automatic purge, as Monitor-<16 hex digits of the
+# SHA-256 of the SID>. The repetition intervals and the default are the maintainer's decision (V05-D2 (a)); no key
+# changes them. A run is stopped after an hour: the audit has no deadline, and a run ended early leaves only a .partial
+# file, which no reader reads. monitor enable asks its own phrase.
+$script:AtmMonitorTaskFolder = '\AgentTempManager'
+$script:AtmMonitorTaskPrefix = 'Monitor-'
+$script:AtmMonitorTaskIntervals = @(1, 2, 4, 6, 12, 24)
+$script:AtmMonitorTaskDefaultInterval = 6
+$script:AtmMonitorTaskTimeLimit = 'PT1H'
+$script:AtmMonitorEnablePhrase = 'ATIVAR MONITORAMENTO'
 
 # Test seams, a single assignment each, all $null in every distributed copy: the CLI never sets them. The suite replaces
 # them inside its own process only.
@@ -83,13 +97,17 @@ $script:AtmMonitorAlertCommands = [ordered]@{
 #   audit: a scriptblock param($InventoryArgs) that returns an inventory;
 #   random: a scriptblock that returns the 8 hex digits of a name;
 #   mutex: the mutex name (a test name of the suite's own);
-#   owner: a scriptblock param($Path) that returns the owner SID of a history file.
+#   owner: a scriptblock param($Path) that returns the owner SID of a history file;
+#   task name: the name of a test task, exactly MonitorTest-<8 hex digits> (any other value throws);
+#   elevation: a scriptblock that returns the token state read by Test-AtmMonitorStandardToken.
 $script:AtmMonitorClockSource = $null
 $script:AtmMonitorFolderPath = $null
 $script:AtmMonitorAuditSource = $null
 $script:AtmMonitorRandomSource = $null
 $script:AtmMonitorMutexName = $null
 $script:AtmMonitorOwnerSource = $null
+$script:AtmMonitorTaskNameOverride = $null
+$script:AtmMonitorElevationSource = $null
 
 function Get-AtmMonitorUtcNow {
     if ($null -ne $script:AtmMonitorClockSource) {
@@ -691,6 +709,23 @@ function Invoke-AtmMonitorCollectionCore {
     $State.Code = 'OK'
 }
 
+function Invoke-AtmMonitorEntry {
+    <#
+      One run of bin\agent-temp-monitor.ps1 (phase M3a), the action of the user's scheduled task. The gate is read again
+      on every run, first: closed (every distributed copy, and a copy updated to one) it returns MONITORING_GATE_CLOSED
+      with exit code 3 before anything else, so nothing is collected, no folder is created and no mutex is taken, and the
+      task's last result shows that it did not collect. Open: the native types of the pinned folder (-NativeLibDir, the
+      entry point's lib folder; the suite has them already), then one collection (Invoke-AtmMonitorCollection). Returns
+      Code (OK when a record was written), ExitCode (0 collected, 3 refused: the gate, busy, the folder refused, a record
+      too large or any other code) and Result (the collector's result, $null with the gate closed).
+    #>
+    param([hashtable]$InventoryArgs = @{}, [string]$NativeLibDir = $null)
+    if (-not $script:AtmMonitoringEnabled) { return [pscustomobject]@{ Code = 'MONITORING_GATE_CLOSED'; ExitCode = 3; Result = $null } }
+    if ($NativeLibDir) { Initialize-AtmNative -LibDir $NativeLibDir }
+    $r = Invoke-AtmMonitorCollection -InventoryArgs $InventoryArgs
+    return [pscustomobject]@{ Code = [string]$r.Code; ExitCode = $(if ([string]$r.Code -ceq 'OK') { 0 } else { 3 }); Result = $r }
+}
+
 # ---------------------------------------------------------------------------------------------
 # The reader (no gate, no lock: reading is allowed with the gate closed, so a leftover stays visible)
 # ---------------------------------------------------------------------------------------------
@@ -1086,4 +1121,246 @@ function Get-AtmMonitorAlerts {
         $alerts.Add([pscustomobject]@{ Code = $code; Commands = @($script:AtmMonitorAlertCommands[$code]); Value = $found[$code][0]; Threshold = $found[$code][1] })
     }
     return $alerts.ToArray()
+}
+
+# ---------------------------------------------------------------------------------------------
+# The scheduled task of the collector (phase M3a; ADR-0017 sections 2 and 5)
+# ---------------------------------------------------------------------------------------------
+# The Task Scheduler is reached only through Connect-AtmTaskScheduler (lib\Engine.Isolate.ps1, not moved), and changed
+# only by Register-AtmMonitorTask, called only by Invoke-AtmMonitorEnable (monitor enable), past the gate. The state
+# (Get-AtmMonitorTaskState) only reads, needs no gate and never creates the task folder, so a leftover task stays
+# visible. Nothing here removes a task or the folder (phase M4).
+
+function Get-AtmMonitorTaskName {
+    # The task name of a user: the prefix and the first 16 hex digits of the SHA-256 of the SID (UTF-8), never the SID.
+    # The suite's name replaces it only in the test form.
+    param([string]$Sid)
+    if ($null -ne $script:AtmMonitorTaskNameOverride) {
+        # \z, not $: a trailing line break is not the exact form.
+        if ([string]$script:AtmMonitorTaskNameOverride -cnotmatch '^MonitorTest-[0-9a-f]{8}\z') { throw 'MONITOR_TASK_TEST_NAME_INVALID' }
+        return [string]$script:AtmMonitorTaskNameOverride
+    }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $h = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Sid)) } finally { $sha.Dispose() }
+    return $script:AtmMonitorTaskPrefix + (-join @($h[0..7] | ForEach-Object { $_.ToString('x2') }))
+}
+
+function Get-AtmMonitorEntryPoint {
+    # The collector's entry point of this copy (bin next to lib): the only action the task may have.
+    return (Join-AtmPath (Split-Path $PSScriptRoot -Parent) 'bin\agent-temp-monitor.ps1')
+}
+
+function Get-AtmMonitorTaskAction {
+    # The exact action (program and arguments), built only here for the definition and for every comparison: Windows
+    # PowerShell 5.1 by its absolute path, with no logo, no profile, no input and a hidden window, and the entry point with
+    # no arguments of its own.
+    param([string]$EntryPoint)
+    return [pscustomobject]@{
+        Path      = (Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe')
+        Arguments = ('-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $EntryPoint)
+    }
+}
+
+function Get-AtmMonitorTaskStart {
+    # The first run: the next whole minute at least one minute ahead (two minutes at most), in local time without an
+    # offset. Registering the task never starts a run.
+    param([datetime]$Now = [datetime]::Now)
+    $t = (New-Object DateTime($Now.Year, $Now.Month, $Now.Day, $Now.Hour, $Now.Minute, 0)).AddMinutes(2)
+    return $t.ToString('yyyy-MM-ddTHH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Get-AtmMonitorTaskInterval {
+    # The repetition interval of a trigger (ISO 8601 duration) in whole hours when it is one of the allowed intervals;
+    # $null otherwise (unreadable, not whole hours, or not in the list).
+    param([string]$Interval)
+    $ts = $null
+    try { $ts = [Xml.XmlConvert]::ToTimeSpan($Interval) } catch { return $null }
+    $h = $ts.TotalHours
+    if ($h -ne [Math]::Floor($h)) { return $null }
+    if (@($script:AtmMonitorTaskIntervals) -notcontains [int]$h) { return $null }
+    return [int]$h
+}
+
+function Get-AtmMonitorTaskObject {
+    # The task of this name in the product's folder, read only (the folder is never created here): Folder and Task
+    # ($null when absent), or Code when the scheduler cannot be read.
+    param($Service, [string]$Name)
+    $folder = $null
+    try { $folder = $Service.GetFolder($script:AtmMonitorTaskFolder) } catch {
+        if (Test-AtmTaskNotFound $_.Exception) { return [pscustomobject]@{ Folder = $null; Task = $null; Code = $null } }
+        return [pscustomobject]@{ Folder = $null; Task = $null; Code = (Get-AtmTaskSchedulerCode $_.Exception) }
+    }
+    $task = $null
+    try { $task = $folder.GetTask($Name) } catch {
+        if (Test-AtmTaskNotFound $_.Exception) { return [pscustomobject]@{ Folder = $folder; Task = $null; Code = $null } }
+        return [pscustomobject]@{ Folder = $folder; Task = $null; Code = (Get-AtmTaskSchedulerCode $_.Exception) }
+    }
+    return [pscustomobject]@{ Folder = $folder; Task = $task; Code = $null }
+}
+
+function Test-AtmMonitorTaskMatch {
+    # Read only: the reasons a registered task is not exactly the product's collection task of this user (none: it is).
+    # Its path in the product's folder; its user (the SID, or a name that resolves to it); interactive logon; limited run
+    # level; one action, a program, exactly the action of Get-AtmMonitorTaskAction, with no working directory; and one
+    # time trigger whose repetition interval is one of the allowed intervals.
+    param($Task, [string]$Sid, [string]$Name, [string]$EntryPoint)
+    $r = New-Object System.Collections.Generic.List[string]
+    if (-not [string]::Equals([string]$Task.Path, ($script:AtmMonitorTaskFolder + '\' + $Name), [StringComparison]::OrdinalIgnoreCase)) { $r.Add('TASK_PATH') }
+    $td = $Task.Definition
+    if ((Resolve-AtmTaskUserSid ([string]$td.Principal.UserId)) -cne $Sid) { $r.Add('TASK_USER') }
+    if ([int]$td.Principal.LogonType -ne 3) { $r.Add('TASK_LOGON_TYPE') }
+    if ([int]$td.Principal.RunLevel -ne 0) { $r.Add('TASK_RUN_LEVEL') }
+    if ([int]$td.Actions.Count -ne 1) { $r.Add('TASK_ACTION_COUNT') }
+    else {
+        $a = $td.Actions.Item(1)
+        if ([int]$a.Type -ne 0) { $r.Add('TASK_ACTION_TYPE') }
+        else {
+            $want = Get-AtmMonitorTaskAction -EntryPoint $EntryPoint
+            if (-not [string]::Equals([string]$a.Path, $want.Path, [StringComparison]::OrdinalIgnoreCase)) { $r.Add('TASK_ACTION_PATH') }
+            if ([string]$a.Arguments -cne $want.Arguments) { $r.Add('TASK_ACTION_ARGUMENTS') }
+            if ([string]$a.WorkingDirectory) { $r.Add('TASK_ACTION_DIRECTORY') }
+        }
+    }
+    if ([int]$td.Triggers.Count -ne 1) { $r.Add('TASK_TRIGGER_COUNT') }
+    else {
+        $tr = $td.Triggers.Item(1)
+        if ([int]$tr.Type -ne 1) { $r.Add('TASK_TRIGGER_TYPE') }
+        elseif ($null -eq (Get-AtmMonitorTaskInterval ([string]$tr.Repetition.Interval))) { $r.Add('TASK_INTERVAL') }
+    }
+    return $r.ToArray()
+}
+
+function Get-AtmMonitorTaskState {
+    # Read only, with the gate open or closed: the product's collection task of the process user. State ABSENT, PRESENT
+    # (exactly the product's task, with the entry point of this copy), DIVERGENT (Reasons) or UNREADABLE (Reasons: the
+    # code). TaskPath, Enabled, IntervalHours, NextRunTime and LastRunTime/LastResult (local times; $null when none), and
+    # GateOpen (the gate as this copy has it). Never the SID or the account name. The task folder is never created.
+    $st = [ordered]@{ State = 'UNREADABLE'; TaskPath = $null; Enabled = $null; IntervalHours = $null; NextRunTime = $null; LastRunTime = $null; LastResult = $null; Reasons = @(); GateOpen = [bool]$script:AtmMonitoringEnabled }
+    try {
+        $sid = (Get-AtmMonitorIdentity).Sid
+        $name = Get-AtmMonitorTaskName -Sid $sid
+        $st.TaskPath = $script:AtmMonitorTaskFolder + '\' + $name
+        $found = Get-AtmMonitorTaskObject -Service (Connect-AtmTaskScheduler) -Name $name
+        if ($found.Code) { $st.Reasons = @($found.Code) }
+        elseif ($null -eq $found.Task) { $st.State = 'ABSENT' }
+        else {
+            $t = $found.Task
+            $st.Reasons = @(Test-AtmMonitorTaskMatch -Task $t -Sid $sid -Name $name -EntryPoint (Get-AtmMonitorEntryPoint))
+            $st.State = $(if ($st.Reasons.Count -gt 0) { 'DIVERGENT' } else { 'PRESENT' })
+            $st.Enabled = [bool]$t.Enabled
+            if ($st.State -ceq 'PRESENT') { $st.IntervalHours = Get-AtmMonitorTaskInterval ([string]$t.Definition.Triggers.Item(1).Repetition.Interval) }
+            # No next run: a date in 1899. Never run: SCHED_S_TASK_HAS_NOT_RUN (0x00041303), with a last run in 1999.
+            $nr = [datetime]$t.NextRunTime; if ($nr.Year -gt 1900) { $st.NextRunTime = $nr }
+            $lr = [datetime]$t.LastRunTime; if ([int]$t.LastTaskResult -ne 267011 -and $lr.Year -gt 1999) { $st.LastRunTime = $lr; $st.LastResult = ('0x{0:X8}' -f [int]$t.LastTaskResult) }
+        }
+    } catch { $st.State = 'UNREADABLE'; $st.Reasons = @(Get-AtmTaskSchedulerCode $_.Exception) }
+    return [pscustomobject]$st
+}
+
+function New-AtmMonitorTaskDefinition {
+    # The definition of the task, not registered: the user's own token, interactive (no password), limited; a time
+    # trigger at the first run, repeated every -IntervalHours for an unlimited duration; a missed run at the next
+    # opportunity, also on battery (the defaults would never start it on a laptop on battery); one instance at a time
+    # (a new start while one runs is ignored); stopped after the time limit; the single action. $null with the gate closed
+    # or an interval not in the list.
+    param($Service, [string]$Sid, [string]$EntryPoint, [int]$IntervalHours, [datetime]$Now = [datetime]::Now)
+    if (-not $script:AtmMonitoringEnabled) { return $null }
+    if (@($script:AtmMonitorTaskIntervals) -notcontains $IntervalHours) { return $null }
+    $td = $Service.NewTask(0)
+    $td.RegistrationInfo.Author = 'Agent Temp Manager'
+    $td.RegistrationInfo.Description = 'Agent Temp Manager: preventive monitoring. Each run collects the audit''s aggregates into the user''s own history and changes nothing else.'
+    $td.Principal.UserId = $Sid
+    $td.Principal.LogonType = 3
+    $td.Principal.RunLevel = 0
+    $tr = $td.Triggers.Create(1)
+    $tr.StartBoundary = Get-AtmMonitorTaskStart -Now $Now
+    $tr.Repetition.Interval = ('PT{0}H' -f $IntervalHours)
+    $tr.Enabled = $true
+    $s = $td.Settings
+    $s.Enabled = $true
+    $s.StartWhenAvailable = $true
+    $s.DisallowStartIfOnBatteries = $false
+    $s.StopIfGoingOnBatteries = $false
+    $s.ExecutionTimeLimit = $script:AtmMonitorTaskTimeLimit
+    $s.MultipleInstances = 2
+    $act = Get-AtmMonitorTaskAction -EntryPoint $EntryPoint
+    $a = $td.Actions.Create(0)
+    $a.Path = $act.Path
+    $a.Arguments = $act.Arguments
+    return $td
+}
+
+function Register-AtmMonitorTask {
+    # The only registration (monitor enable), past the gate: the product's folder, created when missing, and the task of
+    # this user with TASK_CREATE, so an existing task of the same name is never replaced (MONITOR_TASK_EXISTS). The user
+    # is the SID, the logon type interactive and the password none. Returns $null, or the code.
+    param([string]$Sid, [string]$EntryPoint, [int]$IntervalHours)
+    if (-not $script:AtmMonitoringEnabled) { return 'MONITORING_GATE_CLOSED' }
+    try {
+        $name = Get-AtmMonitorTaskName -Sid $Sid
+        $svc = Connect-AtmTaskScheduler
+        $found = Get-AtmMonitorTaskObject -Service $svc -Name $name
+        if ($found.Code) { return $found.Code }
+        if ($null -ne $found.Task) { return 'MONITOR_TASK_EXISTS' }
+        $td = New-AtmMonitorTaskDefinition -Service $svc -Sid $Sid -EntryPoint $EntryPoint -IntervalHours $IntervalHours
+        if ($null -eq $td) { return 'MONITOR_INTERVAL_INVALID' }
+        $folder = $found.Folder
+        if ($null -eq $folder) {
+            # Created by another process meanwhile (ERROR_ALREADY_EXISTS): that folder is used.
+            try { $folder = $svc.GetFolder('\').CreateFolder($script:AtmMonitorTaskFolder.TrimStart('\'), $null) } catch {
+                if ([int](Get-AtmInnerException $_.Exception).HResult -ne -2147024713) { throw }
+                $folder = $svc.GetFolder($script:AtmMonitorTaskFolder)
+            }
+        }
+        $null = $folder.RegisterTaskDefinition($name, $td, 2, $Sid, $null, 3, $null)
+        return $null
+    } catch {
+        # Registered by another process meanwhile: TASK_CREATE refuses (ERROR_ALREADY_EXISTS or ERROR_FILE_EXISTS).
+        if (@(-2147024713, -2147024816) -contains [int](Get-AtmInnerException $_.Exception).HResult) { return 'MONITOR_TASK_EXISTS' }
+        return (Get-AtmTaskSchedulerCode $_.Exception)
+    }
+}
+
+function Test-AtmMonitorStandardToken {
+    # monitor enable runs only on a standard token: not an elevated administrator, not a full token, medium integrity.
+    # Anything else, an unreadable token included, is refused: the task is always the user's own, never elevated.
+    $tok = $(if ($null -ne $script:AtmMonitorElevationSource) { & $script:AtmMonitorElevationSource } else { Get-AtmIdentityState })
+    return ($tok.IsElevatedAdministrator -eq $false -and @('DEFAULT', 'LIMITED') -ccontains [string]$tok.ElevationType -and @('MEDIUM', 'MEDIUM_PLUS') -ccontains [string]$tok.IntegrityLevel)
+}
+
+function Invoke-AtmMonitorEnable {
+    <#
+      monitor enable (phase M3a; ADR-0017 section 5). In order: the gate closed (every distributed copy) refuses with
+      MONITORING_GATE_CLOSED before anything else is read or asked; an interval not in the list is refused
+      (MONITOR_INTERVAL_INVALID); a token that is not a standard one (MONITOR_TASK_REQUIRES_STANDARD_TOKEN); a copy that is
+      not installed, or without its entry point (MONITOR_TASK_NOT_INSTALLED); the console, observed by the engine itself
+      (CONSOLE_NOT_OBSERVED); the task: unreadable (MONITOR_TASK_UNREADABLE) or present in any state (MONITOR_TASK_EXISTS,
+      never replaced). Then the plan is shown, and the phrase ATIVAR MONITORAMENTO is asked (MONITOR_TASK_NOT_CONFIRMED).
+      Only then the task is registered and read back until it is PRESENT (MONITOR_TASK_NOT_VERIFIED otherwise). Nothing is
+      asked before the plan. Returns Operation, Aborted, Plan, Registered, Done and Task (the state read last).
+    #>
+    param([int]$IntervalHours = $script:AtmMonitorTaskDefaultInterval, [switch]$Installed, [scriptblock]$PlanPresenter, [scriptblock]$ConfirmationReader)
+    if (-not $script:AtmMonitoringEnabled) { return [pscustomobject]@{ Operation = 'enable'; Aborted = 'MONITORING_GATE_CLOSED'; Plan = $null; Registered = $false; Done = $false; Task = $null } }
+    $st = [ordered]@{ Operation = 'enable'; Aborted = $null; Plan = $null; Registered = $false; Done = $false; Task = $null }
+    $end = { return [pscustomobject]$st }
+    if (@($script:AtmMonitorTaskIntervals) -notcontains $IntervalHours) { $st.Aborted = 'MONITOR_INTERVAL_INVALID'; return (& $end) }
+    if (-not (Test-AtmMonitorStandardToken)) { $st.Aborted = 'MONITOR_TASK_REQUIRES_STANDARD_TOKEN'; return (& $end) }
+    $ep = Get-AtmMonitorEntryPoint
+    if (-not $Installed -or -not [IO.File]::Exists($ep)) { $st.Aborted = 'MONITOR_TASK_NOT_INSTALLED'; return (& $end) }
+    if (-not $PlanPresenter -or -not $ConfirmationReader) { $st.Aborted = 'SEM_APRESENTACAO_OU_CONFIRMACAO'; return (& $end) }
+    if (-not (Get-AtmEngineConsoleObservation).Observed) { $st.Aborted = 'CONSOLE_NOT_OBSERVED'; return (& $end) }
+    $st.Task = Get-AtmMonitorTaskState
+    if ($st.Task.State -ceq 'UNREADABLE') { $st.Aborted = 'MONITOR_TASK_UNREADABLE'; return (& $end) }
+    if ($st.Task.State -cne 'ABSENT') { $st.Aborted = 'MONITOR_TASK_EXISTS'; return (& $end) }
+    $act = Get-AtmMonitorTaskAction -EntryPoint $ep
+    $st.Plan = [pscustomobject]@{ TaskPath = $st.Task.TaskPath; IntervalHours = $IntervalHours; FirstRun = (Get-AtmMonitorTaskStart); TimeLimit = $script:AtmMonitorTaskTimeLimit
+        ActionPath = $act.Path; ActionArguments = $act.Arguments; Phrase = $script:AtmMonitorEnablePhrase }
+    & $PlanPresenter $st.Plan
+    if ([string](& $ConfirmationReader $script:AtmMonitorEnablePhrase 'monitor-enable') -cne $script:AtmMonitorEnablePhrase) { $st.Aborted = 'MONITOR_TASK_NOT_CONFIRMED'; return (& $end) }
+    $code = Register-AtmMonitorTask -Sid (Get-AtmMonitorIdentity).Sid -EntryPoint $ep -IntervalHours $IntervalHours
+    if ($code) { $st.Aborted = $code; return (& $end) }
+    $st.Registered = $true
+    $st.Task = Get-AtmMonitorTaskState
+    if ($st.Task.State -cne 'PRESENT') { $st.Aborted = 'MONITOR_TASK_NOT_VERIFIED' } else { $st.Done = $true }
+    return (& $end)
 }

@@ -5420,12 +5420,19 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
         $iso = [IO.File]::ReadAllText($isoFile)
         $all = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1', '.cmd', '.cs') })
         $count = { param([string]$Pat) $n = 0; $where = @(); foreach ($fi in $all) { $m = [regex]::Matches([IO.File]::ReadAllText($fi.FullName), $Pat).Count; if ($m -gt 0) { $n += $m; $where += $fi.Name } }; [pscustomobject]@{ N = $n; Where = ($where -join ',') } }
-        foreach ($c in @(@('Schedule\.Service', 'Connect-AtmTaskScheduler'), @('\.RegisterTaskDefinition\(', 'Register-AtmAutoPurgeTask'), @('\.DeleteTask\(', 'Unregister-AtmAutoPurgeTask'), @('\.CreateFolder\(', 'Register-AtmAutoPurgeTask'), @('\.NewTask\(', 'New-AtmAutoPurgeTaskDefinition'))) {
+        foreach ($c in @(@('Schedule\.Service', 'Connect-AtmTaskScheduler'), @('\.DeleteTask\(', 'Unregister-AtmAutoPurgeTask'))) {
             $r = & $count $c[0]
             Assert-True ($r.N -eq 1 -and $r.Where -ceq 'Engine.Isolate.ps1' -and [regex]::IsMatch((Get-ApFnBody $isoFile $c[1]), $c[0])) "$($c[0]): uma vez, so em $($c[1]) ($($r.N) em $($r.Where))"
         }
+        # V0.5 M3a: the collection task of the monitoring registers too, once, in its own functions of Engine.Monitor; the
+        # purge's stay once each in Engine.Isolate. Nothing in the monitoring removes a task or a folder.
+        $monFile = Join-Path $srcDir 'lib\Engine.Monitor.ps1'
+        foreach ($c in @(@('\.RegisterTaskDefinition\(', 'Register-AtmAutoPurgeTask', 'Register-AtmMonitorTask'), @('\.CreateFolder\(', 'Register-AtmAutoPurgeTask', 'Register-AtmMonitorTask'), @('\.NewTask\(', 'New-AtmAutoPurgeTaskDefinition', 'New-AtmMonitorTaskDefinition'))) {
+            $r = & $count $c[0]
+            Assert-True ($r.N -eq 2 -and $r.Where -ceq 'Engine.Isolate.ps1,Engine.Monitor.ps1' -and [regex]::Matches((Get-ApFnBody $isoFile $c[1]), $c[0]).Count -eq 1 -and [regex]::Matches((Get-ApFnBody $monFile $c[2]), $c[0]).Count -eq 1) "$($c[0]): uma vez em $($c[1]) e uma em $($c[2]) ($($r.N) em $($r.Where))"
+        }
         foreach ($pat in @('DeleteFolder', 'Register-ScheduledTask', 'Unregister-ScheduledTask', 'Set-ScheduledTask', 'New-ScheduledTask', 'schtasks', 'Get-Credential', 'SecureString', 'savecred')) { Assert-Eq (& $count ([regex]::Escape($pat))).N 0 "nenhum '$pat' em src" }
-        Assert-Eq ((Get-ApCallers 'Connect-AtmTaskScheduler') -join ',') 'Engine.Isolate.ps1:Get-AtmAutoPurgeTaskState,Engine.Isolate.ps1:Register-AtmAutoPurgeTask,Engine.Isolate.ps1:Unregister-AtmAutoPurgeTask' 'o agendador so e alcancado pelo estado (leitura) e pelas duas funcoes que o mudam'
+        Assert-Eq ((Get-ApCallers 'Connect-AtmTaskScheduler') -join ',') 'Engine.Isolate.ps1:Get-AtmAutoPurgeTaskState,Engine.Isolate.ps1:Register-AtmAutoPurgeTask,Engine.Isolate.ps1:Unregister-AtmAutoPurgeTask,Engine.Monitor.ps1:Get-AtmMonitorTaskState,Engine.Monitor.ps1:Register-AtmMonitorTask' 'o agendador so e alcancado pelos estados (leitura) e pelas funcoes que o mudam (purga: registrar e remover; monitoramento: so registrar)'
         Assert-Eq ((Get-ApCallers 'Register-AtmAutoPurgeTask') -join ',') 'Engine.Isolate.ps1:Invoke-AtmAutoPurgeSchedule' 'registrar so pelo agendar'
         Assert-Eq ((Get-ApCallers 'Unregister-AtmAutoPurgeTask') -join ',') 'Engine.Isolate.ps1:Invoke-AtmAutoPurgeUnschedule' 'remover so pelo desagendar'
         Assert-Eq ((Get-ApCallers 'Invoke-AtmAutoPurgeSchedule') -join ',') 'agent-temp.ps1:script' 'agendar so pela CLI'
@@ -5433,9 +5440,9 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
         $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
         $iCase = $cli.IndexOf("{ `$_ -in @('schedule-autopurge', 'unschedule-autopurge') } {"); $iDef = $cli.IndexOf("default { Write-Host (Get-AtmText 'cli.quarantineUsage')")
         foreach ($fn in @('Invoke-AtmAutoPurgeSchedule -', 'Invoke-AtmAutoPurgeUnschedule -')) { $i = $cli.IndexOf($fn); Assert-True ($iCase -gt 0 -and $i -gt $iCase -and $i -lt $iDef) "$fn so no caso dos dois subcomandos de quarantine" }
-        foreach ($n in @('lib\Tui.ps1', 'lib\Report.ps1', 'bin\agent-temp-autopurge.ps1', 'agent-temp.ps1')) {
+        foreach ($n in @('lib\Tui.ps1', 'lib\Report.ps1', 'bin\agent-temp-autopurge.ps1', 'bin\agent-temp-monitor.ps1', 'agent-temp.ps1')) {
             $t = [IO.File]::ReadAllText((Join-Path $srcDir $n))
-            foreach ($pat in @('Register-AtmAutoPurgeTask', 'Connect-AtmTaskScheduler', 'RegisterTaskDefinition', 'DeleteTask', 'CreateFolder', 'Schedule.Service', 'AtmAutoPurgeTaskNameOverride', 'AtmAutoPurgeElevationSource')) { Assert-True (-not $t.Contains($pat)) "$n sem '$pat'" }
+            foreach ($pat in @('Register-AtmAutoPurgeTask', 'Connect-AtmTaskScheduler', 'RegisterTaskDefinition', 'DeleteTask', 'CreateFolder', 'Schedule.Service', 'AtmAutoPurgeTaskNameOverride', 'AtmAutoPurgeElevationSource', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'AtmMonitorTaskNameOverride', 'AtmMonitorElevationSource')) { Assert-True (-not $t.Contains($pat)) "$n sem '$pat'" }
         }
         foreach ($n in @('lib\Tui.ps1', 'lib\Report.ps1', 'bin\agent-temp-autopurge.ps1')) { foreach ($pat in @('Invoke-AtmAutoPurgeSchedule', 'Invoke-AtmAutoPurgeUnschedule')) { Assert-True (-not ([IO.File]::ReadAllText((Join-Path $srcDir $n))).Contains($pat)) "$n sem '$pat' (a TUI so mostra, T-ISO-6)" } }
         $ic = [IO.File]::ReadAllText((Join-Path $root 'install\InstallCommon.ps1'))
@@ -15247,7 +15254,10 @@ try {
         'Get-AtmRecoverCollection', 'Get-AtmRecoverList', 'Get-AtmRecoverPlan', 'Get-AtmRecoverListLines', 'Get-AtmRecoverPlanLines')
     $guiAllowedCmdlets = @('Write-Host', 'New-Object', 'Add-Type', 'ConvertFrom-Json')
     # Forbidden names (ADR-0014 section 3), searched in the text, case-insensitive, comments included.
+    # V0.5 M3a: the exact names of the monitoring's register and write functions (never a prefix: the GUI may never read
+    # the monitoring either, which another static checks).
     $guiForbidden = @('Invoke-AtmClean', 'Invoke-AtmIsolate', 'Invoke-AtmRestore', 'Invoke-AtmPurge', 'Invoke-AtmAutoPurgeSchedule', 'Invoke-AtmAutoPurgeUnschedule', 'Invoke-AtmDiscardAuthorization',
+        'Invoke-AtmMonitorEnable', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'Invoke-AtmMonitorEntry',
         'AtmDeleter', 'AtmLockProbe', 'DeleteTree', 'Remove-Item', 'Move-Item', '::Delete(', '.Delete(', '::Move(', 'Set-Content', 'Add-Content', 'Out-File', 'New-Item', 'Set-ItemProperty', 'Set-Acl',
         '::WriteAll', '::AppendAll', '::Create(', '::OpenWrite(', 'CreateSubKey', 'SetValue', 'Start-Process', 'Stop-Process', 'Start-Service', 'Stop-Service', 'Set-Service', 'Restart-Service',
         'Suspend-Service', 'ScheduledTask', 'schtasks', 'Invoke-CimMethod', 'Invoke-WmiMethod', 'Set-CimInstance', 'Remove-CimInstance', 'Clipboard', 'Invoke-Expression', 'sc.exe', 'net stop', 'net start',
@@ -21333,17 +21343,17 @@ exit 0
         $script:caseNote = ('{0} {1} {2}: {3}' -f $arch, $PSVersionTable.PSEdition, $PSVersionTable.PSVersion, ($notes -join '; '))
         Write-Host ('   V0.5 M1 custo: ' + $script:caseNote)
     }
-    Test-Case 'V0.5 M1' 'M1: CLI (processo novo deste shell) - monitor status 0 com a trava fechada nos dois idiomas, opt-in sem prometer comando e nada alterado; sem subverbo ou com subverbo desconhecido: uso 2; version mostra a nona trava; a pasta real nunca criada' {
+    Test-Case 'V0.5 M1' 'M1: CLI (processo novo deste shell) - monitor status 0 com a trava fechada nos dois idiomas, opt-in pelo monitor enable que recusa nesta versao e nada alterado; sem subverbo ou com subverbo desconhecido: uso 2; version mostra a nona trava; a pasta real nunca criada' {
         $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
         $launch = { param([string]$CliArgs) Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$(Join-Path $srcDir 'agent-temp.ps1')`" " + $CliArgs) -TimeoutSec 300 }
         $before = Get-AtmPathPresence $monRealFolder
         $r = & $launch 'monitor status -Lang en-US'
-        Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('Monitoring is not available in this release: nothing is collected, scheduled or written.') -and $r.Text.Contains('This one has no such command.') -and $r.Text.Contains('Nothing was collected, created or changed.')) "status en-US: saida $($r.Exit)"
+        Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('Monitoring is not available in this release: nothing is collected, scheduled or written.') -and $r.Text.Contains('It is opt-in, through agent-temp monitor enable, which in this release refuses before asking anything.') -and $r.Text.Contains('Nothing was collected, created or changed.')) "status en-US: saida $($r.Exit)"
         $r = & $launch 'monitor status -Lang pt-BR'
         Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('Monitoramento preventivo (V0.5)') -and $r.Text.Contains('Nada foi coletado, criado ou alterado.')) "status pt-BR: saida $($r.Exit)"
         foreach ($u in @('monitor', 'monitor collect')) {
             $r = & $launch "$u -Lang en-US"
-            Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('Usage: agent-temp monitor status. Nothing was changed.')) "${u}: uso 2 ($($r.Exit))"
+            Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('Usage: agent-temp monitor status | agent-temp monitor enable [-IntervalHours 1|2|4|6|12|24]. Nothing was changed.')) "${u}: uso 2 ($($r.Exit))"
         }
         $r = & $launch 'version -Lang en-US'
         Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('preventive monitoring: DISABLED in this release (monitor status only reads the history; nothing is collected or scheduled)')) "version: saida $($r.Exit)"
@@ -21359,7 +21369,7 @@ exit 0
         $code = [regex]::Replace([regex]::Replace($mon, '(?s)<#.*?#>', ''), '(?m)#.*$', '')
         foreach ($pat in @('$env:', 'Get-Content', 'Set-Variable', 'New-Variable')) { Assert-True (-not $code.Contains($pat)) "nenhum '$pat' abre a trava" }
         Assert-Eq $shippedMonitorMutexName $null 'costura do mutex distribuida $null'
-        foreach ($s in @('AtmMonitorClockSource', 'AtmMonitorFolderPath', 'AtmMonitorAuditSource', 'AtmMonitorRandomSource', 'AtmMonitorMutexName', 'AtmMonitorOwnerSource')) {
+        foreach ($s in @('AtmMonitorClockSource', 'AtmMonitorFolderPath', 'AtmMonitorAuditSource', 'AtmMonitorRandomSource', 'AtmMonitorMutexName', 'AtmMonitorOwnerSource', 'AtmMonitorTaskNameOverride', 'AtmMonitorElevationSource')) {
             Assert-True ([regex]::Matches($mon, '\$script:' + $s + '\s*=').Count -eq 1 -and $mon -match ('(?m)^\$script:' + $s + ' = \$null\r?$')) "costura ${s}: uma unica atribuicao, a `$null"
             foreach ($f in $all) { if ($f.Rel -cne 'lib\Engine.Monitor.ps1') { Assert-True (-not $f.Text.Contains($s)) "$($f.Rel) nao usa a costura $s" } }
         }
@@ -21370,7 +21380,18 @@ exit 0
         # scheduler, the B8 lock, the network, elevation and every other removal or ACL write.
         $diagFns = @([regex]::Matches(@($all | Where-Object { $_.Rel -ceq 'lib\Engine.Diagnose.ps1' })[0].Text, '(?m)^function\s+([A-Za-z]+-[A-Za-z0-9]+)') | ForEach-Object { $_.Groups[1].Value })
         Assert-True ($diagFns.Count -gt 20) "funcoes do diagnose lidas ($($diagFns.Count))"
-        foreach ($fn in $diagFns) { Assert-True (-not [regex]::IsMatch($code, '(?<![\w-])' + [regex]::Escape($fn) + '(?![\w-])')) "motor nao chama $fn" }
+        # V0.5 M3a: one exception, declared here: the token state (Get-AtmIdentityState) read once, by
+        # Test-AtmMonitorStandardToken only (monitor enable runs only on a standard token, as the purge's schedule).
+        $tokenFns = @{ 'Get-AtmIdentityState' = 'Test-AtmMonitorStandardToken' }
+        $astM = [Management.Automation.Language.Parser]::ParseFile($monFile, [ref]$null, [ref]$null)
+        foreach ($fn in $diagFns) {
+            $hits = [regex]::Matches($code, '(?<![\w-])' + [regex]::Escape($fn) + '(?![\w-])').Count
+            if ($tokenFns.ContainsKey($fn)) {
+                $in = @($astM.FindAll({ param($a) $a -is [Management.Automation.Language.CommandAst] -and $a.GetCommandName() -ceq $fn }, $true) | ForEach-Object { $p = $_.Parent; while ($null -ne $p -and -not ($p -is [Management.Automation.Language.FunctionDefinitionAst])) { $p = $p.Parent }; $(if ($null -ne $p) { $p.Name } else { 'script' }) })
+                Assert-True ($hits -eq 1 -and ($in -join ',') -ceq $tokenFns[$fn]) "motor chama $fn uma vez, so em $($tokenFns[$fn]) ($hits; $($in -join ','))"
+            } else { Assert-True ($hits -eq 0) "motor nao chama $fn" }
+        }
+        Assert-True ($diagFns -ccontains 'Get-AtmIdentityState') 'controle positivo: a excecao declarada e uma funcao do diagnose'
         foreach ($pat in @('Invoke-AtmDiagnose', 'Engine.Diagnose', 'Invoke-AtmClean', 'Invoke-AtmIsolat', 'Invoke-AtmRecover', 'Invoke-AtmPurge', 'Invoke-AtmRestore', 'Schedule.Service', 'Register-ScheduledTask', 'ScheduledTask',
                 'AtmCleanLock', 'AtmCleanLockName', 'Invoke-WebRequest', 'Invoke-RestMethod', 'Net.WebClient', 'HttpClient', 'Net.Sockets', 'Start-Process', 'Read-Host', 'Write-Host', 'AtmDeleter', 'AtmMover', 'PinForMove',
                 'OpenExisting', 'Remove-Item', 'Move-Item', 'Directory]::Delete', '.Delete(', 'Set-Acl', 'SetAccessControl', 'Add-Type', ('run' + 'as'), 'ShellExecute')) {
@@ -21394,16 +21415,20 @@ exit 0
         Assert-Eq (& $fnOf 'File]::Move(') 'Write-AtmMonitorRecordFile' 'troca de nome so no escritor'
         Assert-Eq (& $fnOf 'Threading.Mutex') 'Invoke-AtmMonitorCollection' 'mutex so no coletor'
         Assert-Eq (& $fnOf 'Invoke-AtmInventory @') 'Invoke-AtmMonitorCollectionCore' 'auditoria so no nucleo do coletor'
-        foreach ($fn in @('Open-AtmMonitorFolder', 'Write-AtmMonitorRecordFile', 'Invoke-AtmMonitorPrune', 'Invoke-AtmMonitorRotation', 'Invoke-AtmMonitorCollection')) {
+        # Since M3a also the entry point's run, the task's definition, its registration and monitor enable.
+        foreach ($fn in @('Open-AtmMonitorFolder', 'Write-AtmMonitorRecordFile', 'Invoke-AtmMonitorPrune', 'Invoke-AtmMonitorRotation', 'Invoke-AtmMonitorCollection', 'Invoke-AtmMonitorEntry', 'New-AtmMonitorTaskDefinition', 'Register-AtmMonitorTask', 'Invoke-AtmMonitorEnable')) {
             $first = @($defs[$fn].Body.EndBlock.Statements)[0].Extent.Text
             Assert-True ($first.StartsWith('if (-not $script:AtmMonitoringEnabled) { return ')) "${fn}: a trava e a primeira instrucao"
         }
-        # Since M2 the readers include the thresholds reader, the trends and the alerts (and their helpers).
+        # Since M2 the readers include the thresholds reader, the trends and the alerts (and their helpers); since M3a the
+        # task's state, its reading, its comparison, its name and its interval.
         foreach ($fn in @('Get-AtmMonitorHistory', 'Get-AtmMonitorStatus', 'Get-AtmMonitorNewestName', 'Test-AtmMonitorRecordText', 'Get-AtmMonitorFolder', 'Get-AtmMonitorConfig', 'Get-AtmMonitorConfigFile', 'Get-AtmMonitorConfigValues',
-                'Get-AtmMonitorRecordBytes', 'Get-AtmMonitorGroupKey', 'Get-AtmMonitorSlope', 'Get-AtmMonitorEntryNames', 'Get-AtmMonitorTrends', 'Get-AtmMonitorAlerts')) {
+                'Get-AtmMonitorRecordBytes', 'Get-AtmMonitorGroupKey', 'Get-AtmMonitorSlope', 'Get-AtmMonitorEntryNames', 'Get-AtmMonitorTrends', 'Get-AtmMonitorAlerts',
+                'Get-AtmMonitorTaskState', 'Get-AtmMonitorTaskObject', 'Test-AtmMonitorTaskMatch', 'Get-AtmMonitorTaskName', 'Get-AtmMonitorTaskInterval')) {
             $t = $defs[$fn].Extent.Text
-            foreach ($pat in @('CreateNew', '::Pin(', 'File]::Move', 'Mutex', '::Delete(', 'WriteAll', 'CreateDirectory', 'Invoke-AtmMonitor', 'Open-AtmMonitorFolder', 'Write-AtmMonitorRecordFile')) { Assert-True (-not $t.Contains($pat)) "leitor $fn sem '$pat'" }
+            foreach ($pat in @('CreateNew', '::Pin(', 'File]::Move', 'Mutex', '::Delete(', 'WriteAll', 'CreateDirectory', 'Invoke-AtmMonitor', 'Open-AtmMonitorFolder', 'Write-AtmMonitorRecordFile', 'RegisterTaskDefinition', 'CreateFolder', 'NewTask', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition')) { Assert-True (-not $t.Contains($pat)) "leitor $fn sem '$pat'" }
         }
+        Assert-True (-not $defs['Get-AtmMonitorTaskState'].Extent.Text.Contains('if (-not $script:AtmMonitoringEnabled)')) 'o estado da tarefa nao depende da trava (um residuo fica visivel)'
         Assert-True (-not $defs['Get-AtmMonitorHistory'].Extent.Text.Contains('AtmMonitoringEnabled')) 'o leitor nao depende da trava'
         # The launcher: the engine in monitor and version only, once each; no collection, no seam.
         $launcher = @($all | Where-Object { $_.Rel -ceq 'agent-temp.ps1' })[0].Text
@@ -21414,6 +21439,10 @@ exit 0
             if ($ln.Contains($loadLine)) { $lHits.Add([string]$lBlock) }
         }
         Assert-Eq (@($lHits | Sort-Object) -join ',') 'monitor,version' "motor carregado so em monitor e version, uma vez cada ($($lHits -join ','))"
+        # V0.5 M3a: exactly one third loader, the collector's entry point (once); no other file of src loads the engine.
+        $loaders = @($all | Where-Object { $_.Text.Contains($loadLine) } | ForEach-Object { $_.Rel } | Sort-Object)
+        Assert-Eq ($loaders -join ',') 'agent-temp.ps1,bin\agent-temp-monitor.ps1' "motor carregado so pelo lancador e pelo ponto de entrada do coletor ($($loaders -join ','))"
+        Assert-Eq ([regex]::Matches(@($all | Where-Object { $_.Rel -ceq 'bin\agent-temp-monitor.ps1' })[0].Text, [regex]::Escape($loadLine)).Count) 1 'o ponto de entrada carrega o motor uma vez'
         Assert-True ($launcher.Contains("'lib\Report.ps1', 'lib\Engine.Monitor.ps1', 'lib\Tui.ps1'") -and $script:AtmRequiredFiles -contains 'lib\Engine.Monitor.ps1') 'motor na verificacao de integridade do lancador e obrigatorio na instalacao'
         Assert-True ($launcher.Contains("Get-AtmText 'cli.monitoring' `$(if (`$script:AtmMonitoringEnabled)") -and [regex]::Matches($launcher, 'AtmMonitoringEnabled').Count -eq 1 -and $launcher.Contains("'help.monitor'")) 'version le a trava (uma vez); ajuda com a linha de monitor'
         foreach ($pat in @('Invoke-AtmMonitorCollection', 'Invoke-AtmMonitorRotation', 'Invoke-AtmMonitorPrune', 'Open-AtmMonitorFolder', 'Write-AtmMonitorRecordFile')) {
@@ -21985,6 +22014,612 @@ exit 0
             $ph = { param([string]$T) (@([regex]::Matches($T, '\{\d\}') | ForEach-Object { $_.Value } | Sort-Object -Unique) -join ',') }
             Assert-Eq (& $ph $script:AtmMessages['pt-BR'][$key]) (& $ph $script:AtmMessages['en-US'][$key]) "${key}: mesmos campos nos dois idiomas"
         }
+    }
+
+    # ------------------------------------------------------------------ V0.5 M3a (preventive monitoring: the collector's scheduled task, monitor enable and the entry point, gate closed, ADR-0017)
+    # The suite NEVER registers a real task: the real scheduler is validated by the CI harness of phase M3b. Every case that
+    # reaches a registration shadows Connect-AtmTaskScheduler with a fake scheduler in memory (New-M3Service), checked by
+    # the static of this area; the only real scheduler object is $script:m3RealSvc, used for NewTask only (a definition in
+    # memory, never registered). The monitoring gate is opened inside this process only, around each call, and closed
+    # again. The token, the console, the clock and the confirmation are injected.
+    $script:m3RealSvc = Connect-AtmTaskScheduler
+    $script:m3k = @{}
+    function Reset-M3Seams { param($Console) Reset-MonSeams; $script:AtmMonitorTaskNameOverride = $null; $script:AtmMonitorElevationSource = $null; $script:AtmCleanConsoleSource = $Console }
+    function New-M3Task {
+        # A registered task as the fake scheduler returns it: -Definition (a definition in memory), never run.
+        param([string]$Name, $Definition, [bool]$Enabled = $true, $LastRun = $null, [int]$LastResult = 267011)
+        return [pscustomobject]@{ Path = ('\AgentTempManager\' + $Name); Definition = $Definition; Enabled = $Enabled; NextRunTime = (New-Object DateTime(2026, 11, 18, 18, 0, 0))
+            LastRunTime = $(if ($null -ne $LastRun) { $LastRun } else { New-Object DateTime(1999, 11, 30) }); LastTaskResult = $LastResult }
+    }
+    function New-M3Service {
+        # A fake Task Scheduler in memory, as $script:m3Svc (state and counters in $script:m3k): the product's folder and at
+        # most one task. A missing folder or task fails as the real one does (ERROR_FILE_NOT_FOUND); ReadHr makes every
+        # read fail with that HRESULT; RegisterHr makes the registration fail (a race: TASK_CREATE refuses); FolderHr makes
+        # the folder's creation fail after another process created it; NoStore registers without keeping the task.
+        param([bool]$Folder = $false, $Task = $null)
+        $script:m3k = @{ FolderExists = $Folder; Task = $Task; Registered = 0; Folders = 0; Connects = 0; ReadHr = 0; RegisterHr = 0; FolderHr = 0; NoStore = $false; Args = $null; Name = $null; Definition = $null }
+        $f = [pscustomobject]@{ Path = '\AgentTempManager' }
+        $f | Add-Member -MemberType ScriptMethod -Name GetTask -Value {
+            param($n)
+            if ($script:m3k.ReadHr) { [Runtime.InteropServices.Marshal]::ThrowExceptionForHR($script:m3k.ReadHr) }
+            if ($null -eq $script:m3k.Task) { [Runtime.InteropServices.Marshal]::ThrowExceptionForHR(-2147024894) }
+            return $script:m3k.Task
+        }
+        $f | Add-Member -MemberType ScriptMethod -Name RegisterTaskDefinition -Value {
+            param($n, $td, $flags, $user, $pw, $logon, $sddl)
+            $script:m3k.Args = @($flags, $user, $pw, $logon, $sddl); $script:m3k.Name = $n; $script:m3k.Definition = $td
+            if ($script:m3k.RegisterHr) { [Runtime.InteropServices.Marshal]::ThrowExceptionForHR($script:m3k.RegisterHr) }
+            $script:m3k.Registered++
+            if (-not $script:m3k.NoStore) { $script:m3k.Task = New-M3Task -Name $n -Definition $td }
+            return $script:m3k.Task
+        }
+        $root = [pscustomobject]@{ Path = '\' }
+        $root | Add-Member -MemberType ScriptMethod -Name CreateFolder -Value {
+            param($n, $sddl)
+            $script:m3k.Folders++
+            $script:m3k.FolderExists = $true
+            if ($script:m3k.FolderHr) { [Runtime.InteropServices.Marshal]::ThrowExceptionForHR($script:m3k.FolderHr) }
+            return $script:m3Folder
+        }
+        $script:m3Folder = $f; $script:m3Root = $root
+        $svc = [pscustomobject]@{ Fake = $true }
+        $svc | Add-Member -MemberType ScriptMethod -Name GetFolder -Value {
+            param($p)
+            if ($script:m3k.ReadHr) { [Runtime.InteropServices.Marshal]::ThrowExceptionForHR($script:m3k.ReadHr) }
+            if ($p -ceq '\') { return $script:m3Root }
+            if (-not $script:m3k.FolderExists) { [Runtime.InteropServices.Marshal]::ThrowExceptionForHR(-2147024894) }
+            return $script:m3Folder
+        }
+        $svc | Add-Member -MemberType ScriptMethod -Name NewTask -Value { param($fl) return $script:m3RealSvc.NewTask($fl) }
+        $script:m3Svc = $svc
+        return $svc
+    }
+    function New-M3Definition {
+        # The product's definition of this process's user, built in memory with the gate opened around the call (the gate
+        # is given back as it was); never registered.
+        param([int]$IntervalHours = 6, [string]$EntryPoint = $null, [datetime]$Now = (New-Object DateTime(2026, 11, 18, 9, 0, 30)))
+        if (-not $EntryPoint) { $EntryPoint = Get-AtmMonitorEntryPoint }
+        $was = $script:AtmMonitoringEnabled
+        $script:AtmMonitoringEnabled = $true
+        try { return (New-AtmMonitorTaskDefinition -Service $script:m3RealSvc -Sid $me.Sid -EntryPoint $EntryPoint -IntervalHours $IntervalHours -Now $Now) } finally { $script:AtmMonitoringEnabled = $was }
+    }
+
+    Test-Case 'V0.5 M3a' 'M3a: definicao montada e nunca registrada (XML), campo a campo, para cada intervalo da lista e o padrao - o SID, logon interativo, nivel limitado, sem senha; um gatilho de horario repetido a cada N horas sem fim, primeira execucao ao menos 1 min adiante sem fuso; perdida na proxima oportunidade, tambem na bateria; uma instancia; limite de 1 h; uma acao exata sem pasta; trava fechada ou intervalo fora da lista: nenhuma definicao; leitura do intervalo' {
+        $ep = Join-Path $sandbox 'm3a dir\bin\agent-temp-monitor.ps1'
+        Assert-Eq (@($script:AtmMonitorTaskIntervals) -join ',') '1,2,4,6,12,24' 'a lista D2 nao muda'
+        Assert-Eq $script:AtmMonitorTaskDefaultInterval 6 'o padrao D2 nao muda'
+        $want = Get-AtmMonitorTaskAction -EntryPoint $ep
+        Assert-True ($want.Path -ieq (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -and $want.Arguments -ceq ('-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ep + '"')) 'a acao exata: o PowerShell 5.1 absoluto e o ponto de entrada, sem argumentos proprios'
+        foreach ($n in @(@($script:AtmMonitorTaskIntervals) + @($script:AtmMonitorTaskDefaultInterval))) {
+            $td = New-M3Definition -IntervalHours $n -EntryPoint $ep
+            $x = [xml]$td.XmlText
+            $ns = New-Object Xml.XmlNamespaceManager($x.NameTable); $ns.AddNamespace('t', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
+            $v = { param($p) $nd = $x.SelectSingleNode($p, $ns); if ($null -ne $nd) { $nd.InnerText } else { '<none>' } }
+            Assert-True ((& $v '//t:Principal/t:UserId') -ceq $me.Sid -and (& $v '//t:Principal/t:LogonType') -ceq 'InteractiveToken' -and (& $v '//t:Principal/t:RunLevel') -ceq 'LeastPrivilege') "$n h: principal o SID do processo, InteractiveToken, LeastPrivilege"
+            Assert-True ($null -eq $x.SelectSingleNode('//t:Password', $ns) -and -not $td.XmlText.Contains('Password')) "$n h: nenhuma senha"
+            Assert-True (@($x.SelectNodes('//t:Triggers/*', $ns)).Count -eq 1 -and $null -ne $x.SelectSingleNode('//t:Triggers/t:TimeTrigger', $ns)) "$n h: um unico gatilho, de horario"
+            Assert-Eq (& $v '//t:TimeTrigger/t:StartBoundary') '2026-11-18T09:02:00' "$n h: primeira execucao no minuto cheio ao menos 1 min adiante, sem fuso"
+            Assert-Eq (& $v '//t:TimeTrigger/t:Repetition/t:Interval') ('PT' + $n + 'H') "$n h: repeticao a cada $n h"
+            Assert-True (@('<none>', '') -ccontains (& $v '//t:TimeTrigger/t:Repetition/t:Duration')) "$n h: duracao indefinida"
+            foreach ($k in @(@('StartWhenAvailable', 'true'), @('DisallowStartIfOnBatteries', 'false'), @('StopIfGoingOnBatteries', 'false'), @('MultipleInstancesPolicy', 'IgnoreNew'), @('ExecutionTimeLimit', 'PT1H'))) { Assert-Eq (& $v ('//t:Settings/t:' + $k[0])) $k[1] "$n h: configuracao $($k[0])" }
+            Assert-True (@($x.SelectNodes('//t:Actions/*', $ns)).Count -eq 1 -and (& $v '//t:Exec/t:Command') -ieq $want.Path -and (& $v '//t:Exec/t:Arguments') -ceq $want.Arguments -and (& $v '//t:Exec/t:WorkingDirectory') -ceq '<none>') "$n h: uma acao exata, sem pasta de trabalho"
+            Assert-Eq (& $v '//t:RegistrationInfo/t:Author') 'Agent Temp Manager' "$n h: autor o produto (nunca a conta)"
+        }
+        foreach ($c in @(@('2026-11-18T09:00:00', '2026-11-18T09:02:00'), @('2026-11-18T09:00:59.900', '2026-11-18T09:02:00'), @('2026-12-31T23:59:10', '2027-01-01T00:01:00'))) {
+            $s = Get-AtmMonitorTaskStart -Now ([datetime]$c[0])
+            $gap = ([datetime]$s - [datetime]$c[0]).TotalSeconds
+            Assert-True ($s -ceq $c[1] -and $gap -ge 60 -and $gap -le 120) "primeira execucao para $($c[0]): $s ($gap s adiante; registrar nunca dispara)"
+        }
+        Assert-Eq $script:AtmMonitoringEnabled $false 'trava fechada'
+        Assert-Eq (New-AtmMonitorTaskDefinition -Service $script:m3RealSvc -Sid $me.Sid -EntryPoint $ep -IntervalHours 6) $null 'trava fechada: nenhuma definicao'
+        foreach ($bad in @(0, 3, 5, 8, 48)) { Assert-Eq (New-M3Definition -IntervalHours $bad -EntryPoint $ep) $null "intervalo $bad fora da lista: nenhuma definicao" }
+        Assert-Eq $script:AtmMonitoringEnabled $false 'trava fechada de novo'
+        foreach ($c in @(@('PT1H', 1), @('PT24H', 24), @('P1D', 24), @('PT6H', 6), @('PT3H', $null), @('PT90M', $null), @('PT30M', $null), @('P2D', $null), @('x', $null), @('', $null))) { Assert-Eq (Get-AtmMonitorTaskInterval $c[0]) $c[1] "intervalo lido: '$($c[0])'" }
+    }
+
+    Test-Case 'V0.5 M3a' 'M3a: nome pelo hash do SID (nunca o SID), o de teste so na forma exata MonitorTest-<8 hex> (outro valor lanca); conferencia campo a campo - a exata passa e cada divergencia tem o seu motivo (caminho, usuario, logon, nivel, numero de acoes, tipo, programa, argumentos, pasta, numero de gatilhos, tipo de gatilho, intervalo fora da lista); a definicao montada confere; regra do token' {
+        $syn = 'S-1-5-21-1-2-3-777'
+        $nm0 = Get-AtmMonitorTaskName -Sid $syn
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $h = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($syn)) } finally { $sha.Dispose() }
+        $hex = -join @($h[0..7] | ForEach-Object { $_.ToString('x2') })
+        Assert-True ($nm0 -ceq ('Monitor-' + $hex) -and $nm0 -cmatch '^Monitor-[0-9a-f]{16}$' -and -not $nm0.Contains('777') -and (Get-AtmMonitorTaskName -Sid $syn) -ceq $nm0 -and (Get-AtmMonitorTaskName -Sid 'S-1-5-21-1-2-3-4444') -cne $nm0) "nome: prefixo e 16 hex do SHA-256 do SID, estavel, nunca o SID ($nm0)"
+        Assert-True ($nm0 -cne (Get-AtmAutoPurgeTaskName -Sid $syn)) 'nome diferente do da tarefa da purga (mesma pasta)'
+        try {
+            foreach ($bad in @('Monitor-0123456789abcdef', 'MonitorTest-ABCDEF12', 'MonitorTest-1234567', 'MonitorTest-0a1b2c3d9', 'monitortest-0a1b2c3d', 'AutoPurgeTest-0a1b2c3d', ' MonitorTest-0a1b2c3d', "MonitorTest-0a1b2c3d`n", 'x', '')) {
+                $script:AtmMonitorTaskNameOverride = $bad
+                $thrown = ''; try { $null = Get-AtmMonitorTaskName -Sid $syn } catch { $thrown = $_.Exception.Message }
+                Assert-Eq $thrown 'MONITOR_TASK_TEST_NAME_INVALID' "nome de teste fora da forma lanca: '$($bad.Trim())' ($($bad.Length))"
+            }
+            $script:AtmMonitorTaskNameOverride = 'MonitorTest-0a1b2c3d'
+            Assert-Eq (Get-AtmMonitorTaskName -Sid $syn) 'MonitorTest-0a1b2c3d' 'nome de teste na forma exata'
+            $script:AtmMonitorTaskNameOverride = $null
+            foreach ($c in @(@($true, 'FULL', 'HIGH', $false), @($false, 'FULL', 'MEDIUM', $false), @($false, 'DEFAULT', 'HIGH', $false), @($false, 'DEFAULT', 'SYSTEM', $false), @($null, 'UNKNOWN', 'UNKNOWN', $false),
+                    @($false, 'DEFAULT', 'LOW', $false), @($false, 'DEFAULT', 'MEDIUM', $true), @($false, 'LIMITED', 'MEDIUM', $true), @($false, 'DEFAULT', 'MEDIUM_PLUS', $true))) {
+                $script:m3Tok = [pscustomobject]@{ IsElevatedAdministrator = $c[0]; ElevationType = $c[1]; IntegrityLevel = $c[2] }
+                $script:AtmMonitorElevationSource = { $script:m3Tok }
+                Assert-Eq (Test-AtmMonitorStandardToken) $c[3] "token admin=$($c[0]) $($c[1]) $($c[2])"
+            }
+        } finally { Reset-M3Seams $script:AtmCleanConsoleSource }
+        # The exact match, on tasks built in memory (no scheduler).
+        $ep = Join-Path $sandbox 'm3a dir\bin\agent-temp-monitor.ps1'
+        $want = Get-AtmMonitorTaskAction -EntryPoint $ep
+        $nm = Get-AtmMonitorTaskName -Sid $me.Sid
+        $col = { param($Items) $o = [pscustomobject]@{ Count = @($Items).Count; Items = @($Items) }; $o | Add-Member -MemberType ScriptMethod -Name Item -Value { param($i) $this.Items[$i - 1] }; $o }
+        $mkTask = { param($Path, $User, $Logon, $Run, $Acts, $Trigs) [pscustomobject]@{ Path = $Path; Definition = [pscustomobject]@{ Principal = [pscustomobject]@{ UserId = $User; LogonType = $Logon; RunLevel = $Run }; Actions = (& $col $Acts); Triggers = (& $col $Trigs) } } }
+        $mkAct = { param($Type, $P, $A, $D) [pscustomobject]@{ Type = $Type; Path = $P; Arguments = $A; WorkingDirectory = $D } }
+        $mkTrig = { param($Type, $I) [pscustomobject]@{ Type = $Type; Repetition = [pscustomobject]@{ Interval = $I } } }
+        $tp = '\AgentTempManager\' + $nm
+        $ok = & $mkAct 0 $want.Path $want.Arguments ''
+        $tr = & $mkTrig 1 'PT6H'
+        $cases = @(
+            @('exata', (& $mkTask $tp $me.Sid 3 0 @($ok) @($tr)), ''),
+            @('usuario por nome', (& $mkTask $tp $me.Name 3 0 @($ok) @($tr)), ''),
+            @('caminho em maiusculas', (& $mkTask $tp.ToUpperInvariant() $me.Sid 3 0 @(& $mkAct 0 $want.Path.ToUpperInvariant() $want.Arguments '') @($tr)), ''),
+            @('outra pasta', (& $mkTask ('\Other\' + $nm) $me.Sid 3 0 @($ok) @($tr)), 'TASK_PATH'),
+            @('outro nome', (& $mkTask '\AgentTempManager\Monitor-0000000000000000' $me.Sid 3 0 @($ok) @($tr)), 'TASK_PATH'),
+            @('outro usuario', (& $mkTask $tp 'S-1-5-18' 3 0 @($ok) @($tr)), 'TASK_USER'),
+            @('usuario que nao resolve', (& $mkTask $tp 'NOSUCHDOMAIN\no-such-account' 3 0 @($ok) @($tr)), 'TASK_USER'),
+            @('logon com senha', (& $mkTask $tp $me.Sid 1 0 @($ok) @($tr)), 'TASK_LOGON_TYPE'),
+            @('nivel elevado', (& $mkTask $tp $me.Sid 3 1 @($ok) @($tr)), 'TASK_RUN_LEVEL'),
+            @('duas acoes', (& $mkTask $tp $me.Sid 3 0 @($ok, $ok) @($tr)), 'TASK_ACTION_COUNT'),
+            @('nenhuma acao', (& $mkTask $tp $me.Sid 3 0 @() @($tr)), 'TASK_ACTION_COUNT'),
+            @('acao que nao e programa', (& $mkTask $tp $me.Sid 3 0 @(& $mkAct 5 $want.Path $want.Arguments '') @($tr)), 'TASK_ACTION_TYPE'),
+            @('outro programa', (& $mkTask $tp $me.Sid 3 0 @(& $mkAct 0 'C:\Windows\System32\cmd.exe' $want.Arguments '') @($tr)), 'TASK_ACTION_PATH'),
+            @('argumentos a mais', (& $mkTask $tp $me.Sid 3 0 @(& $mkAct 0 $want.Path ($want.Arguments + ' x') '') @($tr)), 'TASK_ACTION_ARGUMENTS'),
+            @('argumentos em outra caixa', (& $mkTask $tp $me.Sid 3 0 @(& $mkAct 0 $want.Path $want.Arguments.ToLowerInvariant() '') @($tr)), 'TASK_ACTION_ARGUMENTS'),
+            @('outro ponto de entrada', (& $mkTask $tp $me.Sid 3 0 @(& $mkAct 0 $want.Path ($want.Arguments.Replace('m3a dir', 'm3a other')) '') @($tr)), 'TASK_ACTION_ARGUMENTS'),
+            @('pasta de trabalho', (& $mkTask $tp $me.Sid 3 0 @(& $mkAct 0 $want.Path $want.Arguments 'C:\') @($tr)), 'TASK_ACTION_DIRECTORY'),
+            @('dois gatilhos', (& $mkTask $tp $me.Sid 3 0 @($ok) @($tr, $tr)), 'TASK_TRIGGER_COUNT'),
+            @('nenhum gatilho', (& $mkTask $tp $me.Sid 3 0 @($ok) @()), 'TASK_TRIGGER_COUNT'),
+            @('gatilho diario', (& $mkTask $tp $me.Sid 3 0 @($ok) @(& $mkTrig 2 'PT6H')), 'TASK_TRIGGER_TYPE'),
+            @('intervalo de 3 h', (& $mkTask $tp $me.Sid 3 0 @($ok) @(& $mkTrig 1 'PT3H')), 'TASK_INTERVAL'),
+            @('intervalo de 90 min', (& $mkTask $tp $me.Sid 3 0 @($ok) @(& $mkTrig 1 'PT90M')), 'TASK_INTERVAL'),
+            @('sem repeticao', (& $mkTask $tp $me.Sid 3 0 @($ok) @(& $mkTrig 1 '')), 'TASK_INTERVAL'))
+        Assert-Eq $cases.Count 23 'os 23 casos inteiros (nenhum desenrolado)'
+        foreach ($c in $cases) { Assert-Eq (@(Test-AtmMonitorTaskMatch -Task $c[1] -Sid $me.Sid -Name $nm -EntryPoint $ep) -join ',') $c[2] "conferencia: $($c[0])" }
+        foreach ($n in @($script:AtmMonitorTaskIntervals)) { Assert-Eq (@(Test-AtmMonitorTaskMatch -Task (& $mkTask $tp $me.Sid 3 0 @($ok) @(& $mkTrig 1 ('PT' + $n + 'H'))) -Sid $me.Sid -Name $nm -EntryPoint $ep) -join ',') '' "conferencia: intervalo de $n h na lista" }
+        Assert-Eq (@(Test-AtmMonitorTaskMatch -Task (New-M3Task -Name $nm -Definition (New-M3Definition -EntryPoint $ep)) -Sid $me.Sid -Name $nm -EntryPoint $ep) -join ',') '' 'a definicao montada pelo produto confere'
+    }
+
+    Test-Case 'V0.5 M3a' 'M3a: monitor enable (agendador falso) - cada recusa na ordem, sem registro e sem frase antes do plano: trava fechada (nada lido: nem token, nem console, nem agendador), intervalo fora da lista, token elevado, copia nao instalada ou sem o ponto de entrada, sem apresentador ou leitor, console nao observado, tarefa presente, divergente e ilegivel; frase errada nao registra nem cria a pasta' {
+        $prevConsole = $script:AtmCleanConsoleSource
+        $tdOk = New-M3Definition
+        $tdDiv = New-M3Definition
+        $tdDiv.Actions.Item(1).Arguments = $tdDiv.Actions.Item(1).Arguments + ' -Extra'
+        $null = New-M3Service
+        function Connect-AtmTaskScheduler { $script:m3k.Connects++; return $script:m3Svc }
+        $script:m3asked = New-Object System.Collections.Generic.List[string]
+        $pres = { param($p) $script:m3asked.Add('plan'); $script:m3plan = $p }
+        $rd = { param($ph, $k) $script:m3asked.Add($k); 'nao' }
+        $script:m3n = @{ Tok = 0; Con = 0 }
+        $script:m3Tok = & $apStd
+        $none = { $script:m3asked.Count -eq 0 -and $script:m3k.Registered -eq 0 -and $script:m3k.Folders -eq 0 -and $null -eq $script:m3k.Name }
+        try {
+            $script:AtmMonitorTaskNameOverride = 'MonitorTest-0a1b2c3d'
+            $script:AtmMonitorElevationSource = { $script:m3n.Tok++; $script:m3Tok }
+            $script:AtmCleanConsoleSource = { $script:m3n.Con++; $true }
+            $r = Invoke-AtmMonitorEnable -Installed -PlanPresenter $pres -ConfirmationReader $rd
+            Assert-True ($r.Aborted -ceq 'MONITORING_GATE_CLOSED' -and -not $r.Done -and -not $r.Registered -and $null -eq $r.Plan -and $null -eq $r.Task -and (& $none) -and $script:m3n.Tok -eq 0 -and $script:m3n.Con -eq 0 -and $script:m3k.Connects -eq 0) "trava fechada: recusa antes de tudo ($($r.Aborted); token $($script:m3n.Tok), console $($script:m3n.Con), agendador $($script:m3k.Connects))"
+            $script:AtmMonitoringEnabled = $true
+            try {
+                $r = Invoke-AtmMonitorEnable -IntervalHours 3 -Installed -PlanPresenter $pres -ConfirmationReader $rd
+                Assert-True ($r.Aborted -ceq 'MONITOR_INTERVAL_INVALID' -and (& $none) -and $script:m3n.Tok -eq 0 -and $script:m3k.Connects -eq 0) "intervalo fora da lista ($($r.Aborted))"
+                foreach ($tok in @(@($true, 'FULL', 'HIGH'), @($false, 'DEFAULT', 'HIGH'), @($null, 'UNKNOWN', 'UNKNOWN'))) {
+                    $script:m3Tok = [pscustomobject]@{ IsElevatedAdministrator = $tok[0]; ElevationType = $tok[1]; IntegrityLevel = $tok[2] }
+                    $r = Invoke-AtmMonitorEnable -Installed -PlanPresenter $pres -ConfirmationReader $rd
+                    Assert-True ($r.Aborted -ceq 'MONITOR_TASK_REQUIRES_STANDARD_TOKEN' -and (& $none) -and $script:m3n.Con -eq 0 -and $script:m3k.Connects -eq 0) "token $($tok -join ' ') recusado ($($r.Aborted))"
+                }
+                Assert-True ($script:m3n.Tok -eq 3) "o token lido so depois da trava e do intervalo ($($script:m3n.Tok))"
+                $script:m3Tok = & $apStd
+                $r = Invoke-AtmMonitorEnable -PlanPresenter $pres -ConfirmationReader $rd
+                Assert-True ($r.Aborted -ceq 'MONITOR_TASK_NOT_INSTALLED' -and (& $none) -and $script:m3k.Connects -eq 0) "copia nao instalada ($($r.Aborted))"
+                $r = & { function Get-AtmMonitorEntryPoint { return (Join-Path $sandbox 'm3a-missing\bin\agent-temp-monitor.ps1') }; Invoke-AtmMonitorEnable -Installed -PlanPresenter $pres -ConfirmationReader $rd }
+                Assert-True ($r.Aborted -ceq 'MONITOR_TASK_NOT_INSTALLED' -and (& $none) -and $script:m3k.Connects -eq 0) "instalada sem o ponto de entrada ($($r.Aborted))"
+                $r = Invoke-AtmMonitorEnable -Installed -ConfirmationReader $rd
+                Assert-True ($r.Aborted -ceq 'SEM_APRESENTACAO_OU_CONFIRMACAO' -and (& $none)) "sem apresentador ($($r.Aborted))"
+                $r = Invoke-AtmMonitorEnable -Installed -PlanPresenter $pres
+                Assert-True ($r.Aborted -ceq 'SEM_APRESENTACAO_OU_CONFIRMACAO' -and (& $none) -and $script:m3n.Con -eq 0) "sem leitor ($($r.Aborted))"
+                $script:AtmCleanConsoleSource = { $script:m3n.Con++; $false }
+                $r = Invoke-AtmMonitorEnable -Installed -PlanPresenter $pres -ConfirmationReader $rd
+                Assert-True ($r.Aborted -ceq 'CONSOLE_NOT_OBSERVED' -and (& $none) -and $script:m3n.Con -eq 1 -and $script:m3k.Connects -eq 0) "console nao observado, antes do agendador ($($r.Aborted))"
+                $script:AtmCleanConsoleSource = { $script:m3n.Con++; $true }
+                $null = New-M3Service -Folder $true -Task (New-M3Task -Name 'MonitorTest-0a1b2c3d' -Definition $tdOk)
+                $r = Invoke-AtmMonitorEnable -Installed -PlanPresenter $pres -ConfirmationReader $rd
+                Assert-True ($r.Aborted -ceq 'MONITOR_TASK_EXISTS' -and $r.Task.State -ceq 'PRESENT' -and (& $none)) "tarefa presente: nunca substituida, sem perguntar ($($r.Aborted) $($r.Task.State))"
+                $null = New-M3Service -Folder $true -Task (New-M3Task -Name 'MonitorTest-0a1b2c3d' -Definition $tdDiv)
+                $r = Invoke-AtmMonitorEnable -Installed -PlanPresenter $pres -ConfirmationReader $rd
+                Assert-True ($r.Aborted -ceq 'MONITOR_TASK_EXISTS' -and $r.Task.State -ceq 'DIVERGENT' -and (@($r.Task.Reasons) -join ',') -ceq 'TASK_ACTION_ARGUMENTS' -and (& $none)) "tarefa divergente: nunca substituida, sem perguntar ($($r.Aborted) $($r.Task.State))"
+                $null = New-M3Service -Folder $true
+                $script:m3k.ReadHr = -2147024891
+                $r = Invoke-AtmMonitorEnable -Installed -PlanPresenter $pres -ConfirmationReader $rd
+                Assert-True ($r.Aborted -ceq 'MONITOR_TASK_UNREADABLE' -and $r.Task.State -ceq 'UNREADABLE' -and (@($r.Task.Reasons) -join ',') -ceq 'TASK_SCHEDULER_0x80070005' -and (& $none)) "agendador ilegivel ($($r.Aborted) $(@($r.Task.Reasons) -join ','))"
+                $null = New-M3Service
+                $r = Invoke-AtmMonitorEnable -Installed -PlanPresenter $pres -ConfirmationReader $rd
+                Assert-True ($r.Aborted -ceq 'MONITOR_TASK_NOT_CONFIRMED' -and ($script:m3asked -join ',') -ceq 'plan,monitor-enable' -and $null -ne $r.Plan -and -not $r.Registered -and $script:m3k.Registered -eq 0 -and $script:m3k.Folders -eq 0 -and -not $script:m3k.FolderExists) "frase errada: plano e frase, nada registrado e a pasta nao criada ($($r.Aborted) $($script:m3asked -join ','))"
+            } finally { $script:AtmMonitoringEnabled = $false }
+        } finally { Reset-M3Seams $prevConsole }
+        Assert-Eq $script:AtmMonitoringEnabled $false 'trava fechada de novo'
+    }
+
+    Test-Case 'V0.5 M3a' 'M3a: monitor enable (agendador falso em memoria; nunca o real) - caminho feliz: o plano e depois a frase, um registro com TASK_CREATE, o SID, sem senha e logon interativo, a pasta criada quando falta, releitura PRESENT; -IntervalHours 12; MONITOR_TASK_EXISTS numa corrida (as duas recusas do TASK_CREATE) e com a tarefa ja presente; a pasta criada por outro processo no meio; registro que nao rele: MONITOR_TASK_NOT_VERIFIED; codigo do agendador; trava fechada no registro direto; plano e resultados nos dois idiomas' {
+        $prevConsole = $script:AtmCleanConsoleSource
+        $old = Get-AtmLanguage
+        $tdPresent = New-M3Definition
+        $null = New-M3Service
+        function Connect-AtmTaskScheduler { $script:m3k.Connects++; return $script:m3Svc }
+        $script:m3asked = New-Object System.Collections.Generic.List[string]
+        $pres = { param($p) $script:m3asked.Add('plan'); $script:m3plan = $p }
+        $rd = { param($ph, $k) $script:m3asked.Add($k); $ph }
+        $name = 'MonitorTest-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+        try {
+            $script:AtmMonitorTaskNameOverride = $name
+            $script:AtmMonitorElevationSource = $apStd
+            $script:AtmCleanConsoleSource = { $true }
+            $ep = Get-AtmMonitorEntryPoint
+            $want = Get-AtmMonitorTaskAction -EntryPoint $ep
+            $script:AtmMonitoringEnabled = $true
+            try {
+                $r = Invoke-AtmMonitorEnable -Installed -PlanPresenter $pres -ConfirmationReader $rd
+                $rDone = $r
+                Assert-True ($r.Done -and $r.Registered -and -not $r.Aborted -and $r.Task.State -ceq 'PRESENT' -and ($script:m3asked -join ',') -ceq 'plan,monitor-enable') "caminho feliz ($($r.Aborted) $($script:m3asked -join ','))"
+                Assert-True ($script:m3k.Registered -eq 1 -and $script:m3k.Folders -eq 1 -and $script:m3k.Name -ceq $name) "um registro, a pasta criada uma vez ($($script:m3k.Registered), $($script:m3k.Folders))"
+                $a = $script:m3k.Args
+                Assert-True ($a[0] -eq 2 -and [string]$a[1] -ceq $me.Sid -and $null -eq $a[2] -and $a[3] -eq 3 -and $null -eq $a[4]) 'TASK_CREATE (2), o SID, senha nula, logon interativo (3), sem SDDL'
+                $p = $script:m3plan
+                Assert-True ($p.TaskPath -ceq ('\AgentTempManager\' + $name) -and $p.IntervalHours -eq 6 -and $p.TimeLimit -ceq 'PT1H' -and $p.ActionPath -ieq $want.Path -and $p.ActionArguments -ceq $want.Arguments -and $p.Phrase -ceq 'ATIVAR MONITORAMENTO' -and $p.FirstRun -cmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00$') 'o plano: caminho, intervalo padrao, limite, acao, frase e primeira execucao'
+                Assert-True ($r.Task.IntervalHours -eq 6 -and [string]$script:m3k.Definition.Triggers.Item(1).Repetition.Interval -ceq 'PT6H') 'o padrao: a cada 6 h'
+                $shown = ($r.Task | Out-String) + ($p | Out-String)
+                Assert-True (-not $shown.Contains($me.Sid) -and (-not $me.Name -or -not $shown.Contains([string]$me.Name))) 'o estado e o plano nunca levam o SID nem a conta'
+                $null = New-M3Service; $script:m3asked.Clear()
+                $r = Invoke-AtmMonitorEnable -IntervalHours 12 -Installed -PlanPresenter $pres -ConfirmationReader $rd
+                Assert-True ($r.Done -and $script:m3plan.IntervalHours -eq 12 -and [string]$script:m3k.Definition.Triggers.Item(1).Repetition.Interval -ceq 'PT12H' -and $r.Task.IntervalHours -eq 12) "-IntervalHours 12 ($($r.Aborted))"
+                foreach ($hr in @(-2147024713, -2147024816)) {
+                    $null = New-M3Service -Folder $true
+                    $script:m3k.RegisterHr = $hr; $script:m3asked.Clear()
+                    $r = Invoke-AtmMonitorEnable -Installed -PlanPresenter $pres -ConfirmationReader $rd
+                    Assert-True ($r.Aborted -ceq 'MONITOR_TASK_EXISTS' -and -not $r.Registered -and -not $r.Done -and $script:m3k.Registered -eq 0 -and $null -eq $script:m3k.Task -and ($script:m3asked -join ',') -ceq 'plan,monitor-enable') "corrida (0x$('{0:X8}' -f $hr)): MONITOR_TASK_EXISTS, nada substituido ($($r.Aborted))"
+                }
+                $null = New-M3Service -Folder $true -Task (New-M3Task -Name $name -Definition $tdPresent)
+                Assert-Eq (Register-AtmMonitorTask -Sid $me.Sid -EntryPoint $ep -IntervalHours 6) 'MONITOR_TASK_EXISTS' 'registro direto com a tarefa presente: MONITOR_TASK_EXISTS'
+                Assert-Eq $script:m3k.Name $null 'nenhum RegisterTaskDefinition com a tarefa presente'
+                $null = New-M3Service
+                $script:m3k.FolderHr = -2147024713
+                $code = Register-AtmMonitorTask -Sid $me.Sid -EntryPoint $ep -IntervalHours 6
+                Assert-True ($null -eq $code -and $script:m3k.Registered -eq 1 -and $script:m3k.Folders -eq 1) "pasta criada por outro processo no meio: usada, a tarefa registrada ($code)"
+                $null = New-M3Service
+                Assert-Eq (Register-AtmMonitorTask -Sid $me.Sid -EntryPoint $ep -IntervalHours 3) 'MONITOR_INTERVAL_INVALID' 'registro direto com intervalo fora da lista'
+                Assert-True ($script:m3k.Folders -eq 0 -and $script:m3k.Registered -eq 0) 'intervalo fora da lista: nem a pasta criada'
+                $null = New-M3Service
+                $script:m3k.NoStore = $true; $script:m3asked.Clear()
+                $r = Invoke-AtmMonitorEnable -Installed -PlanPresenter $pres -ConfirmationReader $rd
+                Assert-True ($r.Aborted -ceq 'MONITOR_TASK_NOT_VERIFIED' -and $r.Registered -and -not $r.Done -and $r.Task.State -ceq 'ABSENT') "registro que nao rele: MONITOR_TASK_NOT_VERIFIED ($($r.Aborted))"
+                $null = New-M3Service
+                $script:m3k.RegisterHr = -2147024891
+                $r = Invoke-AtmMonitorEnable -Installed -PlanPresenter $pres -ConfirmationReader $rd
+                Assert-True ($r.Aborted -ceq 'TASK_SCHEDULER_0x80070005' -and -not $r.Registered) "erro do agendador como codigo ($($r.Aborted))"
+            } finally { $script:AtmMonitoringEnabled = $false }
+            $null = New-M3Service
+            Assert-Eq (Register-AtmMonitorTask -Sid $me.Sid -EntryPoint $ep -IntervalHours 6) 'MONITORING_GATE_CLOSED' 'registro direto com a trava fechada: recusa antes de tudo'
+            Assert-True ($script:m3k.Connects -eq 0 -and $script:m3k.Registered -eq 0) 'trava fechada: o agendador nem alcancado'
+            $plan = [pscustomobject]@{ TaskPath = '\AgentTempManager\MonitorTest-0a1b2c3d'; IntervalHours = 6; FirstRun = '2026-11-18T09:02:00'; TimeLimit = 'PT1H'; ActionPath = 'P.exe'; ActionArguments = '-File "x"'; Phrase = 'ATIVAR MONITORAMENTO' }
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                foreach ($c in @('MONITORING_GATE_CLOSED', 'MONITOR_INTERVAL_INVALID', 'MONITOR_TASK_REQUIRES_STANDARD_TOKEN', 'MONITOR_TASK_NOT_INSTALLED', 'CONSOLE_NOT_OBSERVED', 'MONITOR_TASK_UNREADABLE', 'MONITOR_TASK_EXISTS', 'MONITOR_TASK_NOT_CONFIRMED', 'MONITOR_TASK_NOT_VERIFIED', 'TASK_SCHEDULER_0x80070005')) {
+                    $t = Get-RstHost { Show-AtmMonitorEnableResult -Result ([pscustomobject]@{ Operation = 'enable'; Aborted = $c; Plan = $null; Registered = $false; Done = $false; Task = $null }) }
+                    $why = 'mon.task.why.' + $c
+                    Assert-True ($t.Contains((Get-AtmText 'mon.task.notEnabled' $c)) -and (-not $script:AtmMessages['en-US'].ContainsKey($why) -or $t.Contains((Get-AtmText $why))) -and ($c -cne 'MONITOR_TASK_NOT_VERIFIED' -or $t.Contains((Get-AtmText 'mon.task.notVerified')))) "$lang`: resultado $c"
+                }
+                $t = Get-RstHost { Show-AtmMonitorEnableResult -Result $rDone }
+                Assert-True ($t.Contains((Get-AtmText 'mon.task.created' ('\AgentTempManager\' + $name))) -and $t.Contains((Get-AtmText 'mon.task.noRemove'))) "$lang`: resultado criado, com a linha da tarefa"
+                $t = Get-RstHost { Show-AtmMonitorEnablePlan -Plan $plan }
+                Assert-True ($t.Contains((Get-AtmText 'mon.plan.header')) -and $t.Contains((Get-AtmText 'mon.plan.task' $plan.TaskPath)) -and $t.Contains((Get-AtmText 'mon.plan.trigger' 6 '2026-11-18 09:02:00' 60)) -and $t.Contains((Get-AtmText 'mon.plan.action' 'P.exe' '-File "x"')) -and $t.Contains((Get-AtmText 'mon.plan.principal')) -and $t.Contains((Get-AtmText 'mon.plan.history')) -and $t.Contains('%LOCALAPPDATA%\AgentTempManager\Monitor')) "$lang`: plano (tarefa, gatilho, acao, quem roda, historico e o que nunca grava)"
+            }
+        } finally { Reset-M3Seams $prevConsole; Set-AtmLanguage -Requested $old }
+    }
+
+    Test-Case 'V0.5 M3a' 'M3a: execucao do ponto de entrada (Invoke-AtmMonitorEntry, neste processo) - trava fechada: 3 sem coleta, sem tipos nativos, sem pasta e sem mutex (contadores); aberta na suite com a costura da coleta: 0 e um registro; coleta recusada: 3 com o codigo' {
+        $folder = New-MonFolder
+        $base = Split-Path (Split-Path $folder -Parent) -Parent
+        $k = @{ Audit = 0; Native = 0 }
+        $mx = $script:AtmMonitorMutexName
+        $inv = New-MonInv @(New-MonPart)
+        try {
+            $script:AtmMonitorFolderPath = $folder
+            $t0 = $monT0
+            $script:AtmMonitorClockSource = { $t0 }.GetNewClosure()
+            $script:AtmMonitorAuditSource = { param($a) $k.Audit++; $inv }.GetNewClosure()
+            function Initialize-AtmNative { param($LibDir) $k.Native++ }
+            $before = Get-TreeListing $base
+            $r = Invoke-AtmMonitorEntry -NativeLibDir (Join-Path $srcDir 'lib')
+            Assert-True ($r.Code -ceq 'MONITORING_GATE_CLOSED' -and $r.ExitCode -eq 3 -and $null -eq $r.Result) "trava fechada: 3 ($($r.Code) $($r.ExitCode))"
+            Assert-True ($k.Audit -eq 0 -and $k.Native -eq 0) "nenhuma auditoria nem tipos nativos ($($k.Audit), $($k.Native))"
+            $m = $null; Assert-True (-not [Threading.Mutex]::TryOpenExisting($mx, [ref]$m)) 'nenhum mutex com a trava fechada'
+            Assert-Eq (Get-TreeListing $base) $before 'nada criado nem gravado'
+            Assert-True (-not [IO.Directory]::Exists((Split-Path $folder -Parent))) 'nenhuma pasta criada'
+            $script:AtmMonitoringEnabled = $true
+            try { $r = Invoke-AtmMonitorEntry -NativeLibDir (Join-Path $srcDir 'lib') } finally { $script:AtmMonitoringEnabled = $false }
+            if (Test-MonFolderSkip $r.Code) { return }
+            Assert-True ($r.Code -ceq 'OK' -and $r.ExitCode -eq 0 -and $k.Audit -eq 1 -and $k.Native -eq 1 -and [string]$r.Result.Outcome -ceq 'OK') "aberta: 0 e uma coleta ($($r.Code) $($r.ExitCode); auditoria $($k.Audit), nativos $($k.Native))"
+            Assert-Eq @(Get-MonNames $folder).Count 1 'um registro'
+            & { function Invoke-AtmMonitorCollection { param($InventoryArgs) return [pscustomobject]@{ Code = 'MONITOR_BUSY' } }; $script:AtmMonitoringEnabled = $true; try { $script:m3r = Invoke-AtmMonitorEntry } finally { $script:AtmMonitoringEnabled = $false } }
+            Assert-True ($script:m3r.Code -ceq 'MONITOR_BUSY' -and $script:m3r.ExitCode -eq 3) "coleta recusada: 3 com o codigo ($($script:m3r.Code) $($script:m3r.ExitCode))"
+        } finally { Reset-MonSeams }
+    }
+
+    Test-Case 'V0.5 M3a' 'M3a: ponto de entrada em processo filho (copia preparada com manifesto) - argumento: 2; trava fechada (toda copia distribuida): 3 sem coleta e a pasta real do usuario nunca criada; sem manifesto (origem), biblioteca carregada ou o proprio ponto de entrada alterado e provider fora do manifesto: 5, nada carregado; o manifesto lista o ponto de entrada' {
+        $shell = (Get-Process -Id $PID).Path
+        $inst = Join-Path $sandbox 'm3a-stage\AgentTempManager'
+        [void][IO.Directory]::CreateDirectory($inst)
+        Copy-AtmTree -From $srcDir -To $inst
+        Write-AtmManifest -Root $inst -Version (Get-AtmSourceVersion -SourceDir $srcDir)
+        $ep = Join-Path $inst 'bin\agent-temp-monitor.ps1'
+        $run = { param([string]$File, [string]$ArgLine = '') Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -ExecutionPolicy Bypass -File `"$File`" $ArgLine") -TimeoutSec 300 }
+        $before = Get-AtmPathPresence $monRealFolder
+        Assert-True (@(([IO.File]::ReadAllText((Join-Path $inst 'manifest.json')) | ConvertFrom-Json).files | Where-Object { [string]$_.path -ceq 'bin\agent-temp-monitor.ps1' }).Count -eq 1) 'manifesto lista bin\agent-temp-monitor.ps1'
+        foreach ($al in @('x', '-Verbose', '-IntervalHours 6')) {
+            $r = & $run $ep $al
+            Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('takes no arguments') -and $r.Text.Contains('nao aceita argumentos')) "argumento '$al' recusado: exit $($r.Exit)"
+        }
+        $r = & $run $ep
+        Assert-True ($r.Exit -eq 3 -and ($r.Text.Contains('Monitoring is not available in this release: nothing was collected and no folder was created.') -or $r.Text.Contains('nada foi coletado e nenhuma pasta foi criada'))) "trava fechada: exit 3 sem coleta ($($r.Exit): $($r.Text.Trim()))"
+        $r = & $run (Join-Path $srcDir 'bin\agent-temp-monitor.ps1')
+        Assert-True ($r.Exit -eq 5 -and $r.Text.Contains('manifest missing / manifesto ausente: manifest.json')) "origem sem manifesto recusada: exit $($r.Exit)"
+        foreach ($rel in @('lib\Engine.Monitor.ps1', 'lib\Engine.Audit.ps1', 'lib\I18n.ps1', 'bin\agent-temp-monitor.ps1')) {
+            $fp = Join-Path $inst $rel
+            $orig = [IO.File]::ReadAllBytes($fp)
+            try {
+                [IO.File]::WriteAllBytes($fp, [byte[]]($orig + [Text.Encoding]::ASCII.GetBytes("`r`n# m3a")))
+                $r = & $run $ep
+            } finally { [IO.File]::WriteAllBytes($fp, $orig) }
+            Assert-True ($r.Exit -eq 5 -and $r.Text.Contains('modified/alterado: ' + $rel.ToLowerInvariant())) "$rel alterado: exit $($r.Exit)"
+        }
+        $extra = Join-Path $inst 'providers\Extra.ps1'
+        [IO.File]::WriteAllText($extra, '# x')
+        try { $r = & $run $ep } finally { [IO.File]::Delete($extra) }
+        Assert-True ($r.Exit -eq 5 -and $r.Text.Contains('provider not in manifest / provider fora do manifesto: Extra.ps1')) "provider fora do manifesto: exit $($r.Exit)"
+        $r = & $run $ep
+        Assert-Eq $r.Exit 3 "copia restaurada volta a sair com 3 pela trava ($($r.Text.Trim()))"
+        Assert-Eq (Get-AtmPathPresence $monRealFolder) $before 'pasta real do usuario inalterada'
+    }
+
+    Test-Case 'V0.5 M3a' 'M3a: estado so leitura com a trava fechada - agendador real so lido (nome de teste: ausente; a pasta de tarefas nem criada nem removida); falso: ausente sem a pasta (nunca criada), residuo presente e divergente (nada registrado nem criado), ultima execucao com o resultado, ilegivel com o codigo, nome de teste invalido; nunca o SID nem a conta' {
+        $prevConsole = $script:AtmCleanConsoleSource
+        try {
+            $script:AtmMonitorTaskNameOverride = 'MonitorTest-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+            $hasFolder = { $fx = $true; try { $null = (Connect-AtmTaskScheduler).GetFolder('\AgentTempManager') } catch { $fx = $false }; $fx }
+            $real0 = & $hasFolder
+            $st = Get-AtmMonitorTaskState
+            Assert-True ($st.State -ceq 'ABSENT' -and -not $st.GateOpen -and $st.TaskPath -ceq ('\AgentTempManager\' + $script:AtmMonitorTaskNameOverride)) "agendador real, so lido: ABSENT com o nome de teste ($($st.State) $(@($st.Reasons) -join ','))"
+            Assert-Eq (& $hasFolder) $real0 'a pasta de tarefas real nem criada nem removida pela leitura'
+            $script:AtmMonitorTaskNameOverride = 'MonitorTest-0a1b2c3d'
+            $tdOk = New-M3Definition
+            $tdDiv = New-M3Definition
+            $tdDiv.Principal.RunLevel = 1
+            function Connect-AtmTaskScheduler { $script:m3k.Connects++; return $script:m3Svc }
+            $null = New-M3Service
+            $st = Get-AtmMonitorTaskState
+            Assert-True ($st.State -ceq 'ABSENT' -and -not $st.GateOpen -and $null -eq $st.NextRunTime -and $script:m3k.Folders -eq 0 -and -not $script:m3k.FolderExists -and $script:m3k.Registered -eq 0 -and $script:m3k.Connects -eq 1) "ausente sem a pasta: nunca criada ($($st.State))"
+            $null = New-M3Service -Folder $true
+            Assert-Eq (Get-AtmMonitorTaskState).State 'ABSENT' 'ausente com a pasta'
+            $null = New-M3Service -Folder $true -Task (New-M3Task -Name 'MonitorTest-0a1b2c3d' -Definition $tdOk)
+            $st = Get-AtmMonitorTaskState
+            Assert-True ($st.State -ceq 'PRESENT' -and $st.IntervalHours -eq 6 -and $st.Enabled -and $null -ne $st.NextRunTime -and $null -eq $st.LastRunTime -and $null -eq $st.LastResult -and -not $st.GateOpen -and $script:m3k.Registered -eq 0 -and $script:m3k.Folders -eq 0) "residuo presente com a trava fechada, nunca executado ($($st.State))"
+            Assert-True (-not ($st | Out-String).Contains($me.Sid) -and (-not $me.Name -or -not ($st | Out-String).Contains([string]$me.Name))) 'o estado nunca leva o SID nem a conta'
+            $null = New-M3Service -Folder $true -Task (New-M3Task -Name 'MonitorTest-0a1b2c3d' -Definition $tdOk -Enabled $false -LastRun (New-Object DateTime(2026, 11, 18, 12, 0, 0)) -LastResult 3)
+            $st = Get-AtmMonitorTaskState
+            Assert-True ($st.State -ceq 'PRESENT' -and -not $st.Enabled -and $st.LastRunTime -eq (New-Object DateTime(2026, 11, 18, 12, 0, 0)) -and $st.LastResult -ceq '0x00000003') "ultima execucao e o seu resultado (o 3 da trava fechada), desativada ($($st.LastResult))"
+            $null = New-M3Service -Folder $true -Task (New-M3Task -Name 'MonitorTest-0a1b2c3d' -Definition $tdDiv)
+            $st = Get-AtmMonitorTaskState
+            Assert-True ($st.State -ceq 'DIVERGENT' -and (@($st.Reasons) -join ',') -ceq 'TASK_RUN_LEVEL' -and $null -eq $st.IntervalHours -and $script:m3k.Registered -eq 0) "residuo divergente ($($st.State) $(@($st.Reasons) -join ','))"
+            $null = New-M3Service -Folder $true
+            $script:m3k.ReadHr = -2147024891
+            $st = Get-AtmMonitorTaskState
+            Assert-True ($st.State -ceq 'UNREADABLE' -and (@($st.Reasons) -join ',') -ceq 'TASK_SCHEDULER_0x80070005') "ilegivel com o codigo ($($st.State) $(@($st.Reasons) -join ','))"
+            $null = New-M3Service
+            $script:AtmMonitorTaskNameOverride = 'MonitorTest-XYZ'
+            $st = Get-AtmMonitorTaskState
+            Assert-True ($st.State -ceq 'UNREADABLE' -and $script:m3k.Connects -eq 0) "nome de teste invalido: ilegivel, o agendador nem alcancado ($($st.State))"
+        } finally { Reset-M3Seams $prevConsole }
+    }
+
+    Test-Case 'V0.5 M3a' 'M3a: linhas do estado em version e monitor status (en-US e pt-BR) - ausente (como criar so com a trava aberta), presente (caminho, intervalo, proxima execucao, ultimo resultado), divergente, ilegivel; residuo com a trava fechada diz que existe e que esta versao nao tem comando que a remova, sem fase e sem comando que nao existe; o status com as linhas da tarefa logo depois da trava' {
+        $old = Get-AtmLanguage
+        $tp = '\AgentTempManager\MonitorTest-0a1b2c3d'
+        $mk = { param($State, $Gate, $Reasons = @(), $Last = $null, $Res = $null) [pscustomobject]@{ State = $State; TaskPath = $(if ($State -ceq 'UNREADABLE') { $null } else { $tp }); Enabled = $true; IntervalHours = $(if ($State -ceq 'PRESENT') { 6 } else { $null }); NextRunTime = (New-Object DateTime(2026, 11, 18, 18, 0, 0)); LastRunTime = $Last; LastResult = $Res; Reasons = $Reasons; GateOpen = $Gate } }
+        $L = { param($T) , @(Get-AtmMonitorTaskLines -Task $T | ForEach-Object { $_.Text }) }
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                Assert-Eq @(Get-AtmMonitorTaskLines -Task $null).Count 0 "${lang}: sem estado, sem linha"
+                $a = & $L (& $mk 'ABSENT' $false)
+                Assert-True ($a.Count -eq 1 -and $a[0] -ceq (Get-AtmText 'mon.task.absent')) "${lang}: ausente com a trava fechada: uma linha, sem como criar ($($a -join ' | '))"
+                $a = & $L (& $mk 'ABSENT' $true)
+                Assert-True ($a.Count -eq 2 -and $a[1] -ceq (Get-AtmText 'mon.task.howEnable')) "${lang}: ausente com a trava aberta: como criar ($($a -join ' | '))"
+                $a = & $L (& $mk 'PRESENT' $false)
+                Assert-True ($a.Count -eq 3 -and $a[0].Contains($tp) -and $a[0].Contains('2026-11-18 18:00') -and $a[0].Contains((Get-AtmText 'mon.task.never')) -and $a[0].Contains(' 6 h') -and $a[1] -ceq (Get-AtmText 'mon.task.residue') -and $a[2] -ceq (Get-AtmText 'mon.task.noRemove')) "${lang}: residuo presente: caminho, intervalo, proxima, nunca executada, residuo e sem comando de remocao ($($a -join ' | '))"
+                $a = & $L (& $mk 'PRESENT' $true -Last (New-Object DateTime(2026, 11, 18, 12, 0, 0)) -Res '0x00000000')
+                Assert-True ($a.Count -eq 2 -and $a[0].Contains('2026-11-18 12:00') -and $a[0].Contains('0x00000000') -and $a[1] -ceq (Get-AtmText 'mon.task.noRemove')) "${lang}: presente com a trava aberta: ultimo resultado, sem aviso de residuo ($($a -join ' | '))"
+                $a = & $L (& $mk 'DIVERGENT' $false -Reasons @('TASK_ACTION_ARGUMENTS', 'TASK_INTERVAL'))
+                Assert-True ($a.Count -eq 3 -and $a[0].Contains($tp) -and $a[0].Contains('TASK_ACTION_ARGUMENTS, TASK_INTERVAL') -and $a[1] -ceq (Get-AtmText 'mon.task.residue') -and $a[2] -ceq (Get-AtmText 'mon.task.noRemove')) "${lang}: divergente com os motivos ($($a -join ' | '))"
+                $a = & $L (& $mk 'UNREADABLE' $false -Reasons @('TASK_SCHEDULER_0x80070005'))
+                Assert-True ($a.Count -eq 1 -and $a[0].Contains('TASK_SCHEDULER_0x80070005')) "${lang}: ilegivel com o codigo ($($a -join ' | '))"
+                $script:AtmMonitorFolderPath = New-MonFolder
+                try { $s = Get-AtmMonitorStatus } finally { Reset-MonSeams }
+                $sl = @(Get-AtmMonitorStatusLines -Status $s -Task (& $mk 'PRESENT' $false) | ForEach-Object { $_.Text })
+                Assert-True ($sl[0] -ceq (Get-AtmText 'mon.gateClosed') -and $sl[1] -ceq (Get-AtmText 'mon.optIn') -and $sl[2].Contains($tp) -and $sl[3] -ceq (Get-AtmText 'mon.task.residue') -and $sl[4] -ceq (Get-AtmText 'mon.task.noRemove') -and $sl[-1] -ceq (Get-AtmText 'mon.nothingChanged')) "${lang}: status com a tarefa logo depois da trava, a monitoracao indisponivel ($($sl -join ' | '))"
+                $t = Get-RstHost { Show-AtmMonitorStatus -Status $s -Task (& $mk 'ABSENT' $false) }
+                Assert-True ($t.Contains((Get-AtmText 'mon.header')) -and $t.Contains((Get-AtmText 'mon.task.absent'))) "${lang}: Show-AtmMonitorStatus mostra a linha da tarefa"
+                Assert-Eq @(Get-AtmMonitorStatusLines -Status $s).Count (@($sl).Count - 3) "${lang}: sem -Task, as linhas do M1/M2 ficam como eram"
+            }
+            # No phase and no command this copy lacks, in any text of the task, the plan, the entry point or the usage.
+            $launcher = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+            $verbs = @([regex]::Matches($launcher, "(?m)^        '([a-z-]+)' \{\s*$") | ForEach-Object { $_.Groups[1].Value })
+            Assert-True ($verbs -ccontains 'monitor' -and $verbs -ccontains 'version') "verbos do lancador lidos ($($verbs -join ','))"
+            foreach ($l in @('en-US', 'pt-BR')) {
+                $keys = @($script:AtmMessages[$l].Keys | Where-Object { $_ -like 'mon.task.*' -or $_ -like 'mon.plan.*' -or $_ -like 'monep.*' -or @('mon.optIn', 'mon.gateOpen', 'mon.gateClosed', 'cli.monitorUsage', 'cli.monitorIntervalInvalid', 'help.monitor') -ccontains $_ })
+                Assert-True ($keys.Count -ge 35) "textos da M3a lidos ($l, $($keys.Count))"
+                foreach ($key in $keys) {
+                    $t = [string]$script:AtmMessages[$l][$key]
+                    Assert-True ($t -cnotmatch '\bM[0-9]\b' -and -not $t.Contains('disable') -and -not $t.Contains('remove-history') -and -not $t.Contains('V0.6')) "${key} ($l): sem fase nem comando futuro"
+                    foreach ($m in [regex]::Matches($t, 'agent-temp ([a-z-]+)(?: ([a-z-]+))?')) {
+                        $vb = $m.Groups[1].Value; $sb = $m.Groups[2].Value
+                        Assert-True ($verbs -ccontains $vb -and ($vb -cne 'monitor' -or @('', 'status', 'enable') -ccontains $sb)) "${key} ($l): cita so comando que existe ($($m.Value))"
+                    }
+                }
+            }
+            Assert-True (-not ('agent-temp monitor disable' -cmatch 'agent-temp monitor (status|enable)\b')) 'controle positivo: um subverbo inexistente nao passa'
+        } finally { Set-AtmLanguage -Requested $old; Reset-MonSeams }
+    }
+
+    Test-Case 'V0.5 M3a' 'M3a: CLI (processo novo deste shell, trava fechada) - monitor enable: 3 com MONITORING_GATE_CLOSED antes de qualquer pergunta ou plano (com e sem -IntervalHours valido); -IntervalHours fora da lista ou nao inteiro: 2; monitor status -IntervalHours 6: 2; recover recusa -IntervalHours (2, a convencao dele); version ignora a opcao alheia (0, a convencao dos demais verbos); version e monitor status com a linha da tarefa nos dois idiomas; ajuda com o enable; a pasta real nunca criada' {
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $launch = { param([string]$CliArgs) Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$(Join-Path $srcDir 'agent-temp.ps1')`" " + $CliArgs) -TimeoutSec 300 }
+        $before = Get-AtmPathPresence $monRealFolder
+        foreach ($al in @('monitor enable', 'monitor enable -IntervalHours 24')) {
+            $r = & $launch "$al -Lang en-US"
+            Assert-True ($r.Exit -eq 3 -and $r.Text.Contains('NOTHING WAS SCHEDULED: MONITORING_GATE_CLOSED') -and $r.Text.Contains('Monitoring is not available in this release: nothing was read, asked or created.') -and -not $r.Text.Contains('ATIVAR MONITORAMENTO') -and -not $r.Text.Contains('COLLECTION TASK PLAN') -and -not $r.Text.Contains('Collection task:')) "${al}: exit 3 sem plano nem frase ($($r.Exit))"
+        }
+        foreach ($al in @('monitor enable -IntervalHours 3', 'monitor enable -IntervalHours abc', 'monitor enable -IntervalHours 6.0')) {
+            $r = & $launch "$al -Lang en-US"
+            Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('-IntervalHours takes only one of these numbers of hours: 1, 2, 4, 6, 12, 24. Nothing was changed.')) "${al}: uso 2 ($($r.Exit))"
+        }
+        $r = & $launch 'monitor status -IntervalHours 6 -Lang en-US'
+        Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('Usage: agent-temp monitor status | agent-temp monitor enable [-IntervalHours 1|2|4|6|12|24]. Nothing was changed.')) "monitor status -IntervalHours 6: uso 2 ($($r.Exit))"
+        $r = & $launch 'recover list -IntervalHours 6 -Lang en-US'
+        Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('recover does not take -IntervalHours. Nothing was changed.')) "recover recusa a opcao do enable: 2 ($($r.Exit))"
+        $r = & $launch 'version -IntervalHours 6 -Lang en-US'
+        Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('Collection task:') -and $r.Text.Contains('preventive monitoring: DISABLED')) "version ignora a opcao alheia e mostra a linha da tarefa: 0 ($($r.Exit))"
+        $r = & $launch 'version -Lang pt-BR'
+        Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('Tarefa de coleta:')) "version pt-BR com a linha da tarefa ($($r.Exit))"
+        $r = & $launch 'monitor status -Lang en-US'
+        Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('Collection task:') -and $r.Text.Contains('Monitoring is not available in this release')) "monitor status com a linha da tarefa ($($r.Exit))"
+        $r = & $launch 'help -Lang en-US'
+        Assert-True ($r.Text.Contains('enable [-IntervalHours 1|2|4|6|12|24]')) 'a ajuda mostra o enable'
+        Assert-Eq (Get-AtmPathPresence $monRealFolder) $before 'pasta real do usuario inalterada'
+    }
+
+    Test-Case 'V0.5 M3a' 'M3a (estatico): sem Schedule.Service no motor (o agendador so por Connect-AtmTaskScheduler); registrar so pelo enable, a definicao so pelo registro, o enable so pela CLI no verbo monitor e a execucao so pelo ponto de entrada; recusas, plano, frase e registro nessa ordem; nenhuma remocao de tarefa ou pasta no monitoramento; os auxiliares de outros motores declarados e so nas funcoes da tarefa; o caminho do coletor so nas bibliotecas do ponto de entrada; o ponto de entrada sem parametros, integridade antes de carregar, so ASCII e sem Write-Host; -IntervalHours so no monitor (e na recusa do recover); GUI e TUI sem as funcoes novas; nomes exatos na lista proibida da GUI; no AtmRequiredFiles; textos nos dois idiomas; a suite nunca registra tarefa real' {
+        $monFile = Join-Path $srcDir 'lib\Engine.Monitor.ps1'
+        $strip = { param([string]$T) [regex]::Replace([regex]::Replace($T, '(?s)<#.*?#>', ''), '(?m)#.*$', '') }
+        $code = & $strip ([IO.File]::ReadAllText($monFile))
+        Assert-True (-not $code.Contains('Schedule.Service') -and -not $code.Contains('-ComObject')) 'motor do monitoramento sem Schedule.Service (o agendador so por Connect-AtmTaskScheduler)'
+        $uniq = { param([string]$C) (@(Get-ApCallers $C | Sort-Object -Unique) -join ',') }
+        Assert-Eq (& $uniq 'Register-AtmMonitorTask') 'Engine.Monitor.ps1:Invoke-AtmMonitorEnable' 'registrar so pelo enable'
+        Assert-Eq (& $uniq 'New-AtmMonitorTaskDefinition') 'Engine.Monitor.ps1:Register-AtmMonitorTask' 'a definicao so pelo registro'
+        Assert-Eq (& $uniq 'Invoke-AtmMonitorEnable') 'agent-temp.ps1:script' 'o enable so pela CLI'
+        Assert-Eq (& $uniq 'Invoke-AtmMonitorEntry') 'agent-temp-monitor.ps1:script' 'a execucao do coletor so pelo ponto de entrada'
+        Assert-Eq (& $uniq 'Get-AtmMonitorTaskState') 'agent-temp.ps1:script,Engine.Monitor.ps1:Invoke-AtmMonitorEnable' 'o estado: version, monitor status e o enable'
+        $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        $enCall = 'Invoke-AtmMonitorEnable' + ' -'
+        $iM = $cli.IndexOf("        'monitor' {"); $iV = $cli.IndexOf("        'version' {"); $iE = $cli.IndexOf($enCall)
+        Assert-True ($iM -gt 0 -and $iE -gt $iM -and $iE -lt $iV -and $cli.IndexOf($enCall, $iE + 1) -lt 0) 'o enable uma vez, so no verbo monitor'
+        $blk = $null; $ivBlocks = New-Object System.Collections.Generic.List[string]
+        foreach ($ln in @($cli -split "`r?`n")) {
+            if ($ln -cmatch "^        '([a-z-]+)' \{\s*$") { $blk = $Matches[1] }
+            if ($null -ne $blk -and $ln.Contains('IntervalHours')) { $ivBlocks.Add($blk) }
+        }
+        Assert-Eq (@($ivBlocks | Sort-Object -Unique) -join ',') 'monitor,recover' '-IntervalHours so no monitor e na lista de recusa do recover'
+        Assert-True ($cli.Contains("'PseudonymKeyFile', 'IntervalHours')) {") -and $cli.Contains("if (`$PSBoundParameters.ContainsKey('IntervalHours')) { Write-Host (Get-AtmText 'cli.monitorUsage')")) 'recover recusa a opcao; monitor status tambem'
+        $en = & $strip (Get-ApFnBody $monFile 'Invoke-AtmMonitorEnable')
+        $ix = @(@('if (-not $script:AtmMonitoringEnabled)', "'MONITOR_INTERVAL_INVALID'", "'MONITOR_TASK_REQUIRES_STANDARD_TOKEN'", "'MONITOR_TASK_NOT_INSTALLED'", "'SEM_APRESENTACAO_OU_CONFIRMACAO'", "'CONSOLE_NOT_OBSERVED'", 'Get-AtmMonitorTaskState', "'MONITOR_TASK_UNREADABLE'", "'MONITOR_TASK_EXISTS'", '& $PlanPresenter', '& $ConfirmationReader', 'Register-AtmMonitorTask -', "'MONITOR_TASK_NOT_VERIFIED'") | ForEach-Object { $en.IndexOf($_) })
+        Assert-True (@($ix | Where-Object { $_ -lt 0 }).Count -eq 0 -and ((@($ix | Sort-Object) -join ',') -ceq ($ix -join ','))) "enable: trava, intervalo, token, instalacao, apresentador, console, estado, existente, plano, frase, registro e releitura nessa ordem ($($ix -join ','))"
+        $rg = & $strip (Get-ApFnBody $monFile 'Register-AtmMonitorTask')
+        $ix = @(@('if (-not $script:AtmMonitoringEnabled)', 'Get-AtmMonitorTaskObject', "'MONITOR_TASK_EXISTS'", 'New-AtmMonitorTaskDefinition', '.CreateFolder(', '.RegisterTaskDefinition($name, $td, 2, $Sid, $null, 3, $null)') | ForEach-Object { $rg.IndexOf($_) })
+        Assert-True (@($ix | Where-Object { $_ -lt 0 }).Count -eq 0 -and ((@($ix | Sort-Object) -join ',') -ceq ($ix -join ','))) "registro: trava, leitura, existente, definicao, pasta e TASK_CREATE com o SID, sem senha e logon interativo nessa ordem ($($ix -join ','))"
+        $def = & $strip (Get-ApFnBody $monFile 'New-AtmMonitorTaskDefinition')
+        foreach ($s in @('$td.Principal.UserId = $Sid', '$td.Principal.LogonType = 3', '$td.Principal.RunLevel = 0', '$td.Triggers.Create(1)', "`$tr.Repetition.Interval = ('PT{0}H' -f `$IntervalHours)", '$s.StartWhenAvailable = $true', '$s.DisallowStartIfOnBatteries = $false', '$s.StopIfGoingOnBatteries = $false', '$s.ExecutionTimeLimit = $script:AtmMonitorTaskTimeLimit', '$s.MultipleInstances = 2', '$td.Actions.Create(0)')) { Assert-True $def.Contains($s) "definicao: $s" }
+        Assert-True ([regex]::Matches($def, '\.Actions\.Create\(').Count -eq 1 -and [regex]::Matches($def, '\.Triggers\.Create\(').Count -eq 1 -and -not $def.Contains('Repetition.Duration')) 'uma acao, um gatilho, duracao indefinida'
+        $mon = [IO.File]::ReadAllText($monFile)
+        foreach ($rx in @("(?m)^\`$script:AtmMonitorTaskFolder = '\\AgentTempManager'\r?$", "(?m)^\`$script:AtmMonitorTaskPrefix = 'Monitor-'\r?$", '(?m)^\$script:AtmMonitorTaskIntervals = @\(1, 2, 4, 6, 12, 24\)\r?$', '(?m)^\$script:AtmMonitorTaskDefaultInterval = 6\r?$', "(?m)^\`$script:AtmMonitorTaskTimeLimit = 'PT1H'\r?$", "(?m)^\`$script:AtmMonitorEnablePhrase = 'ATIVAR MONITORAMENTO'\r?$")) { Assert-True ($mon -match $rx) "fixo no codigo: $rx" }
+        Assert-True ((Get-ApFnBody $monFile 'Get-AtmMonitorTaskName').Contains("-cnotmatch '^MonitorTest-[0-9a-f]{8}\z'")) 'o nome de teste so na forma exata'
+        $epFile = Join-Path $srcDir 'bin\agent-temp-monitor.ps1'
+        $epText = [IO.File]::ReadAllText($epFile)
+        foreach ($n in @('lib\Engine.Monitor.ps1', 'bin\agent-temp-monitor.ps1', 'lib\Report.ps1')) {
+            $t = & $strip ([IO.File]::ReadAllText((Join-Path $srcDir $n)))
+            foreach ($pat in @('DeleteTask', 'DeleteFolder', 'Unregister-ScheduledTask', 'Unregister-Atm', 'schtasks')) { Assert-True (-not $t.Contains($pat)) "$n sem '$pat' (nenhuma remocao de tarefa ou pasta no monitoramento)" }
+        }
+        # Every command the engine calls that another file of lib defines: the audit's and the messages' (the entry point
+        # loads them), plus the declared helpers of the isolation, clean and diagnose engines, each only in the task's
+        # functions (never reached by the collector's path).
+        $defsAll = @{}
+        foreach ($fi in @(@(Get-ChildItem -LiteralPath (Join-Path $srcDir 'lib') -Filter '*.ps1') + @(Get-ChildItem -LiteralPath (Join-Path $srcDir 'providers') -Filter '*.ps1'))) {
+            $t = [Management.Automation.Language.Parser]::ParseFile($fi.FullName, [ref]$null, [ref]$null)
+            foreach ($d in @($t.FindAll({ param($a) $a -is [Management.Automation.Language.FunctionDefinitionAst] }, $true))) { if (-not $defsAll.ContainsKey($d.Name)) { $defsAll[$d.Name] = [pscustomobject]@{ File = $fi.Name; Ast = $d } } }
+        }
+        $declared = @{ 'Connect-AtmTaskScheduler' = 'Engine.Isolate.ps1'; 'Get-AtmTaskSchedulerCode' = 'Engine.Isolate.ps1'; 'Test-AtmTaskNotFound' = 'Engine.Isolate.ps1'; 'Resolve-AtmTaskUserSid' = 'Engine.Isolate.ps1'; 'Get-AtmEngineConsoleObservation' = 'Engine.Clean.ps1'; 'Get-AtmIdentityState' = 'Engine.Diagnose.ps1' }
+        $taskFns = @('Get-AtmMonitorTaskObject', 'Test-AtmMonitorTaskMatch', 'Get-AtmMonitorTaskState', 'Register-AtmMonitorTask', 'Test-AtmMonitorStandardToken', 'Invoke-AtmMonitorEnable')
+        $monAst = [Management.Automation.Language.Parser]::ParseFile($monFile, [ref]$null, [ref]$null)
+        $foreign = @{}; $where = New-Object System.Collections.Generic.List[string]
+        foreach ($c in @($monAst.FindAll({ param($a) $a -is [Management.Automation.Language.CommandAst] }, $true))) {
+            $cn = $c.GetCommandName()
+            if (-not $cn -or -not $defsAll.ContainsKey($cn)) { continue }
+            if (@('Engine.Monitor.ps1', 'Engine.Audit.ps1', 'I18n.ps1') -ccontains $defsAll[$cn].File) { continue }
+            $foreign[$cn + '@' + $defsAll[$cn].File] = $true
+            $p = $c.Parent; while ($null -ne $p -and -not ($p -is [Management.Automation.Language.FunctionDefinitionAst])) { $p = $p.Parent }
+            if ($null -eq $p -or $taskFns -cnotcontains $p.Name) { $where.Add($cn + ' em ' + $(if ($null -ne $p) { $p.Name } else { 'script' })) }
+        }
+        Assert-Eq (Get-MonSorted @($foreign.Keys)) (Get-MonSorted @($declared.Keys | ForEach-Object { $_ + '@' + $declared[$_] })) 'o motor do monitoramento so chama de outros motores os auxiliares declarados (nao movidos)'
+        Assert-Eq ($where -join '; ') '' 'os auxiliares so nas funcoes da tarefa'
+        $seen = @{}; $queue = New-Object System.Collections.Generic.Queue[string]; $queue.Enqueue('Invoke-AtmMonitorEntry')
+        while ($queue.Count -gt 0) {
+            $fn = $queue.Dequeue()
+            if ($seen.ContainsKey($fn)) { continue }
+            $seen[$fn] = $true
+            foreach ($c in @($defsAll[$fn].Ast.FindAll({ param($a) $a -is [Management.Automation.Language.CommandAst] }, $true))) { $cn = $c.GetCommandName(); if ($cn -and $defsAll.ContainsKey($cn) -and -not $seen.ContainsKey($cn)) { $queue.Enqueue($cn) } }
+        }
+        $epFiles = @('Engine.Audit.ps1', 'I18n.ps1', 'Engine.Monitor.ps1') + @(Get-ChildItem -LiteralPath (Join-Path $srcDir 'providers') -Filter '*.ps1' | ForEach-Object { $_.Name })
+        Assert-Eq ((@($seen.Keys | Where-Object { $epFiles -cnotcontains $defsAll[$_].File } | ForEach-Object { $_ + '@' + $defsAll[$_].File } | Sort-Object)) -join ',') '' 'o caminho do coletor so alcanca funcoes das bibliotecas que o ponto de entrada carrega'
+        Assert-True ($seen.ContainsKey('Invoke-AtmMonitorCollectionCore') -and $seen.ContainsKey('Invoke-AtmInventory') -and $seen.ContainsKey('Initialize-AtmNative') -and -not $seen.ContainsKey('Get-AtmMonitorTaskState')) "controle positivo: o nucleo, a auditoria e os tipos nativos alcancados, a tarefa nao ($($seen.Count) funcoes)"
+        # The entry point.
+        $epAst = [Management.Automation.Language.Parser]::ParseFile($epFile, [ref]$null, [ref]$null)
+        Assert-True ($null -eq $epAst.ParamBlock -and -not (& $strip $epText).Contains('CmdletBinding')) 'ponto de entrada sem parametros'
+        Assert-Eq @([IO.File]::ReadAllBytes($epFile) | Where-Object { $_ -gt 127 }).Count 0 'ponto de entrada so em ASCII'
+        Assert-True (-not $epText.Contains('Write-Host') -and -not $epText.Contains('AtmMonitoringEnabled') -and -not $epText.Contains('Read-Host')) 'ponto de entrada sem Write-Host, sem ler a trava por conta propria (o motor a le primeiro) e sem perguntar'
+        $iArgs = $epText.IndexOf('if ($args.Count -gt 0)'); $iInt = $epText.IndexOf('$integrity = Test-AtmMonitorEntryIntegrity'); $iLoad = $epText.IndexOf(". (Join-Path `$here 'lib\"); $iRun = $epText.IndexOf('Invoke-AtmMonitorEntry -')
+        Assert-True ($iArgs -gt 0 -and $iInt -gt $iArgs -and $iLoad -gt $iInt -and $iRun -gt $iLoad) "argumentos, integridade, carga e execucao nessa ordem ($iArgs, $iInt, $iLoad, $iRun)"
+        Assert-True ($epText.Contains("`$loadedLibs = @('lib\Engine.Audit.ps1', 'lib\I18n.ps1', 'lib\Engine.Monitor.ps1', 'lib\Native.cs', 'bin\agent-temp-monitor.ps1')")) 'as bibliotecas do coletor e o proprio ponto de entrada no $loadedLibs'
+        $dots = @([regex]::Matches($epText, "\. \(Join-Path \`$here '([^']+)'\)") | ForEach-Object { $_.Groups[1].Value })
+        Assert-Eq ($dots -join ',') 'lib\Engine.Audit.ps1,lib\Engine.Monitor.ps1' 'carrega so a auditoria (com I18n) e o motor, depois os providers listados'
+        Assert-True ([IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Audit.ps1')).Contains('I18n.ps1')) 'a auditoria carrega I18n'
+        $rule = "if (`$p -notmatch '^[A-Za-z0-9_. -]+(\\[A-Za-z0-9_. -]+)*`$' -or `$segments -contains '.' -or `$segments -contains '..' -or"
+        Assert-True ($epText.Contains($rule) -and $cli.Contains($rule)) 'a regra das entradas do manifesto igual a do lancador'
+        Assert-True ((& $strip (Get-ApFnBody $monFile 'Invoke-AtmMonitorEntry')).IndexOf('Initialize-AtmNative') -gt (& $strip (Get-ApFnBody $monFile 'Invoke-AtmMonitorEntry')).IndexOf('if (-not $script:AtmMonitoringEnabled)')) 'tipos nativos so depois da trava'
+        Assert-True ($script:AtmRequiredFiles -contains 'bin\agent-temp-monitor.ps1') 'instalador exige o ponto de entrada'
+        # GUI and TUI: no new function; the GUI's forbidden list has the exact names (never a prefix).
+        foreach ($n in @('lib\Tui.ps1', 'lib\Gui.ps1', 'lib\GuiModel.ps1')) {
+            $t = [IO.File]::ReadAllText((Join-Path $srcDir $n))
+            foreach ($fn in @('Invoke-AtmMonitorEnable', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'Invoke-AtmMonitorEntry', 'Get-AtmMonitorTaskState', 'Get-AtmMonitorTaskLines', 'Show-AtmMonitorEnablePlan', 'Show-AtmMonitorEnableResult')) { Assert-True (-not $t.Contains($fn)) "$n sem $fn" }
+        }
+        foreach ($fn in @('Invoke-AtmMonitorEnable', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'Invoke-AtmMonitorEntry')) { Assert-True ($guiForbidden -ccontains $fn) "lista proibida da GUI: $fn" }
+        Assert-True ($guiForbidden -cnotcontains 'AtmMonitor' -and $guiForbidden -cnotcontains 'Get-AtmMonitor') 'lista proibida da GUI sem prefixo do monitoramento'
+        $rep = & $strip ([IO.File]::ReadAllText((Join-Path $srcDir 'lib\Report.ps1')))
+        foreach ($fn in @('Invoke-AtmMonitorEnable', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'Invoke-AtmMonitorEntry', 'Get-AtmMonitorTaskState')) { Assert-True (-not $rep.Contains($fn)) "apresentacao sem chamar $fn (so mostra o que recebe)" }
+        # The texts of the M3a in both languages, with the same fields.
+        $ph = { param([string]$T) (@([regex]::Matches($T, '\{\d\}') | ForEach-Object { $_.Value } | Sort-Object -Unique) -join ',') }
+        $mk = { param($l) @($script:AtmMessages[$l].Keys | Where-Object { $_ -like 'mon.task.*' -or $_ -like 'mon.plan.*' -or $_ -like 'monep.*' }) }
+        Assert-Eq (Get-MonSorted (& $mk 'pt-BR')) (Get-MonSorted (& $mk 'en-US')) 'as mesmas chaves da M3a nos dois idiomas'
+        foreach ($key in @(@(& $mk 'en-US') + @('cli.monitorIntervalInvalid', 'cli.monitorUsage', 'mon.optIn', 'mon.gateOpen', 'help.monitor'))) {
+            Assert-True ($script:AtmMessages['en-US'].ContainsKey($key) -and $script:AtmMessages['pt-BR'].ContainsKey($key)) "$key nos dois idiomas"
+            Assert-Eq (& $ph $script:AtmMessages['pt-BR'][$key]) (& $ph $script:AtmMessages['en-US'][$key]) "${key}: mesmos campos nos dois idiomas"
+        }
+        # The suite never registers a real task: the real scheduler object of this area only builds definitions, no case
+        # creates tasks only on the CI, and every case that reaches a registration with the gate open shadows the scheduler.
+        $self = [IO.File]::ReadAllText((Join-Path $testsDir 'Run-Tests.ps1'))
+        $a0 = $self.IndexOf('-----' + ' V0.5 M3a ('); $a1 = $self.IndexOf('-----' + ' scale')
+        Assert-True ($a0 -gt 0 -and $a1 -gt $a0) 'area V0.5 M3a encontrada'
+        $area = $self.Substring($a0, $a1 - $a0)
+        $uses = @([regex]::Matches($area, 'm3RealSvc\.([A-Za-z]+)\(') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+        Assert-Eq ($uses -join ',') 'NewTask' 'o agendador real da area so monta definicoes (NewTask)'
+        Assert-True (-not $area.Contains('GITHUB_' + 'ACTIONS') -and -not $area.Contains('Start-' + 'Sleep')) 'area sem caso so de CI e sem espera real'
+        $on = 'AtmMonitoringEnabled = ' + '$true'; $rgCall = 'Register-AtmMonitorTask' + ' -'; $shadow = 'function Connect-AtmTask' + 'Scheduler {'
+        $needing = 0
+        foreach ($c in @([regex]::Split($area, "(?m)^\s*Test-Case 'V0\.5 M3a' ") | Select-Object -Skip 1)) {
+            if ($c.Contains($on) -and ($c.Contains($enCall) -or $c.Contains($rgCall))) { $needing++; Assert-True ($c.Contains($shadow)) "caso que chega ao registro sombreia o agendador: $($c.Substring(0, [Math]::Min(60, $c.Length)))" }
+        }
+        Assert-True ($needing -ge 2) "casos que chegam ao registro: $needing"
+        $outside = $self.Substring(0, $a0) + $self.Substring($a1)
+        Assert-True (-not $outside.Contains($enCall) -and -not $outside.Contains($rgCall)) 'fora da area, nenhuma chamada ao enable ou ao registro'
     }
 
     # ------------------------------------------------------------------ scale

@@ -25,6 +25,8 @@ param(
     [string]$Lang,
     [int]$DeadlineSeconds = -1,
     [string]$PseudonymKeyFile, [string]$Operation, [string]$Service, [string]$RunId,
+    # V0.5 M3a: the repetition interval of monitor enable only (1, 2, 4, 6, 12 or 24 hours; checked by that verb).
+    [string]$IntervalHours,
     # V0.4 R4: the marker of a recovery copy relaunched elevated through UAC. It proves nothing: that copy only gets stricter.
     [switch]$AtmElevatedRecovery
 )
@@ -486,7 +488,7 @@ try {
             # operation and one target per call. Exit 0 list or plan shown, 3 target refused, 2 usage.
             . (Join-Path $here 'lib\Engine.Recover.ps1')
             $recSub = $(if ($SubCommand) { $SubCommand.ToLowerInvariant() } else { '' })
-            foreach ($opt in @('User', 'Project', 'Root', 'Path', 'AllowListFile', 'IncludeOtherUsers', 'AcceptB1ResidualRisk', 'ExportJson', 'LogFile', 'RecordFile', 'Entry', 'All', 'PseudonymKeyFile')) {
+            foreach ($opt in @('User', 'Project', 'Root', 'Path', 'AllowListFile', 'IncludeOtherUsers', 'AcceptB1ResidualRisk', 'ExportJson', 'LogFile', 'RecordFile', 'Entry', 'All', 'PseudonymKeyFile', 'IntervalHours')) {
                 if ($PSBoundParameters.ContainsKey($opt)) { Write-Host (Get-AtmText 'cli.recoverOptionRefused' $opt) -ForegroundColor Red; exit 2 }
             }
             if ($recSub -cne 'list' -and $recSub -cne 'plan' -and $recSub -cne 'start' -and $recSub -cne 'undo') { Write-Host (Get-AtmText 'cli.recoverUsage') -ForegroundColor Red; exit 2 }
@@ -534,16 +536,35 @@ try {
             exit $(if ($recPlan.Offered) { 0 } else { 3 })
         }
         'monitor' {
-            # V0.5 M1 (docs/adr/ADR-0017): status only. The monitoring engine is loaded here and by version. status reads the
-            # monitoring gate as this copy has it and the history as it is: it never creates the history folder, never
-            # collects, takes no lock and writes nothing. There is no other monitor verb. Exit 0 status shown, 2 usage.
+            # V0.5 M1 and M3a (docs/adr/ADR-0017): status and enable. The monitoring engine is loaded here and by version.
+            # status reads the monitoring gate as this copy has it, the history as it is and the collection task's state:
+            # it never creates the history folder or the task folder, never collects, takes no lock and writes nothing.
+            # enable registers the user's own collection task, through the engine only: with the monitoring gate closed
+            # (every distributed copy) the engine refuses before anything is read or asked; past it, a standard token, an
+            # installed copy, the console the engine observes, no existing task, the plan and its own phrase.
+            # -IntervalHours belongs to enable only. Exit 0 status shown or task created, 2 usage, 3 refused or not
+            # confirmed, 6 no interactive console.
             . (Join-Path $here 'lib\Engine.Monitor.ps1')
             foreach ($opt in @('User', 'Project', 'Root', 'Path', 'AllowListFile', 'IncludeOtherUsers', 'AcceptB1ResidualRisk', 'ExportJson', 'LogFile', 'RecordFile', 'Entry', 'All', 'PseudonymKeyFile', 'Operation', 'Service', 'RunId', 'AtmElevatedRecovery', 'DeadlineSeconds')) {
                 if ($PSBoundParameters.ContainsKey($opt)) { Write-Host (Get-AtmText 'cli.monitorUsage') -ForegroundColor Red; exit 2 }
             }
-            if (-not $SubCommand -or $SubCommand.ToLowerInvariant() -cne 'status') { Write-Host (Get-AtmText 'cli.monitorUsage') -ForegroundColor Red; exit 2 }
-            Show-AtmMonitorStatus -Status (Get-AtmMonitorStatus)
-            exit 0
+            $monSub = $(if ($SubCommand) { $SubCommand.ToLowerInvariant() } else { '' })
+            if ($monSub -cne 'status' -and $monSub -cne 'enable') { Write-Host (Get-AtmText 'cli.monitorUsage') -ForegroundColor Red; exit 2 }
+            if ($monSub -ceq 'status') {
+                if ($PSBoundParameters.ContainsKey('IntervalHours')) { Write-Host (Get-AtmText 'cli.monitorUsage') -ForegroundColor Red; exit 2 }
+                Show-AtmMonitorStatus -Status (Get-AtmMonitorStatus) -Task (Get-AtmMonitorTaskState)
+                exit 0
+            }
+            $monInterval = $script:AtmMonitorTaskDefaultInterval
+            if ($PSBoundParameters.ContainsKey('IntervalHours')) {
+                if ($IntervalHours -cnotmatch '^[0-9]{1,2}$' -or @($script:AtmMonitorTaskIntervals) -notcontains [int]$IntervalHours) { Write-Host (Get-AtmText 'cli.monitorIntervalInvalid' (@($script:AtmMonitorTaskIntervals) -join ', ')) -ForegroundColor Red; exit 2 }
+                $monInterval = [int]$IntervalHours
+            }
+            $monPresenter = { param($plan) Show-AtmMonitorEnablePlan -Plan $plan }
+            $monReader = { param($phrase, $kind) Read-AtmCleanAnswer -Phrase $phrase -Kind $kind -LineReader { param($pr) Read-Host $pr } }
+            $monRes = Invoke-AtmMonitorEnable -IntervalHours $monInterval -Installed:([bool]$integrity.Installed) -PlanPresenter $monPresenter -ConfirmationReader $monReader
+            Show-AtmMonitorEnableResult -Result $monRes
+            exit $(if ($monRes.Done) { 0 } elseif ($monRes.Aborted -ceq 'CONSOLE_NOT_OBSERVED') { 6 } else { 3 })
         }
         'version' {
             Initialize-AtmNative -LibDir (Join-Path $here 'lib')
@@ -564,6 +585,8 @@ try {
             foreach ($pl in (Get-AtmQuarantinePolicyLines -Policy (Get-AtmQuarantinePolicy -ConfigDir $invArgs.ConfigDir))) { Write-Host $pl.Text -ForegroundColor $pl.Color }
             # The user's scheduled task of the automatic purge, read only (P6b).
             foreach ($tl in (Get-AtmAutoPurgeTaskLines -Task (Get-AtmAutoPurgeTaskState))) { Write-Host $tl.Text -ForegroundColor $tl.Color }
+            # The user's collection task of preventive monitoring, read only (V0.5 M3a; a leftover stays visible).
+            foreach ($tl in (Get-AtmMonitorTaskLines -Task (Get-AtmMonitorTaskState))) { Write-Host $tl.Text -ForegroundColor $tl.Color }
             Write-Host (Get-AtmText 'cli.language' (Get-AtmLanguage))
             $idState = Get-AtmIdentityState
             Write-Host (Get-AtmText 'cli.identity' $idState.Name (Get-AtmYesNo ([bool]$idState.IsElevatedAdministrator)) $idState.ElevationType $idState.IntegrityLevel $idState.SessionId)
