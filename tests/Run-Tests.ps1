@@ -21631,13 +21631,15 @@ exit 0
             $c = Get-AtmMonitorConfig
             Assert-True ($c.State -ceq 'DEFAULTS' -and $null -eq $c.Code -and (Get-MonValuesText $c) -ceq $defaults -and -not (Test-Path -LiteralPath (Join-Path $f 'monitor.json'))) "ausente: padroes, sem codigo, nada criado ($($c.State))"
             Assert-Eq (Get-MonCodes (@(Get-AtmMonitorAlerts -History (Get-AtmMonitorHistory) -Config $c -Trends (Get-MonTrends)))) '' 'ausente: nenhum alerta'
+            # One pair per line: the unary comma keeps each pair whole (a line's array output is otherwise unrolled).
             $accepted = @(
-                @('{"totalGiB":30,"failedCollections":5}', 'totalGiB=30 growthGiBPerDay=2 orphanSuspectedGiB=5 livenessUnknownGiB=5 failedCollections=5')
-                @('{"totalGiB":1,"growthGiBPerDay":0.1,"orphanSuspectedGiB":1,"livenessUnknownGiB":1,"failedCollections":2}', ('totalGiB=1 growthGiBPerDay=' + [string]0.1 + ' orphanSuspectedGiB=1 livenessUnknownGiB=1 failedCollections=2'))
-                @('{"totalGiB":4096,"growthGiBPerDay":1024,"orphanSuspectedGiB":4096,"livenessUnknownGiB":4096,"failedCollections":30}', 'totalGiB=4096 growthGiBPerDay=1024 orphanSuspectedGiB=4096 livenessUnknownGiB=4096 failedCollections=30')
-                @('{"failedCollections":3.0}', $defaults)
-                @('{}', $defaults)
+                , @('{"totalGiB":30,"failedCollections":5}', 'totalGiB=30 growthGiBPerDay=2 orphanSuspectedGiB=5 livenessUnknownGiB=5 failedCollections=5')
+                , @('{"totalGiB":1,"growthGiBPerDay":0.1,"orphanSuspectedGiB":1,"livenessUnknownGiB":1,"failedCollections":2}', ('totalGiB=1 growthGiBPerDay=' + [string]0.1 + ' orphanSuspectedGiB=1 livenessUnknownGiB=1 failedCollections=2'))
+                , @('{"totalGiB":4096,"growthGiBPerDay":1024,"orphanSuspectedGiB":4096,"livenessUnknownGiB":4096,"failedCollections":30}', 'totalGiB=4096 growthGiBPerDay=1024 orphanSuspectedGiB=4096 livenessUnknownGiB=4096 failedCollections=30')
+                , @('{"failedCollections":3.0}', $defaults)
+                , @('{}', $defaults)
             )
+            Assert-True ($accepted.Count -eq 5 -and @($accepted | Where-Object { @($_).Count -ne 2 }).Count -eq 0) "aceitos: 5 pares inteiros ($($accepted.Count))"
             foreach ($a in $accepted) {
                 Write-MonConfig -Folder $f -Text $a[0]
                 $c = Get-AtmMonitorConfig
@@ -21657,6 +21659,7 @@ exit 0
                 @('{"totalGiB":"30"}', 'TYPE'), @('{"totalGiB":true}', 'TYPE'), @('{"totalGiB":null}', 'TYPE'), @('{"totalGiB":[30]}', 'TYPE'), @('[{"totalGiB":30}]', 'TYPE'), @('30', 'TYPE')
                 @('{"totalGiB":30', 'JSON'), @(('{"totalGiB":30' + (' ' * 4100) + '}'), 'SIZE'), @('{"totalGiB":123456789012345678901234567890}', $null)
             )
+            Assert-True ($refused.Count -eq 22 -and @($refused | Where-Object { @($_).Count -ne 2 }).Count -eq 0) "recusados: 22 pares inteiros ($($refused.Count))"
             foreach ($r in $refused) {
                 Write-MonConfig -Folder $f -Text $r[0]
                 $c = Get-AtmMonitorConfig
