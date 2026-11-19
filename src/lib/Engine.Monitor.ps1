@@ -1,11 +1,11 @@
 # AgentTempManager MONITORING ENGINE (V0.5, docs/adr/ADR-0017, phase M1): the collector and the storage of the preventive
 # monitoring history. Depends on Engine.Audit.ps1: a collection runs the audit and nothing else (V05-D8 (a)). No terminal
-# output of its own; presentation lives in Report.ps1. Nothing here removes the history, the task or the folder on request
-# (phase M4). Phase M2 adds the trends, the thresholds (monitor.json, read only) and the alerts: pure functions over what
-# the reader found, computed only with the gate open; an alert NAMES a command and runs none. Phase M3a adds the user's
-# own scheduled task of the collector (monitor enable, past the gate only) and the entry point's run
-# (bin\agent-temp-monitor.ps1). The Task Scheduler is reached only through the isolation engine's generic helpers
-# (Connect-AtmTaskScheduler and the code, absence and user helpers next to it), which are not moved.
+# output of its own; presentation lives in Report.ps1. Nothing here removes the history on request (a later M4 phase).
+# Phase M2 adds the trends, the thresholds (monitor.json, read only) and the alerts: pure functions over what the reader
+# found, computed only with the gate open; an alert NAMES a command and runs none. Phase M3a adds the user's own
+# scheduled task of the collector (monitor enable) and the entry point's run (bin\agent-temp-monitor.ps1); phase M4a
+# its removal (monitor disable), both past the gate only. The Task Scheduler is reached only through the isolation
+# engine's generic helpers (Connect-AtmTaskScheduler and the code, absence and user helpers next to it), not moved.
 #
 # With the monitoring gate closed (every distributed copy) nothing is collected, created or written: the collector, the
 # folder, the writer, the rotation and the single removal function return MONITORING_GATE_CLOSED before anything else,
@@ -82,13 +82,14 @@ $script:AtmMonitorAlertCommands = [ordered]@{
 # Limited). It lives in the product's task folder, shared with the automatic purge, as Monitor-<16 hex digits of the
 # SHA-256 of the SID>. The repetition intervals and the default are the maintainer's decision (V05-D2 (a)); no key
 # changes them. A run is stopped after an hour: the audit has no deadline, and a run ended early leaves only a .partial
-# file, which no reader reads. monitor enable asks its own phrase.
+# file, which no reader reads. monitor enable and monitor disable (phase M4a) ask their own phrases.
 $script:AtmMonitorTaskFolder = '\AgentTempManager'
 $script:AtmMonitorTaskPrefix = 'Monitor-'
 $script:AtmMonitorTaskIntervals = @(1, 2, 4, 6, 12, 24)
 $script:AtmMonitorTaskDefaultInterval = 6
 $script:AtmMonitorTaskTimeLimit = 'PT1H'
 $script:AtmMonitorEnablePhrase = 'ATIVAR MONITORAMENTO'
+$script:AtmMonitorDisablePhrase = 'DESATIVAR MONITORAMENTO'
 
 # Test seams, a single assignment each, all $null in every distributed copy: the CLI never sets them. The suite replaces
 # them inside its own process only.
@@ -1127,9 +1128,11 @@ function Get-AtmMonitorAlerts {
 # The scheduled task of the collector (phase M3a; ADR-0017 sections 2 and 5)
 # ---------------------------------------------------------------------------------------------
 # The Task Scheduler is reached only through Connect-AtmTaskScheduler (lib\Engine.Isolate.ps1, not moved), and changed
-# only by Register-AtmMonitorTask, called only by Invoke-AtmMonitorEnable (monitor enable), past the gate. The state
-# (Get-AtmMonitorTaskState) only reads, needs no gate and never creates the task folder, so a leftover task stays
-# visible. Nothing here removes a task or the folder (phase M4).
+# only past the gate: by Register-AtmMonitorTask, called only by Invoke-AtmMonitorEnable (monitor enable), and by
+# Unregister-AtmMonitorTask, called only by Invoke-AtmMonitorDisable (monitor disable, phase M4a), which then removes
+# the product's task folder when it is empty through Remove-AtmEmptyTaskFolder (lib\Engine.Isolate.ps1, shared with
+# unschedule-autopurge). The state (Get-AtmMonitorTaskState) only reads, needs no gate and never creates the task
+# folder, so a leftover task stays visible.
 
 function Get-AtmMonitorTaskName {
     # The task name of a user: the prefix and the first 16 hex digits of the SHA-256 of the SID (UTF-8), never the SID.
@@ -1362,5 +1365,61 @@ function Invoke-AtmMonitorEnable {
     $st.Registered = $true
     $st.Task = Get-AtmMonitorTaskState
     if ($st.Task.State -cne 'PRESENT') { $st.Aborted = 'MONITOR_TASK_NOT_VERIFIED' } else { $st.Done = $true }
+    return (& $end)
+}
+
+function Unregister-AtmMonitorTask {
+    # The only removal of the collection task (monitor disable), past the gate: the task is read again just before and
+    # removed only when it is exactly the product's collection task of this user (Test-AtmMonitorTaskMatch); any
+    # divergence refuses with nothing touched (MONITOR_TASK_DIVERGENT), and so does its absence (MONITOR_TASK_ABSENT). The
+    # task folder is not touched here. Returns $null, or the code.
+    param([string]$Sid, [string]$EntryPoint)
+    if (-not $script:AtmMonitoringEnabled) { return 'MONITORING_GATE_CLOSED' }
+    try {
+        $name = Get-AtmMonitorTaskName -Sid $Sid
+        $found = Get-AtmMonitorTaskObject -Service (Connect-AtmTaskScheduler) -Name $name
+        if ($found.Code) { return $found.Code }
+        if ($null -eq $found.Task) { return 'MONITOR_TASK_ABSENT' }
+        if (@(Test-AtmMonitorTaskMatch -Task $found.Task -Sid $Sid -Name $name -EntryPoint $EntryPoint).Count -gt 0) { return 'MONITOR_TASK_DIVERGENT' }
+        $found.Folder.DeleteTask($name, 0)
+        return $null
+    } catch { return (Get-AtmTaskSchedulerCode $_.Exception) }
+}
+
+function Invoke-AtmMonitorDisable {
+    <#
+      monitor disable (phase M4a; ADR-0017 sections 3 and 5). In order: the gate closed (every distributed copy) refuses
+      with MONITORING_GATE_CLOSED before anything else is read or asked; no presenter or reader; the console, observed by
+      the engine itself (CONSOLE_NOT_OBSERVED); the task: absent (MONITOR_TASK_ABSENT), unreadable
+      (MONITOR_TASK_UNREADABLE) or divergent from the product's collection task of this user in any way
+      (MONITOR_TASK_DIVERGENT, with the reasons) is refused with nothing touched. Then the plan is shown, and the phrase
+      DESATIVAR MONITORAMENTO is asked (MONITOR_TASK_NOT_CONFIRMED). Only then the task is checked again and removed, and
+      read back until it is ABSENT (MONITOR_TASK_NOT_VERIFIED otherwise); only then the product's task folder is removed
+      if it is empty (Remove-AtmEmptyTaskFolder, V05-D9 (c)), whose outcome never fails the command. No standard token is
+      required: removing the user's own task elevates nothing. The history is not touched. Nothing is asked before the
+      plan. Returns the shape of Invoke-AtmMonitorEnable, plus Folder (the outcome of the folder; $null when the task was
+      not removed).
+    #>
+    param([scriptblock]$PlanPresenter, [scriptblock]$ConfirmationReader)
+    if (-not $script:AtmMonitoringEnabled) { return [pscustomobject]@{ Operation = 'disable'; Aborted = 'MONITORING_GATE_CLOSED'; Plan = $null; Registered = $false; Done = $false; Task = $null; Folder = $null } }
+    $st = [ordered]@{ Operation = 'disable'; Aborted = $null; Plan = $null; Registered = $false; Done = $false; Task = $null; Folder = $null }
+    $end = { return [pscustomobject]$st }
+    if (-not $PlanPresenter -or -not $ConfirmationReader) { $st.Aborted = 'SEM_APRESENTACAO_OU_CONFIRMACAO'; return (& $end) }
+    if (-not (Get-AtmEngineConsoleObservation).Observed) { $st.Aborted = 'CONSOLE_NOT_OBSERVED'; return (& $end) }
+    $st.Task = Get-AtmMonitorTaskState
+    if ($st.Task.State -ceq 'ABSENT') { $st.Aborted = 'MONITOR_TASK_ABSENT'; return (& $end) }
+    if ($st.Task.State -ceq 'UNREADABLE') { $st.Aborted = 'MONITOR_TASK_UNREADABLE'; return (& $end) }
+    if ($st.Task.State -cne 'PRESENT') { $st.Aborted = 'MONITOR_TASK_DIVERGENT'; return (& $end) }
+    $ep = Get-AtmMonitorEntryPoint
+    $act = Get-AtmMonitorTaskAction -EntryPoint $ep
+    $st.Plan = [pscustomobject]@{ TaskPath = $st.Task.TaskPath; IntervalHours = $st.Task.IntervalHours; ActionPath = $act.Path; ActionArguments = $act.Arguments; Folder = $script:AtmMonitorTaskFolder; Phrase = $script:AtmMonitorDisablePhrase }
+    & $PlanPresenter $st.Plan
+    if ([string](& $ConfirmationReader $script:AtmMonitorDisablePhrase 'monitor-disable') -cne $script:AtmMonitorDisablePhrase) { $st.Aborted = 'MONITOR_TASK_NOT_CONFIRMED'; return (& $end) }
+    $code = Unregister-AtmMonitorTask -Sid (Get-AtmMonitorIdentity).Sid -EntryPoint $ep
+    $st.Task = Get-AtmMonitorTaskState
+    if ($code) { $st.Aborted = $code; return (& $end) }
+    if ($st.Task.State -cne 'ABSENT') { $st.Aborted = 'MONITOR_TASK_NOT_VERIFIED'; return (& $end) }
+    $st.Done = $true
+    $st.Folder = Remove-AtmEmptyTaskFolder
     return (& $end)
 }

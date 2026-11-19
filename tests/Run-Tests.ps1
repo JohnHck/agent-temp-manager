@@ -5414,27 +5414,44 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
     function Reset-ApSeams { param($Console) $script:AtmAutoPurgeTaskNameOverride = $null; $script:AtmAutoPurgeElevationSource = $null; $script:AtmCleanConsoleSource = $Console }
     $apStd = { [pscustomobject]@{ IsElevatedAdministrator = $false; ElevationType = 'DEFAULT'; IntegrityLevel = 'MEDIUM' } }
 
-    Test-Case 'Isolamento P6b' 'Estatico: o agendador so por Connect-AtmTaskScheduler; RegisterTaskDefinition, DeleteTask, CreateFolder e NewTask uma vez cada, so nas suas funcoes; registrar so pelo agendar e remover so pelo desagendar, os dois so pela CLI nos dois subcomandos; TUI, relatorio, ponto de entrada e desinstalador nunca mudam o agendador; principal interativo e limitado, TASK_CREATE, sem senha; ordem das recusas; costuras de atribuicao unica; mesmo nome e pasta no motor e no desinstalador; textos nos dois idiomas; excecao de Write-Host do ponto de entrada' {
+    Test-Case 'Isolamento P6b' 'Estatico: o agendador so por Connect-AtmTaskScheduler; RegisterTaskDefinition, CreateFolder e NewTask uma vez cada por motor, so nas suas funcoes; DeleteTask exatamente duas vezes (as duas remocoes, cada uma depois da conferencia exata) e DeleteFolder exatamente uma (a pasta vazia, a constante do produto, depois da contagem; V0.5 M4a); registrar so pelo agendar e remover so pelo desagendar, os dois so pela CLI nos dois subcomandos; a pasta vazia so pelos dois comandos de desagendar, depois da releitura ABSENT; a mesma constante de pasta no expurgo e no monitoramento; TUI, relatorio, ponto de entrada e desinstalador nunca mudam o agendador; principal interativo e limitado, TASK_CREATE, sem senha; ordem das recusas; costuras de atribuicao unica; mesmo nome e pasta no motor e no desinstalador; textos nos dois idiomas; excecao de Write-Host do ponto de entrada' {
         $root = Split-Path -Parent $testsDir
         $isoFile = Join-Path $srcDir 'lib\Engine.Isolate.ps1'
         $iso = [IO.File]::ReadAllText($isoFile)
         $all = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1', '.cmd', '.cs') })
         $count = { param([string]$Pat) $n = 0; $where = @(); foreach ($fi in $all) { $m = [regex]::Matches([IO.File]::ReadAllText($fi.FullName), $Pat).Count; if ($m -gt 0) { $n += $m; $where += $fi.Name } }; [pscustomobject]@{ N = $n; Where = ($where -join ',') } }
-        foreach ($c in @(@('Schedule\.Service', 'Connect-AtmTaskScheduler'), @('\.DeleteTask\(', 'Unregister-AtmAutoPurgeTask'))) {
-            $r = & $count $c[0]
-            Assert-True ($r.N -eq 1 -and $r.Where -ceq 'Engine.Isolate.ps1' -and [regex]::IsMatch((Get-ApFnBody $isoFile $c[1]), $c[0])) "$($c[0]): uma vez, so em $($c[1]) ($($r.N) em $($r.Where))"
-        }
+        $r = & $count 'Schedule\.Service'
+        Assert-True ($r.N -eq 1 -and $r.Where -ceq 'Engine.Isolate.ps1' -and [regex]::IsMatch((Get-ApFnBody $isoFile 'Connect-AtmTaskScheduler'), 'Schedule\.Service')) "Schedule.Service: uma vez, so em Connect-AtmTaskScheduler ($($r.N) em $($r.Where))"
         # V0.5 M3a: the collection task of the monitoring registers too, once, in its own functions of Engine.Monitor; the
-        # purge's stay once each in Engine.Isolate. Nothing in the monitoring removes a task or a folder.
+        # purge's stay once each in Engine.Isolate. V0.5 M4a: DeleteTask exactly twice, once in each removal, each after
+        # its exact-task check in the same read; DeleteFolder exactly once, in the empty-folder helper, after the counts.
         $monFile = Join-Path $srcDir 'lib\Engine.Monitor.ps1'
+        $r = & $count '\.DeleteTask\('
+        $unA = Get-ApFnBody $isoFile 'Unregister-AtmAutoPurgeTask'; $unM = Get-ApFnBody $monFile 'Unregister-AtmMonitorTask'
+        Assert-True ($r.N -eq 2 -and $r.Where -ceq 'Engine.Isolate.ps1,Engine.Monitor.ps1' -and [regex]::Matches($unA, '\.DeleteTask\(').Count -eq 1 -and [regex]::Matches($unM, '\.DeleteTask\(').Count -eq 1) "DeleteTask: exatamente duas vezes, uma em Unregister-AtmAutoPurgeTask e uma em Unregister-AtmMonitorTask ($($r.N) em $($r.Where))"
+        Assert-True ($unM.IndexOf('Test-AtmMonitorTaskMatch') -gt 0 -and $unM.IndexOf('Test-AtmMonitorTaskMatch') -lt $unM.IndexOf('.DeleteTask($name, 0)') -and $unM.IndexOf('if (-not $script:AtmMonitoringEnabled)') -ge 0 -and $unM.IndexOf('if (-not $script:AtmMonitoringEnabled)') -lt $unM.IndexOf('Connect-AtmTaskScheduler')) 'remocao do monitoramento: a trava antes do agendador, e so depois de conferir a tarefa exata, na mesma leitura'
+        $r = & $count '\.DeleteFolder\('
+        $hlp = Get-ApFnBody $isoFile 'Remove-AtmEmptyTaskFolder'
+        Assert-True ($r.N -eq 1 -and $r.Where -ceq 'Engine.Isolate.ps1' -and [regex]::Matches($hlp, '\.DeleteFolder\(').Count -eq 1) "DeleteFolder: exatamente uma vez, so em Remove-AtmEmptyTaskFolder ($($r.N) em $($r.Where))"
+        Assert-Eq (& $count 'DeleteFolder').Where 'Engine.Isolate.ps1' 'DeleteFolder so e citado no Engine.Isolate'
+        $ix = @(@('$svc.GetFolder($script:AtmAutoPurgeTaskFolder)', 'Test-AtmTaskNotFound', '.GetTasks(1).Count', '.GetFolders(0).Count', "'NOT_EMPTY'", ".DeleteFolder(`$script:AtmAutoPurgeTaskFolder.TrimStart('\'), 0)", "'REMOVED'") | ForEach-Object { $hlp.IndexOf($_) })
+        Assert-True (@($ix | Where-Object { $_ -lt 0 }).Count -eq 0 -and ((@($ix | Sort-Object) -join ',') -ceq ($ix -join ','))) "pasta vazia: a constante do produto, ausente, contagem de tarefas (inclusive ocultas) e subpastas, nao vazia, e so entao DeleteFolder nessa ordem ($($ix -join ','))"
+        Assert-True (-not $hlp.Contains('param(') -and -not $hlp.Contains('DeleteTask') -and -not $hlp.Contains('RegisterTaskDefinition') -and -not $hlp.Contains('Set-Acl') -and -not $hlp.Contains('SetSecurityDescriptor') -and [regex]::Matches($hlp, 'GetFolder\(').Count -eq 2) 'pasta vazia: sem parametro (so a constante), sem remover tarefa, sem ACL, sem segunda tentativa'
+        foreach ($u in @($unA, $unM)) { Assert-True (-not $u.Contains('DeleteFolder') -and -not $u.Contains('Remove-AtmEmptyTaskFolder')) 'as remocoes de tarefa nao tocam a pasta' }
+        $isoT = [IO.File]::ReadAllText($isoFile); $monT = [IO.File]::ReadAllText($monFile)
+        $fA = [regex]::Match($isoT, "(?m)^\`$script:AtmAutoPurgeTaskFolder = '([^']+)'\r?$"); $fM = [regex]::Match($monT, "(?m)^\`$script:AtmMonitorTaskFolder = '([^']+)'\r?$")
+        Assert-True ($fA.Success -and $fM.Success -and $fA.Groups[1].Value -ceq $fM.Groups[1].Value -and $fA.Groups[1].Value -ceq '\AgentTempManager' -and [regex]::Matches($isoT, '\$script:AtmAutoPurgeTaskFolder\s*=').Count -eq 1 -and [regex]::Matches($monT, '\$script:AtmMonitorTaskFolder\s*=').Count -eq 1) "a pasta do helper (expurgo) e a do monitoramento: a mesma constante, atribuida uma vez cada ($($fA.Groups[1].Value) / $($fM.Groups[1].Value))"
         foreach ($c in @(@('\.RegisterTaskDefinition\(', 'Register-AtmAutoPurgeTask', 'Register-AtmMonitorTask'), @('\.CreateFolder\(', 'Register-AtmAutoPurgeTask', 'Register-AtmMonitorTask'), @('\.NewTask\(', 'New-AtmAutoPurgeTaskDefinition', 'New-AtmMonitorTaskDefinition'))) {
             $r = & $count $c[0]
             Assert-True ($r.N -eq 2 -and $r.Where -ceq 'Engine.Isolate.ps1,Engine.Monitor.ps1' -and [regex]::Matches((Get-ApFnBody $isoFile $c[1]), $c[0]).Count -eq 1 -and [regex]::Matches((Get-ApFnBody $monFile $c[2]), $c[0]).Count -eq 1) "$($c[0]): uma vez em $($c[1]) e uma em $($c[2]) ($($r.N) em $($r.Where))"
         }
-        foreach ($pat in @('DeleteFolder', 'Register-ScheduledTask', 'Unregister-ScheduledTask', 'Set-ScheduledTask', 'New-ScheduledTask', 'schtasks', 'Get-Credential', 'SecureString', 'savecred')) { Assert-Eq (& $count ([regex]::Escape($pat))).N 0 "nenhum '$pat' em src" }
-        Assert-Eq ((Get-ApCallers 'Connect-AtmTaskScheduler') -join ',') 'Engine.Isolate.ps1:Get-AtmAutoPurgeTaskState,Engine.Isolate.ps1:Register-AtmAutoPurgeTask,Engine.Isolate.ps1:Unregister-AtmAutoPurgeTask,Engine.Monitor.ps1:Get-AtmMonitorTaskState,Engine.Monitor.ps1:Register-AtmMonitorTask' 'o agendador so e alcancado pelos estados (leitura) e pelas funcoes que o mudam (purga: registrar e remover; monitoramento: so registrar)'
+        foreach ($pat in @('Register-ScheduledTask', 'Unregister-ScheduledTask', 'Set-ScheduledTask', 'New-ScheduledTask', 'schtasks', 'Get-Credential', 'SecureString', 'savecred')) { Assert-Eq (& $count ([regex]::Escape($pat))).N 0 "nenhum '$pat' em src" }
+        Assert-Eq ((Get-ApCallers 'Connect-AtmTaskScheduler') -join ',') 'Engine.Isolate.ps1:Get-AtmAutoPurgeTaskState,Engine.Isolate.ps1:Register-AtmAutoPurgeTask,Engine.Isolate.ps1:Unregister-AtmAutoPurgeTask,Engine.Isolate.ps1:Remove-AtmEmptyTaskFolder,Engine.Monitor.ps1:Get-AtmMonitorTaskState,Engine.Monitor.ps1:Register-AtmMonitorTask,Engine.Monitor.ps1:Unregister-AtmMonitorTask' 'o agendador so e alcancado pelos estados (leitura) e pelas funcoes que o mudam (purga e monitoramento: registrar e remover; a pasta vazia)'
         Assert-Eq ((Get-ApCallers 'Register-AtmAutoPurgeTask') -join ',') 'Engine.Isolate.ps1:Invoke-AtmAutoPurgeSchedule' 'registrar so pelo agendar'
         Assert-Eq ((Get-ApCallers 'Unregister-AtmAutoPurgeTask') -join ',') 'Engine.Isolate.ps1:Invoke-AtmAutoPurgeUnschedule' 'remover so pelo desagendar'
+        Assert-Eq ((Get-ApCallers 'Unregister-AtmMonitorTask') -join ',') 'Engine.Monitor.ps1:Invoke-AtmMonitorDisable' 'remover a tarefa de coleta so pelo disable'
+        Assert-Eq ((Get-ApCallers 'Remove-AtmEmptyTaskFolder') -join ',') 'Engine.Isolate.ps1:Invoke-AtmAutoPurgeUnschedule,Engine.Monitor.ps1:Invoke-AtmMonitorDisable' 'a pasta vazia so pelos dois comandos de desagendar'
+        Assert-Eq ((Get-ApCallers 'Invoke-AtmMonitorDisable') -join ',') 'agent-temp.ps1:script' 'o disable so pela CLI'
         Assert-Eq ((Get-ApCallers 'Invoke-AtmAutoPurgeSchedule') -join ',') 'agent-temp.ps1:script' 'agendar so pela CLI'
         Assert-Eq ((Get-ApCallers 'Invoke-AtmAutoPurgeUnschedule') -join ',') 'agent-temp.ps1:script' 'desagendar so pela CLI'
         $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
@@ -5442,7 +5459,7 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
         foreach ($fn in @('Invoke-AtmAutoPurgeSchedule -', 'Invoke-AtmAutoPurgeUnschedule -')) { $i = $cli.IndexOf($fn); Assert-True ($iCase -gt 0 -and $i -gt $iCase -and $i -lt $iDef) "$fn so no caso dos dois subcomandos de quarantine" }
         foreach ($n in @('lib\Tui.ps1', 'lib\Report.ps1', 'bin\agent-temp-autopurge.ps1', 'bin\agent-temp-monitor.ps1', 'agent-temp.ps1')) {
             $t = [IO.File]::ReadAllText((Join-Path $srcDir $n))
-            foreach ($pat in @('Register-AtmAutoPurgeTask', 'Connect-AtmTaskScheduler', 'RegisterTaskDefinition', 'DeleteTask', 'CreateFolder', 'Schedule.Service', 'AtmAutoPurgeTaskNameOverride', 'AtmAutoPurgeElevationSource', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'AtmMonitorTaskNameOverride', 'AtmMonitorElevationSource')) { Assert-True (-not $t.Contains($pat)) "$n sem '$pat'" }
+            foreach ($pat in @('Register-AtmAutoPurgeTask', 'Connect-AtmTaskScheduler', 'RegisterTaskDefinition', 'DeleteTask', 'CreateFolder', 'DeleteFolder', 'Schedule.Service', 'AtmAutoPurgeTaskNameOverride', 'AtmAutoPurgeElevationSource', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'AtmMonitorTaskNameOverride', 'AtmMonitorElevationSource', 'Unregister-AtmMonitorTask', 'Remove-AtmEmptyTaskFolder')) { Assert-True (-not $t.Contains($pat)) "$n sem '$pat'" }
         }
         foreach ($n in @('lib\Tui.ps1', 'lib\Report.ps1', 'bin\agent-temp-autopurge.ps1')) { foreach ($pat in @('Invoke-AtmAutoPurgeSchedule', 'Invoke-AtmAutoPurgeUnschedule')) { Assert-True (-not ([IO.File]::ReadAllText((Join-Path $srcDir $n))).Contains($pat)) "$n sem '$pat' (a TUI so mostra, T-ISO-6)" } }
         $ic = [IO.File]::ReadAllText((Join-Path $root 'install\InstallCommon.ps1'))
@@ -5464,14 +5481,14 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
         $ix = @(@("'AUTOPURGE_TASK_REQUIRES_STANDARD_TOKEN'", "'AUTOPURGE_TASK_NOT_INSTALLED'", "'CONSOLE_NOT_OBSERVED'", "'AUTOPURGE_TASK_EXISTS'", '& $PlanPresenter', "'autopurge-off'", "'autopurge-schedule'", 'Register-AtmAutoPurgeTask -') | ForEach-Object { $sch.IndexOf($_) })
         Assert-True (@($ix | Where-Object { $_ -lt 0 }).Count -eq 0 -and ((@($ix | Sort-Object) -join ',') -ceq ($ix -join ','))) "agendar: token, instalacao, console, existente, plano, frases e registro nessa ordem ($($ix -join ','))"
         $uns = Get-ApFnBody $isoFile 'Invoke-AtmAutoPurgeUnschedule'
-        $ix = @(@("'CONSOLE_NOT_OBSERVED'", 'Get-AtmAutoPurgeTaskState', "'AUTOPURGE_TASK_DIVERGENT'", '& $PlanPresenter', "'autopurge-unschedule'", 'Unregister-AtmAutoPurgeTask -') | ForEach-Object { $uns.IndexOf($_) })
-        Assert-True (@($ix | Where-Object { $_ -lt 0 }).Count -eq 0 -and ((@($ix | Sort-Object) -join ',') -ceq ($ix -join ','))) "desagendar: console, estado, divergente, plano, frase e remocao nessa ordem ($($ix -join ','))"
+        $ix = @(@("'CONSOLE_NOT_OBSERVED'", 'Get-AtmAutoPurgeTaskState', "'AUTOPURGE_TASK_DIVERGENT'", '& $PlanPresenter', "'autopurge-unschedule'", 'Unregister-AtmAutoPurgeTask -', "'AUTOPURGE_TASK_NOT_VERIFIED'", '$st.Done = $true', '$st.Folder = Remove-AtmEmptyTaskFolder') | ForEach-Object { $uns.IndexOf($_) })
+        Assert-True (@($ix | Where-Object { $_ -lt 0 }).Count -eq 0 -and ((@($ix | Sort-Object) -join ',') -ceq ($ix -join ',')) -and [regex]::Matches($uns, 'Remove-AtmEmptyTaskFolder').Count -eq 1) "desagendar: console, estado, divergente, plano, frase, remocao, releitura ABSENT e so entao a pasta vazia, uma vez, nessa ordem ($($ix -join ','))"
         $un = Get-ApFnBody $isoFile 'Unregister-AtmAutoPurgeTask'
         Assert-True ($un.IndexOf('Test-AtmAutoPurgeTaskMatch') -gt 0 -and $un.IndexOf('Test-AtmAutoPurgeTaskMatch') -lt $un.IndexOf('.DeleteTask(')) 'remocao so depois de conferir a tarefa exata, na mesma leitura'
         Assert-True ((Get-ApFnBody $isoFile 'Get-AtmAutoPurgeTaskObject') -notmatch 'CreateFolder|RegisterTaskDefinition|DeleteTask') 'a leitura do estado nunca cria a pasta'
         foreach ($l in @('en-US', 'pt-BR')) {
             foreach ($k in @('help.quarantine3', 'ap.task.absent', 'ap.task.present', 'ap.task.enabled', 'ap.task.disabled', 'ap.task.never', 'ap.task.lastResult', 'ap.task.divergent', 'ap.task.unreadable', 'ap.plan.header', 'ap.plan.task', 'ap.plan.trigger', 'ap.plan.action', 'ap.plan.principal', 'ap.plan.policyOn', 'ap.plan.policyOff',
-                    'ap.plan.unschedule', 'ap.plan.unscheduleTask', 'ap.task.created', 'ap.task.removed', 'ap.task.notScheduled', 'ap.task.notRemoved', 'ap.task.notVerified', 'inst.apTaskWarn', 'inst.apTaskOthers', 'inst.apTaskUnreadable',
+                    'ap.plan.unschedule', 'ap.plan.unscheduleTask', 'ap.task.created', 'ap.task.removed', 'ap.task.notScheduled', 'ap.task.notRemoved', 'ap.task.notVerified', 'inst.apTaskWarn', 'inst.apTaskOthers', 'inst.apTaskUnreadable', 'tf.removed', 'tf.absent', 'tf.notEmpty', 'tf.kept',
                     'ap.task.why.AUTOPURGE_TASK_REQUIRES_STANDARD_TOKEN', 'ap.task.why.AUTOPURGE_TASK_NOT_INSTALLED', 'ap.task.why.AUTOPURGE_TASK_EXISTS', 'ap.task.why.AUTOPURGE_TASK_DIVERGENT', 'ap.task.why.AUTOPURGE_TASK_ABSENT', 'ap.task.why.AUTOPURGE_TASK_NOT_CONFIRMED', 'ap.task.why.CONSOLE_NOT_OBSERVED')) { Assert-True $script:AtmMessages[$l].ContainsKey($k) "$k ($l)" }
             Assert-True (-not $script:AtmMessages[$l]['q.policyWarn.AUTOPURGE_ON'].Contains('No scheduled task') -and -not $script:AtmMessages[$l]['q.policyWarn.AUTOPURGE_ON'].Contains('existe tarefa agendada'))"aviso de ligado sem 'nenhuma tarefa' ($l)"
         }
@@ -5607,9 +5624,9 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
         Assert-True ($r.Text.Contains('schedule-autopurge | unschedule-autopurge')) 'a ajuda mostra os dois subcomandos'
     }
 
-    Test-Case 'Isolamento P6b' 'Tarefa real (so na CI, runner descartavel, nomes de teste): agendar com a politica ligada pede so a frase principal, cria e rele PRESENT (usuario = o SID do processo, logon interativo, nivel limitado, sem senha, uma acao exata, primeira execucao no futuro, nunca executada); agendar de novo recusa sem perguntar nem mudar nada (AUTOPURGE_TASK_EXISTS) e TASK_CREATE recusa sobrescrever; desagendar com frase errada nao remove; desagendar remove so ela (a pasta fica); com a politica desligada pede a frase do aviso e a principal; acao divergente: estado DIVERGENT e desagendar recusa sem perguntar nem tocar' {
+    Test-Case 'Isolamento P6b' 'Tarefa real (so na CI, runner descartavel, nomes de teste): agendar com a politica ligada pede so a frase principal, cria e rele PRESENT (usuario = o SID do processo, logon interativo, nivel limitado, sem senha, uma acao exata, primeira execucao no futuro, nunca executada); agendar de novo recusa sem perguntar nem mudar nada (AUTOPURGE_TASK_EXISTS) e TASK_CREATE recusa sobrescrever; desagendar com frase errada nao remove; desagendar remove so ela e depois a pasta, vazia (REMOVED, a pasta nao existe mais; V0.5 M4a); com a politica desligada pede a frase do aviso e a principal; acao divergente: estado DIVERGENT e desagendar recusa sem perguntar nem tocar; com outra tarefa de teste na pasta, desagendar remove a propria e a pasta fica (NOT_EMPTY, so a contagem)' {
         if ($env:GITHUB_ACTIONS -ne 'true') { $script:caseSkipped = $true; $script:caseNote = 'cria tarefas agendadas reais: so na CI (runner descartavel), nunca local'; return }
-        $n1 = New-ApTestName; $n2 = New-ApTestName
+        $n1 = New-ApTestName; $n2 = New-ApTestName; $n3 = New-ApTestName
         $me = Get-AtmCurrentIdentity
         $ep = Get-AtmAutoPurgeEntryPoint
         $want = Get-AtmAutoPurgeTaskAction -EntryPoint $ep
@@ -5652,11 +5669,17 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
             $asked.Clear()
             $r = Invoke-AtmAutoPurgeUnschedule -PlanPresenter $pres -ConfirmationReader { param($ph, $k) $asked.Add($k); 'nao' }
             Assert-True ($r.Aborted -ceq 'AUTOPURGE_TASK_NOT_CONFIRMED' -and ($asked -join ',') -ceq 'plan,autopurge-unschedule' -and (Get-AtmAutoPurgeTaskState).State -ceq 'PRESENT') "desagendar com frase errada nao remove ($($r.Aborted))"
+            # V0.5 M4a (V05-D9 (c)): with only this task in the product's folder, the command removes the task and then the
+            # folder, now empty.
+            $pf = (Connect-AtmTaskScheduler).GetFolder('\AgentTempManager')
+            $pre = @([int]$pf.GetTasks(1).Count, [int]$pf.GetFolders(0).Count)
             $asked.Clear()
             $r = Invoke-AtmAutoPurgeUnschedule -PlanPresenter $pres -ConfirmationReader $rd
             Assert-True ($r.Done -and -not $r.Aborted -and $r.Task.State -ceq 'ABSENT' -and ($asked -join ',') -ceq 'plan,autopurge-unschedule' -and $script:apPlan.TaskPath -ceq ('\AgentTempManager\' + $n1)) "desagendar remove ($($r.Aborted))"
-            $folderStays = $true; try { $null = (Connect-AtmTaskScheduler).GetFolder('\AgentTempManager') } catch { $folderStays = $false }
-            Assert-True $folderStays 'a pasta do produto fica'
+            $folderGone = $false; try { $null = (Connect-AtmTaskScheduler).GetFolder('\AgentTempManager') } catch { $folderGone = [bool](Test-AtmTaskNotFound $_.Exception) }
+            Assert-True ($pre[0] -eq 1 -and $pre[1] -eq 0 -and [string]$r.Folder.State -ceq 'REMOVED' -and $null -eq $r.Folder.Code -and $folderGone) "pasta vazia depois da tarefa: REMOVED, a pasta nao existe mais (antes: $($pre[0]) tarefa(s), $($pre[1]) subpasta(s); $($r.Folder.State) $($r.Folder.Code))"
+            $t = Get-RstHost { Show-AtmAutoPurgeTaskResult -Result $r }
+            Assert-True ($t.Contains((Get-AtmText 'ap.task.removed' ('\AgentTempManager\' + $n1))) -and $t.Contains((Get-AtmText 'tf.removed' '\AgentTempManager'))) 'o resultado mostra a tarefa e a pasta removidas'
             $script:AtmAutoPurgeTaskNameOverride = $n2
             $asked.Clear()
             $r = Invoke-AtmAutoPurgeSchedule -ConfigDir $cfgOff -Installed -PlanPresenter $pres -ConfirmationReader $rd
@@ -5675,7 +5698,109 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
             Assert-Eq ([string](& $getTask $n2).Xml) $xml2 'a divergente ficou intacta'
             $t = Get-RstHost { Show-AtmAutoPurgeTaskResult -Result $r }
             Assert-True ($t.Contains('AUTOPURGE_TASK_DIVERGENT') -and $t.Contains('TASK_ACTION_ARGUMENTS')) 'o resultado mostra o codigo e o motivo'
-        } finally { Reset-ApSeams $prevConsole; Clear-ApTestTask $n1; Clear-ApTestTask $n2 }
+            # V0.5 M4a: another task in the folder (the divergent test task n2): the command removes its own task n3, and
+            # the folder stays NOT_EMPTY, with nothing tried and nothing named.
+            $script:AtmAutoPurgeTaskNameOverride = $n3
+            $asked.Clear()
+            $r = Invoke-AtmAutoPurgeSchedule -ConfigDir $cfgOn -Installed -PlanPresenter $pres -ConfirmationReader $rd
+            Assert-True ($r.Done) "terceira tarefa de teste criada ($($r.Aborted))"
+            $r = Invoke-AtmAutoPurgeUnschedule -PlanPresenter $pres -ConfirmationReader $rd
+            $pf = (Connect-AtmTaskScheduler).GetFolder('\AgentTempManager')
+            Assert-True ($r.Done -and $r.Task.State -ceq 'ABSENT' -and [string]$r.Folder.State -ceq 'NOT_EMPTY' -and $r.Folder.Tasks -eq 1 -and $r.Folder.Folders -eq 0 -and $null -eq $r.Folder.Code) "outra tarefa na pasta: a propria removida, a pasta NOT_EMPTY ($($r.Folder.State), $($r.Folder.Tasks) tarefa(s))"
+            Assert-True ([int]$pf.GetTasks(1).Count -eq 1 -and [string](& $getTask $n2).Xml -ceq $xml2) 'a pasta fica com a outra tarefa, intacta'
+            $t = Get-RstHost { Show-AtmAutoPurgeTaskResult -Result $r }
+            Assert-True ($t.Contains((Get-AtmText 'tf.notEmpty' '\AgentTempManager' 1 0)) -and -not $t.Contains($n2)) 'o resultado diz que a pasta fica, so com a contagem (sem nomear a outra tarefa)'
+        } finally { Reset-ApSeams $prevConsole; Clear-ApTestTask $n1; Clear-ApTestTask $n2; Clear-ApTestTask $n3 }
+    }
+
+    Test-Case 'Isolamento P6b' 'Limite final do agendador (so na CI, runner descartavel, nomes de teste; V0.5 M4a): uma pasta de teste \AtmTest-<8 hex> com uma tarefa de teste; DeleteFolder direto (codigo de teste) sobre ela e recusado pelo proprio agendador, com o codigo, e a pasta e a tarefa ficam; depois a tarefa e a pasta de teste saem pelos nomes exatos' {
+        if ($env:GITHUB_ACTIONS -ne 'true') { $script:caseSkipped = $true; $script:caseNote = 'cria uma pasta e uma tarefa agendadas reais: so na CI (runner descartavel), nunca local'; return }
+        # Test code only: this folder and this task are the suite's (test names), and are removed here by those names.
+        $fName = 'AtmTest-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $tName = New-ApTestName
+        if ($fName -cnotmatch '^AtmTest-[0-9a-f]{8}$' -or $tName -cnotmatch '^AutoPurgeTest-[0-9a-f]{8}$') { throw 'nomes de teste fora da forma' }
+        $me = Get-AtmCurrentIdentity
+        $svc = Connect-AtmTaskScheduler
+        $rootF = $svc.GetFolder('\')
+        $made = $false
+        try {
+            $tf = $rootF.CreateFolder($fName, $null); $made = $true
+            $null = $tf.RegisterTaskDefinition($tName, (New-AtmAutoPurgeTaskDefinition -Service $svc -Sid $me.Sid -EntryPoint (Get-AtmAutoPurgeEntryPoint) -Now ([datetime]::Now.AddDays(3))), 2, $me.Sid, $null, 3, $null)
+            $hr = 0
+            try { $rootF.DeleteFolder($fName, 0) } catch { $hr = [int](Get-AtmInnerException $_.Exception).HResult }
+            $still = $true; try { $null = $svc.GetFolder('\' + $fName).GetTask($tName) } catch { $still = $false }
+            Assert-True ($hr -ne 0 -and $still) ("DeleteFolder de uma pasta com tarefa: recusado pelo agendador (0x{0:X8}), a pasta e a tarefa ficam ({1})" -f $hr, $still)
+            # The code reaches the CI log and the report through the case's note (the host output of a case is discarded).
+            $script:caseNote = ('limite final: DeleteFolder recusado pelo agendador com 0x{0:X8}; a pasta e a tarefa de teste ficaram' -f $hr)
+        } finally {
+            if ($made) {
+                try { $svc.GetFolder('\' + $fName).DeleteTask($tName, 0) } catch { $null = $_ }
+                try { $rootF.DeleteFolder($fName, 0) } catch { $null = $_ }
+            }
+        }
+    }
+
+    Test-Case 'V0.5 M4a' 'M4a real (so na CI, runner descartavel, nome de teste MonitorTest-<8 hex>, trava aberta so na memoria da suite): monitor disable no agendador real - a tarefa de coleta de teste (a definicao do produto, registrada pelo teste) relida PRESENT; frase errada nao remove nada; com outra tarefa de teste na pasta, o disable remove so a propria e a pasta fica (NOT_EMPTY, so a contagem, a outra intacta e nao nomeada); sozinha na pasta, o disable remove a tarefa e depois a pasta (REMOVED, a pasta nao existe mais); o token elevado do runner chega a pergunta' {
+        if ($env:GITHUB_ACTIONS -ne 'true') { $script:caseSkipped = $true; $script:caseNote = 'registra e remove tarefas agendadas reais: so na CI (runner descartavel), nunca local; local, o disable so com o agendador falso (area V0.5 M4a)'; return }
+        # Test code registers the monitoring test task (the product's definition, the test name) only so the product's
+        # monitor disable can remove it; the gate is opened in this process only and closed in the finally.
+        $mName = 'MonitorTest-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $aName = New-ApTestName
+        if ($mName -cnotmatch '^MonitorTest-[0-9a-f]{8}$' -or $aName -cnotmatch '^AutoPurgeTest-[0-9a-f]{8}$') { throw 'nomes de teste fora da forma' }
+        $me = Get-AtmCurrentIdentity
+        $mEp = Get-AtmMonitorEntryPoint
+        $asked = New-Object System.Collections.Generic.List[string]
+        $pres = { param($p) $script:m4realPlan = $p; $asked.Add('plan') }
+        $rd = { param($ph, $k) $asked.Add($k); $ph }
+        $folderOf = { (Connect-AtmTaskScheduler).GetFolder('\AgentTempManager') }
+        $regMon = { $svc = Connect-AtmTaskScheduler; $null = $svc.GetFolder('\AgentTempManager').RegisterTaskDefinition($mName, (New-AtmMonitorTaskDefinition -Service $svc -Sid $me.Sid -EntryPoint $mEp -IntervalHours 6), 2, $me.Sid, $null, 3, $null) }
+        $prevConsole = $script:AtmCleanConsoleSource
+        $notes = New-Object System.Collections.Generic.List[string]
+        try {
+            $script:AtmCleanConsoleSource = { $true }
+            $script:AtmAutoPurgeTaskNameOverride = $aName
+            $script:AtmMonitorTaskNameOverride = $mName
+            $script:AtmMonitoringEnabled = $true
+            # The other test task first: the product's own registration creates the folder when it is missing.
+            Assert-Eq (Register-AtmAutoPurgeTask -Sid $me.Sid -EntryPoint (Get-AtmAutoPurgeEntryPoint)) $null 'a outra tarefa de teste (purga) registrada pelo produto'
+            & $regMon
+            Assert-Eq (Get-AtmMonitorTaskState).State 'PRESENT' 'a tarefa de coleta de teste relida PRESENT (a definicao exata do produto)'
+            $r = Invoke-AtmMonitorDisable -PlanPresenter $pres -ConfirmationReader { param($ph, $k) $asked.Add($k); 'nao' }
+            Assert-True ($r.Aborted -ceq 'MONITOR_TASK_NOT_CONFIRMED' -and ($asked -join ',') -ceq 'plan,monitor-disable' -and $null -eq $r.Folder -and (Get-AtmMonitorTaskState).State -ceq 'PRESENT') "frase errada nao remove nada; o token elevado do runner chegou a pergunta ($($r.Aborted) $($asked -join ','))"
+            Assert-True ($script:m4realPlan.TaskPath -ceq ('\AgentTempManager\' + $mName) -and $script:m4realPlan.IntervalHours -eq 6 -and $script:m4realPlan.Folder -ceq '\AgentTempManager') 'o plano: a tarefa de teste, o intervalo e a pasta'
+            $pre = [int](& $folderOf).GetTasks(1).Count
+            $asked.Clear()
+            $r = Invoke-AtmMonitorDisable -PlanPresenter $pres -ConfirmationReader $rd
+            Assert-True ($r.Done -and -not $r.Aborted -and $r.Task.State -ceq 'ABSENT' -and [string]$r.Folder.State -ceq 'NOT_EMPTY' -and $r.Folder.Tasks -eq ($pre - 1) -and $r.Folder.Folders -eq 0 -and $null -eq $r.Folder.Code) "outra tarefa na pasta: a propria removida, a pasta NOT_EMPTY ($($r.Aborted) $($r.Folder.State), $($r.Folder.Tasks) de $pre)"
+            $other = $null; try { $other = (& $folderOf).GetTask($aName) } catch { $null = $_ }
+            Assert-True ($null -ne $other) 'a outra tarefa de teste ficou'
+            $t = Get-RstHost { Show-AtmMonitorDisableResult -Result $r }
+            Assert-True ($t.Contains((Get-AtmText 'tf.notEmpty' '\AgentTempManager' $r.Folder.Tasks 0)) -and -not $t.Contains($aName)) 'o resultado diz que a pasta fica, so com a contagem'
+            $notes.Add("com outra tarefa: NOT_EMPTY ($($r.Folder.Tasks) tarefa(s))")
+            Clear-ApTestTask $aName
+            $others = [int](& $folderOf).GetTasks(1).Count
+            & $regMon
+            $asked.Clear()
+            $r = Invoke-AtmMonitorDisable -PlanPresenter $pres -ConfirmationReader $rd
+            $gone = $false; try { $null = (Connect-AtmTaskScheduler).GetFolder('\AgentTempManager') } catch { $gone = [bool](Test-AtmTaskNotFound $_.Exception) }
+            if ($others -eq 0) {
+                Assert-True ($r.Done -and $r.Task.State -ceq 'ABSENT' -and [string]$r.Folder.State -ceq 'REMOVED' -and $null -eq $r.Folder.Code -and $gone) "sozinha na pasta: a tarefa e depois a pasta (REMOVED, a pasta nao existe mais; $($r.Folder.State) $($r.Folder.Code))"
+                $t = Get-RstHost { Show-AtmMonitorDisableResult -Result $r }
+                Assert-True ($t.Contains((Get-AtmText 'mon.task.removed' ('\AgentTempManager\' + $mName))) -and $t.Contains((Get-AtmText 'tf.removed' '\AgentTempManager'))) 'o resultado mostra a tarefa e a pasta removidas'
+                $notes.Add('sozinha: REMOVED')
+            } else {
+                Assert-True ($r.Done -and $r.Task.State -ceq 'ABSENT' -and [string]$r.Folder.State -ceq 'NOT_EMPTY' -and -not $gone) "o runner ja tinha $others tarefa(s) na pasta: NOT_EMPTY ($($r.Folder.State))"
+                $notes.Add("REMOVED nao observavel: o runner ja tinha $others tarefa(s) na pasta (NOT_EMPTY)")
+            }
+            $script:caseNote = 'disable real: ' + ($notes -join '; ')
+        } finally {
+            $script:AtmMonitoringEnabled = $false
+            $script:AtmMonitorTaskNameOverride = $null
+            Reset-ApSeams $prevConsole
+            try { (Connect-AtmTaskScheduler).GetFolder('\AgentTempManager').DeleteTask($mName, 0) } catch { $null = $_ }
+            Clear-ApTestTask $aName
+        }
+        Assert-Eq $script:AtmMonitoringEnabled $false 'trava fechada de novo'
     }
 
     # ------------------------------------------------------------------ trusted accounts per engine (FIX-TRUSTED-SIDS)
@@ -15255,9 +15380,9 @@ try {
     $guiAllowedCmdlets = @('Write-Host', 'New-Object', 'Add-Type', 'ConvertFrom-Json')
     # Forbidden names (ADR-0014 section 3), searched in the text, case-insensitive, comments included.
     # V0.5 M3a: the exact names of the monitoring's register and write functions (never a prefix: the GUI may never read
-    # the monitoring either, which another static checks).
+    # the monitoring either, which another static checks). V0.5 M4a: and of its removal and the empty task folder's.
     $guiForbidden = @('Invoke-AtmClean', 'Invoke-AtmIsolate', 'Invoke-AtmRestore', 'Invoke-AtmPurge', 'Invoke-AtmAutoPurgeSchedule', 'Invoke-AtmAutoPurgeUnschedule', 'Invoke-AtmDiscardAuthorization',
-        'Invoke-AtmMonitorEnable', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'Invoke-AtmMonitorEntry',
+        'Invoke-AtmMonitorEnable', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'Invoke-AtmMonitorEntry', 'Invoke-AtmMonitorDisable', 'Unregister-AtmMonitorTask', 'Remove-AtmEmptyTaskFolder',
         'AtmDeleter', 'AtmLockProbe', 'DeleteTree', 'Remove-Item', 'Move-Item', '::Delete(', '.Delete(', '::Move(', 'Set-Content', 'Add-Content', 'Out-File', 'New-Item', 'Set-ItemProperty', 'Set-Acl',
         '::WriteAll', '::AppendAll', '::Create(', '::OpenWrite(', 'CreateSubKey', 'SetValue', 'Start-Process', 'Stop-Process', 'Start-Service', 'Stop-Service', 'Set-Service', 'Restart-Service',
         'Suspend-Service', 'ScheduledTask', 'schtasks', 'Invoke-CimMethod', 'Invoke-WmiMethod', 'Set-CimInstance', 'Remove-CimInstance', 'Clipboard', 'Invoke-Expression', 'sc.exe', 'net stop', 'net start',
@@ -22017,7 +22142,8 @@ exit 0
     }
 
     # ------------------------------------------------------------------ V0.5 M3a (preventive monitoring: the collector's scheduled task, monitor enable and the entry point, gate closed, ADR-0017)
-    # The suite NEVER registers a real task: the real scheduler is validated by the CI harness of phase M3b. Every case that
+    # This area NEVER registers a real task: the real scheduler is validated by the CI harness of phase M3b (and, since
+    # M4a, by the one CI-only case of monitor disable, outside this area, checked by the M4a static). Every case that
     # reaches a registration shadows Connect-AtmTaskScheduler with a fake scheduler in memory (New-M3Service), checked by
     # the static of this area; the only real scheduler object is $script:m3RealSvc, used for NewTask only (a definition in
     # memory, never registered). The monitoring gate is opened inside this process only, around each call, and closed
@@ -22311,7 +22437,7 @@ exit 0
                     Assert-True ($t.Contains((Get-AtmText 'mon.task.notEnabled' $c)) -and (-not $script:AtmMessages['en-US'].ContainsKey($why) -or $t.Contains((Get-AtmText $why))) -and ($c -cne 'MONITOR_TASK_NOT_VERIFIED' -or $t.Contains((Get-AtmText 'mon.task.notVerified')))) "$lang`: resultado $c"
                 }
                 $t = Get-RstHost { Show-AtmMonitorEnableResult -Result $rDone }
-                Assert-True ($t.Contains((Get-AtmText 'mon.task.created' ('\AgentTempManager\' + $name))) -and $t.Contains((Get-AtmText 'mon.task.noRemove'))) "$lang`: resultado criado, com a linha da tarefa"
+                Assert-True ($t.Contains((Get-AtmText 'mon.task.created' ('\AgentTempManager\' + $name))) -and $t.Contains((Get-AtmText 'mon.task.howDisable'))) "$lang`: resultado criado, com a linha da tarefa (e como remove-la, V0.5 M4a)"
                 $t = Get-RstHost { Show-AtmMonitorEnablePlan -Plan $plan }
                 Assert-True ($t.Contains((Get-AtmText 'mon.plan.header')) -and $t.Contains((Get-AtmText 'mon.plan.task' $plan.TaskPath)) -and $t.Contains((Get-AtmText 'mon.plan.trigger' 6 '2026-11-18 09:02:00' 60)) -and $t.Contains((Get-AtmText 'mon.plan.action' 'P.exe' '-File "x"')) -and $t.Contains((Get-AtmText 'mon.plan.principal')) -and $t.Contains((Get-AtmText 'mon.plan.history')) -and $t.Contains('%LOCALAPPDATA%\AgentTempManager\Monitor')) "$lang`: plano (tarefa, gatilho, acao, quem roda, historico e o que nunca grava)"
             }
@@ -22439,9 +22565,11 @@ exit 0
                 $a = & $L (& $mk 'PRESENT' $false)
                 Assert-True ($a.Count -eq 3 -and $a[0].Contains($tp) -and $a[0].Contains('2026-11-18 18:00') -and $a[0].Contains((Get-AtmText 'mon.task.never')) -and $a[0].Contains(' 6 h') -and $a[1] -ceq (Get-AtmText 'mon.task.residue') -and $a[2] -ceq (Get-AtmText 'mon.task.noRemove')) "${lang}: residuo presente: caminho, intervalo, proxima, nunca executada, residuo e sem comando de remocao ($($a -join ' | '))"
                 $a = & $L (& $mk 'PRESENT' $true -Last (New-Object DateTime(2026, 11, 18, 12, 0, 0)) -Res '0x00000000')
-                Assert-True ($a.Count -eq 2 -and $a[0].Contains('2026-11-18 12:00') -and $a[0].Contains('0x00000000') -and $a[1] -ceq (Get-AtmText 'mon.task.noRemove')) "${lang}: presente com a trava aberta: ultimo resultado, sem aviso de residuo ($($a -join ' | '))"
+                Assert-True ($a.Count -eq 2 -and $a[0].Contains('2026-11-18 12:00') -and $a[0].Contains('0x00000000') -and $a[1] -ceq (Get-AtmText 'mon.task.howDisable')) "${lang}: presente com a trava aberta: ultimo resultado, sem aviso de residuo, e como remover (V0.5 M4a) ($($a -join ' | '))"
                 $a = & $L (& $mk 'DIVERGENT' $false -Reasons @('TASK_ACTION_ARGUMENTS', 'TASK_INTERVAL'))
                 Assert-True ($a.Count -eq 3 -and $a[0].Contains($tp) -and $a[0].Contains('TASK_ACTION_ARGUMENTS, TASK_INTERVAL') -and $a[1] -ceq (Get-AtmText 'mon.task.residue') -and $a[2] -ceq (Get-AtmText 'mon.task.noRemove')) "${lang}: divergente com os motivos ($($a -join ' | '))"
+                $a = & $L (& $mk 'DIVERGENT' $true -Reasons @('TASK_RUN_LEVEL'))
+                Assert-True ($a.Count -eq 2 -and $a[0].Contains('TASK_RUN_LEVEL') -and $a[1] -ceq (Get-AtmText 'mon.task.divergentNoRemove')) "${lang}: divergente com a trava aberta: o disable nao a remove (V0.5 M4a) ($($a -join ' | '))"
                 $a = & $L (& $mk 'UNREADABLE' $false -Reasons @('TASK_SCHEDULER_0x80070005'))
                 Assert-True ($a.Count -eq 1 -and $a[0].Contains('TASK_SCHEDULER_0x80070005')) "${lang}: ilegivel com o codigo ($($a -join ' | '))"
                 $script:AtmMonitorFolderPath = New-MonFolder
@@ -22461,14 +22589,16 @@ exit 0
                 Assert-True ($keys.Count -ge 35) "textos da M3a lidos ($l, $($keys.Count))"
                 foreach ($key in $keys) {
                     $t = [string]$script:AtmMessages[$l][$key]
-                    Assert-True ($t -cnotmatch '\bM[0-9]\b' -and -not $t.Contains('disable') -and -not $t.Contains('remove-history') -and -not $t.Contains('V0.6')) "${key} ($l): sem fase nem comando futuro"
+                    Assert-True ($t -cnotmatch '\bM[0-9]\b' -and -not $t.Contains('remove-history') -and -not $t.Contains('V0.6')) "${key} ($l): sem fase nem comando futuro"
                     foreach ($m in [regex]::Matches($t, 'agent-temp ([a-z-]+)(?: ([a-z-]+))?')) {
                         $vb = $m.Groups[1].Value; $sb = $m.Groups[2].Value
-                        Assert-True ($verbs -ccontains $vb -and ($vb -cne 'monitor' -or @('', 'status', 'enable') -ccontains $sb)) "${key} ($l): cita so comando que existe ($($m.Value))"
+                        Assert-True ($verbs -ccontains $vb -and ($vb -cne 'monitor' -or @('', 'status', 'enable', 'disable') -ccontains $sb)) "${key} ($l): cita so comando que existe ($($m.Value))"
                     }
                 }
             }
-            Assert-True (-not ('agent-temp monitor disable' -cmatch 'agent-temp monitor (status|enable)\b')) 'controle positivo: um subverbo inexistente nao passa'
+            # V0.5 M4a: disable exists now; remove-history does not yet.
+            $subOk = { param([string]$S) @('', 'status', 'enable', 'disable') -ccontains $S }
+            Assert-True ((& $subOk 'disable') -and -not (& $subOk 'remove-history') -and $launcher.Contains("`$monSub -cne 'disable'")) 'controle positivo: disable aceito pelo lancador; um subverbo inexistente (remove-history) nao passa'
         } finally { Set-AtmLanguage -Requested $old; Reset-MonSeams }
     }
 
@@ -22485,7 +22615,7 @@ exit 0
             Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('-IntervalHours takes only one of these numbers of hours: 1, 2, 4, 6, 12, 24. Nothing was changed.')) "${al}: uso 2 ($($r.Exit))"
         }
         $r = & $launch 'monitor status -IntervalHours 6 -Lang en-US'
-        Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('Usage: agent-temp monitor status | agent-temp monitor enable [-IntervalHours 1|2|4|6|12|24]. Nothing was changed.')) "monitor status -IntervalHours 6: uso 2 ($($r.Exit))"
+        Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('Usage: agent-temp monitor status | agent-temp monitor enable [-IntervalHours 1|2|4|6|12|24] | agent-temp monitor disable. Nothing was changed.')) "monitor status -IntervalHours 6: uso 2 ($($r.Exit))"
         $r = & $launch 'recover list -IntervalHours 6 -Lang en-US'
         Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('recover does not take -IntervalHours. Nothing was changed.')) "recover recusa a opcao do enable: 2 ($($r.Exit))"
         $r = & $launch 'version -IntervalHours 6 -Lang en-US'
@@ -22499,7 +22629,7 @@ exit 0
         Assert-Eq (Get-AtmPathPresence $monRealFolder) $before 'pasta real do usuario inalterada'
     }
 
-    Test-Case 'V0.5 M3a' 'M3a (estatico): sem Schedule.Service no motor (o agendador so por Connect-AtmTaskScheduler); registrar so pelo enable, a definicao so pelo registro, o enable so pela CLI no verbo monitor e a execucao so pelo ponto de entrada; recusas, plano, frase e registro nessa ordem; nenhuma remocao de tarefa ou pasta no monitoramento; os auxiliares de outros motores declarados e so nas funcoes da tarefa; o caminho do coletor so nas bibliotecas do ponto de entrada; o ponto de entrada sem parametros, integridade antes de carregar, so ASCII e sem Write-Host; -IntervalHours so no monitor (e na recusa do recover); GUI e TUI sem as funcoes novas; nomes exatos na lista proibida da GUI; no AtmRequiredFiles; textos nos dois idiomas; a suite nunca registra tarefa real' {
+    Test-Case 'V0.5 M3a' 'M3a (estatico): sem Schedule.Service no motor (o agendador so por Connect-AtmTaskScheduler); registrar so pelo enable, a definicao so pelo registro, o enable so pela CLI no verbo monitor e a execucao so pelo ponto de entrada; recusas, plano, frase e registro nessa ordem; nenhuma remocao de tarefa ou pasta no monitoramento; os auxiliares de outros motores declarados e so nas funcoes da tarefa; o caminho do coletor so nas bibliotecas do ponto de entrada; o ponto de entrada sem parametros, integridade antes de carregar, so ASCII e sem Write-Host; -IntervalHours so no monitor (e na recusa do recover); GUI e TUI sem as funcoes novas; nomes exatos na lista proibida da GUI; no AtmRequiredFiles; textos nos dois idiomas; a area nunca registra tarefa real' {
         $monFile = Join-Path $srcDir 'lib\Engine.Monitor.ps1'
         $strip = { param([string]$T) [regex]::Replace([regex]::Replace($T, '(?s)<#.*?#>', ''), '(?m)#.*$', '') }
         $code = & $strip ([IO.File]::ReadAllText($monFile))
@@ -22509,11 +22639,15 @@ exit 0
         Assert-Eq (& $uniq 'New-AtmMonitorTaskDefinition') 'Engine.Monitor.ps1:Register-AtmMonitorTask' 'a definicao so pelo registro'
         Assert-Eq (& $uniq 'Invoke-AtmMonitorEnable') 'agent-temp.ps1:script' 'o enable so pela CLI'
         Assert-Eq (& $uniq 'Invoke-AtmMonitorEntry') 'agent-temp-monitor.ps1:script' 'a execucao do coletor so pelo ponto de entrada'
-        Assert-Eq (& $uniq 'Get-AtmMonitorTaskState') 'agent-temp.ps1:script,Engine.Monitor.ps1:Invoke-AtmMonitorEnable' 'o estado: version, monitor status e o enable'
+        Assert-Eq (& $uniq 'Get-AtmMonitorTaskState') 'agent-temp.ps1:script,Engine.Monitor.ps1:Invoke-AtmMonitorDisable,Engine.Monitor.ps1:Invoke-AtmMonitorEnable' 'o estado: version, monitor status, o enable e o disable (V0.5 M4a)'
+        Assert-Eq (& $uniq 'Unregister-AtmMonitorTask') 'Engine.Monitor.ps1:Invoke-AtmMonitorDisable' 'remover so pelo disable (V0.5 M4a)'
+        Assert-Eq (& $uniq 'Invoke-AtmMonitorDisable') 'agent-temp.ps1:script' 'o disable so pela CLI (V0.5 M4a)'
         $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
         $enCall = 'Invoke-AtmMonitorEnable' + ' -'
         $iM = $cli.IndexOf("        'monitor' {"); $iV = $cli.IndexOf("        'version' {"); $iE = $cli.IndexOf($enCall)
         Assert-True ($iM -gt 0 -and $iE -gt $iM -and $iE -lt $iV -and $cli.IndexOf($enCall, $iE + 1) -lt 0) 'o enable uma vez, so no verbo monitor'
+        $disCall = 'Invoke-AtmMonitorDisable' + ' -'; $iD = $cli.IndexOf($disCall)
+        Assert-True ($iD -gt $iM -and $iD -lt $iV -and $cli.IndexOf($disCall, $iD + 1) -lt 0) 'o disable uma vez, so no verbo monitor (V0.5 M4a)'
         $blk = $null; $ivBlocks = New-Object System.Collections.Generic.List[string]
         foreach ($ln in @($cli -split "`r?`n")) {
             if ($ln -cmatch "^        '([a-z-]+)' \{\s*$") { $blk = $Matches[1] }
@@ -22524,6 +22658,15 @@ exit 0
         $en = & $strip (Get-ApFnBody $monFile 'Invoke-AtmMonitorEnable')
         $ix = @(@('if (-not $script:AtmMonitoringEnabled)', "'MONITOR_INTERVAL_INVALID'", "'MONITOR_TASK_REQUIRES_STANDARD_TOKEN'", "'MONITOR_TASK_NOT_INSTALLED'", "'SEM_APRESENTACAO_OU_CONFIRMACAO'", "'CONSOLE_NOT_OBSERVED'", 'Get-AtmMonitorTaskState', "'MONITOR_TASK_UNREADABLE'", "'MONITOR_TASK_EXISTS'", '& $PlanPresenter', '& $ConfirmationReader', 'Register-AtmMonitorTask -', "'MONITOR_TASK_NOT_VERIFIED'") | ForEach-Object { $en.IndexOf($_) })
         Assert-True (@($ix | Where-Object { $_ -lt 0 }).Count -eq 0 -and ((@($ix | Sort-Object) -join ',') -ceq ($ix -join ','))) "enable: trava, intervalo, token, instalacao, apresentador, console, estado, existente, plano, frase, registro e releitura nessa ordem ($($ix -join ','))"
+        # V0.5 M4a: monitor disable and its removal, in the order of the round; no standard token (removing one's own task
+        # elevates nothing).
+        $dis = & $strip (Get-ApFnBody $monFile 'Invoke-AtmMonitorDisable')
+        $ix = @(@('if (-not $script:AtmMonitoringEnabled)', "'SEM_APRESENTACAO_OU_CONFIRMACAO'", "'CONSOLE_NOT_OBSERVED'", 'Get-AtmMonitorTaskState', "'MONITOR_TASK_ABSENT'", "'MONITOR_TASK_UNREADABLE'", "'MONITOR_TASK_DIVERGENT'", '& $PlanPresenter', '& $ConfirmationReader', 'Unregister-AtmMonitorTask -', "'MONITOR_TASK_NOT_VERIFIED'", '$st.Done = $true', '$st.Folder = Remove-AtmEmptyTaskFolder') | ForEach-Object { $dis.IndexOf($_) })
+        Assert-True (@($ix | Where-Object { $_ -lt 0 }).Count -eq 0 -and ((@($ix | Sort-Object) -join ',') -ceq ($ix -join ','))) "disable: trava, apresentador, console, estado, ausente, ilegivel, divergente, plano, frase, remocao, releitura ABSENT e so entao a pasta vazia nessa ordem ($($ix -join ','))"
+        Assert-True (-not $dis.Contains('Test-AtmMonitorStandardToken') -and -not $dis.Contains('STANDARD_TOKEN') -and [regex]::Matches($dis, 'Remove-AtmEmptyTaskFolder').Count -eq 1 -and $dis.Contains("& `$ConfirmationReader `$script:AtmMonitorDisablePhrase 'monitor-disable'")) 'disable: sem exigir token padrao; a pasta vazia uma vez; a sua propria frase'
+        $ur = & $strip (Get-ApFnBody $monFile 'Unregister-AtmMonitorTask')
+        $ix = @(@('if (-not $script:AtmMonitoringEnabled)', 'Get-AtmMonitorTaskObject', "'MONITOR_TASK_ABSENT'", 'Test-AtmMonitorTaskMatch', "'MONITOR_TASK_DIVERGENT'", '$found.Folder.DeleteTask($name, 0)') | ForEach-Object { $ur.IndexOf($_) })
+        Assert-True (@($ix | Where-Object { $_ -lt 0 }).Count -eq 0 -and ((@($ix | Sort-Object) -join ',') -ceq ($ix -join ','))) "remocao: trava, releitura, ausente, conferencia exata, divergente e DeleteTask nessa ordem ($($ix -join ','))"
         $rg = & $strip (Get-ApFnBody $monFile 'Register-AtmMonitorTask')
         $ix = @(@('if (-not $script:AtmMonitoringEnabled)', 'Get-AtmMonitorTaskObject', "'MONITOR_TASK_EXISTS'", 'New-AtmMonitorTaskDefinition', '.CreateFolder(', '.RegisterTaskDefinition($name, $td, 2, $Sid, $null, 3, $null)') | ForEach-Object { $rg.IndexOf($_) })
         Assert-True (@($ix | Where-Object { $_ -lt 0 }).Count -eq 0 -and ((@($ix | Sort-Object) -join ',') -ceq ($ix -join ','))) "registro: trava, leitura, existente, definicao, pasta e TASK_CREATE com o SID, sem senha e logon interativo nessa ordem ($($ix -join ','))"
@@ -22531,14 +22674,23 @@ exit 0
         foreach ($s in @('$td.Principal.UserId = $Sid', '$td.Principal.LogonType = 3', '$td.Principal.RunLevel = 0', '$td.Triggers.Create(1)', "`$tr.Repetition.Interval = ('PT{0}H' -f `$IntervalHours)", '$s.StartWhenAvailable = $true', '$s.DisallowStartIfOnBatteries = $false', '$s.StopIfGoingOnBatteries = $false', '$s.ExecutionTimeLimit = $script:AtmMonitorTaskTimeLimit', '$s.MultipleInstances = 2', '$td.Actions.Create(0)')) { Assert-True $def.Contains($s) "definicao: $s" }
         Assert-True ([regex]::Matches($def, '\.Actions\.Create\(').Count -eq 1 -and [regex]::Matches($def, '\.Triggers\.Create\(').Count -eq 1 -and -not $def.Contains('Repetition.Duration')) 'uma acao, um gatilho, duracao indefinida'
         $mon = [IO.File]::ReadAllText($monFile)
-        foreach ($rx in @("(?m)^\`$script:AtmMonitorTaskFolder = '\\AgentTempManager'\r?$", "(?m)^\`$script:AtmMonitorTaskPrefix = 'Monitor-'\r?$", '(?m)^\$script:AtmMonitorTaskIntervals = @\(1, 2, 4, 6, 12, 24\)\r?$', '(?m)^\$script:AtmMonitorTaskDefaultInterval = 6\r?$', "(?m)^\`$script:AtmMonitorTaskTimeLimit = 'PT1H'\r?$", "(?m)^\`$script:AtmMonitorEnablePhrase = 'ATIVAR MONITORAMENTO'\r?$")) { Assert-True ($mon -match $rx) "fixo no codigo: $rx" }
+        foreach ($rx in @("(?m)^\`$script:AtmMonitorTaskFolder = '\\AgentTempManager'\r?$", "(?m)^\`$script:AtmMonitorTaskPrefix = 'Monitor-'\r?$", '(?m)^\$script:AtmMonitorTaskIntervals = @\(1, 2, 4, 6, 12, 24\)\r?$', '(?m)^\$script:AtmMonitorTaskDefaultInterval = 6\r?$', "(?m)^\`$script:AtmMonitorTaskTimeLimit = 'PT1H'\r?$", "(?m)^\`$script:AtmMonitorEnablePhrase = 'ATIVAR MONITORAMENTO'\r?$", "(?m)^\`$script:AtmMonitorDisablePhrase = 'DESATIVAR MONITORAMENTO'\r?$")) { Assert-True ($mon -match $rx) "fixo no codigo: $rx" }
         Assert-True ((Get-ApFnBody $monFile 'Get-AtmMonitorTaskName').Contains("-cnotmatch '^MonitorTest-[0-9a-f]{8}\z'")) 'o nome de teste so na forma exata'
         $epFile = Join-Path $srcDir 'bin\agent-temp-monitor.ps1'
         $epText = [IO.File]::ReadAllText($epFile)
-        foreach ($n in @('lib\Engine.Monitor.ps1', 'bin\agent-temp-monitor.ps1', 'lib\Report.ps1')) {
+        # V0.5 M4a: the monitoring removes its task in Unregister-AtmMonitorTask only (DeleteTask once, the only
+        # Unregister- of the engine, called once by monitor disable), and never a folder itself (the helper of the
+        # isolation engine does); the entry point and the presentation remove nothing and call no removal.
+        $monCode = & $strip ([IO.File]::ReadAllText($monFile))
+        Assert-True ([regex]::Matches($monCode, 'DeleteTask').Count -eq 1 -and (& $strip (Get-ApFnBody $monFile 'Unregister-AtmMonitorTask')).Contains('.DeleteTask(')) 'Engine.Monitor: DeleteTask uma vez, so em Unregister-AtmMonitorTask'
+        Assert-Eq (@([regex]::Matches($monCode, 'Unregister-[A-Za-z]+') | ForEach-Object { $_.Value }) -join ',') 'Unregister-AtmMonitorTask,Unregister-AtmMonitorTask' 'Engine.Monitor: o unico Unregister- e a sua remocao (a definicao e a chamada do disable)'
+        foreach ($pat in @('DeleteFolder', 'Unregister-ScheduledTask', 'Unregister-AtmAutoPurge', 'schtasks')) { Assert-True (-not $monCode.Contains($pat)) "lib\Engine.Monitor.ps1 sem '$pat'" }
+        foreach ($n in @('bin\agent-temp-monitor.ps1', 'lib\Report.ps1')) {
             $t = & $strip ([IO.File]::ReadAllText((Join-Path $srcDir $n)))
-            foreach ($pat in @('DeleteTask', 'DeleteFolder', 'Unregister-ScheduledTask', 'Unregister-Atm', 'schtasks')) { Assert-True (-not $t.Contains($pat)) "$n sem '$pat' (nenhuma remocao de tarefa ou pasta no monitoramento)" }
+            foreach ($pat in @('DeleteTask', 'DeleteFolder', 'Unregister-ScheduledTask', 'Unregister-Atm', 'schtasks', 'Remove-AtmEmptyTaskFolder', 'Invoke-AtmMonitorDisable')) { Assert-True (-not $t.Contains($pat)) "$n sem '$pat' (o ponto de entrada e a apresentacao nao removem nada)" }
         }
+        $entryBody = & $strip (Get-ApFnBody $monFile 'Invoke-AtmMonitorEntry')
+        foreach ($pat in @('Unregister-', 'Remove-AtmEmptyTaskFolder', 'Invoke-AtmMonitorDisable', 'DeleteTask', 'DeleteFolder')) { Assert-True (-not $entryBody.Contains($pat)) "Invoke-AtmMonitorEntry sem '$pat'" }
         # Every command the engine calls that another file of lib defines: the audit's and the messages' (the entry point
         # loads them), plus the declared helpers of the isolation, clean and diagnose engines, each only in the task's
         # functions (never reached by the collector's path).
@@ -22547,8 +22699,8 @@ exit 0
             $t = [Management.Automation.Language.Parser]::ParseFile($fi.FullName, [ref]$null, [ref]$null)
             foreach ($d in @($t.FindAll({ param($a) $a -is [Management.Automation.Language.FunctionDefinitionAst] }, $true))) { if (-not $defsAll.ContainsKey($d.Name)) { $defsAll[$d.Name] = [pscustomobject]@{ File = $fi.Name; Ast = $d } } }
         }
-        $declared = @{ 'Connect-AtmTaskScheduler' = 'Engine.Isolate.ps1'; 'Get-AtmTaskSchedulerCode' = 'Engine.Isolate.ps1'; 'Test-AtmTaskNotFound' = 'Engine.Isolate.ps1'; 'Resolve-AtmTaskUserSid' = 'Engine.Isolate.ps1'; 'Get-AtmEngineConsoleObservation' = 'Engine.Clean.ps1'; 'Get-AtmIdentityState' = 'Engine.Diagnose.ps1' }
-        $taskFns = @('Get-AtmMonitorTaskObject', 'Test-AtmMonitorTaskMatch', 'Get-AtmMonitorTaskState', 'Register-AtmMonitorTask', 'Test-AtmMonitorStandardToken', 'Invoke-AtmMonitorEnable')
+        $declared = @{ 'Connect-AtmTaskScheduler' = 'Engine.Isolate.ps1'; 'Get-AtmTaskSchedulerCode' = 'Engine.Isolate.ps1'; 'Test-AtmTaskNotFound' = 'Engine.Isolate.ps1'; 'Resolve-AtmTaskUserSid' = 'Engine.Isolate.ps1'; 'Remove-AtmEmptyTaskFolder' = 'Engine.Isolate.ps1'; 'Get-AtmEngineConsoleObservation' = 'Engine.Clean.ps1'; 'Get-AtmIdentityState' = 'Engine.Diagnose.ps1' }
+        $taskFns = @('Get-AtmMonitorTaskObject', 'Test-AtmMonitorTaskMatch', 'Get-AtmMonitorTaskState', 'Register-AtmMonitorTask', 'Test-AtmMonitorStandardToken', 'Invoke-AtmMonitorEnable', 'Unregister-AtmMonitorTask', 'Invoke-AtmMonitorDisable')
         $monAst = [Management.Automation.Language.Parser]::ParseFile($monFile, [ref]$null, [ref]$null)
         $foreign = @{}; $where = New-Object System.Collections.Generic.List[string]
         foreach ($c in @($monAst.FindAll({ param($a) $a -is [Management.Automation.Language.CommandAst] }, $true))) {
@@ -22589,12 +22741,12 @@ exit 0
         # GUI and TUI: no new function; the GUI's forbidden list has the exact names (never a prefix).
         foreach ($n in @('lib\Tui.ps1', 'lib\Gui.ps1', 'lib\GuiModel.ps1')) {
             $t = [IO.File]::ReadAllText((Join-Path $srcDir $n))
-            foreach ($fn in @('Invoke-AtmMonitorEnable', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'Invoke-AtmMonitorEntry', 'Get-AtmMonitorTaskState', 'Get-AtmMonitorTaskLines', 'Show-AtmMonitorEnablePlan', 'Show-AtmMonitorEnableResult')) { Assert-True (-not $t.Contains($fn)) "$n sem $fn" }
+            foreach ($fn in @('Invoke-AtmMonitorEnable', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'Invoke-AtmMonitorEntry', 'Get-AtmMonitorTaskState', 'Get-AtmMonitorTaskLines', 'Show-AtmMonitorEnablePlan', 'Show-AtmMonitorEnableResult', 'Invoke-AtmMonitorDisable', 'Unregister-AtmMonitorTask', 'Remove-AtmEmptyTaskFolder', 'Show-AtmMonitorDisablePlan', 'Show-AtmMonitorDisableResult', 'Get-AtmTaskFolderLine')) { Assert-True (-not $t.Contains($fn)) "$n sem $fn" }
         }
-        foreach ($fn in @('Invoke-AtmMonitorEnable', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'Invoke-AtmMonitorEntry')) { Assert-True ($guiForbidden -ccontains $fn) "lista proibida da GUI: $fn" }
+        foreach ($fn in @('Invoke-AtmMonitorEnable', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'Invoke-AtmMonitorEntry', 'Invoke-AtmMonitorDisable', 'Unregister-AtmMonitorTask', 'Remove-AtmEmptyTaskFolder')) { Assert-True ($guiForbidden -ccontains $fn) "lista proibida da GUI: $fn" }
         Assert-True ($guiForbidden -cnotcontains 'AtmMonitor' -and $guiForbidden -cnotcontains 'Get-AtmMonitor') 'lista proibida da GUI sem prefixo do monitoramento'
         $rep = & $strip ([IO.File]::ReadAllText((Join-Path $srcDir 'lib\Report.ps1')))
-        foreach ($fn in @('Invoke-AtmMonitorEnable', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'Invoke-AtmMonitorEntry', 'Get-AtmMonitorTaskState')) { Assert-True (-not $rep.Contains($fn)) "apresentacao sem chamar $fn (so mostra o que recebe)" }
+        foreach ($fn in @('Invoke-AtmMonitorEnable', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'Invoke-AtmMonitorEntry', 'Get-AtmMonitorTaskState', 'Invoke-AtmMonitorDisable', 'Unregister-AtmMonitorTask', 'Remove-AtmEmptyTaskFolder')) { Assert-True (-not $rep.Contains($fn)) "apresentacao sem chamar $fn (so mostra o que recebe)" }
         # The texts of the M3a in both languages, with the same fields.
         $ph = { param([string]$T) (@([regex]::Matches($T, '\{\d\}') | ForEach-Object { $_.Value } | Sort-Object -Unique) -join ',') }
         $mk = { param($l) @($script:AtmMessages[$l].Keys | Where-Object { $_ -like 'mon.task.*' -or $_ -like 'mon.plan.*' -or $_ -like 'monep.*' }) }
@@ -22603,7 +22755,7 @@ exit 0
             Assert-True ($script:AtmMessages['en-US'].ContainsKey($key) -and $script:AtmMessages['pt-BR'].ContainsKey($key)) "$key nos dois idiomas"
             Assert-Eq (& $ph $script:AtmMessages['pt-BR'][$key]) (& $ph $script:AtmMessages['en-US'][$key]) "${key}: mesmos campos nos dois idiomas"
         }
-        # The suite never registers a real task: the real scheduler object of this area only builds definitions, no case
+        # This area never registers a real task: the real scheduler object of this area only builds definitions, no case
         # creates tasks only on the CI, and every case that reaches a registration with the gate open shadows the scheduler.
         $self = [IO.File]::ReadAllText((Join-Path $testsDir 'Run-Tests.ps1'))
         $a0 = $self.IndexOf('-----' + ' V0.5 M3a ('); $a1 = $self.IndexOf('-----' + ' scale')
@@ -22683,7 +22835,7 @@ exit 0
             Assert-True (-not (Test-Path -LiteralPath $sum)) "$leg`: nenhum resumo criado"
         }
     }
-    Test-Case 'V0.5 M3b' 'M3b (estatico): harness so da CI - fora do pacote ($ciOnly antes da exclusao; o e2e confere o pacote e roda as pernas A e B depois do R6 e antes do X2, com o usuario padrao existente, sem remover tarefa nem criar conta); guarda antes de tudo; so a trava do monitoramento, na memoria do proprio processo, depois do motor instalado, e so a costura do nome de teste; toda chamada ao agendador so dentro dos envoltorios, cada um com Assert-TestName como primeira instrucao; DeleteTask uma vez, no Remove-TestTask, sobre o nome de teste; nada de definicao, tipo de logon, conta, senha ou escrita alem do resumo; resumo so por Protect-Text; prazo do run once declarado; src sem referencia' {
+    Test-Case 'V0.5 M3b' 'M3b (estatico): harness so da CI - fora do pacote ($ciOnly antes da exclusao; o e2e confere o pacote e roda as pernas A e B depois do R6 e antes do X2, com o usuario padrao existente, sem remover tarefa nem criar conta); guarda antes de tudo; so a trava do monitoramento, na memoria do proprio processo, depois do motor instalado, e so a costura do nome de teste; toda chamada ao agendador so dentro dos envoltorios, cada um com Assert-TestName como primeira instrucao; DeleteTask uma vez, no Remove-TestTask, sobre o nome de teste; V0.5 M4a: a tarefa removida pela remocao do produto e a pasta pelo helper do produto, depois da releitura ABSENT, e o Remove-TestTask chamado uma vez, so no finally (rede de seguranca); nada de definicao, pasta, tipo de logon, conta, senha ou escrita alem do resumo; resumo so por Protect-Text; prazo do run once declarado; src sem referencia' {
         $root = Split-Path -Parent $testsDir
         $h = [IO.File]::ReadAllText((Join-Path $testsDir 'e2e\Invoke-MonitorE2E.ps1'))
         $tokens = $null; $perr = $null
@@ -22716,7 +22868,7 @@ exit 0
         $fns = @{}
         foreach ($f in @($ast.FindAll({ param($a) $a -is [Management.Automation.Language.FunctionDefinitionAst] }, $true))) { $fns[$f.Name] = $f }
         Assert-True ($fns.ContainsKey('Assert-TestName') -and $fns['Assert-TestName'].Extent.Text.Contains("-cmatch '^MonitorTest-[0-9a-f]{8}\z'") -and $fns['Assert-TestName'].Extent.Text.Contains('[string]$script:AtmMonitorTaskNameOverride -ceq [string]$script:testName')) 'Assert-TestName: a forma exata e o nome desta execucao como o do motor'
-        $wrappers = @('Get-TestTask', 'Get-TestState', 'Invoke-TestRegister', 'Invoke-TestEnable', 'Invoke-TestTaskRun', 'Remove-TestTask', 'Get-TestFolderListing', 'Invoke-TestCliEnable')
+        $wrappers = @('Get-TestTask', 'Get-TestState', 'Invoke-TestRegister', 'Invoke-TestEnable', 'Invoke-TestTaskRun', 'Remove-TestTask', 'Get-TestFolderListing', 'Invoke-TestCliEnable', 'Invoke-TestUnregister', 'Invoke-TestFolderCleanup')
         foreach ($w in $wrappers) {
             Assert-True $fns.ContainsKey($w) "envoltorio $w encontrado"
             $first = @($fns[$w].Body.EndBlock.Statements)[0]
@@ -22724,7 +22876,7 @@ exit 0
         }
         # Every call to the scheduler (the engine's task functions, the scheduler objects' methods and the CLI's enable) is
         # inside a wrapper, so after its Assert-TestName.
-        $schedPats = @(('Connect-AtmTask' + 'Scheduler'), ('Register-AtmMonitor' + 'Task'), ('Get-AtmMonitor' + 'TaskState'), ('Invoke-AtmMonitor' + 'Enable'), ('Get-AtmMonitor' + 'TaskObject'), '\.Run\(', '\.DeleteTask\(', '\.GetTasks?\(', '\.GetFolder\(', 'monitor enable -Lang')
+        $schedPats = @(('Connect-AtmTask' + 'Scheduler'), ('Register-AtmMonitor' + 'Task'), ('Get-AtmMonitor' + 'TaskState'), ('Invoke-AtmMonitor' + 'Enable'), ('Get-AtmMonitor' + 'TaskObject'), ('Unregister-AtmMonitor' + 'Task'), ('Remove-AtmEmpty' + 'TaskFolder'), ('Invoke-AtmMonitor' + 'Disable'), '\.Run\(', '\.DeleteTask\(', '\.GetTasks?\(', '\.GetFolders?\(', 'monitor enable -Lang')
         $spans = @($wrappers | ForEach-Object { , @($fns[$_].Extent.StartOffset, $fns[$_].Extent.EndOffset) })
         $outside = New-Object System.Collections.Generic.List[string]; $count = 0
         foreach ($p in $schedPats) {
@@ -22738,6 +22890,18 @@ exit 0
         # The removal: once, in Remove-TestTask, after the check, of the test name only.
         $rt = $fns['Remove-TestTask'].Extent.Text
         Assert-True ([regex]::Matches($code, '\.DeleteTask\(').Count -eq 1 -and $rt.Contains('.DeleteTask($script:testName, 0)') -and $rt.IndexOf('Assert-TestName') -lt $rt.IndexOf('.DeleteTask(') -and $rt.Contains('[string]$o.Task.Name -ceq $script:testName')) 'DeleteTask uma vez, no Remove-TestTask, depois da conferencia, sobre o nome de teste'
+        # V0.5 M4a: the test task is removed by the product (Unregister-AtmMonitorTask, through its wrapper), then the
+        # product's empty-folder helper runs, only after the read-back ABSENT; Remove-TestTask is called once, only in the
+        # finally of the legs (the safety net).
+        $calls = @($ast.FindAll({ param($a) $a -is [Management.Automation.Language.CommandAst] -and $a.GetCommandName() -ceq 'Remove-TestTask' }, $true))
+        $fin = @($ast.FindAll({ param($a) $a -is [Management.Automation.Language.TryStatementAst] -and $null -ne $a.Finally }, $true) | Where-Object { $_.Body.Extent.Text.Contains('Invoke-OwnTaskCycle') })
+        Assert-True ($calls.Count -eq 1 -and $fin.Count -eq 1 -and $calls[0].Extent.StartOffset -ge $fin[0].Finally.Extent.StartOffset -and $calls[0].Extent.EndOffset -le $fin[0].Finally.Extent.EndOffset) "Remove-TestTask chamado uma vez, so no finally das pernas ($($calls.Count) chamada(s), $($fin.Count) finally)"
+        $cyc = $fns['Invoke-OwnTaskCycle'].Extent.Text
+        # Each piece searched after the previous one.
+        $ix = @(); $at = 0
+        foreach ($piece in @('Invoke-TestUnregister $sid $ep', "Case `"`$Prefix-absent-after`"", 'Get-TestState', "Case `"`$Prefix-folder`"", "Assert (`$summary.cases[`"`$Prefix-absent-after`"].status -eq 'PASS')", 'Invoke-TestFolderCleanup')) { $at = $(if ($at -ge 0) { $cyc.IndexOf($piece, $at) } else { -1 }); $ix += $at }
+        Assert-True (@($ix | Where-Object { $_ -lt 0 }).Count -eq 0 -and [regex]::Matches($cyc, 'Invoke-TestFolderCleanup').Count -eq 1 -and [regex]::Matches($cyc, 'Invoke-TestUnregister').Count -eq 1) "remocao do produto, releitura ABSENT e so entao a pasta vazia do produto, uma vez cada ($($ix -join ','))"
+        Assert-True ($fns['Invoke-TestUnregister'].Extent.Text.Contains('Unregister-AtmMonitor' + 'Task -Sid $Sid -EntryPoint $EntryPoint') -and $fns['Invoke-TestFolderCleanup'].Extent.Text.Contains('(Remove-AtmEmpty' + 'TaskFolder)')) 'os envoltorios chamam a remocao e o helper do produto, sem argumento de pasta'
         # Nothing of a definition, a folder, an account, a password, a logon type or a file other than the summary.
         foreach ($pat in @(('Schedule.' + 'Service'), ('-Com' + 'Object'), ('RegisterTask' + 'Definition'), ('.New' + 'Task('), ('Create' + 'Folder'), ('Delete' + 'Folder'), ('sch' + 'tasks'), ('Register-Scheduled' + 'Task'), ('Unregister-Scheduled' + 'Task'),
                 ('New-Local' + 'User'), ('Add-LocalGroup' + 'Member'), ('PS' + 'Credential'), ('-Cred' + 'ential'), ('Remove-' + 'Item'), ('.Delete' + '('), ('Set-' + 'Content'), ('Add-' + 'Content'), ('Out-' + 'File'), ('Append' + 'AllText'), ('WriteAll' + 'Bytes'),
@@ -22764,9 +22928,349 @@ exit 0
         Assert-True ($monSteps.Contains('-Credential $cred -LoadUserProfile') -and $monSteps.Contains('-File `"$copy`" -Leg A') -and $monSteps.Contains("'Invoke-MonitorE2E.ps1') -Leg B")) 'e2e: perna A com o usuario padrao existente, perna B na conta do runner'
         foreach ($f in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File)) { Assert-True (-not ([IO.File]::ReadAllText($f.FullName)).Contains('Invoke-MonitorE2E')) "$($f.Name) sem referencia ao harness" }
     }
-    Test-Case 'V0.5 M3b' 'M3b execucao real do harness (tarefa de teste registrada, relida, rodada uma vez e removida no agendador real): NAO_TESTADO nesta suite' {
+    Test-Case 'V0.5 M3b' 'M3b execucao real do harness (tarefa de teste registrada, relida, rodada uma vez, removida pela remocao do produto e seguida pela pasta vazia do produto no agendador real): NAO_TESTADO nesta suite' {
         $script:caseSkipped = $true
         $script:caseNote = 'so na CI, no install e2e (perna A usuario padrao, perna B elevada), em runners descartaveis; nesta suite so o caminho de recusa (que nao toca nada) e os estaticos'
+    }
+
+    # ------------------------------------------------------------------ V0.5 M4a (preventive monitoring: monitor disable and the empty task folder, gate closed, ADR-0017)
+    # The suite never removes a real task or folder here: every case that reaches the scheduler shadows
+    # Connect-AtmTaskScheduler with a fake scheduler in memory (New-M4Service), checked by the static of this area. The
+    # real scheduler for the removal is the M3b harness (CI, both legs), and for the folder through unschedule-autopurge
+    # the P6b case of the CI. The monitoring gate is opened inside this process only, around each call, and closed again.
+    function New-M4Service {
+        # A fake Task Scheduler in memory, as $script:m4Svc (state and counters in $script:m4k): the root and the
+        # product's folder (present or not) with a task table (name -> task), other tasks (Other: always listed; Hidden:
+        # listed only with TASK_ENUM_HIDDEN, flag 1) and subfolders. ReadHr makes every read fail, DeleteHr the task's
+        # removal, CountHr the listing, DeleteFolderHr the folder's removal; Keep makes DeleteTask leave the task.
+        param([bool]$Folder = $false, $Task = $null, [string]$Name = 'MonitorTest-0a1b2c3d', [int]$Other = 0, [int]$Hidden = 0, [int]$Sub = 0)
+        $script:m4k = @{ FolderExists = $Folder; Tasks = @{}; Other = $Other; Hidden = $Hidden; Sub = $Sub; Connects = 0; Deletes = 0; DeletedName = $null; DeleteFlags = $null; FolderDeletes = 0; DeletedFolder = $null; FolderFlags = $null; TaskEnumFlags = @(); SubEnumFlags = @()
+            ReadHr = 0; DeleteHr = 0; CountHr = 0; DeleteFolderHr = 0; Keep = $false }
+        if ($null -ne $Task) { $script:m4k.Tasks[$Name] = $Task }
+        $f = [pscustomobject]@{ Path = '\AgentTempManager' }
+        $f | Add-Member -MemberType ScriptMethod -Name GetTask -Value {
+            param($n)
+            if ($script:m4k.ReadHr) { [Runtime.InteropServices.Marshal]::ThrowExceptionForHR($script:m4k.ReadHr) }
+            if (-not $script:m4k.Tasks.ContainsKey([string]$n)) { [Runtime.InteropServices.Marshal]::ThrowExceptionForHR(-2147024894) }
+            return $script:m4k.Tasks[[string]$n]
+        }
+        $f | Add-Member -MemberType ScriptMethod -Name DeleteTask -Value {
+            param($n, $flags)
+            $script:m4k.Deletes++; $script:m4k.DeletedName = [string]$n; $script:m4k.DeleteFlags = $flags
+            if ($script:m4k.DeleteHr) { [Runtime.InteropServices.Marshal]::ThrowExceptionForHR($script:m4k.DeleteHr) }
+            if (-not $script:m4k.Keep) { $script:m4k.Tasks.Remove([string]$n) }
+        }
+        $f | Add-Member -MemberType ScriptMethod -Name GetTasks -Value {
+            param($flags)
+            $script:m4k.TaskEnumFlags += @($flags)
+            if ($script:m4k.CountHr) { [Runtime.InteropServices.Marshal]::ThrowExceptionForHR($script:m4k.CountHr) }
+            return [pscustomobject]@{ Count = ($script:m4k.Tasks.Count + $script:m4k.Other + $(if (([int]$flags -band 1) -eq 1) { $script:m4k.Hidden } else { 0 })) }
+        }
+        $f | Add-Member -MemberType ScriptMethod -Name GetFolders -Value {
+            param($flags)
+            $script:m4k.SubEnumFlags += @($flags)
+            return [pscustomobject]@{ Count = $script:m4k.Sub }
+        }
+        $root = [pscustomobject]@{ Path = '\' }
+        $root | Add-Member -MemberType ScriptMethod -Name DeleteFolder -Value {
+            param($n, $flags)
+            $script:m4k.FolderDeletes++; $script:m4k.DeletedFolder = [string]$n; $script:m4k.FolderFlags = $flags
+            if ($script:m4k.DeleteFolderHr) { [Runtime.InteropServices.Marshal]::ThrowExceptionForHR($script:m4k.DeleteFolderHr) }
+            $script:m4k.FolderExists = $false
+        }
+        $script:m4Folder = $f; $script:m4Root = $root
+        $svc = [pscustomobject]@{ Fake = $true }
+        $svc | Add-Member -MemberType ScriptMethod -Name GetFolder -Value {
+            param($p)
+            if ($script:m4k.ReadHr) { [Runtime.InteropServices.Marshal]::ThrowExceptionForHR($script:m4k.ReadHr) }
+            if ($p -ceq '\') { return $script:m4Root }
+            if (-not $script:m4k.FolderExists) { [Runtime.InteropServices.Marshal]::ThrowExceptionForHR(-2147024894) }
+            return $script:m4Folder
+        }
+        $script:m4Svc = $svc
+        return $svc
+    }
+
+    Test-Case 'V0.5 M4a' 'M4a: pasta vazia (agendador falso) - so a constante do produto; ausente: ABSENT sem tentar; vazia (GetTasks(1) e GetFolders(0)): REMOVED com um DeleteFolder; tarefa visivel, tarefa oculta (so com a flag 1) ou subpasta: NOT_EMPTY sem tentar e so com a contagem; DeleteFolder recusado (nao vazia para o agendador, acesso negado): KEPT com o codigo, sem nova tentativa; contagem ou leitura ilegivel: KEPT com o codigo, sem tentar; nunca remove tarefa' {
+        function Connect-AtmTaskScheduler { $script:m4k.Connects++; return $script:m4Svc }
+        $none = { $script:m4k.Deletes -eq 0 }
+        $null = New-M4Service
+        $f = Remove-AtmEmptyTaskFolder
+        Assert-True ([string]$f.State -ceq 'ABSENT' -and $null -eq $f.Code -and $script:m4k.FolderDeletes -eq 0 -and (& $none)) "sem a pasta: ABSENT, nada tentado ($($f.State))"
+        $null = New-M4Service -Folder $true
+        $f = Remove-AtmEmptyTaskFolder
+        Assert-True ([string]$f.State -ceq 'REMOVED' -and $null -eq $f.Code -and $f.Tasks -eq 0 -and $f.Folders -eq 0 -and $script:m4k.FolderDeletes -eq 1 -and $script:m4k.DeletedFolder -ceq 'AgentTempManager' -and $script:m4k.FolderFlags -eq 0 -and -not $script:m4k.FolderExists -and (& $none)) "vazia: REMOVED, um DeleteFolder da constante do produto ($($f.State) $($script:m4k.DeletedFolder))"
+        Assert-True ((@($script:m4k.TaskEnumFlags) -join ',') -ceq '1' -and (@($script:m4k.SubEnumFlags) -join ',') -ceq '0') "contagem com GetTasks(1) (inclusive ocultas) e GetFolders(0) ($(@($script:m4k.TaskEnumFlags) -join ',') / $(@($script:m4k.SubEnumFlags) -join ','))"
+        foreach ($c in @(@{ Other = 1; Hidden = 0; Sub = 0; T = 1; F = 0; Why = 'tarefa visivel' }, @{ Other = 0; Hidden = 1; Sub = 0; T = 1; F = 0; Why = 'tarefa oculta (so com a flag 1)' }, @{ Other = 0; Hidden = 0; Sub = 2; T = 0; F = 2; Why = 'subpastas' })) {
+            $null = New-M4Service -Folder $true -Other $c.Other -Hidden $c.Hidden -Sub $c.Sub
+            $f = Remove-AtmEmptyTaskFolder
+            Assert-True ([string]$f.State -ceq 'NOT_EMPTY' -and $f.Tasks -eq $c.T -and $f.Folders -eq $c.F -and $null -eq $f.Code -and $script:m4k.FolderDeletes -eq 0 -and $script:m4k.FolderExists -and (& $none)) "$($c.Why): NOT_EMPTY, nada tentado ($($f.State) $($f.Tasks)/$($f.Folders))"
+            Assert-True (-not (($f | Out-String).Contains('MonitorTest')) -and -not (($f | Out-String).Contains('AutoPurge'))) "$($c.Why): o resultado so tem contagens, nenhum nome"
+        }
+        foreach ($hr in @(-2147024751, -2147024891)) {
+            $null = New-M4Service -Folder $true
+            $script:m4k.DeleteFolderHr = $hr
+            $f = Remove-AtmEmptyTaskFolder
+            $want = 'TASK_SCHEDULER_0x{0:X8}' -f $hr
+            Assert-True ([string]$f.State -ceq 'KEPT' -and [string]$f.Code -ceq $want -and $script:m4k.FolderDeletes -eq 1 -and $script:m4k.FolderExists -and (& $none)) "DeleteFolder recusado pelo agendador: KEPT com $want, uma unica tentativa ($($f.State) $($f.Code), $($script:m4k.FolderDeletes))"
+        }
+        $null = New-M4Service -Folder $true
+        $script:m4k.CountHr = -2147024891
+        $f = Remove-AtmEmptyTaskFolder
+        Assert-True ([string]$f.State -ceq 'KEPT' -and [string]$f.Code -ceq 'TASK_SCHEDULER_0x80070005' -and $script:m4k.FolderDeletes -eq 0 -and (& $none)) "contagem ilegivel: KEPT com o codigo, sem tentar ($($f.State) $($f.Code))"
+        $null = New-M4Service -Folder $true
+        $script:m4k.ReadHr = -2147024891
+        $f = Remove-AtmEmptyTaskFolder
+        Assert-True ([string]$f.State -ceq 'KEPT' -and [string]$f.Code -ceq 'TASK_SCHEDULER_0x80070005' -and $script:m4k.FolderDeletes -eq 0 -and (& $none)) "pasta ilegivel: KEPT com o codigo, sem tentar ($($f.State) $($f.Code))"
+    }
+
+    Test-Case 'V0.5 M4a' 'M4a: monitor disable (agendador falso) - cada recusa na ordem, sem pergunta antes do plano e nada removido: trava fechada antes de ler qualquer coisa (costuras que falham se chamadas: agendador, console e token), sem apresentador ou leitor, console nao observado, tarefa ausente (sem a pasta e com ela), ilegivel e divergente (com os motivos); frase errada nao remove nem toca a pasta; um token elevado chega a pergunta (o disable nao exige token padrao)' {
+        $prevConsole = $script:AtmCleanConsoleSource
+        $tdOk = New-M3Definition
+        $tdDiv = New-M3Definition
+        $tdDiv.Actions.Item(1).Arguments = $tdDiv.Actions.Item(1).Arguments + ' -Extra'
+        $script:m4asked = New-Object System.Collections.Generic.List[string]
+        $pres = { param($p) $script:m4asked.Add('plan'); $script:m4plan = $p }
+        $rd = { param($ph, $k) $script:m4asked.Add($k); 'nao' }
+        $script:m4n = @{ Tok = 0; Con = 0 }
+        $nothing = { $script:m4asked.Count -eq 0 -and $script:m4k.Deletes -eq 0 -and $script:m4k.FolderDeletes -eq 0 }
+        try {
+            $script:AtmMonitorTaskNameOverride = 'MonitorTest-0a1b2c3d'
+            # The gate closed: seams that fail when called (the scheduler, the console and the token).
+            $script:AtmCleanConsoleSource = { throw 'SEAM: console lido com a trava fechada' }
+            $script:AtmMonitorElevationSource = { throw 'SEAM: token lido com a trava fechada' }
+            $r = & {
+                function Connect-AtmTaskScheduler { throw 'SEAM: agendador alcancado com a trava fechada' }
+                Invoke-AtmMonitorDisable -PlanPresenter $pres -ConfirmationReader $rd
+            }
+            Assert-True ($r.Aborted -ceq 'MONITORING_GATE_CLOSED' -and -not $r.Done -and $null -eq $r.Plan -and $null -eq $r.Task -and $null -eq $r.Folder -and $script:m4asked.Count -eq 0) "trava fechada: recusa antes de ler o agendador, o console ou o token ($($r.Aborted))"
+            $code = & { function Connect-AtmTaskScheduler { throw 'SEAM: agendador alcancado com a trava fechada' }; Unregister-AtmMonitorTask -Sid $me.Sid -EntryPoint (Get-AtmMonitorEntryPoint) }
+            Assert-Eq $code 'MONITORING_GATE_CLOSED' 'remocao direta com a trava fechada: recusa antes do agendador'
+            function Connect-AtmTaskScheduler { $script:m4k.Connects++; return $script:m4Svc }
+            $script:AtmMonitorElevationSource = { $script:m4n.Tok++; [pscustomobject]@{ IsElevatedAdministrator = $true; ElevationType = 'FULL'; IntegrityLevel = 'HIGH' } }
+            $script:AtmCleanConsoleSource = { $script:m4n.Con++; $true }
+            $null = New-M4Service -Folder $true -Task (New-M3Task -Name 'MonitorTest-0a1b2c3d' -Definition $tdOk)
+            $script:AtmMonitoringEnabled = $true
+            try {
+                $r = Invoke-AtmMonitorDisable -ConfirmationReader $rd
+                Assert-True ($r.Aborted -ceq 'SEM_APRESENTACAO_OU_CONFIRMACAO' -and (& $nothing) -and $script:m4n.Con -eq 0 -and $script:m4k.Connects -eq 0) "sem apresentador ($($r.Aborted))"
+                $r = Invoke-AtmMonitorDisable -PlanPresenter $pres
+                Assert-True ($r.Aborted -ceq 'SEM_APRESENTACAO_OU_CONFIRMACAO' -and (& $nothing) -and $script:m4n.Con -eq 0 -and $script:m4k.Connects -eq 0) "sem leitor ($($r.Aborted))"
+                $script:AtmCleanConsoleSource = { $script:m4n.Con++; $false }
+                $r = Invoke-AtmMonitorDisable -PlanPresenter $pres -ConfirmationReader $rd
+                Assert-True ($r.Aborted -ceq 'CONSOLE_NOT_OBSERVED' -and (& $nothing) -and $script:m4n.Con -eq 1 -and $script:m4k.Connects -eq 0) "console nao observado, antes do agendador ($($r.Aborted))"
+                $script:AtmCleanConsoleSource = { $script:m4n.Con++; $true }
+                foreach ($fx in @($false, $true)) {
+                    $null = New-M4Service -Folder $fx
+                    $r = Invoke-AtmMonitorDisable -PlanPresenter $pres -ConfirmationReader $rd
+                    Assert-True ($r.Aborted -ceq 'MONITOR_TASK_ABSENT' -and $r.Task.State -ceq 'ABSENT' -and $null -eq $r.Plan -and $null -eq $r.Folder -and (& $nothing)) "tarefa ausente (pasta $fx): recusa sem perguntar ($($r.Aborted))"
+                }
+                $null = New-M4Service -Folder $true -Task (New-M3Task -Name 'MonitorTest-0a1b2c3d' -Definition $tdOk)
+                $script:m4k.ReadHr = -2147024891
+                $r = Invoke-AtmMonitorDisable -PlanPresenter $pres -ConfirmationReader $rd
+                Assert-True ($r.Aborted -ceq 'MONITOR_TASK_UNREADABLE' -and (@($r.Task.Reasons) -join ',') -ceq 'TASK_SCHEDULER_0x80070005' -and (& $nothing)) "agendador ilegivel ($($r.Aborted))"
+                $null = New-M4Service -Folder $true -Task (New-M3Task -Name 'MonitorTest-0a1b2c3d' -Definition $tdDiv)
+                $r = Invoke-AtmMonitorDisable -PlanPresenter $pres -ConfirmationReader $rd
+                Assert-True ($r.Aborted -ceq 'MONITOR_TASK_DIVERGENT' -and $r.Task.State -ceq 'DIVERGENT' -and (@($r.Task.Reasons) -join ',') -ceq 'TASK_ACTION_ARGUMENTS' -and (& $nothing) -and $script:m4k.Tasks.ContainsKey('MonitorTest-0a1b2c3d')) "tarefa divergente: recusa sem perguntar, intacta ($($r.Aborted))"
+                $null = New-M4Service -Folder $true -Task (New-M3Task -Name 'MonitorTest-0a1b2c3d' -Definition $tdOk)
+                $r = Invoke-AtmMonitorDisable -PlanPresenter $pres -ConfirmationReader $rd
+                Assert-True ($r.Aborted -ceq 'MONITOR_TASK_NOT_CONFIRMED' -and ($script:m4asked -join ',') -ceq 'plan,monitor-disable' -and $null -ne $r.Plan -and $script:m4k.Deletes -eq 0 -and $script:m4k.FolderDeletes -eq 0 -and $script:m4k.Tasks.ContainsKey('MonitorTest-0a1b2c3d') -and $null -eq $r.Folder) "frase errada: plano e frase, nada removido e a pasta nao tocada ($($r.Aborted) $($script:m4asked -join ','))"
+                Assert-Eq $script:m4n.Tok 0 'um token elevado chega a pergunta: o disable nunca le o token (remover a propria tarefa nao eleva nada)'
+            } finally { $script:AtmMonitoringEnabled = $false }
+        } finally { Reset-M3Seams $prevConsole }
+        Assert-Eq $script:AtmMonitoringEnabled $false 'trava fechada de novo'
+    }
+
+    Test-Case 'V0.5 M4a' 'M4a: monitor disable (agendador falso) - caminho feliz: o plano (tarefa, intervalo, acao, pasta, frase) e depois a frase, um DeleteTask da tarefa exata, releitura ABSENT e a pasta vazia removida (REMOVED); com outra tarefa: NOT_EMPTY; pasta recusada: KEPT com o codigo e o comando feito (saida 0); a divergencia relida logo antes do DeleteTask recusa sem remover; tarefa sumida antes da remocao: MONITOR_TASK_ABSENT; erro do agendador como codigo; remocao que nao rele ABSENT: MONITOR_TASK_NOT_VERIFIED, sem tocar a pasta; nome de teste invalido: o agendador nem alcancado' {
+        $prevConsole = $script:AtmCleanConsoleSource
+        $tdOk = New-M3Definition
+        $tdDiv = New-M3Definition
+        $tdDiv.Principal.RunLevel = 1
+        function Connect-AtmTaskScheduler { $script:m4k.Connects++; return $script:m4Svc }
+        $script:m4asked = New-Object System.Collections.Generic.List[string]
+        $pres = { param($p) $script:m4asked.Add('plan'); $script:m4plan = $p }
+        $rd = { param($ph, $k) $script:m4asked.Add($k); $ph }
+        $name = 'MonitorTest-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $task = { param($d) New-M3Task -Name $name -Definition $d }
+        try {
+            $script:AtmMonitorTaskNameOverride = $name
+            $script:AtmCleanConsoleSource = { $true }
+            $ep = Get-AtmMonitorEntryPoint
+            $want = Get-AtmMonitorTaskAction -EntryPoint $ep
+            $script:AtmMonitoringEnabled = $true
+            try {
+                $null = New-M4Service -Folder $true -Task (& $task $tdOk) -Name $name
+                $r = Invoke-AtmMonitorDisable -PlanPresenter $pres -ConfirmationReader $rd
+                $rDone = $r
+                Assert-True ($r.Done -and -not $r.Aborted -and $r.Task.State -ceq 'ABSENT' -and ($script:m4asked -join ',') -ceq 'plan,monitor-disable' -and $script:m4k.Deletes -eq 1 -and $script:m4k.DeletedName -ceq $name -and $script:m4k.DeleteFlags -eq 0) "caminho feliz: a tarefa exata removida e relida ABSENT ($($r.Aborted) $($script:m4asked -join ','))"
+                Assert-True ([string]$r.Folder.State -ceq 'REMOVED' -and $script:m4k.FolderDeletes -eq 1 -and -not $script:m4k.FolderExists) "a pasta vazia removida depois ($($r.Folder.State))"
+                $p = $script:m4plan
+                Assert-True ($p.TaskPath -ceq ('\AgentTempManager\' + $name) -and $p.IntervalHours -eq 6 -and $p.ActionPath -ieq $want.Path -and $p.ActionArguments -ceq $want.Arguments -and $p.Folder -ceq '\AgentTempManager' -and $p.Phrase -ceq 'DESATIVAR MONITORAMENTO') 'o plano: caminho, intervalo, acao, pasta e frase'
+                Assert-True (-not (($r | Out-String) + ($p | Out-String) + ($r.Folder | Out-String)).Contains($me.Sid)) 'o resultado e o plano nunca levam o SID'
+                $null = New-M4Service -Folder $true -Task (& $task $tdOk) -Name $name -Other 1
+                $r = Invoke-AtmMonitorDisable -PlanPresenter $pres -ConfirmationReader $rd
+                Assert-True ($r.Done -and [string]$r.Folder.State -ceq 'NOT_EMPTY' -and $r.Folder.Tasks -eq 1 -and $script:m4k.FolderDeletes -eq 0 -and $script:m4k.FolderExists) "outra tarefa na pasta: a propria removida, a pasta NOT_EMPTY ($($r.Folder.State))"
+                $null = New-M4Service -Folder $true -Task (& $task $tdOk) -Name $name
+                $script:m4k.DeleteFolderHr = -2147024891
+                $r = Invoke-AtmMonitorDisable -PlanPresenter $pres -ConfirmationReader $rd
+                Assert-True ($r.Done -and -not $r.Aborted -and [string]$r.Folder.State -ceq 'KEPT' -and [string]$r.Folder.Code -ceq 'TASK_SCHEDULER_0x80070005' -and $script:m4k.FolderDeletes -eq 1) "pasta recusada pelo agendador: KEPT com o codigo, e o comando feito ($($r.Folder.State) $($r.Folder.Code))"
+                # The divergence read again just before the DeleteTask: the task changes between the plan and the removal.
+                $null = New-M4Service -Folder $true -Task (& $task $tdOk) -Name $name
+                $swap = { param($ph, $k) $script:m4asked.Add($k); $script:m4k.Tasks[$name] = (New-M3Task -Name $name -Definition $tdDiv); $ph }
+                $r = Invoke-AtmMonitorDisable -PlanPresenter $pres -ConfirmationReader $swap
+                Assert-True ($r.Aborted -ceq 'MONITOR_TASK_DIVERGENT' -and -not $r.Done -and $script:m4k.Deletes -eq 0 -and $script:m4k.FolderDeletes -eq 0 -and $null -eq $r.Folder -and $r.Task.State -ceq 'DIVERGENT') "divergente relida logo antes do DeleteTask: recusa, nada removido ($($r.Aborted))"
+                $null = New-M4Service -Folder $true -Task (& $task $tdOk) -Name $name
+                $gone = { param($ph, $k) $script:m4asked.Add($k); $null = $script:m4k.Tasks.Remove($name); $ph }
+                $r = Invoke-AtmMonitorDisable -PlanPresenter $pres -ConfirmationReader $gone
+                Assert-True ($r.Aborted -ceq 'MONITOR_TASK_ABSENT' -and $script:m4k.Deletes -eq 0 -and $script:m4k.FolderDeletes -eq 0 -and $null -eq $r.Folder) "tarefa sumida antes da remocao: MONITOR_TASK_ABSENT, nada removido ($($r.Aborted))"
+                $null = New-M4Service -Folder $true -Task (& $task $tdOk) -Name $name
+                $script:m4k.DeleteHr = -2147024891
+                $r = Invoke-AtmMonitorDisable -PlanPresenter $pres -ConfirmationReader $rd
+                Assert-True ($r.Aborted -ceq 'TASK_SCHEDULER_0x80070005' -and -not $r.Done -and $null -eq $r.Folder -and $script:m4k.FolderDeletes -eq 0) "erro do agendador como codigo, a pasta nao tocada ($($r.Aborted))"
+                $null = New-M4Service -Folder $true -Task (& $task $tdOk) -Name $name
+                $script:m4k.Keep = $true
+                $r = Invoke-AtmMonitorDisable -PlanPresenter $pres -ConfirmationReader $rd
+                Assert-True ($r.Aborted -ceq 'MONITOR_TASK_NOT_VERIFIED' -and -not $r.Done -and $r.Task.State -ceq 'PRESENT' -and $null -eq $r.Folder -and $script:m4k.FolderDeletes -eq 0) "remocao que nao rele ABSENT: MONITOR_TASK_NOT_VERIFIED, a pasta nao tocada ($($r.Aborted))"
+                $null = New-M4Service -Folder $true -Name $name
+                Assert-Eq (Unregister-AtmMonitorTask -Sid $me.Sid -EntryPoint $ep) 'MONITOR_TASK_ABSENT' 'remocao direta sem a tarefa'
+                $null = New-M4Service -Folder $true -Task (& $task $tdDiv) -Name $name
+                Assert-True ((Unregister-AtmMonitorTask -Sid $me.Sid -EntryPoint $ep) -ceq 'MONITOR_TASK_DIVERGENT' -and $script:m4k.Deletes -eq 0) 'remocao direta da divergente: recusa sem DeleteTask'
+                $null = New-M4Service -Folder $true -Task (& $task $tdOk) -Name $name
+                Assert-True ((Unregister-AtmMonitorTask -Sid $me.Sid -EntryPoint (Join-Path $sandbox 'm4a other\bin\agent-temp-monitor.ps1')) -ceq 'MONITOR_TASK_DIVERGENT' -and $script:m4k.Deletes -eq 0) 'remocao direta com o ponto de entrada de outra copia: divergente, sem DeleteTask'
+                $null = New-M4Service -Folder $true -Task (& $task $tdOk) -Name $name
+                $script:AtmMonitorTaskNameOverride = 'MonitorTest-XYZ'
+                $code = Unregister-AtmMonitorTask -Sid $me.Sid -EntryPoint $ep
+                Assert-True ([string]$code -cmatch '^TASK_SCHEDULER_0x[0-9A-F]{8}$' -and $script:m4k.Connects -eq 0 -and $script:m4k.Deletes -eq 0) "nome de teste invalido: codigo, o agendador nem alcancado ($code)"
+            } finally { $script:AtmMonitoringEnabled = $false }
+            $script:m4rDone = $rDone
+        } finally { Reset-M3Seams $prevConsole }
+        Assert-Eq $script:AtmMonitoringEnabled $false 'trava fechada de novo'
+    }
+
+    Test-Case 'V0.5 M4a' 'M4a: unschedule-autopurge com a pasta vazia (agendador falso) - depois da releitura ABSENT a pasta vazia sai (REMOVED), com outra tarefa fica (NOT_EMPTY), recusada fica (KEPT, o comando feito); frase errada ou remocao que nao rele ABSENT nao tocam a pasta (Folder nulo); a trava do unschedule-autopurge nao muda' {
+        $prevConsole = $script:AtmCleanConsoleSource
+        $apName = 'AutoPurgeTest-0a1b2c3d'
+        $tdAp = New-AtmAutoPurgeTaskDefinition -Service $script:m3RealSvc -Sid $me.Sid -EntryPoint (Get-AtmAutoPurgeEntryPoint)
+        function Connect-AtmTaskScheduler { $script:m4k.Connects++; return $script:m4Svc }
+        $pres = { param($p) $null = $p }
+        $rd = { param($ph, $k) $null = $k; $ph }
+        try {
+            $script:AtmAutoPurgeTaskNameOverride = $apName
+            $script:AtmCleanConsoleSource = { $true }
+            Assert-Eq $script:AtmMonitoringEnabled $false 'o unschedule-autopurge roda com a trava do monitoramento fechada (nao muda de trava)'
+            $null = New-M4Service -Folder $true -Task (New-M3Task -Name $apName -Definition $tdAp) -Name $apName
+            $r = Invoke-AtmAutoPurgeUnschedule -PlanPresenter $pres -ConfirmationReader $rd
+            Assert-True ($r.Done -and $r.Task.State -ceq 'ABSENT' -and [string]$r.Folder.State -ceq 'REMOVED' -and $script:m4k.Deletes -eq 1 -and $script:m4k.FolderDeletes -eq 1) "desagendar: a tarefa e depois a pasta vazia ($($r.Aborted) $($r.Folder.State))"
+            $script:m4apDone = $r
+            $null = New-M4Service -Folder $true -Task (New-M3Task -Name $apName -Definition $tdAp) -Name $apName -Other 2
+            $r = Invoke-AtmAutoPurgeUnschedule -PlanPresenter $pres -ConfirmationReader $rd
+            Assert-True ($r.Done -and [string]$r.Folder.State -ceq 'NOT_EMPTY' -and $r.Folder.Tasks -eq 2 -and $script:m4k.FolderDeletes -eq 0) "outras tarefas: NOT_EMPTY ($($r.Folder.State))"
+            $null = New-M4Service -Folder $true -Task (New-M3Task -Name $apName -Definition $tdAp) -Name $apName
+            $script:m4k.DeleteFolderHr = -2147024751
+            $r = Invoke-AtmAutoPurgeUnschedule -PlanPresenter $pres -ConfirmationReader $rd
+            Assert-True ($r.Done -and -not $r.Aborted -and [string]$r.Folder.State -ceq 'KEPT' -and [string]$r.Folder.Code -ceq 'TASK_SCHEDULER_0x80070091') "pasta recusada: KEPT com o codigo, o comando feito ($($r.Folder.State) $($r.Folder.Code))"
+            $null = New-M4Service -Folder $true -Task (New-M3Task -Name $apName -Definition $tdAp) -Name $apName
+            $r = Invoke-AtmAutoPurgeUnschedule -PlanPresenter $pres -ConfirmationReader { param($ph, $k) 'nao' }
+            Assert-True ($r.Aborted -ceq 'AUTOPURGE_TASK_NOT_CONFIRMED' -and $null -eq $r.Folder -and $script:m4k.Deletes -eq 0 -and $script:m4k.FolderDeletes -eq 0) "frase errada: Folder nulo, nada tocado ($($r.Aborted))"
+            $null = New-M4Service -Folder $true -Task (New-M3Task -Name $apName -Definition $tdAp) -Name $apName
+            $script:m4k.Keep = $true
+            $r = Invoke-AtmAutoPurgeUnschedule -PlanPresenter $pres -ConfirmationReader $rd
+            Assert-True ($r.Aborted -ceq 'AUTOPURGE_TASK_NOT_VERIFIED' -and $null -eq $r.Folder -and $script:m4k.FolderDeletes -eq 0) "remocao que nao rele ABSENT: Folder nulo ($($r.Aborted))"
+        } finally { Reset-ApSeams $prevConsole }
+    }
+
+    Test-Case 'V0.5 M4a' 'M4a: apresentacao (en-US e pt-BR) - plano do disable (tarefa, intervalo, acao, pasta e o historico nao tocado); resultado de cada recusa com o codigo e o motivo proprio do disable antes do comum; removida com a linha da pasta (removida, nao vazia so com a contagem, mantida com o codigo, ausente); o unschedule-autopurge feito com a linha da pasta e sem ela quando nao ha; mesmas chaves e campos nos dois idiomas' {
+        $old = Get-AtmLanguage
+        $tp = '\AgentTempManager\MonitorTest-0a1b2c3d'
+        $plan = [pscustomobject]@{ TaskPath = $tp; IntervalHours = 6; ActionPath = 'P.exe'; ActionArguments = '-File "x"'; Folder = '\AgentTempManager'; Phrase = 'DESATIVAR MONITORAMENTO' }
+        $folders = @([pscustomobject]@{ State = 'REMOVED'; Code = $null; Tasks = 0; Folders = 0 }, [pscustomobject]@{ State = 'NOT_EMPTY'; Code = $null; Tasks = 2; Folders = 1 }, [pscustomobject]@{ State = 'KEPT'; Code = 'TASK_SCHEDULER_0x80070091'; Tasks = 0; Folders = 0 }, [pscustomobject]@{ State = 'ABSENT'; Code = $null; Tasks = $null; Folders = $null })
+        $fline = { param($f) switch ([string]$f.State) { 'REMOVED' { Get-AtmText 'tf.removed' '\AgentTempManager' } 'NOT_EMPTY' { Get-AtmText 'tf.notEmpty' '\AgentTempManager' $f.Tasks $f.Folders } 'KEPT' { Get-AtmText 'tf.kept' '\AgentTempManager' $f.Code } default { Get-AtmText 'tf.absent' '\AgentTempManager' } } }
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                $t = Get-RstHost { Show-AtmMonitorDisablePlan -Plan $plan }
+                Assert-True ($t.Contains((Get-AtmText 'mon.plan.disableHeader')) -and $t.Contains((Get-AtmText 'mon.plan.disableTask' $tp 6)) -and $t.Contains((Get-AtmText 'mon.plan.action' 'P.exe' '-File "x"')) -and $t.Contains((Get-AtmText 'mon.plan.disableFolder' '\AgentTempManager')) -and $t.Contains('%LOCALAPPDATA%\AgentTempManager\Monitor')) "${lang}: plano do disable (tarefa, intervalo, acao, pasta e historico)"
+                foreach ($c in @('MONITORING_GATE_CLOSED', 'SEM_APRESENTACAO_OU_CONFIRMACAO', 'CONSOLE_NOT_OBSERVED', 'MONITOR_TASK_ABSENT', 'MONITOR_TASK_UNREADABLE', 'MONITOR_TASK_DIVERGENT', 'MONITOR_TASK_NOT_CONFIRMED', 'MONITOR_TASK_NOT_VERIFIED', 'TASK_SCHEDULER_0x80070005')) {
+                    $t = Get-RstHost { Show-AtmMonitorDisableResult -Result ([pscustomobject]@{ Operation = 'disable'; Aborted = $c; Plan = $null; Registered = $false; Done = $false; Task = $null; Folder = $null }) }
+                    $own = 'mon.task.whyDisable.' + $c; $shared = 'mon.task.why.' + $c
+                    $whyOk = $(if ($script:AtmMessages['en-US'].ContainsKey($own)) { $t.Contains((Get-AtmText $own)) -and ($c -cne 'MONITORING_GATE_CLOSED' -or -not $t.Contains((Get-AtmText $shared))) } elseif ($script:AtmMessages['en-US'].ContainsKey($shared)) { $t.Contains((Get-AtmText $shared)) } else { $true })
+                    Assert-True ($t.Contains((Get-AtmText 'mon.task.notRemoved' $c)) -and $whyOk -and ($c -cne 'MONITOR_TASK_NOT_VERIFIED' -or $t.Contains((Get-AtmText 'mon.task.notVerifiedDisable')))) "${lang}: resultado $c"
+                }
+                foreach ($k in @('MONITORING_GATE_CLOSED', 'MONITOR_TASK_ABSENT', 'MONITOR_TASK_DIVERGENT', 'MONITOR_TASK_UNREADABLE')) { Assert-True $script:AtmMessages[$lang].ContainsKey('mon.task.whyDisable.' + $k) "${lang}: motivo proprio do disable para $k" }
+                foreach ($f in $folders) {
+                    $res = [pscustomobject]@{ Operation = 'disable'; Aborted = $null; Plan = $plan; Registered = $false; Done = $true; Task = $null; Folder = $f }
+                    $t = Get-RstHost { Show-AtmMonitorDisableResult -Result $res }
+                    Assert-True ($t.Contains((Get-AtmText 'mon.task.removed' $tp)) -and $t.Contains((& $fline $f))) "${lang}: disable feito com a linha da pasta $($f.State)"
+                    $res = [pscustomobject]@{ Operation = 'unschedule'; Aborted = $null; Plan = [pscustomobject]@{ TaskPath = '\AgentTempManager\AutoPurge-0123456789abcdef' }; Registered = $false; Done = $true; Task = $null; Folder = $f }
+                    $t = Get-RstHost { Show-AtmAutoPurgeTaskResult -Result $res }
+                    Assert-True ($t.Contains((Get-AtmText 'ap.task.removed' '\AgentTempManager\AutoPurge-0123456789abcdef')) -and $t.Contains((& $fline $f))) "${lang}: unschedule-autopurge feito com a linha da pasta $($f.State)"
+                }
+                $t = Get-RstHost { Show-AtmAutoPurgeTaskResult -Result ([pscustomobject]@{ Operation = 'unschedule'; Aborted = $null; Plan = [pscustomobject]@{ TaskPath = '\AgentTempManager\AutoPurge-0123456789abcdef' }; Registered = $false; Done = $true; Task = $null }) }
+                Assert-True ($t.Contains((Get-AtmText 'ap.task.removed' '\AgentTempManager\AutoPurge-0123456789abcdef')) -and -not $t.Contains('\AgentTempManager ')) "${lang}: unschedule-autopurge feito sem resultado da pasta: sem linha da pasta"
+                Assert-True (-not (Get-AtmText 'ap.task.removed' 'X').Contains('{1}') -and -not (Get-AtmText 'tf.notEmpty' 'F' 3 0).Contains('MonitorTest')) "${lang}: a tarefa removida sem 'a pasta fica'; a linha da pasta so com a contagem"
+            }
+            $ph = { param([string]$T) (@([regex]::Matches($T, '\{\d\}') | ForEach-Object { $_.Value } | Sort-Object -Unique) -join ',') }
+            foreach ($key in @('tf.removed', 'tf.absent', 'tf.notEmpty', 'tf.kept', 'ap.task.removed', 'mon.task.removed', 'mon.task.notRemoved', 'mon.task.notVerifiedDisable', 'mon.task.howDisable', 'mon.task.divergentNoRemove', 'mon.task.noRemove', 'mon.plan.disableHeader', 'mon.plan.disableTask', 'mon.plan.disableFolder', 'cli.monitorUsage', 'help.monitor')) {
+                Assert-True ($script:AtmMessages['en-US'].ContainsKey($key) -and $script:AtmMessages['pt-BR'].ContainsKey($key)) "$key nos dois idiomas"
+                Assert-Eq (& $ph $script:AtmMessages['pt-BR'][$key]) (& $ph $script:AtmMessages['en-US'][$key]) "${key}: mesmos campos nos dois idiomas"
+            }
+            foreach ($l in @('en-US', 'pt-BR')) { foreach ($key in @('ap.task.removed', 'tf.removed', 'mon.task.removed')) { Assert-True (-not $script:AtmMessages[$l][$key].Contains('stays') -and -not $script:AtmMessages[$l][$key].Contains('permanece')) "${key} ($l): sem 'a pasta fica'" } }
+        } finally { Set-AtmLanguage -Requested $old }
+    }
+
+    Test-Case 'V0.5 M4a' 'M4a: CLI (processo novo deste shell, trava fechada) - monitor disable: 3 com MONITORING_GATE_CLOSED antes de qualquer plano ou pergunta (en-US e pt-BR); monitor disable -IntervalHours 6: 2; subverbo desconhecido: 2 com o uso que lista status, enable e disable; ajuda com o disable; a pasta real do historico nunca criada' {
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $launch = { param([string]$CliArgs) Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$(Join-Path $srcDir 'agent-temp.ps1')`" " + $CliArgs) -TimeoutSec 300 }
+        $before = Get-AtmPathPresence $monRealFolder
+        $r = & $launch 'monitor disable -Lang en-US'
+        Assert-True ($r.Exit -eq 3 -and $r.Text.Contains('NOTHING WAS REMOVED: MONITORING_GATE_CLOSED') -and $r.Text.Contains('Monitoring is not available in this release: nothing was read, asked or removed.') -and -not $r.Text.Contains('DESATIVAR MONITORAMENTO') -and -not $r.Text.Contains('REMOVE THE COLLECTION TASK') -and -not $r.Text.Contains('Collection task:')) "monitor disable: exit 3 sem plano nem frase ($($r.Exit))"
+        $r = & $launch 'monitor disable -Lang pt-BR'
+        Assert-True ($r.Exit -eq 3 -and $r.Text.Contains('NADA FOI REMOVIDO: MONITORING_GATE_CLOSED')) "monitor disable pt-BR: exit 3 ($($r.Exit))"
+        $usage = 'Usage: agent-temp monitor status | agent-temp monitor enable [-IntervalHours 1|2|4|6|12|24] | agent-temp monitor disable. Nothing was changed.'
+        $r = & $launch 'monitor disable -IntervalHours 6 -Lang en-US'
+        Assert-True ($r.Exit -eq 2 -and $r.Text.Contains($usage)) "monitor disable -IntervalHours 6: uso 2 ($($r.Exit))"
+        $r = & $launch 'monitor frobnicate -Lang en-US'
+        Assert-True ($r.Exit -eq 2 -and $r.Text.Contains($usage)) "subverbo desconhecido: uso 2 com status, enable e disable ($($r.Exit))"
+        $r = & $launch 'help -Lang en-US'
+        Assert-True ($r.Text.Contains('disable: removes your own collection task (refused in this release).')) 'a ajuda mostra o disable'
+        Assert-Eq (Get-AtmPathPresence $monRealFolder) $before 'pasta real do historico do usuario inalterada'
+    }
+
+    Test-Case 'V0.5 M4a' 'M4a (estatico): a area nunca remove tarefa nem pasta reais - todo caso que chega a remocao, ao disable, a pasta vazia ou ao unschedule-autopurge sombreia o agendador; sem caso so de CI e sem espera real; o agendador real da area nem chamado; fora da area, nenhuma chamada a remocao, ao disable ou a pasta vazia, salvo o unico caso real do disable (so na CI: a guarda primeiro, o nome de teste, so o disable, o finally fecha a trava e tira a tarefa de teste)' {
+        $self = [IO.File]::ReadAllText((Join-Path $testsDir 'Run-Tests.ps1'))
+        $a0 = $self.IndexOf('-----' + ' V0.5 M4a ('); $a1 = $self.IndexOf("`n" + '} fin' + 'ally {', $a0)
+        Assert-True ($a0 -gt 0 -and $a1 -gt $a0) 'area V0.5 M4a encontrada'
+        $area = $self.Substring($a0, $a1 - $a0)
+        $uses = @([regex]::Matches($area, 'm3RealSvc\.([A-Za-z]+)\(') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+        Assert-True ($uses.Count -eq 0 -and -not $area.Contains('RegisterTask' + 'Definition') -and -not $area.Contains('Create' + 'Folder')) 'o agendador real da area nem chamado diretamente; nada registrado nem criado'
+        Assert-True (-not $area.Contains('GITHUB_' + 'ACTIONS') -and -not $area.Contains('Start-' + 'Sleep')) 'area sem caso so de CI e sem espera real'
+        $shadow = 'function Connect-AtmTask' + 'Scheduler {'
+        $reach = @(('Invoke-AtmMonitor' + 'Disable -'), ('Unregister-AtmMonitor' + 'Task -'), ('Remove-AtmEmpty' + 'TaskFolder'), ('Invoke-AtmAutoPurge' + 'Unschedule -'))
+        $needing = 0
+        foreach ($c in @([regex]::Split($area, "(?m)^\s*Test-Case 'V0\.5 M4a' ") | Select-Object -Skip 1)) {
+            $hit = @($reach | Where-Object { $c.Contains($_) })
+            if ($hit.Count -gt 0 -and -not $c.StartsWith("'M4a (estatico)")) { $needing++; Assert-True ($c.Contains($shadow)) "caso que chega a remocao sombreia o agendador: $($c.Substring(0, [Math]::Min(60, $c.Length)))" }
+        }
+        Assert-True ($needing -ge 4) "casos que chegam a remocao: $needing"
+        # Calls, not text: the statics outside the area name these functions in strings; the parser tells a call apart.
+        $names = @(('Invoke-AtmMonitor' + 'Disable'), ('Unregister-AtmMonitor' + 'Task'), ('Remove-AtmEmpty' + 'TaskFolder'))
+        $selfAst = [Management.Automation.Language.Parser]::ParseInput($self, [ref]$null, [ref]$null)
+        $calls = @($selfAst.FindAll({ param($x) $x -is [Management.Automation.Language.CommandAst] -and $names -ccontains [string]$x.GetCommandName() }, $true))
+        # The one exception, outside the area: the CI-only case of the real scheduler (its guard first, the test name,
+        # the gate closed in its finally), which calls only monitor disable itself.
+        $real = @($selfAst.FindAll({ param($x) $x -is [Management.Automation.Language.CommandAst] -and [string]$x.GetCommandName() -ceq 'Test-Case' -and @($x.CommandElements).Count -ge 4 -and $x.CommandElements[2].Extent.Text.StartsWith("'M4a real (so na CI") }, $true))
+        Assert-True ($real.Count -eq 1 -and ($real[0].Extent.StartOffset -lt $a0 -or $real[0].Extent.StartOffset -ge $a1)) "um unico caso real do disable, fora da area ($($real.Count))"
+        $rb = $real[0].CommandElements[3].ScriptBlock.EndBlock.Statements
+        $rt = $real[0].Extent.Text
+        Assert-True (@($rb)[0].Extent.Text.StartsWith("if (`$env:GITHUB_" + "ACTIONS -ne 'true') { `$script:caseSkipped = `$true") -and $rt.Contains("`$mName = 'MonitorTest-' + [guid]::NewGuid()") -and $rt.Contains("`$mName -cnotmatch '^MonitorTest-[0-9a-f]{8}`$'") -and $rt.Contains('$script:AtmMonitorTaskNameOverride = $mName')) 'caso real: a guarda da CI primeiro e o nome de teste na forma exata'
+        $rf = $rt.Substring($rt.LastIndexOf('} fin' + 'ally {'))
+        Assert-True ($rf.Contains('$script:AtmMonitoringEnabled = $false') -and $rf.Contains('$script:AtmMonitorTaskNameOverride = $null') -and $rf.Contains('.DeleteTask($mName, 0)')) 'caso real: o finally fecha a trava, limpa o nome e tira a tarefa de teste pelo nome exato'
+        $rs = $real[0].Extent.StartOffset; $re = $real[0].Extent.EndOffset
+        $inReal = @($calls | Where-Object { $_.Extent.StartOffset -ge $rs -and $_.Extent.StartOffset -lt $re })
+        Assert-True ($inReal.Count -ge 1 -and @($inReal | Where-Object { [string]$_.GetCommandName() -cne $names[0] }).Count -eq 0) "caso real: so o disable do produto ($(@($inReal | ForEach-Object { $_.GetCommandName() }) -join ','))"
+        $out = @($calls | Where-Object { ($_.Extent.StartOffset -lt $a0 -or $_.Extent.StartOffset -ge $a1) -and -not ($_.Extent.StartOffset -ge $rs -and $_.Extent.StartOffset -lt $re) } | ForEach-Object { [string]$_.GetCommandName() + '@' + $_.Extent.StartLineNumber })
+        Assert-Eq ($out -join ', ') '' 'fora da area (e do caso real), nenhuma chamada ao disable, a remocao ou a pasta vazia'
+        Assert-True (@($calls | Where-Object { [string]$_.GetCommandName() -ceq $names[0] }).Count -ge 10 -and @($calls | Where-Object { [string]$_.GetCommandName() -ceq $names[2] }).Count -ge 5) "controle positivo: chamadas encontradas na area ($($calls.Count))"
     }
 } finally {
     # The console encoding of this process is restored, even when the suite aborts (a redirected console may refuse it).

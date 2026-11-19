@@ -536,24 +536,34 @@ try {
             exit $(if ($recPlan.Offered) { 0 } else { 3 })
         }
         'monitor' {
-            # V0.5 M1 and M3a (docs/adr/ADR-0017): status and enable. The monitoring engine is loaded here and by version.
-            # status reads the monitoring gate as this copy has it, the history as it is and the collection task's state:
-            # it never creates the history folder or the task folder, never collects, takes no lock and writes nothing.
-            # enable registers the user's own collection task, through the engine only: with the monitoring gate closed
-            # (every distributed copy) the engine refuses before anything is read or asked; past it, a standard token, an
-            # installed copy, the console the engine observes, no existing task, the plan and its own phrase.
-            # -IntervalHours belongs to enable only. Exit 0 status shown or task created, 2 usage, 3 refused or not
-            # confirmed, 6 no interactive console.
+            # V0.5 M1, M3a and M4a (docs/adr/ADR-0017): status, enable and disable. The monitoring engine is loaded here and
+            # by version. status reads the monitoring gate as this copy has it, the history as it is and the collection
+            # task's state: it never creates the history folder or the task folder, never collects, takes no lock and
+            # writes nothing. enable registers the user's own collection task, through the engine only: with the
+            # monitoring gate closed (every distributed copy) the engine refuses before anything is read or asked; past it,
+            # a standard token, an installed copy, the console the engine observes, no existing task, the plan and its own
+            # phrase. disable removes that task, through the engine only, behind the same gate: past it, the console the
+            # engine observes, exactly the product's task, the plan and its own phrase, then the task folder when empty.
+            # -IntervalHours belongs to enable only. Exit 0 status shown or task created or removed, 2 usage, 3 refused or
+            # not confirmed, 6 no interactive console.
             . (Join-Path $here 'lib\Engine.Monitor.ps1')
             foreach ($opt in @('User', 'Project', 'Root', 'Path', 'AllowListFile', 'IncludeOtherUsers', 'AcceptB1ResidualRisk', 'ExportJson', 'LogFile', 'RecordFile', 'Entry', 'All', 'PseudonymKeyFile', 'Operation', 'Service', 'RunId', 'AtmElevatedRecovery', 'DeadlineSeconds')) {
                 if ($PSBoundParameters.ContainsKey($opt)) { Write-Host (Get-AtmText 'cli.monitorUsage') -ForegroundColor Red; exit 2 }
             }
             $monSub = $(if ($SubCommand) { $SubCommand.ToLowerInvariant() } else { '' })
-            if ($monSub -cne 'status' -and $monSub -cne 'enable') { Write-Host (Get-AtmText 'cli.monitorUsage') -ForegroundColor Red; exit 2 }
+            if ($monSub -cne 'status' -and $monSub -cne 'enable' -and $monSub -cne 'disable') { Write-Host (Get-AtmText 'cli.monitorUsage') -ForegroundColor Red; exit 2 }
             if ($monSub -ceq 'status') {
                 if ($PSBoundParameters.ContainsKey('IntervalHours')) { Write-Host (Get-AtmText 'cli.monitorUsage') -ForegroundColor Red; exit 2 }
                 Show-AtmMonitorStatus -Status (Get-AtmMonitorStatus) -Task (Get-AtmMonitorTaskState)
                 exit 0
+            }
+            if ($monSub -ceq 'disable') {
+                if ($PSBoundParameters.ContainsKey('IntervalHours')) { Write-Host (Get-AtmText 'cli.monitorUsage') -ForegroundColor Red; exit 2 }
+                $monDisPresenter = { param($plan) Show-AtmMonitorDisablePlan -Plan $plan }
+                $monDisReader = { param($phrase, $kind) Read-AtmCleanAnswer -Phrase $phrase -Kind $kind -LineReader { param($pr) Read-Host $pr } }
+                $monDisRes = Invoke-AtmMonitorDisable -PlanPresenter $monDisPresenter -ConfirmationReader $monDisReader
+                Show-AtmMonitorDisableResult -Result $monDisRes
+                exit $(if ($monDisRes.Done) { 0 } elseif ($monDisRes.Aborted -ceq 'CONSOLE_NOT_OBSERVED') { 6 } else { 3 })
             }
             $monInterval = $script:AtmMonitorTaskDefaultInterval
             if ($PSBoundParameters.ContainsKey('IntervalHours')) {

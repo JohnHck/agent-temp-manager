@@ -370,7 +370,9 @@ The quarantine is a folder of the sandbox (the `AtmIsolationQuarantineRoot` seam
   engine accepts in place of the product's) and removed by the case; anywhere else that case is `NAO_TESTADO`. The
   suite's elevated process reaches the rest of `schedule-autopurge` only through a test seam for the token:
   * static: the Task Scheduler is reached only through `Connect-AtmTaskScheduler`; `RegisterTaskDefinition`,
-    `DeleteTask`, `CreateFolder` and `NewTask` appear once each, in their functions; registering is called only by
+    `CreateFolder` and `NewTask` appear once each in the purge's functions, `DeleteTask` twice (the purge's removal and,
+    since V0.5 M4a, the monitoring's, each after its exact match) and `DeleteFolder` once, in the empty-folder helper,
+    after its counts, with no parameter and no second attempt; registering is called only by
     `schedule-autopurge` and removing only by `unschedule-autopurge`, both only from the CLI's two subcommands; the TUI,
     the reports, the entry point and the uninstall never change the scheduler; the definition (interactive, limited,
     `TASK_CREATE`, no password), the order of the refusals, the single-assignment seams, the same folder and name rule
@@ -387,9 +389,14 @@ The quarantine is a folder of the sandbox (the `AtmIsolationQuarantineRoot` seam
   * the real task (CI only): created with the policy on (only the main phrase) and read back as the process user,
     interactive, limited, no password, the exact action, the first run in the future and never run; a second
     `schedule-autopurge` refused with nothing asked or changed, and `TASK_CREATE` refusing to overwrite; a wrong
-    unschedule phrase removes nothing; unschedule removes it and the folder stays; with the policy off, the warning's
-    phrase and then the main one; a task whose action the test changed is `DIVERGENT` and is refused by unschedule with
-    nothing asked or touched;
+    unschedule phrase removes nothing; unschedule removes it and then the empty folder (`REMOVED`, the folder no longer
+    found; V0.5 M4a); with the policy off, the warning's phrase and then the main one; a task whose action the test
+    changed is `DIVERGENT` and is refused by unschedule with nothing asked or touched; with that task still in the
+    folder, unscheduling a third test task removes it and leaves the folder (`NOT_EMPTY`, one task, no subfolder) with
+    the other task intact and not named;
+  * the scheduler's final limit (CI only, V0.5 M4a): in a test folder `\AtmTest-<8 hex>` holding one test task, a direct
+    `DeleteFolder` is refused by the Task Scheduler itself with a non-zero code (printed in the log), and the folder and
+    the task stay; the case then removes both by their exact names;
   * the TUI headless in both languages: with `autoPurge: true` the notice is under the header of every frame (menu,
     dashboard, help, quarantine, busy); the quarantine area shows the task's state, read once when the area opens
     (through a test reader); without the policy, no notice.
@@ -952,8 +959,9 @@ lines are checked through the presentation function there.
 
 ### The collection task, `monitor enable` and the entry point (V0.5 M3a)
 
-The area "V0.5 M3a" of `tests/Run-Tests.ps1` (ADR-0017 phase M3a) runs in both shells. **The suite never registers a
-real task**: the scheduler is replaced by an in-memory fake (its methods throw real COM HResults through
+The area "V0.5 M3a" of `tests/Run-Tests.ps1` (ADR-0017 phase M3a) runs in both shells. **This area never registers a
+real task** (since M4a, one CI-only case outside it registers a monitoring test task for `monitor disable`; see
+"`monitor disable` and the empty task folder" below): the scheduler is replaced by an in-memory fake (its methods throw real COM HResults through
 `Marshal.ThrowExceptionForHR`, so the engine's error paths see what the real scheduler raises), and the real scheduler
 is only read, under a test name `MonitorTest-<8 hex digits>`. The gate is opened only around a call, inside the suite's
 process. The real scheduler is phase M3b's, in a CI-only harness.
@@ -991,15 +999,15 @@ process. The real scheduler is phase M3b's, in a CI-only harness.
 * **Statics:** no `Schedule.Service` in the monitoring engine (the scheduler only through `Connect-AtmTaskScheduler`,
   whose callers the P6b static now lists with the two monitoring functions); the registration only from `monitor
   enable`, the definition only from the registration, `monitor enable` only from the CLI's `monitor` block and the
-  entry only from the entry point; refusals, plan, phrase and registration in that order; no removal of a task or
-  folder in the monitoring engine; the foreign helpers declared and used only in the task functions; the collector's
+  entry only from the entry point; refusals, plan, phrase and registration in that order; no folder removal in the
+  monitoring engine, and since M4a its task's removal only in `Unregister-AtmMonitorTask`; the foreign helpers declared and used only in the task functions; the collector's
   path reachable only from the entry point's libraries; the entry point with no parameters, its integrity check before
   any load, ASCII only and no `Write-Host`; `-IntervalHours` only in the `monitor` block and `recover`'s refusal; the TUI
   and the GUI with none of the new functions, and their exact names in the GUI's forbidden list; the entry point in
   `AtmRequiredFiles`; the texts in both languages; and the suite never calling the real registration.
 
 NAO_TESTADO in the suite: the real scheduler registering, running and removing the task (the M3b harness, CI only,
-below); `monitor enable` through the CLI with the gate open (only its gate-closed path runs in a child process); the
+below; the removal is the product's since M4a); `monitor enable` through the CLI with the gate open (only its gate-closed path runs in a child process); the
 console a scheduled run gets.
 
 ### The real scheduler for the collection task (V0.5 M3b, CI only)
@@ -1016,6 +1024,9 @@ harness `tests/e2e/Invoke-MonitorE2E.ps1` it covers runs only in the install e2e
     * the test task name is the only seam set, never the token or console seams;
     * every scheduler call is inside a wrapper whose first statement is `Assert-TestName`;
     * `DeleteTask` appears once, in `Remove-TestTask`, on the test name;
+    * since V0.5 M4a, the task is removed by the product (`Unregister-AtmMonitorTask`, through `Invoke-TestUnregister`),
+      then read back `ABSENT`, and only then the product's empty-folder helper runs (`Invoke-TestFolderCleanup`);
+      `Remove-TestTask` is called once, only in the `finally` that wraps the cycle, as a safety net;
     * there is no definition, task folder, account, credential, logon-type change or file written other than the
       summary;
     * the summary goes only through `Protect-Text`;
@@ -1034,10 +1045,13 @@ harness `tests/e2e/Invoke-MonitorE2E.ps1` it covers runs only in the install e2e
     * `MONITOR_TASK_EXISTS` on a second registration;
     * one run, polled for at most 45 seconds: last result 3 with the history folder unchanged, or NOT_TESTED with the
       scheduler's state and code;
-    * the removal by the harness;
-    * `ABSENT`.
+    * the removal by the product (`Unregister-AtmMonitorTask` returns `$null`; V0.5 M4a);
+    * `ABSENT`;
+    * the folder (V0.5 M4a): the product's helper runs between two listings of the folder, and its state (`REMOVED`,
+      `ABSENT`, `NOT_EMPTY` or `KEPT` with the scheduler's code) must agree with them; the state goes in the summary.
   * Leg B, the elevated runner account: `monitor enable` refused with `MONITOR_TASK_REQUIRES_STANDARD_TOKEN` before any
-    plan or phrase, with nothing registered; then, optionally, the same cycle for its own test task.
+    plan or phrase, with nothing registered; then, optionally, the same cycle for its own test task, removal and folder
+    included.
   * Both legs: the installed `monitor enable` exits 3 with `MONITORING_GATE_CLOSED`, and the task folder's listing is
     unchanged. The nine installed gates and the SHA-256 of every installed file are compared before and after.
   * Only a summary with booleans, codes and counts is uploaded.
@@ -1045,6 +1059,68 @@ harness `tests/e2e/Invoke-MonitorE2E.ps1` it covers runs only in the install e2e
   * the console window of a scheduled run (the action carries `-WindowStyle Hidden`; no window is captured);
   * a run the scheduler does not start for a user with no interactive session (NOT_TESTED, with its code);
   * the real scheduler of any machine other than a disposable runner.
+
+### `monitor disable` and the empty task folder (V0.5 M4a)
+
+The area "V0.5 M4a" of `tests/Run-Tests.ps1` (ADR-0017 phase M4a) runs in both shells, after the M3b area. **The suite
+never removes a real task or folder in this area** (the one real case is CI-only, below): every case that reaches the removal, `monitor disable`, the empty-folder
+helper or `unschedule-autopurge` shadows `Connect-AtmTaskScheduler` with a fake scheduler in memory (`New-M4Service`),
+and a static case of the area checks it. The monitoring gate is opened in this process only, around each call.
+* **The empty-folder helper with the fake:** no folder gives `ABSENT` with nothing tried; an empty folder gives
+  `REMOVED` with one `DeleteFolder` of the product's constant, counted with `GetTasks(1)` and `GetFolders(0)`; a
+  visible task, a hidden task (seen only with flag 1) or subfolders give `NOT_EMPTY` with the counts and no name, and
+  nothing tried; `DeleteFolder` refused (not empty, access denied) gives `KEPT` with the code after one attempt; an
+  unreadable count or folder gives `KEPT` with the code and nothing tried; no task is ever removed.
+* **`monitor disable` refusals,** in order, with nothing asked before the plan and nothing removed: the gate closed,
+  proven with seams for the scheduler, the console and the token that fail if called; the direct removal with the gate
+  closed; no presenter or reader; the console; no task (with and without the folder); the scheduler unreadable; a
+  divergent task, left intact; a wrong phrase, after the plan, with nothing removed and the folder not touched. An
+  elevated token reaches the question: the command never reads the token.
+* **`monitor disable` with the fake:** the plan (task, interval, action, folder, phrase), then the phrase, one
+  `DeleteTask` of the exact task, the read-back `ABSENT` and the empty folder removed; with another task, `NOT_EMPTY`;
+  with the folder refused, `KEPT` and the command still done; a task changed between the plan and the removal (read
+  again just before `DeleteTask`) refused with nothing removed; a task gone before the removal, `MONITOR_TASK_ABSENT`;
+  a scheduler error as its code; a removal that does not read back absent, `MONITOR_TASK_NOT_VERIFIED`, with the
+  folder not touched; the direct removal of a divergent task or of another copy's entry point refused; an invalid test
+  name never reaches the scheduler.
+* **`unschedule-autopurge` with the fake:** after the read-back `ABSENT`, the empty folder is removed, a folder with
+  other tasks is `NOT_EMPTY`, a refused one is `KEPT` with the command done; a wrong phrase or a removal that does not
+  read back absent leaves the folder untouched (no folder outcome).
+* **Presentation,** in both languages: the plan of `disable`; each refusal with its code and the command's own reason
+  before the shared one; the task removed with the folder's line (removed, not empty with the counts only, kept with
+  the code, absent); `unschedule-autopurge` done with and without the folder's line; the same keys and placeholders in
+  both languages.
+* **The CLI** in a new process, gate closed: `monitor disable` exits 3 with `MONITORING_GATE_CLOSED` before any plan or
+  phrase (en-US and pt-BR); `-IntervalHours` exits 2; an unknown subverb exits 2 with the usage that lists `disable`;
+  the help names it; the real history folder is never created.
+* **Statics** (in the P6b and M3a static cases): `DeleteTask` twice, each after its exact match, and the monitoring's
+  after the gate; `DeleteFolder` once, only in the helper, which takes no parameter, uses only the product's constant,
+  counts before it removes, never removes a task, never retries and never changes an ACL; the helper called only by
+  the two commands, each after its read-back `ABSENT`; `monitor disable` only from the CLI's `monitor` block, its
+  refusals, plan, phrase, removal, read-back and folder in that order, with no token check; the removal only from
+  `monitor disable`; the entry point, the reports, the TUI and the GUI with none of the new functions.
+
+On the CI only (each case `NAO_TESTADO` anywhere else):
+* the P6b real-task case checks the folder removed after the last task and kept (`NOT_EMPTY`) with another task;
+* a case checks that the Task Scheduler's own `DeleteFolder` refuses a folder that holds a task (the final limit); the
+  code is in the case's line;
+* the case "M4a real" (next to the P6b cases): the test code registers a monitoring test task, `MonitorTest-<8 hex>`
+  with the product's own definition, and the gate is opened only in the suite's memory. The task reads back
+  `PRESENT`. Then:
+  * a wrong phrase removes nothing, after the runner's elevated token has reached the question;
+  * with another test task (the purge's) in the folder, `monitor disable` removes its own task, and the folder stays
+    (`NOT_EMPTY`, the count only, the other task intact and not named);
+  * alone in the folder, `monitor disable` removes the task and then the folder (`REMOVED`, the folder no longer
+    found). If the runner already has other tasks there, the case records that `REMOVED` could not be observed;
+  * the `finally` closes the gate and removes the test tasks by their exact names.
+
+  The area's static allows its calls outside the area only for this one case: the CI guard first, the test name in its
+  exact form, only `monitor disable` called, and that `finally`.
+* the M3b harness removes its test task with the product's removal and records the folder's state per leg.
+
+NAO_TESTADO in the suite: the real removal of the monitoring task outside the CI; `monitor disable` through the CLI
+with the gate open; a folder that holds another user's task on a real machine (only the scheduler's refusal of a folder
+with a task of the same account, on the CI).
 
 ## Future: isolation, quarantine and Recovery Mode (0.3.x and V0.4)
 

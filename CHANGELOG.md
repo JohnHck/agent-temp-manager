@@ -8,6 +8,28 @@ The code in this section reports version 0.3.1, which is not published: 0.3.0 is
 **A sixth, `AtmQuarantinePurgeEnabled`, is closed in every copy too**: in every copy `quarantine purge` only plans, and
 no space is freed.
 
+* Preventive monitoring, V05-M4a (ADR-0017 phase M4a; V05-D9 (c)): removal of the collection task, behind **the ninth gate, closed in every copy**, and the shared task folder removed when empty.
+  * New subverb `agent-temp monitor disable`. With the gate closed (every copy) it refuses with `MONITORING_GATE_CLOSED` before it reads or asks anything (exit `3`).
+  * Past the gate (the suite against an in-memory fake scheduler, and the M3b harness on the CI), in order:
+    * the console the engine observes;
+    * the product's exact task of this user (`MONITOR_TASK_ABSENT`, `MONITOR_TASK_UNREADABLE`, `MONITOR_TASK_DIVERGENT`, with nothing touched);
+    * the plan;
+    * the phrase `DESATIVAR MONITORAMENTO`;
+    * the task checked again just before it is removed, and read back absent (`MONITOR_TASK_NOT_VERIFIED` otherwise).
+  * It needs no standard token. Exit codes `0`, `2` (`-IntervalHours`), `3` and `6`, as `unschedule-autopurge`. The history is not touched.
+  * `quarantine unschedule-autopurge` and `monitor disable` remove the Task Scheduler folder `\AgentTempManager` once their task reads back absent, only when it holds no task (hidden ones included) and no subfolder.
+    * One helper does this, and it takes only the product's constant.
+    * The scheduler's own `DeleteFolder` is the final limit: a refusal keeps the folder with the scheduler's code.
+    * There is no second attempt, no elevation, no ACL change and no task removal.
+    * The folder's outcome (removed, absent, not empty with the counts, kept with the code) is shown in one line and never fails the command.
+    * `unschedule-autopurge` no longer says that the folder stays.
+  * The task line of `version` and `monitor status` names `monitor disable` only where the gate is open.
+  * The M3b harness now removes its test task with the product's removal and records the folder's state per leg.
+  * New suite area "V0.5 M4a", plus CI-only cases:
+    * the folder removed after the last task, and kept with another task;
+    * the scheduler refusing `DeleteFolder` on a folder that holds a task;
+    * `monitor disable` on the real scheduler under a test task name, with the gate opened only in the suite's memory.
+  * **Nothing is scheduled or removed in any copy.** `monitor remove-history`, the uninstaller (V05-D9 (a)) and the TUI and GUI (M5) are not implemented.
 * Preventive monitoring, V05-M3b (ADR-0017 phase M3b), test only: **no product code changed; the ninth gate stays closed in every copy.** A new CI-only harness, `tests/e2e/Invoke-MonitorE2E.ps1`, is on the build's CI-only list, so it is never shipped and an archive that contains it is refused. The install e2e runs it against the installed copy on disposable runners, under a test task name `MonitorTest-<8 hex digits>`, with the gate opened only in the harness's memory:
   * as the install e2e's standard user (no new account mechanism): the engine registers the user's own task, reads it back exactly (interactive, limited, no password, the exact action, `PT6H`), refuses a duplicate, runs it once (last result `3` expected, the installed gate closed; NOT_TESTED with the scheduler's state and code when the scheduler does not start it), and the harness removes it by its exact name and reads back absent;
   * as the elevated runner account: `monitor enable` is refused with `MONITOR_TASK_REQUIRES_STANDARD_TOKEN` before any plan or phrase;

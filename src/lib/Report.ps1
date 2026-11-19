@@ -453,13 +453,32 @@ function Show-AtmAutoPurgeTaskPlan {
     else { Write-Host ('  ' + (Get-AtmText 'ap.plan.policyOff')) -ForegroundColor Yellow }
 }
 
+function Get-AtmTaskFolderLine {
+    # The outcome of the product's task folder after unschedule-autopurge or monitor disable removed their task (the
+    # folder's Folder field, V05-D9 (c)), as one line (Text and Color); $null when there is none. Display only: the
+    # folder is the product's constant, the counts are numbers and the refusal is the scheduler's code; never a task name.
+    param($Folder)
+    if ($null -eq $Folder) { return $null }
+    $f = $script:AtmAutoPurgeTaskFolder
+    switch ([string]$Folder.State) {
+        'REMOVED' { return [pscustomobject]@{ Text = (Get-AtmText 'tf.removed' $f); Color = 'Green' } }
+        'ABSENT' { return [pscustomobject]@{ Text = (Get-AtmText 'tf.absent' $f); Color = 'Gray' } }
+        'NOT_EMPTY' { return [pscustomobject]@{ Text = (Get-AtmText 'tf.notEmpty' $f $Folder.Tasks $Folder.Folders); Color = 'Gray' } }
+        default { return [pscustomobject]@{ Text = (Get-AtmText 'tf.kept' $f $Folder.Code); Color = 'Yellow' } }
+    }
+}
+
 function Show-AtmAutoPurgeTaskResult {
     # The result of schedule-autopurge or unschedule-autopurge: what was done, or the refusal (its code and why).
     param($Result)
     $sched = ($Result.Operation -ceq 'schedule')
     if ($Result.Done) {
         if ($sched) { Write-Host (Get-AtmText 'ap.task.created' $Result.Task.TaskPath) -ForegroundColor Green }
-        else { Write-Host (Get-AtmText 'ap.task.removed' $Result.Plan.TaskPath $script:AtmAutoPurgeTaskFolder) -ForegroundColor Green }
+        else {
+            Write-Host (Get-AtmText 'ap.task.removed' $Result.Plan.TaskPath) -ForegroundColor Green
+            $fl = Get-AtmTaskFolderLine -Folder $(if ($Result.PSObject.Properties['Folder']) { $Result.Folder } else { $null })
+            if ($null -ne $fl) { Write-Host ('  ' + $fl.Text) -ForegroundColor $fl.Color }
+        }
     } else {
         Write-Host (Get-AtmText $(if ($sched) { 'ap.task.notScheduled' } else { 'ap.task.notRemoved' }) $Result.Aborted) -ForegroundColor Yellow
         $why = 'ap.task.why.' + [string]$Result.Aborted
@@ -1604,8 +1623,9 @@ function Show-AtmMonitorStatus {
 function Get-AtmMonitorTaskLines {
     # The state of the user's collection task (Get-AtmMonitorTaskState, V0.5 M3a), as lines for version and monitor status
     # (each item: Text and Color). Display only: the task path, the next run and the last result; never the SID or the
-    # account name. A task that exists while this copy's gate is closed is a leftover: it is said so, and that this
-    # version has no command that removes it.
+    # account name. A task that exists while this copy's gate is closed is a leftover: it is said so, and that no command
+    # of this copy removes it (monitor disable is behind the same gate). With the gate open, the product's exact task
+    # names monitor disable, and a divergent one says that monitor disable does not remove it.
     param($Task)
     if ($null -eq $Task) { return @() }
     $lines = New-Object System.Collections.Generic.List[object]
@@ -1625,8 +1645,9 @@ function Get-AtmMonitorTaskLines {
         default { & $add (Get-AtmText 'mon.task.unreadable' (@($Task.Reasons) -join ', ')) 'Yellow' }
     }
     if ($state -ceq 'PRESENT' -or $state -ceq 'DIVERGENT') {
-        if (-not $Task.GateOpen) { & $add (Get-AtmText 'mon.task.residue') 'Yellow' }
-        & $add (Get-AtmText 'mon.task.noRemove') 'Gray'
+        if (-not $Task.GateOpen) { & $add (Get-AtmText 'mon.task.residue') 'Yellow'; & $add (Get-AtmText 'mon.task.noRemove') 'Gray' }
+        elseif ($state -ceq 'PRESENT') { & $add (Get-AtmText 'mon.task.howDisable') 'Gray' }
+        else { & $add (Get-AtmText 'mon.task.divergentNoRemove') 'Gray' }
     }
     return $lines.ToArray()
 }
@@ -1655,5 +1676,33 @@ function Show-AtmMonitorEnableResult {
         if ($script:AtmMessages['en-US'].ContainsKey($why)) { Write-Host ('  ' + (Get-AtmText $why)) }
         if ($Result.Aborted -ceq 'MONITOR_TASK_NOT_VERIFIED') { Write-Host ('  ' + (Get-AtmText 'mon.task.notVerified')) -ForegroundColor Yellow }
     }
+    foreach ($tl in (Get-AtmMonitorTaskLines -Task $Result.Task)) { Write-Host ('  ' + $tl.Text) -ForegroundColor $tl.Color }
+}
+
+function Show-AtmMonitorDisablePlan {
+    # monitor disable: the plan of the engine, before its phrase. The task to remove (checked again just before), its
+    # action, what happens to the task folder, and that the history is not touched.
+    param($Plan)
+    Write-AtmHeader (Get-AtmText 'mon.plan.disableHeader')
+    Write-Host ('  ' + (Get-AtmText 'mon.plan.disableTask' $Plan.TaskPath $Plan.IntervalHours))
+    Write-Host ('  ' + (Get-AtmText 'mon.plan.action' $Plan.ActionPath $Plan.ActionArguments))
+    Write-Host ('  ' + (Get-AtmText 'mon.plan.disableFolder' $Plan.Folder)) -ForegroundColor Cyan
+}
+
+function Show-AtmMonitorDisableResult {
+    # The result of monitor disable: the task removed and the line of the task folder, or the refusal (its code and why),
+    # then the task's state when the engine read it. A reason of its own (mon.task.whyDisable.<code>) comes before the
+    # shared one (mon.task.why.<code>).
+    param($Result)
+    if ($Result.Done) {
+        Write-Host (Get-AtmText 'mon.task.removed' $Result.Plan.TaskPath) -ForegroundColor Green
+        $fl = Get-AtmTaskFolderLine -Folder $Result.Folder
+        if ($null -ne $fl) { Write-Host ('  ' + $fl.Text) -ForegroundColor $fl.Color }
+        return
+    }
+    Write-Host (Get-AtmText 'mon.task.notRemoved' $Result.Aborted) -ForegroundColor Yellow
+    $why = $(foreach ($k in @(('mon.task.whyDisable.' + [string]$Result.Aborted), ('mon.task.why.' + [string]$Result.Aborted))) { if ($script:AtmMessages['en-US'].ContainsKey($k)) { $k; break } })
+    if ($why) { Write-Host ('  ' + (Get-AtmText $why)) }
+    if ($Result.Aborted -ceq 'MONITOR_TASK_NOT_VERIFIED') { Write-Host ('  ' + (Get-AtmText 'mon.task.notVerifiedDisable')) -ForegroundColor Yellow }
     foreach ($tl in (Get-AtmMonitorTaskLines -Task $Result.Task)) { Write-Host ('  ' + $tl.Text) -ForegroundColor $tl.Color }
 }

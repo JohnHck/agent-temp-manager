@@ -1,7 +1,8 @@
 <#
 .SYNOPSIS
-  V0.5 M3b (ADR-0017 section 6, row M3): the REAL Task Scheduler for the collector's task, end to end, with a test task
-  name, on a DISPOSABLE machine only (CI): register, read back, run once, remove, read back absent.
+  V0.5 M3b and M4a (ADR-0017 section 6, rows M3 and M4): the REAL Task Scheduler for the collector's task, end to end,
+  with a test task name, on a DISPOSABLE machine only (CI): register, read back, run once, remove with the product's
+  removal, read back absent, then the product's empty-folder removal, observed as it is.
 .DESCRIPTION
   CI-only harness, never shipped (tools\Build-Release.ps1 leaves it out of the release archive and refuses an archive
   that contains it; the install e2e checks that it is absent from the package). Two legs, run in this order by the
@@ -11,21 +12,25 @@
       installed entry point and the default interval; the read-back is PRESENT (that user, interactive logon, limited run
       level, no password, the exact action, PT6H, a next run in the future); a second registration is refused
       (MONITOR_TASK_EXISTS); the task is run once and waited for (a short declared timeout): the expected last result is
-      3 (the installed gate is closed) and no history folder is created; the test task is removed by this script, by its
-      exact name; the read-back is ABSENT.
+      3 (the installed gate is closed) and no history folder is created; the test task is removed by the engine's own
+      removal (Unregister-AtmMonitorTask: the exact task, read again just before); the read-back is ABSENT; then the
+      engine's empty-folder removal (Remove-AtmEmptyTaskFolder) runs and its outcome is recorded as observed (REMOVED,
+      NOT_EMPTY, ABSENT, or KEPT with the scheduler's code: who created the folder decides, never forced).
     B (the elevated runner account): monitor enable, with the gate open in this process memory, refuses with
       MONITOR_TASK_REQUIRES_STANDARD_TOKEN before any plan or phrase, and nothing is registered (ABSENT); then a test task
-      of this account (optional proof of the exit code 3, run with the limited token of run level 0), removed the same
-      way.
+      of this account (optional proof of the exit code 3, registered with run level 0), removed and followed by the
+      folder the same way.
     Both legs: the installed CLI's monitor enable, as a process, exits 3 (MONITORING_GATE_CLOSED) and the product's task
       folder lists the same tasks before and after.
   Containment: each leg loads the INSTALLED engine into its own process and opens the monitoring gate there only, in
   memory (the nine installed gates and the SHA-256 of every installed file are checked before and after). The only seam
   set is the engine's test task name, MonitorTest-<8 random hex digits> of this run. Every touch of the scheduler goes
   through a wrapper of this script whose first statement is Assert-TestName (the exact form and this run's name). The
-  product removes no task until M4: Remove-TestTask is this script's only removal, of the test name only. The product's
-  task folder stays. The logon type, the account and the password are never changed or given: if the scheduler does not
-  start the interactive task (no interactive session), the run is NOT_TESTED with the state and the code.
+  task is removed by the product's removal; Remove-TestTask, this script's own removal of the test name only, is only a
+  safety net in a finally, for a test task a failure left behind. The task folder is never removed by this script: only
+  the product's helper, which targets the product's constant folder and is refused by the scheduler when the folder is
+  not empty. The logon type, the account and the password are never changed or given: if the scheduler does not start
+  the interactive task (no interactive session), the run is NOT_TESTED with the state and the code.
   Writes ONLY a summary (booleans, codes, counts, labels; no SID, account name, path or machine name) to -SummaryFile.
   Exit code = number of failed cases (NOT_TESTED is neither a pass nor a failure).
 #>
@@ -52,14 +57,14 @@ $script:testName = 'MonitorTest-' + [guid]::NewGuid().ToString('N').Substring(0,
 # seconds after its registration, so a result read within this window comes from the run of this script.
 $runWaitSeconds = 45
 $summary = [ordered]@{
-    schema = 'atm.e2e-monitor/1'; phase = 'V05-M3b'; leg = $Leg; startedUtc = [datetime]::UtcNow.ToString('o')
+    schema = 'atm.e2e-monitor/1'; phase = 'V05-M3b+M4a'; leg = $Leg; startedUtc = [datetime]::UtcNow.ToString('o')
     shell = "$($PSVersionTable.PSEdition) $($PSVersionTable.PSVersion)"; arch = $env:PROCESSOR_ARCHITECTURE
     elevated = [bool]$isAdmin
     account = $(if ($Leg -eq 'A') { 'the install e2e temporary standard user (launched by the install e2e)' } else { 'the elevated runner account' })
     gate = 'opened in this process memory only, after the installed engine is loaded; the installed copy stays closed'
     seam = 'only the engine test task name (MonitorTest-<8 random hex digits> of this run)'
     runWaitSeconds = $runWaitSeconds
-    token = [ordered]@{}; runOnce = [ordered]@{}; cli = [ordered]@{}; cleanup = $null
+    token = [ordered]@{}; runOnce = [ordered]@{}; cli = [ordered]@{}; folder = [ordered]@{}; cleanup = $null
     cases = [ordered]@{}
 }
 
@@ -197,9 +202,20 @@ function Invoke-TestTaskRun {
     $null = $o.Task.Run([string]'')
     return 'empty-string'
 }
+function Invoke-TestUnregister([string]$Sid, [string]$EntryPoint) {
+    # The product's removal of the collection task (the engine names this run's test task through the override).
+    Assert-TestName
+    return (Unregister-AtmMonitorTask -Sid $Sid -EntryPoint $EntryPoint)
+}
+function Invoke-TestFolderCleanup {
+    # The product's empty-folder removal: the product's constant folder only, refused by the scheduler when not empty.
+    Assert-TestName
+    return (Remove-AtmEmptyTaskFolder)
+}
 function Remove-TestTask {
-    # The only removal of this script: the test task, by its exact name, in the product's folder (the folder stays).
-    # Returns '' when it is absent afterwards (removed, or never there), or the scheduler code.
+    # This script's own removal, only as the safety net of the finally: the test task, by its exact name, in the
+    # product's folder (never the folder). Returns '' when it is absent afterwards (removed, or never there), or the
+    # scheduler code.
     Assert-TestName
     $o = Get-TestTask
     if ($o.Code) { return $o.Code }
@@ -349,7 +365,7 @@ Case 'token' {
 # ============================================================================================== the own task (A; B optional)
 function Invoke-OwnTaskCycle([string]$Prefix) {
     # Register (the engine, this account's SID, the installed entry point, 6 h), read back, the duplicate, run once,
-    # remove (this script, the test name), read back absent.
+    # remove (the engine's removal), read back absent, then the engine's empty-folder removal, recorded as observed.
     $sid = (Get-AtmMonitorIdentity).Sid
     $ep = Get-AtmMonitorEntryPoint
     Case "$Prefix-absent-before" {
@@ -375,19 +391,37 @@ function Invoke-OwnTaskCycle([string]$Prefix) {
     Case "$Prefix-run-once" { Invoke-RunOnce }
     Case "$Prefix-window" { NotTested $windowNote }
     Case "$Prefix-remove" {
-        $code = Remove-TestTask
-        Assert ($code -ceq '') "remocao devolveu $code"
-        'the test task removed by this script, by its exact name (the product removes no task until M4)'
+        $code = Invoke-TestUnregister $sid $ep
+        Assert ($null -eq $code) "remocao do produto devolveu $code"
+        'Unregister-' + 'AtmMonitorTask returned $null (the exact task, read again just before its removal)'
     }
     Case "$Prefix-absent-after" {
+        Assert ($summary.cases["$Prefix-remove"].status -eq 'PASS') 'a remocao do produto nao passou'
         $st = Get-TestState
         Assert ([string]$st.State -ceq 'ABSENT') "estado depois $($st.State) [$(@($st.Reasons) -join ',')]"
-        $o = Get-TestTask
-        Assert ($null -eq $o.Code -and $null -ne $o.Folder) "pasta do produto ausente ou ilegivel ($($o.Code))"
-        'ABSENT; the product''s task folder stays'
+        'ABSENT (read back after the product''s removal)'
+    }
+    Case "$Prefix-folder" {
+        # The product's empty-folder removal, only after the read-back ABSENT, as the commands do. Every outcome is a
+        # result: it is recorded with what this account sees afterwards, and checked to be consistent with it.
+        Assert ($summary.cases["$Prefix-absent-after"].status -eq 'PASS') 'a releitura ABSENT nao passou'
+        $l0 = Get-TestFolderListing
+        $f = Invoke-TestFolderCleanup
+        $l1 = Get-TestFolderListing
+        $state = [string]$f.State
+        $summary.folder[$Prefix] = [ordered]@{ state = $state; code = $f.Code; tasks = $f.Tasks; folders = $f.Folders; presentBefore = $l0.Present; presentAfter = $l1.Present; tasksSeenBefore = $l0.Count }
+        Assert (@('REMOVED', 'NOT_EMPTY', 'KEPT', 'ABSENT') -ccontains $state) "estado da pasta fora do contrato: $state"
+        switch ($state) {
+            'REMOVED' { Assert ($l0.Present -and $l0.Count -eq 0 -and -not $l1.Present -and $null -eq $f.Code) "REMOVED incoerente: antes $($l0.Present)/$($l0.Count), depois $($l1.Present)" }
+            'ABSENT' { Assert (-not $l0.Present -and -not $l1.Present) "ABSENT incoerente: antes $($l0.Present), depois $($l1.Present)" }
+            'NOT_EMPTY' { Assert ($l1.Present -and $l1.Hash -ceq $l0.Hash -and ($f.Tasks + $f.Folders) -gt 0 -and $null -eq $f.Code) "NOT_EMPTY incoerente: depois $($l1.Present), $($f.Tasks) tarefa(s), $($f.Folders) subpasta(s)" }
+            'KEPT' { Assert ($l1.Present -and $l1.Hash -ceq $l0.Hash -and [string]$f.Code -cmatch '^TASK_SCHEDULER_0x[0-9A-F]{8}$') "KEPT incoerente: depois $($l1.Present), codigo $($f.Code)" }
+        }
+        "Remove-AtmEmpty" + "TaskFolder: $state$(if ($f.Code) { ' (' + $f.Code + ')' }); tasks seen $($f.Tasks), subfolders seen $($f.Folders); folder present before $($l0.Present), after $($l1.Present) (observed, never forced)"
     }
 }
 
+try {
 # ============================================================================================== leg A (standard user)
 if ($Leg -eq 'A') {
     Invoke-OwnTaskCycle 'A'
@@ -411,13 +445,14 @@ if ($Leg -eq 'B') {
         'ABSENT (this run''s test name)'
     }
     # Optional: this account's own test task, to prove the exit code 3 on a runner where the scheduler starts it (the
-    # elevated runner account; the task runs with the limited token of run level 0).
+    # elevated runner account; the task is registered with run level 0).
     Invoke-OwnTaskCycle 'B-own'
 }
-
-# ---------------------------------------------------------------------------------------------- after
-# A test task left by a failure is removed here, by its test name only.
-try { $summary.cleanup = $(if ((Remove-TestTask) -ceq '') { 'absent' } else { 'code' }) } catch { $summary.cleanup = 'error' }
+} finally {
+    # ------------------------------------------------------------------------------------------ the safety net
+    # A test task a failure left behind is removed here, by its test name only (absent: nothing is done).
+    try { $summary.cleanup = $(if ((Remove-TestTask) -ceq '') { 'absent' } else { 'code' }) } catch { $summary.cleanup = 'error' }
+}
 Case 'installed-after' {
     foreach ($g in $loadedGates) { Assert ($loaded[$g] -eq $false) "trava $g carregada da instalacao nao era `$false" }
     foreach ($g in @($loadedGates | Where-Object { $_ -cne 'AtmMonitoringEnabled' })) { Assert ((Get-Variable -Name $g -Scope Script -ValueOnly) -eq $false) "trava $g aberta neste processo" }

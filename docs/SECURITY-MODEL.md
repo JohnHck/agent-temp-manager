@@ -880,9 +880,10 @@ credential. What a run may do is still decided only by `autoPurge = true` in the
   from the CLI; the scheduler is reached only through one helper (`Connect-AtmTaskScheduler`). `version`,
   `quarantine list` and the TUI only read the task's state; the TUI never schedules or unschedules (T-ISO-6), and the
   installer never creates a task. Static suite tests check all of this. V0.5 M3a adds a second task, the monitoring's,
-  registered only by `monitor enable` behind the monitoring gate (below). That gate is closed in every copy and
-  `monitor enable` then refuses before asking anything, so in a distributed copy these two commands remain the only
-  ones that change the Task Scheduler.
+  registered only by `monitor enable` and, since M4a, removed only by `monitor disable`, both behind the monitoring gate
+  (below). That gate is closed in every copy and both commands then refuse before asking anything, so in a distributed
+  copy these two commands remain the only ones that change the Task Scheduler (`unschedule-autopurge` also removes the
+  product's folder when it is empty, since M4a).
 * **The task.** One per user, `\AgentTempManager\AutoPurge-<first 16 hex digits of SHA-256(SID)>`: the name does not show
   the SID or the account. Principal: the user's SID, logon type Interactive (`InteractiveToken`: it runs only while that
   user's session is open, and no password is stored), run level Limited (never elevated). One action: Windows
@@ -899,7 +900,8 @@ credential. What a run may do is still decided only by `autoPurge = true` in the
 * **`unschedule-autopurge`** removes only the task with the product's exact folder and name, for the current user's SID
   (a name is resolved to its SID; an unresolvable one does not match), interactive, limited, with exactly one action
   equal to the installed entry point's. Any divergence refuses with nothing touched (`AUTOPURGE_TASK_DIVERGENT`). The
-  task is read and compared again just before it is removed.
+  task is read and compared again just before it is removed. Since V0.5 M4a, once the task is read back absent, the
+  folder `\AgentTempManager` is removed if it is empty (section "Preventive monitoring", "Removal", below).
 * **Uninstall.** It never removes a task, the current user's or another user's. It warns when the current user's task
   exists and counts other users' tasks, without naming them.
 * **Mitigations.** The action is only the installed entry point, which checks the manifest before it loads any code and
@@ -932,13 +934,15 @@ collection uses a **per-user scheduled task**, like the automatic purge's: inter
 with no elevation needed to create it. PRIV-3 ([ELEVATION.md](ELEVATION.md)) admits these two tasks and no other.
 **The task is implemented since phase M3a, behind the monitoring gate** `AtmMonitoringEnabled` (the ninth gate),
 `$false` in every copy (section "Monitoring gate" below): no distributed copy can create it. The real scheduler is
-validated only by phase M3b's CI harness; the command that removes the task comes in phase M4.
+validated only by phase M3b's CI harness, which since phase M4a also removes its test task with the product's own
+removal.
 
 * **The two tasks.**
   * The automatic purge's (above), implemented.
   * The monitoring's, implemented behind the gate: `monitor enable` registers it (`Register-AtmMonitorTask`, the only
-    call), and `monitor disable` (phase M4) will remove it after an exact match. Until M4 no command of the product
-    removes it; `version` and `monitor status` show its state, and a task left by another copy is shown as a residue.
+    call), and `monitor disable` (phase M4a) removes it after an exact match (`Unregister-AtmMonitorTask`, the only
+    call), behind the same gate. In a distributed copy, with the gate closed, no command of the product removes it;
+    `version` and `monitor status` show its state, and a task left by another copy is shown as a residue.
 * **The task.** One per user, `\AgentTempManager\Monitor-<first 16 hex digits of SHA-256(SID)>`: the name does not show
   the SID or the account. Principal: the user's SID, logon type Interactive, run level Limited, no password. One time
   trigger repeated every 1, 2, 4, 6, 12 or 24 hours (default 6, V05-D2 (a)) with no end, first run at least one minute
@@ -960,6 +964,13 @@ validated only by phase M3b's CI harness; the command that removes the task come
     * the typed phrase `ATIVAR MONITORAMENTO` (`MONITOR_TASK_NOT_CONFIRMED`).
 
     It then registers the task and reads it back with an exact match (`MONITOR_TASK_NOT_VERIFIED` otherwise).
+  * `monitor disable` (phase M4a) also refuses with the gate closed (`MONITORING_GATE_CLOSED`), before it reads or asks
+    anything. With the gate open it needs, in this order, a console the engine observes (`CONSOLE_NOT_OBSERVED`) and
+    exactly the product's task of this user (`MONITOR_TASK_ABSENT`, `MONITOR_TASK_UNREADABLE`,
+    `MONITOR_TASK_DIVERGENT`, with nothing touched); then the plan and the typed phrase `DESATIVAR MONITORAMENTO`
+    (`MONITOR_TASK_NOT_CONFIRMED`). It reads and compares the task again just before it removes it, reads it back
+    absent (`MONITOR_TASK_NOT_VERIFIED` otherwise), and only then removes the empty folder (below). It needs no
+    standard token: it removes the user's own task, and the strict match keeps it from touching anyone else's.
   * The collector's entry point takes no arguments, checks the manifest before it loads any code, and reads the gate
     again on every run. A copy whose gate is closed exits (code 3) without collecting, creating the history folder or
     taking the mutex.
@@ -973,8 +984,22 @@ validated only by phase M3b's CI harness; the command that removes the task come
 * **Removal.** What happens to the folder when the product is removed or the last task is unscheduled was **pending
   V05-D9** (the uninstaller and the shared task folder) until 2026-11-18. Decided then, (a) plus (c): the uninstaller
   warns and names `monitor disable` and `monitor remove-history`, and the unschedule commands remove the folder
-  `\AgentTempManager` when it is empty. Phase M4 implements it. Until then the folder stays after
-  `unschedule-autopurge`, and the uninstaller only reads and warns.
+  `\AgentTempManager` when it is empty. Phase M4a implements (c); the uninstaller (a) comes in a later M4 phase and
+  until then only reads and warns.
+  * **One helper, two callers.** `unschedule-autopurge` and `monitor disable` call one helper
+    (`Remove-AtmEmptyTaskFolder`), each only after its own task is read back absent. The helper takes no path: it
+    acts only on the product's constant folder.
+  * **Empty** means no task, hidden ones included (`GetTasks(1)`), and no subfolder (`GetFolders(0)`), each read by
+    its count; no task is enumerated or named. A folder that is not empty is left with the counts seen
+    (`NOT_EMPTY`), and nothing is tried.
+  * **The final limit is the Task Scheduler.** An account sees only the tasks it may read, so a folder that looks
+    empty can still hold another user's task. The scheduler's `DeleteFolder` then refuses (not empty, or access
+    denied), and the folder is kept with the scheduler's code (`KEPT`). There is no second attempt, no elevation, no
+    ACL change and no task removal. A suite case on the CI checks that `DeleteFolder` refuses a folder that holds a
+    task.
+  * **Never a failure.** The folder's outcome (`ABSENT`, `NOT_EMPTY`, `REMOVED` or `KEPT`) never fails the command:
+    the task is already removed. A race in which another user creates a task in the folder between the count and the
+    removal ends in the same refusal by the scheduler.
 * **Never.** The monitoring task never deletes, recovers or changes the user's system or the agents' data. It never
   elevates, and it never stores a credential. The only files it removes are the oldest files of its own history, by
   exact name, in its pinned folder (V05-D4 (a); ADR-0017 section 3).

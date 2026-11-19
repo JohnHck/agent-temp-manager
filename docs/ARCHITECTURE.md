@@ -119,7 +119,7 @@ phase M3b's CI harness). Each follows the same four steps:
 | Build the definition, never registered by itself | `New-AtmAutoPurgeTaskDefinition` (name from `Get-AtmAutoPurgeTaskName`, action from `Get-AtmAutoPurgeTaskAction`) | `New-AtmMonitorTaskDefinition` (name from `Get-AtmMonitorTaskName`, action from `Get-AtmMonitorTaskAction`): interactive, limited, no password, one action running the entry point `src/bin/agent-temp-monitor.ps1`; `$null` with the gate closed |
 | Register (`TASK_CREATE`, never replace) | `Register-AtmAutoPurgeTask`, called only by `Invoke-AtmAutoPurgeSchedule`, reached only from the CLI | `Register-AtmMonitorTask`, called only by `Invoke-AtmMonitorEnable`, reached only from the CLI's `monitor enable`, and only with the gate open (ADR-0017 section 5) |
 | Read back and check the exact match | `Get-AtmAutoPurgeTaskObject`, `Test-AtmAutoPurgeTaskMatch`, `Get-AtmAutoPurgeTaskState` | `Get-AtmMonitorTaskObject`, `Test-AtmMonitorTaskMatch`, `Get-AtmMonitorTaskState`. Reading is allowed with the gate closed, so that a leftover is visible in `version` and `monitor status`. |
-| Remove after the exact match | `Unregister-AtmAutoPurgeTask`, called only by `Invoke-AtmAutoPurgeUnschedule` | `monitor disable` (phase M4); until then nothing removes it |
+| Remove after the exact match | `Unregister-AtmAutoPurgeTask`, called only by `Invoke-AtmAutoPurgeUnschedule` | `Unregister-AtmMonitorTask` (phase M4a), called only by `Invoke-AtmMonitorDisable`, reached only from the CLI's `monitor disable`, and only with the gate open |
 
 * **The scheduler connection.** The Task Scheduler is reached only through `Connect-AtmTaskScheduler`, in
   `Engine.Isolate.ps1`, the only place that creates `Schedule.Service`. Phase M3a decided **not to move it**: the
@@ -137,7 +137,11 @@ phase M3b's CI harness). Each follows the same four steps:
 * **Removal.** Whether the uninstaller or the unschedule commands do more than today about the shared folder was
   **pending V05-D9** until 2026-11-18. Decided then, (a) plus (c): the uninstaller warns and names `monitor disable` and
   `monitor remove-history`, and the unschedule commands remove the folder `\AgentTempManager` when it is empty. Phase
-  M4 implements it.
+  M4a implements (c): one helper in `Engine.Isolate.ps1`, `Remove-AtmEmptyTaskFolder`, called by
+  `Invoke-AtmAutoPurgeUnschedule` and `Invoke-AtmMonitorDisable` after their task reads back absent. It acts only on
+  the constant folder, removes it only when it holds no task (hidden ones included) and no subfolder, and leaves the
+  final word to the Task Scheduler's `DeleteFolder`; its outcome never fails the command. The uninstaller (a) is a
+  later M4 phase.
 
 ### Planned layering (ADR-0013)
 

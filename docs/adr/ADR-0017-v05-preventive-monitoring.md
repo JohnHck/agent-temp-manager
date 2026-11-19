@@ -1,7 +1,8 @@
 # ADR-0017: Persistent preventive monitoring (V0.5)
 
 Status: ACCEPTED: V05-D1 to V05-D10 decided (D1-D7 2026-11-17, D8-D10 2026-11-18, as recommended); M0 to M3 (M3a and
-the M3b real-scheduler CI harness) implemented; M4 next; gate closed in every copy. (Until 2026-11-17: PROPOSED, with V05-D1
+the M3b real-scheduler CI harness) and M4a (`monitor disable` and the empty task folder) implemented; the rest of M4
+(`monitor remove-history` and the uninstaller) next; gate closed in every copy. (Until 2026-11-17: PROPOSED, with V05-D1
 to V05-D10 open. From 2026-11-17 to 2026-11-18: ACCEPTED in part, with V05-D8, V05-D9 and V05-D10 open and only M0
 implemented.)
 Date: 2026-11-17
@@ -893,3 +894,88 @@ V05-M3b leaves them.
 
 **Left for M4 and M5:** `monitor disable`, `monitor remove-history` and the uninstaller (M4, V05-D9 (a) plus (c)); and
 the TUI and the GUI (M5).
+
+## M4a implementation record (V05-M4a, 2026-11-19)
+
+The first part of phase M4: `agent-temp monitor disable`, and V05-D9 (c), the shared task folder removed when it is
+empty by both unschedule commands. The ninth gate stays `$false` in every copy, and `monitor disable` sits behind it.
+`install/` is unchanged; the uninstaller (V05-D9 (a)) and `monitor remove-history` come in a later M4 phase. The line
+numbers below are those of the files as V05-M4a leaves them.
+
+* **The removal** `Unregister-AtmMonitorTask` (`Engine.Monitor.ps1:1371`), the monitoring engine's only `DeleteTask`.
+  * It checks the gate first (`MONITORING_GATE_CLOSED`, before the scheduler is reached).
+  * It reads the task again and removes it only when `Test-AtmMonitorTaskMatch` finds no divergence, in the same read.
+  * It refuses with nothing touched on any divergence (`MONITOR_TASK_DIVERGENT`) and when the task is absent
+    (`MONITOR_TASK_ABSENT`).
+  * It returns `$null` or a code, and never touches the folder.
+* **`monitor disable`,** `Invoke-AtmMonitorDisable` (`:1389`), called only from the CLI's `monitor` block
+  (`agent-temp.ps1:560`). In order:
+  1. the gate closed refuses with `MONITORING_GATE_CLOSED` before anything is read or asked;
+  2. no presenter or reader;
+  3. the console, observed by the engine (`CONSOLE_NOT_OBSERVED`, exit 6);
+  4. the task: absent (`MONITOR_TASK_ABSENT`), unreadable (`MONITOR_TASK_UNREADABLE`) or divergent
+     (`MONITOR_TASK_DIVERGENT`, with the reasons).
+
+  Then the plan is shown (task, interval, action, folder, and that the history is not touched), and the phrase
+  `DESATIVAR MONITORAMENTO` (`:92`) is asked (`MONITOR_TASK_NOT_CONFIRMED`). Only then:
+  * the task is removed (`Unregister-AtmMonitorTask`);
+  * it is read back until it is `ABSENT` (`MONITOR_TASK_NOT_VERIFIED` otherwise);
+  * only after that, the empty folder is handled (below).
+
+  No standard token is required: removing the user's own task elevates nothing, and the strict match keeps it from
+  touching another user's. Exit codes as `unschedule-autopurge`: `0` done (whatever the folder's outcome), `2` usage
+  (`-IntervalHours`), `3` refused or not confirmed, `6` no console.
+* **The empty folder (V05-D9 (c)),** `Remove-AtmEmptyTaskFolder` (`Engine.Isolate.ps1:1910`). It is called only by
+  `Invoke-AtmAutoPurgeUnschedule` (`:1983`) and `Invoke-AtmMonitorDisable`, each after its own task is read back
+  `ABSENT`.
+  * It takes no parameter. It acts only on the product's constant folder (`\AgentTempManager`, the same constant in
+    both engines).
+  * Empty means no task, hidden ones included (`GetTasks(1)`), and no subfolder (`GetFolders(0)`), each read by its
+    count; nothing is enumerated or named.
+  * The Task Scheduler's `DeleteFolder` is the final limit. A task this account cannot see, one registered meanwhile,
+    or a denied access makes it refuse, and the folder is kept with the scheduler's code.
+  * It makes one attempt, with no retry, no elevation, no ACL change and no task removal.
+  * Its outcome, `ABSENT`, `NOT_EMPTY` (with the counts), `REMOVED` or `KEPT` (with the code), is the result's `Folder`
+    field. It never fails the command.
+  * `unschedule-autopurge` keeps its own gate rules (none) and only gains this step.
+* **Presentation.** `Show-AtmMonitorDisablePlan` and `Show-AtmMonitorDisableResult` (`Report.ps1:1682`, `:1692`), and
+  one folder line for both commands (`Get-AtmTaskFolderLine`, `:456`). `ap.task.removed` no longer says that the
+  folder stays. The task line of `version` and `monitor status` names `monitor disable` only where the gate is open;
+  with the gate closed it still says that no command of this copy removes a leftover task.
+* **The M3b harness** (`tests/e2e/Invoke-MonitorE2E.ps1`) now removes its test task with the product's removal:
+  * `Invoke-TestUnregister` (`:205`) calls `Unregister-AtmMonitorTask`, behind the name check;
+  * then the read-back `ABSENT`;
+  * then `Invoke-TestFolderCleanup` (`:210`) calls the product's helper between two listings of the folder, and the
+    state must agree with them. The state per leg is in the summary.
+
+  `Remove-TestTask` remains only as the safety net of a `finally` around each leg's cycle.
+* **Tests.** The suite's area "V0.5 M4a" (`tests/Run-Tests.ps1`), after M3b, uses a fake scheduler in memory for
+  every removal, and a static of the area checks it. It covers:
+  * the helper: absent, empty, a visible or hidden task, subfolders, a refused `DeleteFolder` with no second attempt,
+    and unreadable counts;
+  * each refusal of `disable` in order, the closed gate proven with seams that fail if called;
+  * the divergence read again just before `DeleteTask`;
+  * a wrong phrase that removes nothing;
+  * `unschedule-autopurge` with the folder;
+  * the presentation in both languages;
+  * the CLI with the gate closed.
+
+  The P6b and M3a statics now expect two `DeleteTask` and one `DeleteFolder`, and pin the callers and the order. On
+  the CI only:
+  * the P6b real-task case removes the folder after the last task, and keeps it (`NOT_EMPTY`) with another task;
+  * a new case shows the scheduler's own `DeleteFolder` refusing a folder that holds a task;
+  * a new case, "M4a real", runs `monitor disable` on the real scheduler.
+    * Setup: a test task `MonitorTest-<8 hex>` with the product's definition, registered by the test code, and the gate
+      opened only in the suite's memory.
+    * A wrong phrase removes nothing.
+    * With another test task in the folder, the disable removes its own task and the folder stays `NOT_EMPTY`.
+    * Alone, the disable removes the task and then the folder (`REMOVED`).
+    * The runner's elevated token reaches the question.
+    * A static allows this case alone, outside the area, to reach the removal.
+* **NOT_TESTED.**
+  * `monitor disable` with the gate open through the CLI.
+  * The real removal of the monitoring task outside the CI (the suite's real case and the harness).
+  * A folder holding another user's task on a real machine. The CI shows the scheduler's refusal for a folder with a
+    task of the same account.
+
+**Left for M4 and M5:** `monitor remove-history` and the uninstaller (V05-D9 (a)); and the TUI and the GUI (M5).

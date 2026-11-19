@@ -1893,7 +1893,8 @@ function Register-AtmAutoPurgeTask {
 function Unregister-AtmAutoPurgeTask {
     # The only removal (unschedule-autopurge): the task is read again just before and removed only when it is exactly the
     # product's task of this user (Test-AtmAutoPurgeTaskMatch); any divergence refuses with nothing touched
-    # (AUTOPURGE_TASK_DIVERGENT). The folder stays. Returns $null, or the code.
+    # (AUTOPURGE_TASK_DIVERGENT). The folder is not touched here: the command removes it when empty, after the task is
+    # read back absent. Returns $null, or the code.
     param([string]$Sid, [string]$EntryPoint)
     try {
         $name = Get-AtmAutoPurgeTaskName -Sid $Sid
@@ -1904,6 +1905,33 @@ function Unregister-AtmAutoPurgeTask {
         $found.Folder.DeleteTask($name, 0)
         return $null
     } catch { return (Get-AtmTaskSchedulerCode $_.Exception) }
+}
+
+function Remove-AtmEmptyTaskFolder {
+    # V05-D9 (c): the product's task folder, removed when it is empty, by the two commands that remove a task
+    # (unschedule-autopurge and monitor disable), each after its own task is read back absent. Only the constant folder of
+    # the product ($script:AtmAutoPurgeTaskFolder, the same as the monitoring's): never a path that is passed in. Empty: no
+    # task, hidden ones included (GetTasks(1)), and no subfolder (GetFolders(0)), each read by its Count, never
+    # enumerated. The scheduler's DeleteFolder is the final limit: a task this user cannot see (another user's), one
+    # registered meanwhile, or a denied access makes it refuse. Never a second attempt, an elevation, an ACL change or the
+    # removal of a task. It never fails the command (the task is already removed): State ABSENT (no folder), NOT_EMPTY
+    # (Tasks and Folders: the counts seen; nothing is tried and nothing is named), REMOVED, or KEPT (Code: the scheduler's
+    # code, from the count or from DeleteFolder).
+    $st = [ordered]@{ State = 'KEPT'; Code = $null; Tasks = $null; Folders = $null }
+    try {
+        $svc = Connect-AtmTaskScheduler
+        $folder = $null
+        try { $folder = $svc.GetFolder($script:AtmAutoPurgeTaskFolder) } catch {
+            if (Test-AtmTaskNotFound $_.Exception) { $st.State = 'ABSENT'; return [pscustomobject]$st }
+            throw
+        }
+        $st.Tasks = [int]$folder.GetTasks(1).Count
+        $st.Folders = [int]$folder.GetFolders(0).Count
+        if ($st.Tasks -gt 0 -or $st.Folders -gt 0) { $st.State = 'NOT_EMPTY'; return [pscustomobject]$st }
+        $svc.GetFolder('\').DeleteFolder($script:AtmAutoPurgeTaskFolder.TrimStart('\'), 0)
+        $st.State = 'REMOVED'
+    } catch { $st.State = 'KEPT'; $st.Code = Get-AtmTaskSchedulerCode $_.Exception }
+    return [pscustomobject]$st
 }
 
 function Test-AtmAutoPurgeStandardToken {
@@ -1957,11 +1985,13 @@ function Invoke-AtmAutoPurgeUnschedule {
       quarantine unschedule-autopurge. The console, observed by the engine; then the task: absent
       (AUTOPURGE_TASK_ABSENT), unreadable, or divergent from the product's task of this user in any way
       (AUTOPURGE_TASK_DIVERGENT, with the reasons) is refused with nothing touched. The plan is shown, then the phrase
-      DESAGENDAR EXPURGO AUTOMATICO; the task is checked again just before it is removed, and read back. The folder stays.
-      Returns the shape of Invoke-AtmAutoPurgeSchedule.
+      DESAGENDAR EXPURGO AUTOMATICO; the task is checked again just before it is removed, and read back. Only once it is
+      read back absent, the product's task folder is removed if it is empty (the empty-folder helper, V05-D9 (c)); its
+      outcome never fails the command. Returns the shape of Invoke-AtmAutoPurgeSchedule, plus Folder (the outcome of the
+      folder; $null when the task was not removed).
     #>
     param([scriptblock]$PlanPresenter, [scriptblock]$ConfirmationReader)
-    $st = [ordered]@{ Operation = 'unschedule'; Aborted = $null; Plan = $null; Registered = $false; Done = $false; Task = $null }
+    $st = [ordered]@{ Operation = 'unschedule'; Aborted = $null; Plan = $null; Registered = $false; Done = $false; Task = $null; Folder = $null }
     $end = { return [pscustomobject]$st }
     if (-not $PlanPresenter -or -not $ConfirmationReader) { $st.Aborted = 'SEM_APRESENTACAO_OU_CONFIRMACAO'; return (& $end) }
     if (-not (Get-AtmEngineConsoleObservation).Observed) { $st.Aborted = 'CONSOLE_NOT_OBSERVED'; return (& $end) }
@@ -1977,6 +2007,8 @@ function Invoke-AtmAutoPurgeUnschedule {
     $code = Unregister-AtmAutoPurgeTask -Sid (Get-AtmCurrentIdentity).Sid -EntryPoint $ep
     $st.Task = Get-AtmAutoPurgeTaskState
     if ($code) { $st.Aborted = $code; return (& $end) }
-    if ($st.Task.State -cne 'ABSENT') { $st.Aborted = 'AUTOPURGE_TASK_NOT_VERIFIED' } else { $st.Done = $true }
+    if ($st.Task.State -cne 'ABSENT') { $st.Aborted = 'AUTOPURGE_TASK_NOT_VERIFIED'; return (& $end) }
+    $st.Done = $true
+    $st.Folder = Remove-AtmEmptyTaskFolder
     return (& $end)
 }

@@ -715,7 +715,12 @@ agent-temp quarantine unschedule-autopurge
 * **`unschedule-autopurge`** needs an interactive console and the phrase `DESAGENDAR EXPURGO AUTOMATICO`. It removes
   **only** the task with the product's exact folder and name for you, set to run as you, interactive, limited, with the
   installed entry point as its only action. Anything else (`AUTOPURGE_TASK_DIVERGENT`, with the reasons in `version`),
-  or no task (`AUTOPURGE_TASK_ABSENT`), is refused with nothing touched (exit 3). The folder `\AgentTempManager` stays.
+  or no task (`AUTOPURGE_TASK_ABSENT`), is refused with nothing touched (exit 3). Once the task is read back absent,
+  the Task Scheduler folder `\AgentTempManager` is removed if it is empty: no task, hidden ones included, and no
+  subfolder (V0.5 M4a). Otherwise it stays, and the result says so with the counts it saw (no task is named). If the
+  Task Scheduler refuses to remove it (for example, it holds a task of another user that your account cannot see), it
+  stays with the scheduler's code, and nothing else is tried. The folder never makes the command fail: the task is
+  already removed (exit 0).
 * **State.** `version`, `quarantine list` and the TUI's quarantine screens show whether your task exists, whether it is
   enabled and its next and last run: `ABSENT`, `PRESENT`, `DIVERGENT` (not exactly the product's task; check it in Task
   Scheduler) or unreadable. The policy line next to it says whether a run would do anything.
@@ -1054,18 +1059,20 @@ that only shows. Executing stays in the CLI (T-ISO-6), as restore does.
 * **Nothing else:** no service name is typed, and no key, button or menu starts, undoes, relaunches, elevates, takes the
   lock or writes a log.
 
-## Monitor (V0.5 M1 to M3a, unreleased; nothing is collected or scheduled in any copy)
+## Monitor (V0.5 M1 to M4a, unreleased; nothing is collected, scheduled or removed in any copy)
 
 Preventive monitoring ([ADR-0017](adr/ADR-0017-v05-preventive-monitoring.md)) will keep a small local history of what
 the audit shows, one history per user. Phase M1 adds the collector and the history storage behind the **ninth release
-gate**, `AtmMonitoringEnabled`, closed in every copy, and phase M3a the command that turns it on, `monitor enable`.
-`agent-temp version` shows the gate: `preventive monitoring: DISABLED in this release (monitor status only reads the
-history; nothing is collected or scheduled)`. With the gate closed, as in every copy, `monitor enable` refuses before
-asking anything, so nothing is scheduled.
+gate**, `AtmMonitoringEnabled`, closed in every copy; phase M3a the command that turns it on, `monitor enable`; and
+phase M4a the command that turns it off, `monitor disable`. `agent-temp version` shows the gate: `preventive
+monitoring: DISABLED in this release (monitor status only reads the history; nothing is collected or scheduled)`. With
+the gate closed, as in every copy, `monitor enable` and `monitor disable` refuse before asking anything, so nothing is
+scheduled or removed.
 
 ```powershell
 agent-temp monitor status
 agent-temp monitor enable [-IntervalHours 1|2|4|6|12|24]
+agent-temp monitor disable
 ```
 
 `monitor status` only reads. It says whether monitoring is available, the state of your collection task (also shown by
@@ -1089,7 +1096,9 @@ The collection task's line says one of:
 * **unreadable,** with the scheduler's code.
 
 A present or divergent task with the gate closed was left by another copy: the line says its collector exits without
-collecting. This version has no command that removes it (it can be removed in Task Scheduler).
+collecting, and that no command of this copy removes it, since `monitor disable` is behind the same gate (it can be
+removed in Task Scheduler). Where the gate is open, a present task's line names `monitor disable`, and a divergent
+one's says that `monitor disable` removes only the product's exact task.
 
 It ends with "Nothing was collected, created or changed." Example, with the gate closed, no task and no history:
 
@@ -1130,6 +1139,34 @@ collection: the first run is at least one minute later.
 `-IntervalHours` is an option of `monitor enable` only: it takes a whole number from the list, and anything else (`5`,
 `6.5`, `abc`) is a usage error (exit code `2`, nothing read). `monitor status` and `recover` refuse it (`2`); the other
 commands ignore it, as they ignore other options they do not use.
+
+### `monitor disable` (V0.5 M4a; refused in this release)
+
+`monitor disable` removes your own collection task. **With the gate closed, as in every copy, it refuses first**,
+before it reads the console or the Task Scheduler and before it asks anything:
+
+```
+NOTHING WAS REMOVED: MONITORING_GATE_CLOSED
+  Monitoring is not available in this release: nothing was read, asked or removed.
+```
+
+Where the gate is open (only inside the test suite and the CI harness), it checks, in this order, and refuses with
+nothing removed:
+
+1. an interactive console, observed by the engine: `CONSOLE_NOT_OBSERVED`;
+2. your collection task: none (`MONITOR_TASK_ABSENT`), the Task Scheduler unreadable (`MONITOR_TASK_UNREADABLE`), or a
+   task that is not exactly the product's collection task of this user, with the reasons (`MONITOR_TASK_DIVERGENT`;
+   it is never touched).
+
+It needs no standard token: removing your own task elevates nothing. It then shows the plan (the task's path and
+interval, the action, what happens to the task folder, and that the history is not touched) and asks you to type
+`DESATIVAR MONITORAMENTO` (anything else: `MONITOR_TASK_NOT_CONFIRMED`). Only then it checks the task again, removes it
+if it is still exactly the product's task (otherwise `MONITOR_TASK_DIVERGENT` or `MONITOR_TASK_ABSENT`, with nothing
+removed), and reads it back; a task that does not read back absent is `MONITOR_TASK_NOT_VERIFIED`. Once it is absent,
+the Task Scheduler folder `\AgentTempManager` is removed if it is empty, as `quarantine unschedule-autopurge` does: no
+task, hidden ones included, and no subfolder. Otherwise, or if the Task Scheduler refuses, it stays, the result says
+so with the counts or the scheduler's code, and nothing else is tried; the folder never makes the command fail. The
+history in `%LOCALAPPDATA%\AgentTempManager\Monitor` is not touched (V0.5 has no command that removes it yet).
 
 ### The collector's entry point: `bin\agent-temp-monitor.ps1`
 
@@ -1233,11 +1270,13 @@ A refused file is left exactly as it is. Changing the file changes only which al
 The rotation of the history never removes `monitor.json`. A `monitor.json` with another owner, or a folder or junction
 with that name, makes the rotation refuse, as any other unexpected item does.
 
-Exit codes of `monitor`: `0` for `monitor status`, or the task created and read back by `monitor enable`; `2` usage (no
-subverb, a subverb other than `status` or `enable`, an option `monitor` does not take, `-IntervalHours` with `status`,
-or an interval not in the list); `3` `monitor enable` refused or not confirmed (nothing scheduled; always, with the gate
-closed); `6` `monitor enable` needs an interactive console. `monitor status` takes no option other than `-Lang` and the
-display switches `-NoProgress` and `-Ascii`; `monitor enable` also takes `-IntervalHours`.
+Exit codes of `monitor`: `0` for `monitor status`, the task created and read back by `monitor enable`, or the task
+removed and read back absent by `monitor disable` (whatever happened to the folder); `2` usage (no subverb, a subverb
+other than `status`, `enable` or `disable`, an option `monitor` does not take, `-IntervalHours` with `status` or
+`disable`, or an interval not in the list); `3` `monitor enable` or `monitor disable` refused or not confirmed (nothing
+scheduled or removed; always, with the gate closed); `6` `monitor enable` or `monitor disable` needs an interactive
+console. `monitor status` and `monitor disable` take no option other than `-Lang` and the display switches
+`-NoProgress` and `-Ascii`; `monitor enable` also takes `-IntervalHours`.
 
 ## Verify (installed copy)
 
@@ -1270,11 +1309,11 @@ Version x.y.z; 0 mismatching file(s).
 `-IncludeOtherUsers`, or a `recover` usage error (`RECOVERY_NOT_DECLARED` included), or a `monitor` usage error · `3` clean aborted (nothing
 deleted), `isolate`, `quarantine restore` or `quarantine purge` stopped
 after the plan (nothing moved or purged), `quarantine schedule-autopurge` or `unschedule-autopurge` refused or not
-confirmed (nothing scheduled or removed), `monitor enable` refused or not confirmed (nothing scheduled), `recover plan` refused (nothing changed), or, only with
+confirmed (nothing scheduled or removed), `monitor enable` or `monitor disable` refused or not confirmed (nothing scheduled or removed), `recover plan` refused (nothing changed), or, only with
 deletion enabled (not in any published copy), stopped before completing (Clean log, above); `authorize`: nothing recorded ·
 `4` no manifest (source checkout, `verify` only) · `5` integrity mismatch (a listed file missing, altered or
 unreadable, a missing or unreadable `providers` directory, an unlisted library or provider, an unreadable or
-invalid manifest, or an installed copy without one; nothing is loaded) · `6` TUI, `authorize`, `quarantine schedule-autopurge` or `unschedule-autopurge`, `monitor enable`, or `clean` with real deletion enabled (not in any published copy) needs an interactive console · `7` `gui`: the desktop GUI gate is closed (`GUI_GATE_CLOSED`, every copy; no window) · `8` `gui`: no window can be shown here (`GUI_NOT_STA`, `GUI_NO_INTERACTIVE_DESKTOP`, `GUI_WINFORMS_UNAVAILABLE`) · `10` unexpected error,
+invalid manifest, or an installed copy without one; nothing is loaded) · `6` TUI, `authorize`, `quarantine schedule-autopurge` or `unschedule-autopurge`, `monitor enable` or `monitor disable`, or `clean` with real deletion enabled (not in any published copy) needs an interactive console · `7` `gui`: the desktop GUI gate is closed (`GUI_GATE_CLOSED`, every copy; no window) · `8` `gui`: no window can be shown here (`GUI_NOT_STA`, `GUI_NO_INTERACTIVE_DESKTOP`, `GUI_WINFORMS_UNAVAILABLE`) · `10` unexpected error,
 or a `diagnose` export refused or not written (nothing deleted because of it), or a failed `recover` collection
 (nothing changed). `recover start` and `recover undo` also use `20` to `31` and `40` to `44`, listed under Recover
 (above); in every copy they end with `27`.
