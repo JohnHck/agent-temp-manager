@@ -998,8 +998,53 @@ process. The real scheduler is phase M3b's, in a CI-only harness.
   and the GUI with none of the new functions, and their exact names in the GUI's forbidden list; the entry point in
   `AtmRequiredFiles`; the texts in both languages; and the suite never calling the real registration.
 
-NAO_TESTADO: the real scheduler registering, running and removing the task (M3b, CI only); `monitor enable` through
-the CLI with the gate open (only its gate-closed path runs in a child process); the console a scheduled run gets.
+NAO_TESTADO in the suite: the real scheduler registering, running and removing the task (the M3b harness, CI only,
+below); `monitor enable` through the CLI with the gate open (only its gate-closed path runs in a child process); the
+console a scheduled run gets.
+
+### The real scheduler for the collection task (V0.5 M3b, CI only)
+
+The area "V0.5 M3b" of `tests/Run-Tests.ps1` (ADR-0017 phase M3b) runs in both shells, after the scale area. The
+harness `tests/e2e/Invoke-MonitorE2E.ps1` it covers runs only in the install e2e, on disposable runners.
+* **In the suite:**
+  * the harness refuses to run outside a disposable machine, legs A and B, in a child process with the runner markers
+    cleared, and creates no summary;
+  * a static case:
+    * the harness is in `$ciOnly` before the stage exclusion, out of the package, and checked absent by the install e2e;
+    * the guard comes first;
+    * there is one gate assignment, the monitoring one, in memory, after the installed engine is loaded;
+    * the test task name is the only seam set, never the token or console seams;
+    * every scheduler call is inside a wrapper whose first statement is `Assert-TestName`;
+    * `DeleteTask` appears once, in `Remove-TestTask`, on the test name;
+    * there is no definition, task folder, account, credential, logon-type change or file written other than the
+      summary;
+    * the summary goes only through `Protect-Text`;
+    * the run once's wait is declared (45 seconds);
+    * the install e2e runs leg A then leg B after the R6 legs and before X2, with the standard user it already has,
+      removing no task and creating no account;
+    * `src` never cites the harness;
+  * the real run: NOT_TESTED in the suite.
+* **In the install e2e (CI only, disposable runners).** The steps `monitor-m3b-leg-A-standard-user` and
+  `monitor-m3b-leg-B-elevated`. Each leg loads the installed engine, opens the monitoring gate in memory only and uses
+  a test task name `MonitorTest-<8 random hex digits>`.
+  * Leg A, the VM's standard user, launched as the other standard-user steps are:
+    * the standard token;
+    * the registration by the engine (`$null`);
+    * the read-back `PRESENT`, field by field;
+    * `MONITOR_TASK_EXISTS` on a second registration;
+    * one run, polled for at most 45 seconds: last result 3 with the history folder unchanged, or NOT_TESTED with the
+      scheduler's state and code;
+    * the removal by the harness;
+    * `ABSENT`.
+  * Leg B, the elevated runner account: `monitor enable` refused with `MONITOR_TASK_REQUIRES_STANDARD_TOKEN` before any
+    plan or phrase, with nothing registered; then, optionally, the same cycle for its own test task.
+  * Both legs: the installed `monitor enable` exits 3 with `MONITORING_GATE_CLOSED`, and the task folder's listing is
+    unchanged. The nine installed gates and the SHA-256 of every installed file are compared before and after.
+  * Only a summary with booleans, codes and counts is uploaded.
+* **Not tested here:**
+  * the console window of a scheduled run (the action carries `-WindowStyle Hidden`; no window is captured);
+  * a run the scheduler does not start for a user with no interactive session (NOT_TESTED, with its code);
+  * the real scheduler of any machine other than a disposable runner.
 
 ## Future: isolation, quarantine and Recovery Mode (0.3.x and V0.4)
 

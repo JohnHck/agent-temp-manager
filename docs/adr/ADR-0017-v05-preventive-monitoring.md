@@ -1,7 +1,7 @@
 # ADR-0017: Persistent preventive monitoring (V0.5)
 
-Status: ACCEPTED: V05-D1 to V05-D10 decided (D1-D7 2026-11-17, D8-D10 2026-11-18, as recommended); M0 to M2 and M3a
-implemented; M3b (real-scheduler CI harness) next; gate closed in every copy. (Until 2026-11-17: PROPOSED, with V05-D1
+Status: ACCEPTED: V05-D1 to V05-D10 decided (D1-D7 2026-11-17, D8-D10 2026-11-18, as recommended); M0 to M3 (M3a and
+the M3b real-scheduler CI harness) implemented; M4 next; gate closed in every copy. (Until 2026-11-17: PROPOSED, with V05-D1
 to V05-D10 open. From 2026-11-17 to 2026-11-18: ACCEPTED in part, with V05-D8, V05-D9 and V05-D10 open and only M0
 implemented.)
 Date: 2026-11-17
@@ -810,3 +810,86 @@ them.
 
 **Left for M3b to M5:** the CI-only real-scheduler harness (M3b); `monitor disable`, `monitor remove-history` and the
 uninstaller (M4, V05-D9 (a) plus (c)); and the TUI and the GUI (M5).
+
+## M3b implementation record (V05-M3b, 2026-11-19)
+
+The second half of phase M3: the real Task Scheduler, only in a CI-only harness, on disposable runners, under a test
+task name. No product code changes: `src/`, `install/` and the ninth gate are as V05-M3a left them, and the gate stays
+`$false` in every copy, the copy installed on the runner included. The line numbers below are those of the files as
+V05-M3b leaves them.
+
+* **The harness** `tests/e2e/Invoke-MonitorE2E.ps1`, CI-only and never shipped. It is on the build's CI-only list
+  (`tools/Build-Release.ps1:35`), so the stage leaves it out and an archive that contains it is refused. The install
+  e2e checks that the package does not contain it. It refuses to run outside a GitHub-hosted runner unless
+  `-DisposableMachine` is given.
+* **Containment.**
+  * Each leg loads the installed engine into its own process. It opens the monitoring gate there, in memory, after
+    `Engine.Monitor.ps1` is loaded. The nine installed gates and the SHA-256 of every installed file are compared before
+    and after.
+  * The only seam set is the engine's test task name, `MonitorTest-<8 random hex digits>` of the run. The token,
+    console, clock, folder and other seams are never set, so the token checks are the real ones.
+  * Every touch of the scheduler goes through a wrapper of the harness whose first statement checks the name:
+    * the exact form;
+    * the run's name as the engine's override, so the engine names the test task and never the product's.
+  * The product removes no task until M4. The harness's own `Remove-TestTask` is the only `DeleteTask`, of the test name
+    only. The `\AgentTempManager` folder stays.
+  * The harness writes only booleans, codes and counts.
+* **Leg A, the install e2e's temporary standard user.** It reuses the mechanism of the step
+  `autopurge-task-standard-user` (`Start-Process -Credential`); there is no new account or credential mechanism. The
+  harness checks, in order:
+  * the token is standard (`Test-AtmMonitorStandardToken`, with the elevation type and integrity recorded);
+  * `Register-AtmMonitorTask` with the user's own SID, the installed entry point and 6 hours returns `$null`;
+  * the read-back is `PRESENT`, with:
+    * that user, logon type 3 and run level 0;
+    * no `<Password>` in the XML;
+    * the exact action, with `-WindowStyle Hidden`;
+    * `PT6H` and a next run in the future;
+  * a second registration is `MONITOR_TASK_EXISTS`;
+  * the task is run once and polled for at most 45 seconds. Its own trigger starts at least 61 seconds after
+    registration, so a result in that window comes from this run. The expected result is last result `3` (the
+    installed gate is closed) with the user's history folder unchanged. A run the scheduler does not start, refuses
+    or keeps queued is NOT_TESTED, with the observed state and code. The logon type, the account and the password are
+    never changed to make it run. A small exit code other than 3 fails the case as a product defect;
+  * the test task is removed by its exact name;
+  * the read-back is `ABSENT`.
+* **Leg B, the elevated runner account.**
+  * `Invoke-AtmMonitorEnable`, with the gate open in memory, refuses with `MONITOR_TASK_REQUIRES_STANDARD_TOKEN`. The
+    plan is not shown, the phrase is not asked, and nothing is registered (read back `ABSENT`). The token is recorded
+    as a readable elevated one, so the refusal is not an unreadable token's.
+  * Then, optionally, the same cycle for a test task of that account. The task runs with the limited token of run
+    level 0, to prove the exit code 3 on a runner where the scheduler starts it.
+* **The gate closed, from outside (both legs).** The installed `agent-temp monitor enable -Lang en-US`, through
+  `cmd /c` as a new process, exits `3` with `MONITORING_GATE_CLOSED`, asking no phrase. The product's task folder lists
+  the same tasks before and after; the harness compares a count and a hash of the names.
+* **The hidden window (section 8):** NOT_TESTED by design. The action read back carries `-WindowStyle Hidden`. The
+  entry point ends at the gate check within seconds, and the harness does not trace or capture windows, so whether a
+  console window appeared is not observed.
+* **The install e2e** (`tests/e2e/Invoke-InstallE2E.ps1`) adds:
+  * the package check;
+  * `Read-MonSummary`;
+  * the steps `monitor-m3b-leg-A-standard-user` and `monitor-m3b-leg-B-elevated`, after the R6 legs and before X2 and
+    the uninstall.
+
+  Only the harness summaries are kept. The results per runner are in the CI run's install e2e summaries.
+* **Tests.** The suite's area "V0.5 M3b" (`tests/Run-Tests.ps1`), after the scale area. It covers:
+  * the harness's refusal outside a disposable machine, in a child process with the runner markers cleared, which
+    creates no summary;
+  * a static case:
+    * the harness is in `$ciOnly` before the stage exclusion, and out of the package;
+    * the guard comes before anything;
+    * there is one gate assignment, in memory, after the installed engine;
+    * the test name is the only seam;
+    * every scheduler call is inside a wrapper whose first statement is the name check;
+    * `DeleteTask` appears once, in `Remove-TestTask`, on the test name;
+    * there is no definition, folder, account, password, logon-type change or file write other than the summary;
+    * the install e2e's monitoring steps remove no task and create no account;
+    * `src` never cites the harness;
+  * the real run, NOT_TESTED in the suite.
+* **NOT_TESTED.**
+  * The hidden window, as above.
+  * The run once on a runner where the scheduler does not start an interactive task for a user with no interactive
+    session, with the observed state and code per runner.
+  * The real scheduler of any machine other than a disposable CI runner.
+
+**Left for M4 and M5:** `monitor disable`, `monitor remove-history` and the uninstaller (M4, V05-D9 (a) plus (c)); and
+the TUI and the GUI (M5).
