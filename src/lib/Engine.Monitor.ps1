@@ -1,7 +1,8 @@
 # AgentTempManager MONITORING ENGINE (V0.5, docs/adr/ADR-0017, phase M1): the collector and the storage of the preventive
 # monitoring history. Depends on Engine.Audit.ps1: a collection runs the audit and nothing else (V05-D8 (a)). No terminal
-# output of its own; presentation lives in Report.ps1. Nothing here schedules anything (phase M3), computes trends,
-# thresholds or alerts (phase M2), or removes the history or the folder on request (phase M4).
+# output of its own; presentation lives in Report.ps1. Nothing here schedules anything (phase M3) or removes the history
+# or the folder on request (phase M4). Phase M2 adds the trends, the thresholds (monitor.json, read only) and the alerts:
+# pure functions over what the reader found, computed only with the gate open; an alert NAMES a command and runs none.
 #
 # With the monitoring gate closed (every distributed copy) nothing is collected, created or written: the collector, the
 # folder, the writer, the rotation and the single removal function return MONITORING_GATE_CLOSED before anything else,
@@ -46,6 +47,34 @@ $script:AtmMonitorFolderName = 'Monitor'
 # The per-user mutex of the collectors: the prefix, then 16 hex digits of SHA-256 of the user's SID. It is not the clean
 # lock (B8): monitoring changes nothing, so it never blocks or waits for a clean, an isolation or a recovery.
 $script:AtmMonitorMutexPrefix = 'Global\AgentTempManager.Monitor-'
+# The alert thresholds (V05-D10 (a), phase M2): monitor.json in the history folder, per user, written by the user only.
+# The product never writes, creates or fixes it. Each field has a default and bounds fixed here; a value outside them
+# refuses the whole file. Only failedCollections must be a whole number.
+$script:AtmMonitorConfigName = 'monitor.json'
+$script:AtmMonitorConfigMaxBytes = 4096
+$script:AtmMonitorConfigFields = @(
+    [pscustomobject]@{ Name = 'totalGiB'; Default = 20.0; Min = 1.0; Max = 4096.0; Integer = $false }
+    [pscustomobject]@{ Name = 'growthGiBPerDay'; Default = 2.0; Min = 0.1; Max = 1024.0; Integer = $false }
+    [pscustomobject]@{ Name = 'orphanSuspectedGiB'; Default = 5.0; Min = 1.0; Max = 4096.0; Integer = $false }
+    [pscustomobject]@{ Name = 'livenessUnknownGiB'; Default = 5.0; Min = 1.0; Max = 4096.0; Integer = $false }
+    [pscustomobject]@{ Name = 'failedCollections'; Default = 3.0; Min = 2.0; Max = 30.0; Integer = $true }
+)
+# The trends (ADR-0017 section 4): a fixed window of 7 days up to the newest record (no key changes it); fewer than 4
+# points, or points that span less than 24 hours, are INSUFFICIENT_DATA; monitor status lists at most 5 groups.
+$script:AtmMonitorTrendWindowDays = 7
+$script:AtmMonitorTrendMinPoints = 4
+$script:AtmMonitorTrendMinSpanHours = 24
+$script:AtmMonitorTrendTopGroups = 5
+# The alerts (phase M2) and the commands each one NAMES. A command is never run: the text only tells the user what to
+# run. MON_CONFIG_INVALID names the format in docs/USAGE.md instead. MON_RECOVERY is out of the V0.5 (V05-D8 (a)).
+$script:AtmMonitorAlertCommands = [ordered]@{
+    MON_TOTAL            = @('agent-temp preview', 'agent-temp clean')
+    MON_GROWTH           = @('agent-temp audit')
+    MON_ORPHAN_SUSPECTED = @('agent-temp preview', 'agent-temp isolate')
+    MON_LIVENESS_UNKNOWN = @('agent-temp diagnose')
+    MON_COLLECTION       = @('agent-temp monitor status')
+    MON_CONFIG_INVALID   = @()
+}
 
 # Test seams, a single assignment each, all $null in every distributed copy: the CLI never sets them. The suite replaces
 # them inside its own process only.
@@ -499,7 +528,10 @@ function Invoke-AtmMonitorRotation {
       then the oldest records (by the time in their names) while a record is older than 90 days, or there are more than
       400 records, or they take more than 8 MB. The record just written (-KeepName) is never removed. Every item of the
       folder is checked first: an item with another name, a folder, a reparse point or another owner REFUSES THE WHOLE
-      ROTATION with a code and removes nothing (the alert is phase M2's). Each removal goes through
+      ROTATION with a code and removes nothing. The code is in the collector's result only: no alert of phase M2 reads it
+      (the alerts are computed from the history as the reader finds it). The user's thresholds file (monitor.json) is
+      accepted when it is a plain file, not a reparse point, with the expected owner, and it is NEVER removed (it is not
+      in the removal plan, and Invoke-AtmMonitorPrune refuses its name). Each removal goes through
       Invoke-AtmMonitorPrune, which checks again. Returns Code ($null when nothing was refused), Removed (names), Problems
       (how many items refused it) and Kept (records kept).
     #>
@@ -514,6 +546,13 @@ function Invoke-AtmMonitorRotation {
     foreach ($it in $items) {
         if (($it.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $problems['MONITOR_ROTATION_REPARSE'] = 1 + [int]$problems['MONITOR_ROTATION_REPARSE']; continue }
         if (($it.Attributes -band [IO.FileAttributes]::Directory) -ne 0) { $problems['MONITOR_ROTATION_UNEXPECTED_ITEM'] = 1 + [int]$problems['MONITOR_ROTATION_UNEXPECTED_ITEM']; continue }
+        if ($it.Name -ceq $script:AtmMonitorConfigName) {
+            # The user's thresholds file: a plain file here (reparse points and folders were refused above) with the
+            # expected owner passes, and is never planned for removal.
+            $cOwner = Get-AtmMonitorFileOwner $it.FullName
+            if (-not $cOwner -or @($Owners) -cnotcontains $cOwner) { $problems['MONITOR_ROTATION_FOREIGN_OWNER'] = 1 + [int]$problems['MONITOR_ROTATION_FOREIGN_OWNER'] }
+            continue
+        }
         $mf = [regex]::Match($it.Name, $script:AtmMonitorNamePattern)
         $mp = [regex]::Match($it.Name, $script:AtmMonitorPartialPattern)
         $t = $null
@@ -661,10 +700,11 @@ function Get-AtmMonitorHistory {
       Reads the history, read only: never creates the folder, takes no lock and needs no gate (ADR-0014 section 3 names it
       as the GUI's future read function, phase M5). A missing folder is an empty history. A folder with a reparse point in
       its chain is not read (FolderState REFUSED). Only final names are read: a .partial file is counted and never read, a
-      folder, a reparse point or another name is counted as unexpected and never read, and a file that vanished between
+      folder, a reparse point or another name is counted as unexpected and never read (the user's thresholds file,
+      monitor.json, a plain file with the expected owner, is not counted: phase M2), and a file that vanished between
       the listing and the read is skipped. Each record is checked (Test-AtmMonitorRecordText); one that fails is listed as
       HISTORY_RECORD_INVALID and skipped, never read as zero. A record whose time is earlier than the time of the record
-      it names as "previous" is marked CLOCK_SKEW (the trend that excludes it is phase M2's).
+      it names as "previous" is marked CLOCK_SKEW (Get-AtmMonitorTrends leaves it out, as a gap).
       Returns FolderState (ABSENT | OK | REFUSED | UNREADABLE), FolderCode, Records (Name, Utc, Record, Codes; in name
       order), Invalid (Name, Code, Reason), Skipped, Partial, Unexpected and ClockSkew.
     #>
@@ -682,8 +722,17 @@ function Get-AtmMonitorHistory {
     try { $items = @((New-Object IO.DirectoryInfo($folder)).GetFileSystemInfos()) } catch { $out.FolderState = 'UNREADABLE'; $out.FolderCode = 'MONITOR_FOLDER_LIST_FAILED'; return [pscustomobject]$out }
     $out.FolderState = 'OK'
     $names = New-Object System.Collections.Generic.List[string]
+    $owners = $null
     foreach ($it in $items) {
         if (($it.Attributes -band ([IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::Directory)) -ne 0) { $out.Unexpected++; continue }
+        if ($it.Name -ceq $script:AtmMonitorConfigName) {
+            # The user's thresholds file (phase M2) is not a record and is not counted, when it has the expected owner;
+            # otherwise it is counted as unexpected, as before. Get-AtmMonitorConfig reads it.
+            if ($null -eq $owners) { try { $owners = @((Get-AtmMonitorIdentity).Owners) } catch { $owners = @() } }
+            $cOwner = Get-AtmMonitorFileOwner $it.FullName
+            if (-not $cOwner -or @($owners) -cnotcontains $cOwner) { $out.Unexpected++ }
+            continue
+        }
         if ($it.Name -cmatch $script:AtmMonitorNamePattern) { $names.Add($it.Name) }
         elseif ($it.Name -cmatch $script:AtmMonitorPartialPattern) { $out.Partial++ }
         else { $out.Unexpected++ }
@@ -725,16 +774,316 @@ function Get-AtmMonitorHistory {
 }
 
 function Get-AtmMonitorStatus {
-    # monitor status (V0.5 M1): the gate as this copy has it, the history as the reader finds it, and the latest valid
-    # record summed up (time, outcome, groups, bytes measured), or $null. Reads only.
+    <#
+      monitor status (V0.5 M1, M2): the gate as this copy has it, the history as the reader finds it, and the latest
+      valid record summed up (time, outcome, groups, bytes measured), or $null. With the gate open (the suite only) also
+      the thresholds (Get-AtmMonitorConfig), the trends and the alerts. With it closed none of them is computed and
+      monitor.json is not read: a history left by another copy feeds no alert in a copy that does not collect (Config
+      and Trends $null, Alerts empty). Reads only.
+    #>
     $h = Get-AtmMonitorHistory
     $latest = $null
     $n = @($h.Records).Count
     if ($n -gt 0) {
         $r = @($h.Records)[$n - 1]
-        $bytes = [long]0
-        foreach ($g in @($r.Record.groups)) { $bytes += [long]$g[7] }
-        $latest = [pscustomobject]@{ Utc = $r.Utc; Outcome = [string]$r.Record.outcome; Groups = @($r.Record.groups).Count; Bytes = $bytes }
+        $latest = [pscustomobject]@{ Utc = $r.Utc; Outcome = [string]$r.Record.outcome; Groups = @($r.Record.groups).Count; Bytes = (Get-AtmMonitorRecordBytes $r.Record) }
     }
-    return [pscustomobject]@{ GateOpen = [bool]$script:AtmMonitoringEnabled; History = $h; Latest = $latest }
+    $config = $null; $trends = $null; $alerts = @()
+    if ($script:AtmMonitoringEnabled) {
+        $config = Get-AtmMonitorConfig
+        $trends = Get-AtmMonitorTrends -History $h
+        $alerts = @(Get-AtmMonitorAlerts -History $h -Config $config -Trends $trends)
+    }
+    return [pscustomobject]@{ GateOpen = [bool]$script:AtmMonitoringEnabled; History = $h; Latest = $latest; Config = $config; Trends = $trends; Alerts = $alerts }
+}
+
+# ---------------------------------------------------------------------------------------------
+# Phase M2: the thresholds, the trends and the alerts. Read only and pure: nothing here writes, creates or fixes a file
+# (monitor.json included), runs a command, or calls an engine, a process, the scheduler or the network. An alert NAMES
+# a command for the user to run; it never runs it.
+# ---------------------------------------------------------------------------------------------
+
+function Get-AtmMonitorConfigFile {
+    <#
+      The checks of monitor.json in -Folder, before its values, in this order: the folder's chain (no reparse point;
+      absent: no file); the file (absent: no file; not a reparse point; a plain file); its owner (the user, or the
+      token's default owner); at most 4 KB; strict UTF-8 (one leading byte order mark is accepted and dropped); JSON;
+      an object. Returns Reason (ABSENT when there is no file, $null when it passed, otherwise the short reason of the
+      refusal) and Object (the parsed object).
+    #>
+    param([string]$Folder)
+    $chain = Test-AtmPathChain $Folder.TrimEnd('\')
+    if ($chain.Status -ceq 'NOT_FOUND') { return [pscustomobject]@{ Reason = 'ABSENT'; Object = $null } }
+    if ($chain.Status -ceq 'REPARSE_IN_PATH') { return [pscustomobject]@{ Reason = 'REPARSE'; Object = $null } }
+    if ($chain.Status -cne 'OK') { return [pscustomobject]@{ Reason = 'FOLDER'; Object = $null } }
+    $path = Join-Path $Folder.TrimEnd('\') $script:AtmMonitorConfigName
+    $a = $null
+    try { $a = [IO.File]::GetAttributes($path) }
+    catch {
+        if ((Get-AtmFileErrorKind $_.Exception) -ceq 'NOT_FOUND') { return [pscustomobject]@{ Reason = 'ABSENT'; Object = $null } }
+        return [pscustomobject]@{ Reason = 'READ'; Object = $null }
+    }
+    if (($a -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return [pscustomobject]@{ Reason = 'REPARSE'; Object = $null } }
+    if (($a -band [IO.FileAttributes]::Directory) -ne 0) { return [pscustomobject]@{ Reason = 'NOT_A_FILE'; Object = $null } }
+    $owners = @()
+    try { $owners = @((Get-AtmMonitorIdentity).Owners) } catch { $owners = @() }
+    $owner = Get-AtmMonitorFileOwner $path
+    if (-not $owner -or @($owners) -cnotcontains $owner) { return [pscustomobject]@{ Reason = 'OWNER'; Object = $null } }
+    $bytes = $null
+    try {
+        if ((New-Object IO.FileInfo($path)).Length -gt $script:AtmMonitorConfigMaxBytes) { return [pscustomobject]@{ Reason = 'SIZE'; Object = $null } }
+        $bytes = [IO.File]::ReadAllBytes($path)
+    } catch {
+        if ((Get-AtmFileErrorKind $_.Exception) -ceq 'NOT_FOUND') { return [pscustomobject]@{ Reason = 'ABSENT'; Object = $null } }
+        return [pscustomobject]@{ Reason = 'READ'; Object = $null }
+    }
+    if ($bytes.Length -gt $script:AtmMonitorConfigMaxBytes) { return [pscustomobject]@{ Reason = 'SIZE'; Object = $null } }
+    $off = 0
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $off = 3 }
+    $text = $null
+    try { $text = (New-Object Text.UTF8Encoding($false, $true)).GetString($bytes, $off, $bytes.Length - $off) } catch { return [pscustomobject]@{ Reason = 'ENCODING'; Object = $null } }
+    $o = $null
+    try { $o = ConvertFrom-Json -InputObject $text -ErrorAction Stop } catch { return [pscustomobject]@{ Reason = 'JSON'; Object = $null } }
+    if ($null -eq $o) { return [pscustomobject]@{ Reason = 'JSON'; Object = $null } }
+    # The text itself must be an object: one shell unrolls a one-element array into its element.
+    if (-not $text.TrimStart().StartsWith('{', [StringComparison]::Ordinal) -or $o -isnot [System.Management.Automation.PSCustomObject]) { return [pscustomobject]@{ Reason = 'TYPE'; Object = $null } }
+    return [pscustomobject]@{ Reason = $null; Object = $o }
+}
+
+function Get-AtmMonitorConfigValues {
+    <#
+      The values of a parsed monitor.json (-Object $null: the defaults). Each member must be a field of
+      AtmMonitorConfigFields (names compared with case: UNKNOWN_KEY), a JSON number (TYPE; a whole number for
+      failedCollections, so 3.0 is accepted and 3.5 is not) within the field's bounds, both ends included (RANGE; a
+      number too large for either shell's reader is RANGE). A missing member takes its default. Returns Reason ($null
+      when every member passed) and Values (one per field, the defaults when refused).
+    #>
+    param($Object)
+    $values = [ordered]@{}
+    foreach ($f in $script:AtmMonitorConfigFields) { $values[$f.Name] = $(if ($f.Integer) { [int]$f.Default } else { [double]$f.Default }) }
+    $defaults = [ordered]@{}
+    foreach ($k in @($values.Keys)) { $defaults[$k] = $values[$k] }
+    if ($null -eq $Object) { return [pscustomobject]@{ Reason = $null; Values = $values } }
+    foreach ($p in @($Object.PSObject.Properties)) {
+        $f = $null
+        foreach ($c in $script:AtmMonitorConfigFields) { if ($c.Name -ceq [string]$p.Name) { $f = $c } }
+        if ($null -eq $f) { return [pscustomobject]@{ Reason = 'UNKNOWN_KEY'; Values = $defaults } }
+        $v = $p.Value
+        if ($null -ne $v -and $v.GetType().FullName -ceq 'System.Numerics.BigInteger') { return [pscustomobject]@{ Reason = 'RANGE'; Values = $defaults } }
+        if (-not ($v -is [int] -or $v -is [long] -or $v -is [double] -or $v -is [decimal])) { return [pscustomobject]@{ Reason = 'TYPE'; Values = $defaults } }
+        $d = [double]$v
+        if ([double]::IsNaN($d) -or [double]::IsInfinity($d)) { return [pscustomobject]@{ Reason = 'RANGE'; Values = $defaults } }
+        if ($f.Integer -and $d -ne [math]::Floor($d)) { return [pscustomobject]@{ Reason = 'TYPE'; Values = $defaults } }
+        if ($d -lt $f.Min -or $d -gt $f.Max) { return [pscustomobject]@{ Reason = 'RANGE'; Values = $defaults } }
+        $values[$f.Name] = $(if ($f.Integer) { [int]$d } else { $d })
+    }
+    return [pscustomobject]@{ Reason = $null; Values = $values }
+}
+
+function Get-AtmMonitorConfig {
+    <#
+      The alert thresholds (V05-D10 (a)), read only: monitor.json in the history folder, which only the user writes. The
+      product never writes, creates or fixes it. No file (or no folder): the defaults and no alert (State DEFAULTS). A
+      file that passes every check: its values, a missing member taking its default (State FILE). Otherwise the WHOLE
+      file is refused: the defaults, Code MON_CONFIG_INVALID and the short Reason of the first failed check (State
+      REFUSED): REPARSE, NOT_A_FILE, OWNER, SIZE, ENCODING, JSON, TYPE, UNKNOWN_KEY, RANGE, READ or FOLDER (the folder
+      could not be known or checked). Returns State, Code, Reason and Values.
+    #>
+    $defaults = (Get-AtmMonitorConfigValues -Object $null).Values
+    $folder = Get-AtmMonitorFolder
+    if (-not $folder) { return [pscustomobject]@{ State = 'REFUSED'; Code = 'MON_CONFIG_INVALID'; Reason = 'FOLDER'; Values = $defaults } }
+    $chk = Get-AtmMonitorConfigFile -Folder $folder
+    if ($chk.Reason -ceq 'ABSENT') { return [pscustomobject]@{ State = 'DEFAULTS'; Code = $null; Reason = $null; Values = $defaults } }
+    if ($null -ne $chk.Reason) { return [pscustomobject]@{ State = 'REFUSED'; Code = 'MON_CONFIG_INVALID'; Reason = $chk.Reason; Values = $defaults } }
+    $val = Get-AtmMonitorConfigValues -Object $chk.Object
+    if ($null -ne $val.Reason) { return [pscustomobject]@{ State = 'REFUSED'; Code = 'MON_CONFIG_INVALID'; Reason = $val.Reason; Values = $defaults } }
+    return [pscustomobject]@{ State = 'FILE'; Code = $null; Reason = $null; Values = $val.Values }
+}
+
+function Get-AtmMonitorRecordBytes {
+    # The bytes measured by a record: the sum of its groups, the "other" group included.
+    param($Record)
+    $b = [long]0
+    foreach ($g in @($Record.groups)) { $b += [long]$g[7] }
+    return $b
+}
+
+function Get-AtmMonitorGroupKey {
+    # The key of a group of a record (provider, identified project or not, class); $null for the "other" group.
+    param($Group)
+    if ($Group[4]) { return $null }
+    return ([string]$Group[0] + "`n" + $(if ($Group[2]) { '1' + [string]$Group[1] } else { '0' }) + "`n" + [string]$Group[3])
+}
+
+function Get-AtmMonitorSlope {
+    <#
+      The least-squares slope of -Points (each: Utc, Bytes) in bytes per day, rounded to whole bytes (so a series built
+      on whole days and whole bytes gives its exact slope). Fewer than 4 points, or points that span less than 24 hours,
+      are INSUFFICIENT_DATA; 4 points that span exactly 24 hours are enough. Returns State (OK | INSUFFICIENT_DATA),
+      Slope ($null when insufficient), Points and SpanHours.
+    #>
+    param([object[]]$Points)
+    $pts = @($Points)
+    $n = $pts.Count
+    $span = [TimeSpan]::Zero
+    $min = $null
+    if ($n -gt 0) {
+        $min = $pts[0].Utc; $max = $pts[0].Utc
+        foreach ($p in $pts) { if ($p.Utc -lt $min) { $min = $p.Utc }; if ($p.Utc -gt $max) { $max = $p.Utc } }
+        $span = $max - $min
+    }
+    if ($n -lt $script:AtmMonitorTrendMinPoints -or $span -lt [TimeSpan]::FromHours($script:AtmMonitorTrendMinSpanHours)) {
+        return [pscustomobject]@{ State = 'INSUFFICIENT_DATA'; Slope = $null; Points = $n; SpanHours = $span.TotalHours }
+    }
+    $sx = 0.0; $sy = 0.0
+    foreach ($p in $pts) { $sx += ($p.Utc - $min).TotalDays; $sy += [double]$p.Bytes }
+    $mx = $sx / $n; $my = $sy / $n
+    $num = 0.0; $den = 0.0
+    foreach ($p in $pts) {
+        $dx = ($p.Utc - $min).TotalDays - $mx
+        $num += $dx * ([double]$p.Bytes - $my); $den += $dx * $dx
+    }
+    $slope = [long][math]::Round($num / $den, [MidpointRounding]::AwayFromZero)
+    return [pscustomobject]@{ State = 'OK'; Slope = $slope; Points = $n; SpanHours = $span.TotalHours }
+}
+
+function Get-AtmMonitorEntryNames {
+    # Every entry of the history in name (time) order: the valid records and the invalid files.
+    param($History)
+    $names = [string[]]@(@(@($History.Records) | ForEach-Object { [string]$_.Name }) + @(@($History.Invalid) | ForEach-Object { [string]$_.Name }))
+    [Array]::Sort($names, [StringComparer]::Ordinal)
+    return , $names
+}
+
+function Get-AtmMonitorTrends {
+    <#
+      The trends (ADR-0017 section 4) over the history as Get-AtmMonitorHistory found it; pure, no file read.
+        - The window: the 7 days up to the newest record that is not CLOCK_SKEW, both ends included.
+        - The total (every group summed, "other" included): points only from OK records.
+        - A group (provider, project, identified, class): points only from a record that is not AUDIT_FAILED, whose
+          coverage is complete, and in which that group's flag is complete. So an INCOMPLETE record with complete
+          coverage still gives the points of its complete groups (an OK record never holds an incomplete group, so this
+          is the only way one incomplete group is a gap for its own trend alone). The "other" group has no trend: its
+          content changes from one record to the next.
+        - Gaps, never points (never a decrease): INCOMPLETE and AUDIT_FAILED records for the total, invalid files,
+          CLOCK_SKEW records, an incomplete group, a record with incomplete coverage for the groups.
+        - The delta: the total of the newest entry (a record or an invalid file, by name) minus the total of the entry
+          before it, only when both are valid OK records and neither is CLOCK_SKEW; otherwise GAP (never a decrease nor
+          "resolved"); NONE when there is no entry before it.
+      Returns WindowEndUtc, LatestOk (the newest OK record that is not CLOCK_SKEW: Name, Utc, Record; or $null),
+      LatestOkBytes (its total), Total
+      (Get-AtmMonitorSlope), Groups (Key, Provider, Project, Identified, Class, Trend), Top (at most 5 groups whose
+      trend is OK, the largest slope first) and Delta (State OK | GAP | NONE, Bytes).
+    #>
+    param($History)
+    $recs = @(@($History.Records) | Where-Object { $null -ne $_ -and @($_.Codes) -cnotcontains 'CLOCK_SKEW' })
+    $end = $null
+    $latestOk = $null
+    foreach ($r in $recs) {
+        if ($null -eq $end -or $r.Utc -gt $end) { $end = $r.Utc }
+        if ([string]$r.Record.outcome -ceq 'OK' -and ($null -eq $latestOk -or $r.Utc -gt $latestOk.Utc)) { $latestOk = $r }
+    }
+    $total = New-Object System.Collections.Generic.List[object]
+    $byKey = @{}
+    if ($null -ne $end) {
+        $start = $end.AddDays(-$script:AtmMonitorTrendWindowDays)
+        foreach ($r in $recs) {
+            if ($r.Utc -lt $start -or $r.Utc -gt $end) { continue }
+            $outcome = [string]$r.Record.outcome
+            if ($outcome -ceq 'OK') { $total.Add([pscustomobject]@{ Utc = $r.Utc; Bytes = (Get-AtmMonitorRecordBytes $r.Record) }) }
+            if ($outcome -ceq 'AUDIT_FAILED' -or $null -eq $r.Record.coverage -or $r.Record.coverage.complete -ne $true) { continue }
+            foreach ($g in @($r.Record.groups)) {
+                $k = Get-AtmMonitorGroupKey $g
+                if ($null -eq $k -or $g[9] -ne $true) { continue }
+                if (-not $byKey.ContainsKey($k)) {
+                    $byKey[$k] = [pscustomobject]@{ Key = $k; Provider = [string]$g[0]; Project = $(if ($g[2]) { [string]$g[1] } else { $null }); Identified = [bool]$g[2]; Class = [string]$g[3]; Points = (New-Object System.Collections.Generic.List[object]) }
+                }
+                $byKey[$k].Points.Add([pscustomobject]@{ Utc = $r.Utc; Bytes = [long]$g[7] })
+            }
+        }
+    }
+    $keys = [string[]]@($byKey.Keys)
+    [Array]::Sort($keys, [StringComparer]::Ordinal)
+    $groups = New-Object System.Collections.Generic.List[object]
+    foreach ($k in $keys) {
+        $e = $byKey[$k]
+        $groups.Add([pscustomobject]@{ Key = $k; Provider = $e.Provider; Project = $e.Project; Identified = $e.Identified; Class = $e.Class; Trend = (Get-AtmMonitorSlope -Points $e.Points.ToArray()) })
+    }
+    # The largest slope first; equal slopes in the ordinal order of their key, so the list is the same on every machine.
+    $withTrend = @($groups | Where-Object { $_.Trend.State -ceq 'OK' })
+    $sortKeys = [string[]]@(for ($i = 0; $i -lt $withTrend.Count; $i++) {
+            ([decimal][long]::MaxValue - [decimal]$withTrend[$i].Trend.Slope).ToString('00000000000000000000', [Globalization.CultureInfo]::InvariantCulture) + "`n" + $withTrend[$i].Key + "`n" + $i
+        })
+    [Array]::Sort($sortKeys, [StringComparer]::Ordinal)
+    $top = New-Object System.Collections.Generic.List[object]
+    foreach ($sk in $sortKeys) {
+        if ($top.Count -ge $script:AtmMonitorTrendTopGroups) { break }
+        $top.Add($withTrend[[int]$sk.Substring($sk.LastIndexOf("`n") + 1)])
+    }
+    $delta = [pscustomobject]@{ State = 'NONE'; Bytes = $null }
+    $names = Get-AtmMonitorEntryNames -History $History
+    if ($names.Length -ge 2) {
+        $byName = @{}
+        foreach ($r in @($History.Records)) { $byName[[string]$r.Name] = $r }
+        $pair = @($names[$names.Length - 1], $names[$names.Length - 2])
+        $ok = $true
+        foreach ($nm in $pair) {
+            $r = $byName[$nm]
+            if ($null -eq $r -or [string]$r.Record.outcome -cne 'OK' -or @($r.Codes) -ccontains 'CLOCK_SKEW') { $ok = $false }
+        }
+        $delta = $(if ($ok) { [pscustomobject]@{ State = 'OK'; Bytes = ((Get-AtmMonitorRecordBytes $byName[$pair[0]].Record) - (Get-AtmMonitorRecordBytes $byName[$pair[1]].Record)) } } else { [pscustomobject]@{ State = 'GAP'; Bytes = $null } })
+    }
+    $latestOkBytes = $(if ($null -ne $latestOk) { Get-AtmMonitorRecordBytes $latestOk.Record } else { $null })
+    return [pscustomobject]@{ WindowEndUtc = $end; LatestOk = $latestOk; LatestOkBytes = $latestOkBytes; Total =(Get-AtmMonitorSlope -Points $total.ToArray()); Groups = $groups.ToArray(); Top = $top.ToArray(); Delta = $delta }
+}
+
+function Get-AtmMonitorAlerts {
+    <#
+      The alerts (phase M2), a pure function of the history, the thresholds and the trends. Each alert has a Code, the
+      Commands it NAMES (AtmMonitorAlertCommands; never run), a Value and a Threshold (bytes, or the count). A threshold
+      fires only when the value is STRICTLY greater:
+        MON_TOTAL: the total of the newest OK record over totalGiB;
+        MON_GROWTH: the slope of the total over growthGiBPerDay (never with INSUFFICIENT_DATA);
+        MON_ORPHAN_SUSPECTED, MON_LIVENESS_UNKNOWN: the sum of the groups of that class in the newest OK record over
+          its threshold (the groups summed into "other" have no class, so the sum is a lower bound when the record
+          summed any);
+        MON_COLLECTION: none of the failedCollections newest entries (records or invalid files) is an OK record;
+        MON_CONFIG_INVALID: monitor.json was refused (Value: the reason); the defaults are in use.
+      Returns the alerts in that order.
+    #>
+    param($History, $Config, $Trends)
+    $vals = $Config.Values
+    $found = @{}
+    $latest = $Trends.LatestOk
+    if ($null -ne $latest) {
+        $tb = Get-AtmMonitorRecordBytes $latest.Record
+        $thr = [double]$vals['totalGiB'] * 1GB
+        if ([double]$tb -gt $thr) { $found['MON_TOTAL'] = @($tb, $thr) }
+        foreach ($pair in @(@('MON_ORPHAN_SUSPECTED', 'ORPHAN_SUSPECTED', 'orphanSuspectedGiB'), @('MON_LIVENESS_UNKNOWN', 'LIVENESS_UNKNOWN', 'livenessUnknownGiB'))) {
+            $sum = [long]0
+            foreach ($g in @($latest.Record.groups)) { if ($g[4] -ne $true -and [string]$g[3] -ceq $pair[1]) { $sum += [long]$g[7] } }
+            $thr = [double]$vals[$pair[2]] * 1GB
+            if ([double]$sum -gt $thr) { $found[$pair[0]] = @($sum, $thr) }
+        }
+    }
+    if ($null -ne $Trends.Total -and $Trends.Total.State -ceq 'OK') {
+        $thr = [double]$vals['growthGiBPerDay'] * 1GB
+        if ([double]$Trends.Total.Slope -gt $thr) { $found['MON_GROWTH'] = @($Trends.Total.Slope, $thr) }
+    }
+    $n = [int]$vals['failedCollections']
+    $names = Get-AtmMonitorEntryNames -History $History
+    if ($names.Length -ge $n) {
+        $okNames = @{}
+        foreach ($r in @($History.Records)) { if ([string]$r.Record.outcome -ceq 'OK') { $okNames[[string]$r.Name] = $true } }
+        $anyOk = $false
+        for ($i = $names.Length - $n; $i -lt $names.Length; $i++) { if ($okNames.ContainsKey($names[$i])) { $anyOk = $true } }
+        if (-not $anyOk) { $found['MON_COLLECTION'] = @($n, $n) }
+    }
+    if ([string]$Config.State -ceq 'REFUSED') { $found['MON_CONFIG_INVALID'] = @([string]$Config.Reason, $null) }
+    $alerts = New-Object System.Collections.Generic.List[object]
+    foreach ($code in @($script:AtmMonitorAlertCommands.Keys)) {
+        if (-not $found.ContainsKey($code)) { continue }
+        $alerts.Add([pscustomobject]@{ Code = $code; Commands = @($script:AtmMonitorAlertCommands[$code]); Value = $found[$code][0]; Threshold = $found[$code][1] })
+    }
+    return $alerts.ToArray()
 }

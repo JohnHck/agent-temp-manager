@@ -21398,7 +21398,9 @@ exit 0
             $first = @($defs[$fn].Body.EndBlock.Statements)[0].Extent.Text
             Assert-True ($first.StartsWith('if (-not $script:AtmMonitoringEnabled) { return ')) "${fn}: a trava e a primeira instrucao"
         }
-        foreach ($fn in @('Get-AtmMonitorHistory', 'Get-AtmMonitorStatus', 'Get-AtmMonitorNewestName', 'Test-AtmMonitorRecordText', 'Get-AtmMonitorFolder')) {
+        # Since M2 the readers include the thresholds reader, the trends and the alerts (and their helpers).
+        foreach ($fn in @('Get-AtmMonitorHistory', 'Get-AtmMonitorStatus', 'Get-AtmMonitorNewestName', 'Test-AtmMonitorRecordText', 'Get-AtmMonitorFolder', 'Get-AtmMonitorConfig', 'Get-AtmMonitorConfigFile', 'Get-AtmMonitorConfigValues',
+                'Get-AtmMonitorRecordBytes', 'Get-AtmMonitorGroupKey', 'Get-AtmMonitorSlope', 'Get-AtmMonitorEntryNames', 'Get-AtmMonitorTrends', 'Get-AtmMonitorAlerts')) {
             $t = $defs[$fn].Extent.Text
             foreach ($pat in @('CreateNew', '::Pin(', 'File]::Move', 'Mutex', '::Delete(', 'WriteAll', 'CreateDirectory', 'Invoke-AtmMonitor', 'Open-AtmMonitorFolder', 'Write-AtmMonitorRecordFile')) { Assert-True (-not $t.Contains($pat)) "leitor $fn sem '$pat'" }
         }
@@ -21441,6 +21443,545 @@ exit 0
         Copy-AtmTree -From $srcDir -To $mfDir
         Write-AtmManifest -Root $mfDir -Version (Get-AtmSourceVersion -SourceDir $mfDir)
         Assert-True (@(([IO.File]::ReadAllText((Join-Path $mfDir 'manifest.json')) | ConvertFrom-Json).files | Where-Object { [string]$_.path -ceq 'lib\Engine.Monitor.ps1' }).Count -eq 1) 'manifesto lista lib\Engine.Monitor.ps1'
+    }
+
+    # ------------------------------------------------------------------ V0.5 M2 (preventive monitoring: trends, thresholds and alerts, gate closed, ADR-0017)
+    # The history is planted as record text by the case (Write-MonRecordText, no gate needed) in a folder of the sandbox,
+    # read through the folder seam; the trends and the alerts are pure functions of what the reader finds. monitor.json is
+    # written by the case only, never by the product (checked with a snapshot of the folder). The gate is opened only
+    # around a status or a rotation call (Get-MonStatusOpen, Invoke-MonRotate) and closed again. No case runs a command and
+    # none waits for real.
+    function New-MonHist {
+        # A history folder of the sandbox, created by the case and set as the folder seam.
+        $script:monN++
+        $f = Join-Path $sandbox ('mon2-' + $script:monN + '\AgentTempManager\Monitor')
+        [void][IO.Directory]::CreateDirectory($f)
+        $script:AtmMonitorFolderPath = $f
+        return $f
+    }
+    function Write-MonAt {
+        # One record at -Utc (default: -Hours from the suite's time): OK (one complete group of -Bytes), INCOMPLETE (that
+        # group incomplete), COVERAGE (a complete group, incomplete coverage) or FAILED (AUDIT_FAILED); -Parts replaces
+        # the group. Returns the name.
+        param([string]$Folder, [double]$Hours = 0, $Utc = $null, [long]$Bytes = 1000, [string]$Kind = 'OK', [object[]]$Parts = $null, [string]$Previous = $null)
+        $u = $(if ($null -ne $Utc) { [datetime]$Utc } else { $monT0.AddHours($Hours) })
+        if ($Kind -ceq 'FAILED') { return (Write-MonRecordText -Folder $Folder -Utc $u -Inventory $null -Edit { param($r) $r.failure = 'IOException' } -Previous $Previous) }
+        if ($null -eq $Parts) { $Parts = @(New-MonPart -Bytes $Bytes -Complete ($Kind -cne 'INCOMPLETE')) }
+        return (Write-MonRecordText -Folder $Folder -Utc $u -Inventory (New-MonInv -Parts $Parts -Coverage ($Kind -cne 'COVERAGE')) -Previous $Previous)
+    }
+    function Get-MonTrends { $h = Get-AtmMonitorHistory; return (Get-AtmMonitorTrends -History $h) }
+    function New-MonConfigObj {
+        # A thresholds object as Get-AtmMonitorConfig returns it: from -Json, or the defaults (refused with -Refused).
+        param([string]$Json = $null, [string]$Refused = $null)
+        $v = Get-AtmMonitorConfigValues -Object $(if ($Json) { ConvertFrom-Json $Json } else { $null })
+        if ($Refused) { return [pscustomobject]@{ State = 'REFUSED'; Code = 'MON_CONFIG_INVALID'; Reason = $Refused; Values = $v.Values } }
+        return [pscustomobject]@{ State = $(if ($Json) { 'FILE' } else { 'DEFAULTS' }); Code = $null; Reason = $null; Values = $v.Values }
+    }
+    function Get-MonAlerts {
+        # The alerts of the history in the seam's folder (pure), with -Config (default: the defaults).
+        param($Config = $null)
+        if ($null -eq $Config) { $Config = New-MonConfigObj }
+        $h = Get-AtmMonitorHistory
+        return @(Get-AtmMonitorAlerts -History $h -Config $Config -Trends (Get-AtmMonitorTrends -History $h))
+    }
+    function Get-MonCodes { param($Alerts) return ((@($Alerts | Where-Object { $null -ne $_ }) | ForEach-Object { $_.Code }) -join ',') }
+    function Get-MonStatusOpen {
+        # monitor status with the gate open in this process only.
+        $script:AtmMonitoringEnabled = $true
+        try { return (Get-AtmMonitorStatus) } finally { $script:AtmMonitoringEnabled = $false }
+    }
+    function Invoke-MonRotate {
+        # The rotation of -Folder with the gate open in this process only (removals real, in the sandbox only).
+        param([string]$Folder)
+        $script:AtmMonitoringEnabled = $true
+        try { return (Invoke-AtmMonitorRotation -Folder $Folder -NowUtc $monT0 -Owners @((Get-AtmMonitorIdentity).Owners) -KeepName '') } finally { $script:AtmMonitoringEnabled = $false }
+    }
+    function Write-MonConfig {
+        # monitor.json written by the case: -Bytes as given, or -Text as UTF-8 without a byte order mark.
+        param([string]$Folder, [string]$Text = $null, [byte[]]$Bytes = $null)
+        $p = Join-Path $Folder 'monitor.json'
+        if ($null -ne $Bytes) { [IO.File]::WriteAllBytes($p, $Bytes) } else { [IO.File]::WriteAllText($p, $Text, (New-Object Text.UTF8Encoding($false))) }
+    }
+    function Get-MonDefaultsText { return ((@((New-MonConfigObj).Values.GetEnumerator()) | ForEach-Object { $_.Key + '=' + $_.Value }) -join ' ') }
+    function Get-MonValuesText { param($Config) return ((@($Config.Values.GetEnumerator()) | ForEach-Object { $_.Key + '=' + $_.Value }) -join ' ') }
+
+    Test-Case 'V0.5 M2' 'M2: inclinacao por minimos quadrados em bytes por dia (tolerancia declarada: 1 byte por dia, o arredondamento a bytes inteiros) - serie linear conhecida no total e em grupos, constante e de queda, pontos fora de dias inteiros; o grupo other entra no total e nao tem tendencia propria; os grupos com tendencia ordenados pela maior inclinacao' {
+        try {
+            $f = New-MonHist
+            $prev = $null
+            for ($d = 0; $d -le 4; $d++) {
+                $parts = @((New-MonPart -Project 'cresce' -Bytes (1000 + 1GB * $d)), (New-MonPart -Project 'fixo' -Bytes 5000), (New-MonPart -Project 'cai' -Bytes (10GB - 300MB * $d)))
+                $prev = Write-MonAt -Folder $f -Hours (24 * ($d - 4)) -Parts $parts -Previous $prev
+            }
+            $tr = Get-MonTrends
+            $want = 1GB - 300MB
+            Assert-True ($tr.Total.State -ceq 'OK' -and $tr.Total.Points -eq 5 -and [math]::Abs($tr.Total.Slope - $want) -le 1) "total: $($tr.Total.State) $($tr.Total.Slope), esperado $want"
+            $by = @{}; foreach ($g in @($tr.Groups)) { $by[[string]$g.Project] = $g.Trend }
+            Assert-True ($by.Count -eq 3 -and [math]::Abs($by['cresce'].Slope - 1GB) -le 1 -and $by['fixo'].Slope -eq 0 -and [math]::Abs($by['cai'].Slope + 300MB) -le 1) "grupos: crescente $($by['cresce'].Slope), constante $($by['fixo'].Slope), de queda $($by['cai'].Slope)"
+            Assert-Eq ((@($tr.Top) | ForEach-Object { $_.Project }) -join ',') 'cresce,fixo,cai' 'a maior inclinacao primeiro'
+            Assert-True ($tr.WindowEndUtc -eq $monT0 -and $tr.LatestOkBytes -eq (1000 + 4GB + 5000 + 10GB - 1200MB)) "janela ate o registro mais novo; ultimo total completo ($($tr.LatestOkBytes))"
+            # Points off whole days: 240 bytes per hour is 5760 bytes per day.
+            $pts = @(foreach ($hh in @(0, 6, 15, 30, 47)) { [pscustomobject]@{ Utc = $monT0.AddHours($hh); Bytes = [long](1000 + 240 * $hh) } })
+            $s = Get-AtmMonitorSlope -Points $pts
+            Assert-True ($s.State -ceq 'OK' -and [math]::Abs($s.Slope - 5760) -le 1) "fora de dias inteiros: $($s.Slope), esperado 5760"
+            # The "other" group: in the total, never a trend of its own.
+            $f2 = New-MonHist
+            $prev = $null
+            for ($d = 0; $d -le 4; $d++) {
+                $parts = @(for ($i = 0; $i -lt 64; $i++) { New-MonPart -Project ('p' + $i.ToString('D2')) -Bytes (1000000 + $i) }) + @((New-MonPart -Project 'z1' -Bytes (10 + 100 * $d)), (New-MonPart -Project 'z2' -Bytes 10))
+                $prev = Write-MonAt -Folder $f2 -Hours (24 * ($d - 4)) -Parts $parts -Previous $prev
+            }
+            $tr2 = Get-MonTrends
+            $names = @(@($tr2.Groups) | ForEach-Object { [string]$_.Project })
+            Assert-True ($tr2.Total.Slope -eq 100 -and $names.Count -eq 64 -and $names -cnotcontains 'z1' -and $names -cnotcontains 'z2' -and @($tr2.Groups | Where-Object { $null -eq $_.Key }).Count -eq 0) "other no total ($($tr2.Total.Slope)) e sem tendencia propria ($($names.Count) grupos)"
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M2' 'M2: INSUFFICIENT_DATA - 3 pontos; 4 pontos em menos de 24 h (24 h menos 1 ms); o limite exato, 4 pontos cobrindo 24 h, e suficiente; no total e no grupo' {
+        try {
+            $f = New-MonHist
+            foreach ($hh in @(-48, -24, 0)) { [void](Write-MonAt -Folder $f -Hours $hh -Bytes (1000 + 10 * $hh)) }
+            $tr = Get-MonTrends
+            Assert-True ($tr.Total.State -ceq 'INSUFFICIENT_DATA' -and $tr.Total.Points -eq 3 -and $null -eq $tr.Total.Slope -and @($tr.Groups)[0].Trend.State -ceq 'INSUFFICIENT_DATA' -and @($tr.Top).Count -eq 0) "3 pontos ($($tr.Total.State) $($tr.Total.Points))"
+            $f = New-MonHist
+            foreach ($u in @($monT0.AddHours(-24).AddMilliseconds(1), $monT0.AddHours(-16), $monT0.AddHours(-8), $monT0)) { [void](Write-MonAt -Folder $f -Utc $u) }
+            $tr = Get-MonTrends
+            Assert-True ($tr.Total.State -ceq 'INSUFFICIENT_DATA' -and $tr.Total.Points -eq 4 -and $tr.Total.SpanHours -lt 24 -and @($tr.Groups)[0].Trend.State -ceq 'INSUFFICIENT_DATA') "4 pontos em 24 h menos 1 ms ($($tr.Total.State) $($tr.Total.SpanHours))"
+            $f = New-MonHist
+            foreach ($hh in @(-24, -16, -8, 0)) { [void](Write-MonAt -Folder $f -Hours $hh -Bytes (1000 + 24 * ($hh + 24))) }
+            $tr = Get-MonTrends
+            Assert-True ($tr.Total.State -ceq 'OK' -and $tr.Total.Points -eq 4 -and $tr.Total.SpanHours -eq 24 -and $tr.Total.Slope -eq 576 -and @($tr.Groups)[0].Trend.State -ceq 'OK') "limite exato: suficiente ($($tr.Total.State) $($tr.Total.Slope))"
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M2' 'M2: lacunas - INCOMPLETE ou AUDIT_FAILED no meio nao viram ponto nem queda; um grupo incompleto fica fora so da tendencia dele; cobertura incompleta nao da ponto de grupo; a diferenca so entre dois registros OK (anterior incompleto, mais novo incompleto, anterior invalido: lacuna, nunca queda; sem anterior: nenhuma)' {
+        try {
+            foreach ($kind in @('INCOMPLETE', 'FAILED')) {
+                $f = New-MonHist
+                $prev = $null
+                for ($d = 0; $d -le 4; $d++) {
+                    $k = $(if ($d -eq 2) { $kind } else { 'OK' })
+                    $prev = Write-MonAt -Folder $f -Hours (24 * ($d - 4)) -Bytes $(if ($d -eq 2) { 1 } else { 1000 + 1GB * $d }) -Kind $k -Previous $prev
+                }
+                $tr = Get-MonTrends
+                Assert-True ($tr.Total.Points -eq 4 -and [math]::Abs($tr.Total.Slope - 1GB) -le 1 -and @($tr.Groups)[0].Trend.Points -eq 4) "$kind no meio: lacuna ($($tr.Total.Points) pontos, $($tr.Total.Slope))"
+                Assert-True ($tr.Delta.State -ceq 'OK' -and $tr.Delta.Bytes -eq 1GB) "diferenca entre os dois OK mais novos ($($tr.Delta.State) $($tr.Delta.Bytes))"
+            }
+            # One incomplete group (its record INCOMPLETE, coverage complete) is a gap for its own trend only; a record
+            # with incomplete coverage gives no group point.
+            $f = New-MonHist
+            $prev = $null
+            for ($d = 0; $d -le 4; $d++) {
+                $parts = @((New-MonPart -Project 'a' -Bytes (1000 + 700 * $d)), (New-MonPart -Project 'b' -Bytes $(if ($d -eq 2) { 1 } else { 9000 + 500 * $d }) -Complete ($d -ne 2)))
+                $prev = Write-MonAt -Folder $f -Hours (24 * ($d - 4)) -Parts $parts -Previous $prev
+            }
+            [void](Write-MonAt -Folder $f -Hours (-60) -Kind 'COVERAGE' -Parts @((New-MonPart -Project 'a' -Bytes 1TB), (New-MonPart -Project 'b' -Bytes 1TB)))
+            $tr = Get-MonTrends
+            $by = @{}; foreach ($g in @($tr.Groups)) { $by[[string]$g.Project] = $g.Trend }
+            Assert-True ($by['a'].Points -eq 5 -and $by['a'].Slope -eq 700 -and $by['b'].Points -eq 4 -and $by['b'].Slope -eq 500) "grupo incompleto so na tendencia dele (a: $($by['a'].Points)/$($by['a'].Slope), b: $($by['b'].Points)/$($by['b'].Slope))"
+            Assert-True ($tr.Total.Points -eq 4 -and $tr.Total.Slope -eq 1200) "total so dos registros OK ($($tr.Total.Points) $($tr.Total.Slope))"
+            # The delta.
+            $cases = @(
+                @{ Label = 'anterior incompleto'; Kinds = @('INCOMPLETE', 'OK'); Want = 'GAP' }
+                @{ Label = 'mais novo incompleto'; Kinds = @('OK', 'INCOMPLETE'); Want = 'GAP' }
+                @{ Label = 'mais novo AUDIT_FAILED'; Kinds = @('OK', 'FAILED'); Want = 'GAP' }
+                @{ Label = 'anterior invalido'; Kinds = @('OK', 'INVALID', 'OK'); Want = 'GAP' }
+                @{ Label = 'sem anterior'; Kinds = @('OK'); Want = 'NONE' }
+                @{ Label = 'historico vazio'; Kinds = @(); Want = 'NONE' }
+            )
+            foreach ($c in $cases) {
+                $f = New-MonHist
+                $n = @($c.Kinds).Count
+                for ($i = 0; $i -lt $n; $i++) {
+                    $hh = 24 * ($i - $n + 1)
+                    if ($c.Kinds[$i] -ceq 'INVALID') { [IO.File]::WriteAllBytes((Join-Path $f (Get-MonName $monT0.AddHours($hh))), [byte[]]@(0x7B, 0x7D)); continue }
+                    [void](Write-MonAt -Folder $f -Hours $hh -Bytes $(if ($c.Kinds[$i] -ceq 'OK') { 5000 } else { 1 }) -Kind $c.Kinds[$i])
+                }
+                $tr = Get-MonTrends
+                Assert-True ($tr.Delta.State -ceq $c.Want -and $null -eq $tr.Delta.Bytes) "diferenca, $($c.Label): $($tr.Delta.State), esperado $($c.Want); nunca uma queda"
+            }
+            $f = New-MonHist
+            [void](Write-MonAt -Folder $f -Hours (-24) -Bytes 5000); [void](Write-MonAt -Folder $f -Hours 0 -Bytes 3000)
+            $tr = Get-MonTrends
+            Assert-True ($tr.Delta.State -ceq 'OK' -and $tr.Delta.Bytes -eq -2000) "queda real entre dois registros OK ($($tr.Delta.Bytes))"
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M2' 'M2: CLOCK_SKEW fica fora da tendencia; a janela de 7 dias inclui o ponto de exatamente 7 dias e exclui o de 7 dias e 1 ms e os mais antigos' {
+        try {
+            $f = New-MonHist
+            $line = { param($u) [long](1000 + 100 * ($u - $monT0.AddDays(-7)).TotalDays) }
+            $t8 = $monT0.AddDays(-8); $tOut = $monT0.AddDays(-7).AddMilliseconds(-1); $t7 = $monT0.AddDays(-7)
+            [void](Write-MonAt -Folder $f -Utc $t8 -Bytes 1000000000000)
+            [void](Write-MonAt -Folder $f -Utc $tOut -Bytes 1000000000000)
+            [void](Write-MonAt -Folder $f -Utc $t7 -Bytes (& $line $t7))
+            [void](Write-MonAt -Folder $f -Utc $monT0.AddDays(-5) -Bytes (& $line $monT0.AddDays(-5)))
+            $n2 = Write-MonAt -Folder $f -Utc $monT0.AddDays(-2) -Bytes (& $line $monT0.AddDays(-2))
+            [void](Write-MonAt -Folder $f -Utc $monT0 -Bytes (& $line $monT0) -Previous $n2)
+            # A record whose time is earlier than the record it names as previous (the clock went back).
+            [void](Write-MonAt -Folder $f -Utc $monT0.AddDays(-3.5) -Bytes 1000000000000 -Previous $n2)
+            $h = Get-AtmMonitorHistory
+            Assert-True ($h.ClockSkew -eq 1 -and @($h.Records).Count -eq 7) "um registro CLOCK_SKEW entre 7 validos ($($h.ClockSkew), $(@($h.Records).Count))"
+            $tr = Get-AtmMonitorTrends -History $h
+            Assert-True ($tr.Total.State -ceq 'OK' -and $tr.Total.Points -eq 4 -and $tr.Total.Slope -eq 100 -and @($tr.Groups)[0].Trend.Points -eq 4) "so os 4 pontos da janela, sem o CLOCK_SKEW ($($tr.Total.Points) pontos, $($tr.Total.Slope))"
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M2' 'M2: monitor.json (so leitura) - ausente: padroes sem alerta; valido e parcial; cada limite exato e logo fora; 3.0 inteiro e 3.5 nao; BOM aceito; chave desconhecida, tipo errado, nao objeto, JSON quebrado, nao UTF-8, acima de 4 KB, numero enorme, reparse no arquivo e na cadeia, pasta, outro dono (seam): cada recusa da os padroes e MON_CONFIG_INVALID; o produto nunca escreve o arquivo (instantaneo)' {
+        try {
+            $f = New-MonHist
+            $defaults = Get-MonDefaultsText
+            Assert-Eq $defaults 'totalGiB=20 growthGiBPerDay=2 orphanSuspectedGiB=5 livenessUnknownGiB=5 failedCollections=3' 'padroes'
+            $c = Get-AtmMonitorConfig
+            Assert-True ($c.State -ceq 'DEFAULTS' -and $null -eq $c.Code -and (Get-MonValuesText $c) -ceq $defaults -and -not (Test-Path -LiteralPath (Join-Path $f 'monitor.json'))) "ausente: padroes, sem codigo, nada criado ($($c.State))"
+            Assert-Eq (Get-MonCodes (@(Get-AtmMonitorAlerts -History (Get-AtmMonitorHistory) -Config $c -Trends (Get-MonTrends)))) '' 'ausente: nenhum alerta'
+            $accepted = @(
+                @('{"totalGiB":30,"failedCollections":5}', 'totalGiB=30 growthGiBPerDay=2 orphanSuspectedGiB=5 livenessUnknownGiB=5 failedCollections=5')
+                @('{"totalGiB":1,"growthGiBPerDay":0.1,"orphanSuspectedGiB":1,"livenessUnknownGiB":1,"failedCollections":2}', ('totalGiB=1 growthGiBPerDay=' + [string]0.1 + ' orphanSuspectedGiB=1 livenessUnknownGiB=1 failedCollections=2'))
+                @('{"totalGiB":4096,"growthGiBPerDay":1024,"orphanSuspectedGiB":4096,"livenessUnknownGiB":4096,"failedCollections":30}', 'totalGiB=4096 growthGiBPerDay=1024 orphanSuspectedGiB=4096 livenessUnknownGiB=4096 failedCollections=30')
+                @('{"failedCollections":3.0}', $defaults)
+                @('{}', $defaults)
+            )
+            foreach ($a in $accepted) {
+                Write-MonConfig -Folder $f -Text $a[0]
+                $c = Get-AtmMonitorConfig
+                Assert-True ($c.State -ceq 'FILE' -and $null -eq $c.Code -and (Get-MonValuesText $c) -ceq $a[1]) "aceito $($a[0]): $($c.State) $($c.Reason) $(Get-MonValuesText $c)"
+            }
+            Write-MonConfig -Folder $f -Bytes ([byte[]](@(0xEF, 0xBB, 0xBF) + [Text.Encoding]::UTF8.GetBytes('{"totalGiB":30}')))
+            $c = Get-AtmMonitorConfig
+            Assert-True ($c.State -ceq 'FILE' -and $c.Values['totalGiB'] -eq 30) "BOM UTF-8 aceito ($($c.State) $($c.Reason))"
+            Write-MonConfig -Folder $f -Text ('{"totalGiB":30' + (' ' * (4096 - 15)) + '}')
+            $c = Get-AtmMonitorConfig
+            Assert-True ($c.State -ceq 'FILE' -and (New-Object IO.FileInfo((Join-Path $f 'monitor.json'))).Length -eq 4096) "exatamente 4 KB aceito ($($c.State) $($c.Reason))"
+            $refused = @(
+                @('{"totalGiB":0.99}', 'RANGE'), @('{"totalGiB":4096.01}', 'RANGE'), @('{"growthGiBPerDay":0.09}', 'RANGE'), @('{"growthGiBPerDay":1024.01}', 'RANGE')
+                @('{"orphanSuspectedGiB":0.99}', 'RANGE'), @('{"orphanSuspectedGiB":4096.01}', 'RANGE'), @('{"livenessUnknownGiB":0.99}', 'RANGE'), @('{"livenessUnknownGiB":4096.01}', 'RANGE')
+                @('{"failedCollections":1}', 'RANGE'), @('{"failedCollections":31}', 'RANGE'), @('{"failedCollections":3.5}', 'TYPE')
+                @('{"totalGiB":30,"windowDays":7}', 'UNKNOWN_KEY'), @('{"TotalGiB":30}', 'UNKNOWN_KEY')
+                @('{"totalGiB":"30"}', 'TYPE'), @('{"totalGiB":true}', 'TYPE'), @('{"totalGiB":null}', 'TYPE'), @('{"totalGiB":[30]}', 'TYPE'), @('[{"totalGiB":30}]', 'TYPE'), @('30', 'TYPE')
+                @('{"totalGiB":30', 'JSON'), @(('{"totalGiB":30' + (' ' * 4100) + '}'), 'SIZE'), @('{"totalGiB":123456789012345678901234567890}', $null)
+            )
+            foreach ($r in $refused) {
+                Write-MonConfig -Folder $f -Text $r[0]
+                $c = Get-AtmMonitorConfig
+                $lbl = $(if ($r[0].Length -gt 60) { $r[0].Substring(0, 20) + '...' } else { $r[0] })
+                Assert-True ($c.State -ceq 'REFUSED' -and $c.Code -ceq 'MON_CONFIG_INVALID' -and (Get-MonValuesText $c) -ceq $defaults -and ($null -eq $r[1] -or $c.Reason -ceq $r[1])) "recusado ${lbl}: $($c.State) $($c.Code) $($c.Reason), esperado $($r[1]); padroes"
+            }
+            Write-MonConfig -Folder $f -Bytes ([byte[]]@(0x7B, 0xC3, 0x28, 0x7D))
+            $c = Get-AtmMonitorConfig
+            Assert-True ($c.State -ceq 'REFUSED' -and $c.Code -ceq 'MON_CONFIG_INVALID' -and $c.Reason -ceq 'ENCODING' -and (Get-MonValuesText $c) -ceq $defaults) "nao UTF-8 estrito: $($c.Reason)"
+            Assert-Eq (Get-MonCodes (@(Get-AtmMonitorAlerts -History (Get-AtmMonitorHistory) -Config $c -Trends (Get-MonTrends)))) 'MON_CONFIG_INVALID' 'recusado: o alerta MON_CONFIG_INVALID'
+            # Another owner (owner seam).
+            Write-MonConfig -Folder $f -Text '{"totalGiB":30}'
+            $fs = $monForeignSid
+            $script:AtmMonitorOwnerSource = { param($p) $fs }.GetNewClosure()
+            $c = Get-AtmMonitorConfig
+            $script:AtmMonitorOwnerSource = $null
+            Assert-True ($c.State -ceq 'REFUSED' -and $c.Reason -ceq 'OWNER' -and (Get-MonValuesText $c) -ceq $defaults) "outro dono: $($c.Reason)"
+            # The product never writes the file: the folder is the same before and after every read, gate open included.
+            $before = Get-TreeListing (Split-Path $f -Parent)
+            [void](Get-AtmMonitorConfig); [void](Get-MonStatusOpen); [void](Get-AtmMonitorStatus)
+            Assert-True ($before.Length -gt 0 -and (Get-TreeListing (Split-Path $f -Parent)) -ceq $before) 'instantaneo: arquivo valido, nada escrito'
+            Write-MonConfig -Folder $f -Text '{"totalGiB":"x"}'
+            $before2 = Get-TreeListing (Split-Path $f -Parent)
+            [void](Get-AtmMonitorConfig); [void](Get-MonStatusOpen)
+            Assert-True ((Get-TreeListing (Split-Path $f -Parent)) -ceq $before2) 'instantaneo: arquivo recusado, nada escrito, criado nem corrigido'
+            Assert-Eq ([IO.File]::ReadAllText((Join-Path $f 'monitor.json'))) '{"totalGiB":"x"}' 'o arquivo recusado fica como estava'
+            # A folder named monitor.json, a junction named monitor.json, a junction in the folder's chain.
+            $f = New-MonHist
+            [void][IO.Directory]::CreateDirectory((Join-Path $f 'monitor.json'))
+            $c = Get-AtmMonitorConfig
+            Assert-True ($c.State -ceq 'REFUSED' -and $c.Reason -ceq 'NOT_A_FILE' -and (Get-MonValuesText $c) -ceq $defaults) "pasta com o nome: $($c.Reason)"
+            $f = New-MonHist
+            $tgt = Join-Path $sandbox ('mon2-tgt-' + $script:monN); [void][IO.Directory]::CreateDirectory($tgt)
+            New-Junction -Link (Join-Path $f 'monitor.json') -Target $tgt
+            $c = Get-AtmMonitorConfig
+            Assert-True ($c.State -ceq 'REFUSED' -and $c.Reason -ceq 'REPARSE') "juncao com o nome: $($c.Reason)"
+            $f = New-MonHist
+            Write-MonConfig -Folder $f -Text '{"totalGiB":30}'
+            $jl = Join-Path $sandbox ('mon2-link-' + $script:monN)
+            New-Junction -Link $jl -Target (Split-Path (Split-Path $f -Parent) -Parent)
+            $script:AtmMonitorFolderPath = Join-Path $jl 'AgentTempManager\Monitor'
+            $c = Get-AtmMonitorConfig
+            Assert-True ($c.State -ceq 'REFUSED' -and $c.Reason -ceq 'REPARSE' -and (Get-MonValuesText $c) -ceq $defaults) "juncao na cadeia da pasta: $($c.Reason)"
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M2' 'M2: monitor.json na pasta do historico - a rotacao passa e nao o remove (remove so o registro velho); o leitor nao o conta como inesperado; a remocao unica o recusa pelo nome; outro dono, pasta ou juncao com o nome recusam como antes (rotacao inteira recusada, contado como inesperado)' {
+        try {
+            Assert-True ('monitor.json' -cnotmatch $script:AtmMonitorNamePattern -and 'monitor.json' -cnotmatch $script:AtmMonitorPartialPattern) 'o nome nao e de registro nem de .partial'
+            $f = New-MonHist
+            $old = Write-MonAt -Folder $f -Utc $monT0.AddDays(-100)
+            $new = Write-MonAt -Folder $f -Hours 0
+            Write-MonConfig -Folder $f -Text '{"totalGiB":30}'
+            $cfgBytes = [IO.File]::ReadAllBytes((Join-Path $f 'monitor.json'))
+            $h = Get-AtmMonitorHistory
+            Assert-True ($h.Unexpected -eq 0 -and @($h.Records).Count -eq 2) "leitor: nao conta monitor.json ($($h.Unexpected) inesperados)"
+            $rot = Invoke-MonRotate -Folder $f
+            Assert-True ($null -eq $rot.Code -and (@($rot.Removed) -join ',') -ceq $old -and $rot.Kept -eq 1) "rotacao passa e remove so o registro velho ($($rot.Code) $(@($rot.Removed) -join ','))"
+            Assert-True ([IO.File]::Exists((Join-Path $f 'monitor.json')) -and ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $f 'monitor.json'))) -ceq [Convert]::ToBase64String($cfgBytes))) 'monitor.json intacto depois da rotacao'
+            Assert-Eq ((Get-MonNames $f) -join ',') (Get-MonSorted @($new, 'monitor.json')) 'o resto da pasta'
+            $script:AtmMonitoringEnabled = $true
+            try { $pr = Invoke-AtmMonitorPrune -Folder $f -Name 'monitor.json' -Owners @((Get-AtmMonitorIdentity).Owners) } finally { $script:AtmMonitoringEnabled = $false }
+            Assert-True ($pr -ceq 'MONITOR_PRUNE_NAME_REFUSED' -and [IO.File]::Exists((Join-Path $f 'monitor.json'))) "remocao unica recusa monitor.json pelo nome ($pr)"
+            # Another owner (owner seam: only monitor.json reads as foreign).
+            $f = New-MonHist
+            $old = Write-MonAt -Folder $f -Utc $monT0.AddDays(-100)
+            Write-MonConfig -Folder $f -Text '{"totalGiB":30}'
+            $fs = $monForeignSid
+            $script:AtmMonitorOwnerSource = { param($p) if ($p.EndsWith('\monitor.json')) { $fs } else { [string](Get-Acl -LiteralPath $p).GetOwner([Security.Principal.SecurityIdentifier]).Value } }.GetNewClosure()
+            $rot = Invoke-MonRotate -Folder $f
+            $h = Get-AtmMonitorHistory
+            Assert-True ($rot.Code -ceq 'MONITOR_ROTATION_FOREIGN_OWNER' -and @($rot.Removed).Count -eq 0 -and $h.Unexpected -eq 1 -and [IO.File]::Exists((Join-Path $f $old))) "outro dono: rotacao recusada inteira, contado como inesperado ($($rot.Code), $($h.Unexpected))"
+            $script:AtmMonitorOwnerSource = $null
+            # A folder and a junction named monitor.json.
+            $f = New-MonHist
+            $old = Write-MonAt -Folder $f -Utc $monT0.AddDays(-100)
+            [void][IO.Directory]::CreateDirectory((Join-Path $f 'monitor.json'))
+            $rot = Invoke-MonRotate -Folder $f
+            $h = Get-AtmMonitorHistory
+            Assert-True ($rot.Code -ceq 'MONITOR_ROTATION_UNEXPECTED_ITEM' -and @($rot.Removed).Count -eq 0 -and $h.Unexpected -eq 1 -and [IO.File]::Exists((Join-Path $f $old))) "pasta com o nome: recusa como antes ($($rot.Code), $($h.Unexpected))"
+            $f = New-MonHist
+            $old = Write-MonAt -Folder $f -Utc $monT0.AddDays(-100)
+            $tgt = Join-Path $sandbox ('mon2-jtgt-' + $script:monN); [void][IO.Directory]::CreateDirectory($tgt)
+            New-Junction -Link (Join-Path $f 'monitor.json') -Target $tgt
+            $rot = Invoke-MonRotate -Folder $f
+            $h = Get-AtmMonitorHistory
+            Assert-True ($rot.Code -ceq 'MONITOR_ROTATION_REPARSE' -and @($rot.Removed).Count -eq 0 -and $h.Unexpected -eq 1 -and [IO.File]::Exists((Join-Path $f $old)) -and [IO.Directory]::Exists($tgt)) "juncao com o nome: recusa como antes ($($rot.Code), $($h.Unexpected))"
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M2' 'M2: alertas no limiar (nao dispara) e logo acima (dispara), cada um com o comando citado - MON_TOTAL, MON_ORPHAN_SUSPECTED (soma dos grupos), MON_LIVENESS_UNKNOWN, MON_GROWTH (nunca com INSUFFICIENT_DATA), MON_COLLECTION (N do arquivo; invalido conta como nao OK), MON_CONFIG_INVALID (sem comando); textos nos dois idiomas' {
+        try {
+            $f = New-MonHist; [void](Write-MonAt -Folder $f -Bytes 20GB)
+            Assert-Eq (Get-MonCodes (Get-MonAlerts)) '' 'MON_TOTAL no limiar: nao dispara'
+            $f = New-MonHist; [void](Write-MonAt -Folder $f -Bytes (20GB + 1))
+            $al = @(Get-MonAlerts)
+            Assert-True ((Get-MonCodes $al) -ceq 'MON_TOTAL' -and (@($al[0].Commands) -join ',') -ceq 'agent-temp preview,agent-temp clean' -and $al[0].Value -eq (20GB + 1) -and $al[0].Threshold -eq 20GB) "MON_TOTAL acima: $(Get-MonCodes $al)"
+            foreach ($c in @(@('ORPHAN_SUSPECTED', 'MON_ORPHAN_SUSPECTED', 5GB, 'agent-temp preview,agent-temp isolate'), @('LIVENESS_UNKNOWN', 'MON_LIVENESS_UNKNOWN', 5GB, 'agent-temp diagnose'))) {
+                $f = New-MonHist; [void](Write-MonAt -Folder $f -Parts @((New-MonPart -Project 'x' -Class $c[0] -Bytes 3GB), (New-MonPart -Project 'y' -Class $c[0] -Bytes 2GB), (New-MonPart -Project 'r' -Bytes 9GB)))
+                Assert-Eq (Get-MonCodes (Get-MonAlerts)) '' "$($c[1]) no limiar (soma de dois grupos): nao dispara"
+                $f = New-MonHist; [void](Write-MonAt -Folder $f -Parts @((New-MonPart -Project 'x' -Class $c[0] -Bytes 3GB), (New-MonPart -Project 'y' -Class $c[0] -Bytes (2GB + 1)), (New-MonPart -Project 'r' -Bytes 9GB)))
+                $al = @(Get-MonAlerts)
+                Assert-True ((Get-MonCodes $al) -ceq $c[1] -and (@($al[0].Commands) -join ',') -ceq $c[3] -and $al[0].Value -eq ($c[2] + 1)) "$($c[1]) acima: $(Get-MonCodes $al)"
+            }
+            foreach ($step in @(2GB, (2GB + 1))) {
+                $f = New-MonHist
+                for ($d = 0; $d -le 3; $d++) { [void](Write-MonAt -Folder $f -Hours (24 * ($d - 3)) -Bytes ($step * $d)) }
+                $al = @(Get-MonAlerts)
+                if ($step -eq 2GB) { Assert-Eq (Get-MonCodes $al) '' 'MON_GROWTH no limiar (2 GiB por dia exatos): nao dispara' }
+                else { Assert-True ((Get-MonCodes $al) -ceq 'MON_GROWTH' -and (@($al[0].Commands) -join ',') -ceq 'agent-temp audit' -and $al[0].Value -eq $step) "MON_GROWTH acima: $(Get-MonCodes $al)" }
+            }
+            $f = New-MonHist
+            for ($d = 0; $d -le 2; $d++) { [void](Write-MonAt -Folder $f -Hours (24 * ($d - 2)) -Bytes (1GB * 8 * $d)) }
+            Assert-True ((Get-MonCodes (Get-MonAlerts)) -cnotmatch 'MON_GROWTH') 'MON_GROWTH nunca com INSUFFICIENT_DATA (3 pontos de 8 GiB por dia)'
+            $f = New-MonHist
+            [void](Write-MonAt -Folder $f -Hours (-3)); [void](Write-MonAt -Folder $f -Hours (-2) -Kind 'INCOMPLETE'); [void](Write-MonAt -Folder $f -Hours (-1) -Kind 'FAILED')
+            Assert-Eq (Get-MonCodes (Get-MonAlerts)) '' 'MON_COLLECTION com 2 nao OK de 3: nao dispara'
+            $al = @(Get-MonAlerts -Config (New-MonConfigObj '{"failedCollections":2}'))
+            Assert-True ((Get-MonCodes $al) -ceq 'MON_COLLECTION' -and $al[0].Value -eq 2) "MON_COLLECTION com N=2 do arquivo: $(Get-MonCodes $al)"
+            [void](Write-MonAt -Folder $f -Hours 0 -Kind 'COVERAGE')
+            $al = @(Get-MonAlerts)
+            Assert-True ((Get-MonCodes $al) -ceq 'MON_COLLECTION' -and (@($al[0].Commands) -join ',') -ceq 'agent-temp monitor status' -and $al[0].Value -eq 3) "MON_COLLECTION com os 3 mais novos nao OK: $(Get-MonCodes $al)"
+            $f = New-MonHist
+            [void](Write-MonAt -Folder $f -Hours (-3)); [void](Write-MonAt -Folder $f -Hours (-2) -Kind 'INCOMPLETE')
+            [IO.File]::WriteAllBytes((Join-Path $f (Get-MonName $monT0.AddHours(-1))), [byte[]]@(0x7B, 0x7D)); [void](Write-MonAt -Folder $f -Hours 0 -Kind 'FAILED')
+            Assert-Eq (Get-MonCodes (Get-MonAlerts)) 'MON_COLLECTION' 'MON_COLLECTION: um arquivo invalido conta como nao OK'
+            $al = @(Get-MonAlerts -Config (New-MonConfigObj -Refused 'JSON'))
+            $mc = @($al | Where-Object { $_.Code -ceq 'MON_CONFIG_INVALID' })
+            Assert-True ($mc.Count -eq 1 -and @($mc[0].Commands).Count -eq 0 -and $mc[0].Value -ceq 'JSON') 'MON_CONFIG_INVALID: o motivo, nenhum comando (cita o formato em USAGE)'
+            $old = Get-AtmLanguage
+            try {
+                foreach ($lang in @('en-US', 'pt-BR')) {
+                    Set-AtmLanguage -Requested $lang
+                    foreach ($code in @($script:AtmMonitorAlertCommands.Keys)) { Assert-True ($script:AtmMessages[$lang].ContainsKey('mon.alert.' + $code)) "texto de $code ($lang)" }
+                    Assert-True ((Get-AtmText 'mon.alert.MON_CONFIG_INVALID' 'JSON').Contains('docs/USAGE.md')) "MON_CONFIG_INVALID cita o formato em USAGE ($lang)"
+                }
+            } finally { Set-AtmLanguage -Requested $old }
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M2' 'M2: nenhuma execucao - com a trava aberta, um historico que dispara os seis alertas e o status completo nao chamam motor, processo, comando, agendador nem rede (instrumentacao por sombras); controle positivo: a sombra de Get-AtmMonitorIdentity e alcancada de dentro do motor' {
+        try {
+            $f = New-MonHist
+            [void](Write-MonAt -Folder $f -Hours (-96) -Kind 'INCOMPLETE'); [void](Write-MonAt -Folder $f -Hours (-72) -Kind 'FAILED'); [void](Write-MonAt -Folder $f -Hours (-48) -Kind 'COVERAGE')
+            $parts = { param($k) @((New-MonPart -Project 'o' -Class 'ORPHAN_SUSPECTED' -Bytes (6GB + 1GB * $k)), (New-MonPart -Project 'l' -Class 'LIVENESS_UNKNOWN' -Bytes (6GB + 1GB * $k)), (New-MonPart -Project 'r' -Bytes (10GB + 1GB * $k))) }
+            for ($k = 0; $k -le 4; $k++) { [void](Write-MonAt -Folder $f -Hours (-40 + 10 * $k) -Parts (& $parts $k)) }
+            for ($k = 0; $k -le 2; $k++) { [void](Write-MonAt -Folder $f -Hours (1 + $k) -Kind 'INCOMPLETE') }
+            Write-MonConfig -Folder $f -Text '{"totalGiB":20,"windowDays":7}'
+            $idReal = Get-AtmMonitorIdentity
+            $calls = New-Object System.Collections.Generic.List[string]
+            $ctrl = New-Object System.Collections.Generic.List[string]
+            function Get-AtmMonitorIdentity { $ctrl.Add('identity'); return $idReal }
+            function Invoke-AtmInventory { $calls.Add('Invoke-AtmInventory') }
+            function Invoke-AtmPreview { $calls.Add('Invoke-AtmPreview') }
+            function Invoke-AtmClean { $calls.Add('Invoke-AtmClean') }
+            function Invoke-AtmCleanCore { $calls.Add('Invoke-AtmCleanCore') }
+            function Invoke-AtmDiagnose { $calls.Add('Invoke-AtmDiagnose') }
+            function Invoke-AtmIsolate { $calls.Add('Invoke-AtmIsolate') }
+            function Invoke-AtmRestore { $calls.Add('Invoke-AtmRestore') }
+            function Invoke-AtmPurge { $calls.Add('Invoke-AtmPurge') }
+            function Invoke-AtmAutoPurgeSchedule { $calls.Add('Invoke-AtmAutoPurgeSchedule') }
+            function Invoke-AtmRecover { $calls.Add('Invoke-AtmRecover') }
+            function Invoke-AtmMonitorCollection { $calls.Add('Invoke-AtmMonitorCollection') }
+            function Invoke-AtmMonitorRotation { $calls.Add('Invoke-AtmMonitorRotation') }
+            function Invoke-AtmMonitorPrune { $calls.Add('Invoke-AtmMonitorPrune') }
+            function Open-AtmMonitorFolder { $calls.Add('Open-AtmMonitorFolder') }
+            function Write-AtmMonitorRecordFile { $calls.Add('Write-AtmMonitorRecordFile') }
+            function Start-Process { $calls.Add('Start-Process') }
+            function Start-Job { $calls.Add('Start-Job') }
+            function Invoke-Expression { $calls.Add('Invoke-Expression') }
+            function Invoke-Command { $calls.Add('Invoke-Command') }
+            function Invoke-Item { $calls.Add('Invoke-Item') }
+            function Invoke-WebRequest { $calls.Add('Invoke-WebRequest') }
+            function Invoke-RestMethod { $calls.Add('Invoke-RestMethod') }
+            function Register-ScheduledTask { $calls.Add('Register-ScheduledTask') }
+            function agent-temp { $calls.Add('agent-temp') }
+            function powershell { $calls.Add('powershell') }
+            function pwsh { $calls.Add('pwsh') }
+            function cmd { $calls.Add('cmd') }
+            $st = Get-MonStatusOpen
+            $lines = @(Get-AtmMonitorStatusLines -Status $st | ForEach-Object { $_.Text }) -join ' | '
+            Assert-Eq (Get-MonCodes $st.Alerts) 'MON_TOTAL,MON_GROWTH,MON_ORPHAN_SUSPECTED,MON_LIVENESS_UNKNOWN,MON_COLLECTION,MON_CONFIG_INVALID' 'os seis alertas'
+            Assert-True ($lines.Contains('agent-temp preview') -and $lines.Contains('agent-temp diagnose') -and -not $lines.Contains($sandbox)) 'linhas com os comandos citados; caminho real nunca mostrado'
+            Assert-Eq ($calls -join ',') '' 'nenhuma chamada a motor, processo, comando, agendador ou rede'
+            Assert-True ($ctrl.Count -ge 1) "controle positivo: a sombra e alcancada de dentro do motor ($($ctrl.Count))"
+            Assert-Eq $script:AtmMonitoringEnabled $false 'trava fechada de novo'
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M2' 'M2: trava fechada - com um historico plantado que dispara alertas e um monitor.json recusado, o status nao calcula tendencia nem alerta e nao le monitor.json (so o aviso e o residuo); controle positivo com a trava aberta neste processo' {
+        try {
+            $f = New-MonHist
+            for ($k = 0; $k -le 4; $k++) { [void](Write-MonAt -Folder $f -Hours (24 * ($k - 4)) -Bytes (25GB + 3GB * $k)) }
+            Write-MonConfig -Folder $f -Text 'nao e json'
+            $k = @{ Config = 0; Trends = 0; Alerts = 0 }
+            $realConfig = ${function:Get-AtmMonitorConfig}; $realTrends = ${function:Get-AtmMonitorTrends}; $realAlerts = ${function:Get-AtmMonitorAlerts}
+            function Get-AtmMonitorConfig { $k.Config++; & $realConfig }
+            function Get-AtmMonitorTrends { param($History) $k.Trends++; & $realTrends -History $History }
+            function Get-AtmMonitorAlerts { param($History, $Config, $Trends) $k.Alerts++; & $realAlerts -History $History -Config $Config -Trends $Trends }
+            Assert-Eq $script:AtmMonitoringEnabled $false 'trava fechada'
+            $st = Get-AtmMonitorStatus
+            Assert-True ($st.GateOpen -eq $false -and $null -eq $st.Config -and $null -eq $st.Trends -and @($st.Alerts).Count -eq 0) 'status sem limiares, tendencia nem alerta'
+            Assert-True ($k.Config -eq 0 -and $k.Trends -eq 0 -and $k.Alerts -eq 0) "nada calculado, monitor.json nao lido ($($k.Config) $($k.Trends) $($k.Alerts))"
+            $lines = @(Get-AtmMonitorStatusLines -Status $st | ForEach-Object { $_.Text }) -join ' | '
+            Assert-True ($lines.Contains((Get-AtmText 'mon.gateClosed')) -and $lines.Contains((Get-AtmText 'mon.residue')) -and -not $lines.Contains('MON_') -and -not $lines.Contains((Get-AtmText 'mon.trendGroups')) -and -not $lines.Contains((Get-AtmText 'mon.alertsNone')) -and -not $lines.Contains('monitor.json')) 'linhas: o aviso e o residuo, nenhuma tendencia nem alerta'
+            $st = Get-MonStatusOpen
+            Assert-True ($k.Config -eq 1 -and $k.Trends -eq 1 -and $k.Alerts -eq 1 -and $st.Config.Reason -ceq 'JSON' -and (Get-MonCodes $st.Alerts) -ceq 'MON_TOTAL,MON_GROWTH,MON_CONFIG_INVALID') "controle positivo: trava aberta calcula ($(Get-MonCodes $st.Alerts))"
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M2' 'M2: monitor status com a trava aberta (so na suite) - ultimo total completo e a diferenca, tendencia do total, ate 5 grupos com a maior inclinacao, alertas com o comando citado, estado dos limiares (padroes, arquivo, recusado com o codigo); en-US e pt-BR' {
+        try {
+            $f = New-MonHist
+            $prev = $null
+            for ($d = 0; $d -le 4; $d++) {
+                $parts = @(for ($g = 1; $g -le 6; $g++) { New-MonPart -Project ('g' + $g) -Bytes (1000 + 100MB * $g * $d) })
+                $prev = Write-MonAt -Folder $f -Hours (24 * ($d - 4)) -Parts $parts -Previous $prev
+            }
+            $old = Get-AtmLanguage
+            try {
+                foreach ($lang in @('en-US', 'pt-BR')) {
+                    Set-AtmLanguage -Requested $lang
+                    $st = Get-MonStatusOpen
+                    $lines = @(Get-AtmMonitorStatusLines -Status $st | ForEach-Object { $_.Text })
+                    $tr = $st.Trends
+                    $want = @(
+                        (Get-AtmText 'mon.gateOpen')
+                        (Get-AtmText 'mon.total' (Format-AtmGB $tr.LatestOkBytes) $monT0.ToString('yyyy-MM-dd HH:mm'))
+                        (Get-AtmText 'mon.deltaOk' ('+' + (Format-AtmGB (2100MB))))
+                        (Get-AtmText 'mon.trendTotal' (Format-AtmGB (2100MB)) 5)
+                        (Get-AtmText 'mon.trendGroups')
+                    ) + @(foreach ($g in 6..2) { Get-AtmText 'mon.trendGroup' 'claude-code' ('g' + $g) 'RECENT' (Format-AtmGB (100MB * $g)) }) + @(
+                        (Get-AtmText 'mon.configDefaults')
+                        (Get-AtmText 'mon.alert.MON_GROWTH' (Format-AtmGB (2100MB)) (Format-AtmGB (2GB)))
+                        (Get-AtmText 'mon.alertCommand' 'agent-temp audit')
+                    )
+                    $miss = @($want | Where-Object { $lines -cnotcontains $_ })
+                    Assert-Eq ($miss -join ' | ') '' "linhas presentes ($lang)"
+                    Assert-True ($lines -cnotcontains (Get-AtmText 'mon.trendGroup' 'claude-code' 'g1' 'RECENT' (Format-AtmGB (100MB)))) "so 5 grupos ($lang)"
+                    $i6 = [array]::IndexOf($lines, (Get-AtmText 'mon.trendGroup' 'claude-code' 'g6' 'RECENT' (Format-AtmGB (600MB)))); $i2 = [array]::IndexOf($lines, (Get-AtmText 'mon.trendGroup' 'claude-code' 'g2' 'RECENT' (Format-AtmGB (200MB))))
+                    Assert-True ($i6 -ge 0 -and $i2 -gt $i6) "a maior inclinacao primeiro ($lang)"
+                    Assert-True (($lines -join ' ') -notmatch [regex]::Escape($sandbox)) "caminho real nunca mostrado ($lang)"
+                }
+                Set-AtmLanguage -Requested 'en-US'
+                Write-MonConfig -Folder $f -Text '{"growthGiBPerDay":3}'
+                $lines = @(Get-AtmMonitorStatusLines -Status (Get-MonStatusOpen) | ForEach-Object { $_.Text })
+                Assert-True ($lines -ccontains (Get-AtmText 'mon.configFile') -and $lines -ccontains (Get-AtmText 'mon.alertsNone')) 'limiares do arquivo; nenhum alerta'
+                Write-MonConfig -Folder $f -Text '{"growthGiBPerDay":3,"extra":1}'
+                $lines = @(Get-AtmMonitorStatusLines -Status (Get-MonStatusOpen) | ForEach-Object { $_.Text })
+                Assert-True ($lines -ccontains (Get-AtmText 'mon.configRefused' 'MON_CONFIG_INVALID' 'UNKNOWN_KEY') -and $lines -ccontains (Get-AtmText 'mon.alert.MON_CONFIG_INVALID' 'UNKNOWN_KEY') -and $lines -ccontains (Get-AtmText 'mon.alert.MON_GROWTH' (Format-AtmGB (2100MB)) (Format-AtmGB (2GB)))) 'recusado: os padroes valem de novo, com o codigo'
+                $f = New-MonHist
+                $lines = @(Get-AtmMonitorStatusLines -Status (Get-MonStatusOpen) | ForEach-Object { $_.Text })
+                Assert-True ($lines -ccontains (Get-AtmText 'mon.historyCount' 0) -and $lines -ccontains (Get-AtmText 'mon.totalNone') -and $lines -ccontains (Get-AtmText 'mon.deltaNone') -and $lines -ccontains (Get-AtmText 'mon.trendInsufficient' 0) -and $lines -ccontains (Get-AtmText 'mon.configDefaults')) 'historico vazio: nenhum total, nenhuma diferenca, INSUFFICIENT_DATA, padroes'
+            } finally { Set-AtmLanguage -Requested $old }
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M2' 'M2 monitor status pela CLI com a trava aberta: NAO_TESTADO' {
+        $script:caseSkipped = $true
+        $script:caseNote = 'a trava so abre dentro do processo da suite; o lancador roda num processo filho com a trava fechada da copia (o M1 cobre essa saida). As linhas com a trava aberta sao conferidas pela funcao de apresentacao neste processo'
+    }
+    Test-Case 'V0.5 M2' 'M2 (estatico): limiares, tendencias e alertas so leem - chamadas so de uma lista fechada, nenhum & nem ponto, nenhuma escrita, motor, processo, agendador nem rede (controle positivo); so com a trava aberta e so pelo status; cada comando citado e um verbo do agent-temp.ps1 (controle positivo); lista fechada de alertas sem MON_RECOVERY; monitor.json so lido; a remocao segue numa funcao; GUI e TUI sem a M2; textos nos dois idiomas' {
+        $monFile = Join-Path $srcDir 'lib\Engine.Monitor.ps1'
+        $mon = [IO.File]::ReadAllText($monFile)
+        $strip = { param([string]$T) [regex]::Replace([regex]::Replace($T, '(?s)<#.*?#>', ''), '(?m)#.*$', '') }
+        $ast = [Management.Automation.Language.Parser]::ParseFile($monFile, [ref]$null, [ref]$null)
+        $defs = @{}; foreach ($d in @($ast.FindAll({ param($a) $a -is [Management.Automation.Language.FunctionDefinitionAst] }, $true))) { $defs[$d.Name] = $d }
+        $pure = @('Get-AtmMonitorConfig', 'Get-AtmMonitorConfigFile', 'Get-AtmMonitorConfigValues', 'Get-AtmMonitorRecordBytes', 'Get-AtmMonitorGroupKey', 'Get-AtmMonitorSlope', 'Get-AtmMonitorEntryNames', 'Get-AtmMonitorTrends', 'Get-AtmMonitorAlerts')
+        $allowed = @('Test-AtmPathChain', 'Join-Path', 'Get-AtmFileErrorKind', 'Get-AtmMonitorIdentity', 'Get-AtmMonitorFileOwner', 'Get-AtmMonitorFolder', 'New-Object', 'ConvertFrom-Json', 'Where-Object', 'ForEach-Object') + $pure
+        $bad = @('WriteAll', 'AppendAll', 'Create', 'OpenWrite', '::Open(', 'File]::Move', 'File]::Copy', '::Delete(', 'Mutex', 'Set-Content', 'Add-Content', 'Out-File', 'New-Item', 'Invoke-', 'Start-', 'ScheduledTask', 'Schedule.Service', 'WebRequest', 'RestMethod', 'WebClient', 'HttpClient', 'Sockets', 'AtmMonitoringEnabled', 'Open-AtmMonitorFolder', 'Write-AtmMonitorRecordFile', 'Get-Content', '$env:')
+        $check = {
+            param($Def)
+            $out = New-Object System.Collections.Generic.List[string]
+            foreach ($c in @($Def.FindAll({ param($a) $a -is [Management.Automation.Language.CommandAst] }, $true))) {
+                if ($c.InvocationOperator -ne [Management.Automation.Language.TokenKind]::Unknown) { $out.Add('operador: ' + $c.Extent.Text) }
+                $nm = $c.GetCommandName()
+                if ($null -eq $nm -or $allowed -cnotcontains $nm) { $out.Add('chamada: ' + $c.Extent.Text) }
+            }
+            $code = & $strip $Def.Extent.Text
+            foreach ($pat in $bad) { if ($code.IndexOf($pat, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $out.Add('texto: ' + $pat) } }
+            return , $out.ToArray()
+        }
+        foreach ($fn in $pure) {
+            Assert-True ($defs.ContainsKey($fn)) "$fn definida"
+            Assert-Eq ((& $check $defs[$fn]) -join ' | ') '' "$fn so le, sem execucao"
+        }
+        $plant = [Management.Automation.Language.Parser]::ParseInput('function Get-AtmMonitorPlant { & $x; Start-Process a; [IO.File]::WriteAllText($p, $t) }', [ref]$null, [ref]$null)
+        $pv = & $check @($plant.FindAll({ param($a) $a -is [Management.Automation.Language.FunctionDefinitionAst] }, $true))[0]
+        Assert-True (@($pv).Count -ge 4) "controle positivo: o plantio e recusado ($(@($pv) -join ' | '))"
+        $st = & $strip $defs['Get-AtmMonitorStatus'].Extent.Text
+        $gi = $st.IndexOf('if ($script:AtmMonitoringEnabled) {')
+        Assert-True ($gi -gt 0 -and $st.IndexOf('Get-AtmMonitorConfig') -gt $gi -and $st.IndexOf('Get-AtmMonitorTrends') -gt $gi -and $st.IndexOf('Get-AtmMonitorAlerts') -gt $gi) 'status: limiares, tendencias e alertas so dentro do if da trava'
+        foreach ($fn in @('Get-AtmMonitorConfig', 'Get-AtmMonitorTrends', 'Get-AtmMonitorAlerts')) {
+            $callers = @($defs.Keys | Where-Object { $_ -cne $fn -and [regex]::IsMatch((& $strip $defs[$_].Extent.Text), '(?<![\w-])' + [regex]::Escape($fn) + '(?![\w-])') } | Sort-Object)
+            Assert-Eq ($callers -join ',') 'Get-AtmMonitorStatus' "$fn so chamada pelo status"
+        }
+        $all = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | ForEach-Object { [pscustomobject]@{ Rel = $_.FullName.Substring($srcDir.Length + 1); Text = [IO.File]::ReadAllText($_.FullName) } })
+        foreach ($f in $all) {
+            if ($f.Rel -ceq 'lib\Engine.Monitor.ps1') { continue }
+            foreach ($pat in @('Get-AtmMonitorConfig', 'Get-AtmMonitorTrends', 'Get-AtmMonitorAlerts', 'AtmMonitorConfigName', 'AtmMonitorAlertCommands')) { Assert-True (-not $f.Text.Contains($pat)) "$($f.Rel) sem $pat" }
+            if ($f.Rel -cne 'lib\I18n.ps1') { Assert-True (-not $f.Text.Contains('monitor.json')) "$($f.Rel) nao cita monitor.json" }
+        }
+        foreach ($f in @($all | Where-Object { @('lib\Tui.ps1', 'lib\Gui.ps1', 'lib\GuiModel.ps1') -ccontains $_.Rel })) {
+            foreach ($pat in @('AtmMonitor', 'mon.alert', 'mon.trend', 'MON_TOTAL', 'monitor.json')) { Assert-True (-not $f.Text.Contains($pat)) "$($f.Rel) sem a M2 ($pat)" }
+        }
+        # monitor.json: the name once in the code; read by the config reader, accepted (never removed) by the rotation and
+        # the history reader; not a record name, so neither the writer nor the removal accepts it.
+        $code = & $strip $mon
+        Assert-Eq ([regex]::Matches($code, [regex]::Escape("'monitor.json'")).Count) 1 'o nome uma vez no codigo'
+        Assert-Eq ((@($defs.Keys | Where-Object { (& $strip $defs[$_].Extent.Text).Contains('AtmMonitorConfigName') } | Sort-Object)) -join ',') 'Get-AtmMonitorConfigFile,Get-AtmMonitorHistory,Invoke-AtmMonitorRotation' 'o nome so no leitor dos limiares, no leitor do historico e na rotacao'
+        $rt = & $strip $defs['Invoke-AtmMonitorRotation'].Extent.Text
+        $ri = $rt.IndexOf('AtmMonitorConfigName'); $rc = $rt.IndexOf('continue', $ri)
+        Assert-True ($ri -gt 0 -and $rc -gt $ri -and -not $rt.Substring($ri, $rc - $ri).Contains('plan') -and -not $rt.Substring($ri, $rc - $ri).Contains('Prune')) 'a rotacao nunca planeja remover monitor.json'
+        Assert-Eq ([regex]::Matches($code, '::Delete\(').Count) 1 'a remocao segue numa unica chamada'
+        # The alerts: the closed list, and each command named is a verb the launcher accepts.
+        Assert-Eq (@($script:AtmMonitorAlertCommands.Keys) -join ',') 'MON_TOTAL,MON_GROWTH,MON_ORPHAN_SUSPECTED,MON_LIVENESS_UNKNOWN,MON_COLLECTION,MON_CONFIG_INVALID' 'lista fechada dos alertas, sem MON_RECOVERY'
+        Assert-True (-not $code.Contains('MON_RECOVERY')) 'MON_RECOVERY fora do codigo (D8 (a))'
+        $launcher = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        $verbs = @([regex]::Matches($launcher, "(?m)^        '([a-z-]+)' \{\s*$") | ForEach-Object { $_.Groups[1].Value })
+        Assert-True ($verbs.Count -ge 10 -and $verbs -ccontains 'monitor' -and $verbs -ccontains 'audit') "verbos do lancador lidos ($($verbs -join ','))"
+        $isVerb = { param([string]$Cmd) ($Cmd -cmatch '^agent-temp ([a-z-]+)( status)?$') -and ($verbs -ccontains $Matches[1]) }
+        foreach ($code2 in @($script:AtmMonitorAlertCommands.Keys)) { foreach ($cmd in @($script:AtmMonitorAlertCommands[$code2])) { Assert-True (& $isVerb $cmd) "$code2 cita um verbo aceito ($cmd)" } }
+        Assert-True ($launcher.Contains("'status'")) 'monitor aceita status'
+        Assert-True (-not (& $isVerb 'agent-temp frobnicate') -and -not (& $isVerb 'agent-temp audit; x')) 'controle positivo: verbo inexistente recusado'
+        $keys = @('mon.total', 'mon.totalNone', 'mon.deltaOk', 'mon.deltaGap', 'mon.deltaNone', 'mon.trendTotal', 'mon.trendInsufficient', 'mon.trendGroups', 'mon.trendGroup', 'mon.configDefaults', 'mon.configFile', 'mon.configRefused', 'mon.alertsNone',
+            'mon.alert.MON_TOTAL', 'mon.alert.MON_GROWTH', 'mon.alert.MON_ORPHAN_SUSPECTED', 'mon.alert.MON_LIVENESS_UNKNOWN', 'mon.alert.MON_COLLECTION', 'mon.alert.MON_CONFIG_INVALID', 'mon.alertCommand', 'mon.commandThen')
+        foreach ($key in $keys) {
+            Assert-True ($script:AtmMessages['en-US'].ContainsKey($key) -and $script:AtmMessages['pt-BR'].ContainsKey($key)) "$key nos dois idiomas"
+            $ph = { param([string]$T) (@([regex]::Matches($T, '\{\d\}') | ForEach-Object { $_.Value } | Sort-Object -Unique) -join ',') }
+            Assert-Eq (& $ph $script:AtmMessages['pt-BR'][$key]) (& $ph $script:AtmMessages['en-US'][$key]) "${key}: mesmos campos nos dois idiomas"
+        }
     }
 
     # ------------------------------------------------------------------ scale

@@ -1528,6 +1528,8 @@ function Wait-AtmRecoverKey {
 function Get-AtmMonitorStatusLines {
     # monitor status (V0.5 M1, ADR-0017): the monitoring gate and the history as Get-AtmMonitorStatus found them, as lines
     # (each item: Text and Color). Display only. The folder is always named by its environment form, never resolved.
+    # Since M2, with trends in the status (gate open): the latest complete total and the delta, the trend of the total,
+    # at most 5 groups with the largest trend, the thresholds' state and the alerts, each with the command it names.
     param($Status)
     $lines = New-Object System.Collections.Generic.List[object]
     $add = { param([string]$Text, [string]$Color) $lines.Add([pscustomobject]@{ Text = $Text; Color = $Color }) }
@@ -1551,6 +1553,41 @@ function Get-AtmMonitorStatusLines {
             if ($h.Skipped -gt 0) { & $add (Get-AtmText 'mon.skipped' $h.Skipped) 'Gray' }
         }
         default { & $add (Get-AtmText 'mon.historyRefused' ([string]$h.FolderCode)) 'Yellow' }
+    }
+    # Phase M2: only when the status carries trends, which it does only with the gate open (the suite); with the gate
+    # closed there is no trend and no alert, only the notice and the residue count above.
+    if ($Status.GateOpen -and $null -ne $Status.Trends) {
+        $tr = $Status.Trends
+        if ($null -ne $tr.LatestOk) { & $add (Get-AtmText 'mon.total' (Format-AtmGB $tr.LatestOkBytes) $tr.LatestOk.Utc.ToString('yyyy-MM-dd HH:mm')) 'Cyan' }
+        else { & $add (Get-AtmText 'mon.totalNone') 'Gray' }
+        switch ([string]$tr.Delta.State) {
+            'OK' { & $add (Get-AtmText 'mon.deltaOk' ($(if ($tr.Delta.Bytes -gt 0) { '+' } else { '' }) + (Format-AtmGB $tr.Delta.Bytes))) 'Cyan' }
+            'GAP' { & $add (Get-AtmText 'mon.deltaGap') 'Gray' }
+            default { & $add (Get-AtmText 'mon.deltaNone') 'Gray' }
+        }
+        if ($tr.Total.State -ceq 'OK') { & $add (Get-AtmText 'mon.trendTotal' (Format-AtmGB $tr.Total.Slope) $tr.Total.Points) 'Cyan' }
+        else { & $add (Get-AtmText 'mon.trendInsufficient' $tr.Total.Points) 'Gray' }
+        if (@($tr.Top).Count -gt 0) {
+            & $add (Get-AtmText 'mon.trendGroups') 'Cyan'
+            foreach ($g in @($tr.Top)) {
+                $proj = $(if ($g.Identified) { [string]$g.Project } else { Get-AtmText 'project.unknown' })
+                & $add (Get-AtmText 'mon.trendGroup' $g.Provider $proj $g.Class (Format-AtmGB $g.Trend.Slope)) 'Cyan'
+            }
+        }
+        $cf = $Status.Config
+        switch ([string]$cf.State) {
+            'FILE' { & $add (Get-AtmText 'mon.configFile') 'Cyan' }
+            'REFUSED' { & $add (Get-AtmText 'mon.configRefused' ([string]$cf.Code) ([string]$cf.Reason)) 'Yellow' }
+            default { & $add (Get-AtmText 'mon.configDefaults') 'Gray' }
+        }
+        $al = @($Status.Alerts)
+        if ($al.Count -eq 0) { & $add (Get-AtmText 'mon.alertsNone') 'Gray' }
+        foreach ($a in $al) {
+            $v = $a.Value; $t = $a.Threshold
+            if (@('MON_TOTAL', 'MON_GROWTH', 'MON_ORPHAN_SUSPECTED', 'MON_LIVENESS_UNKNOWN') -ccontains [string]$a.Code) { $v = Format-AtmGB ([long]$a.Value); $t = Format-AtmGB ([long]$a.Threshold) }
+            & $add (Get-AtmText ('mon.alert.' + [string]$a.Code) $v $t) 'Yellow'
+            if (@($a.Commands).Count -gt 0) { & $add (Get-AtmText 'mon.alertCommand' (@($a.Commands) -join (Get-AtmText 'mon.commandThen'))) 'Gray' }
+        }
     }
     & $add (Get-AtmText 'mon.nothingChanged') 'Gray'
     return $lines.ToArray()
