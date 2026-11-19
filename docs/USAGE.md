@@ -1054,20 +1054,22 @@ that only shows. Executing stays in the CLI (T-ISO-6), as restore does.
 * **Nothing else:** no service name is typed, and no key, button or menu starts, undoes, relaunches, elevates, takes the
   lock or writes a log.
 
-## Monitor (V0.5 M1 and M2, unreleased; nothing is collected in any copy)
+## Monitor (V0.5 M1 to M3a, unreleased; nothing is collected or scheduled in any copy)
 
 Preventive monitoring ([ADR-0017](adr/ADR-0017-v05-preventive-monitoring.md)) will keep a small local history of what
 the audit shows, one history per user. Phase M1 adds the collector and the history storage behind the **ninth release
-gate**, `AtmMonitoringEnabled`, closed in every copy. `agent-temp version` shows it: `preventive monitoring: DISABLED in
-this release (monitor status only reads the history; nothing is collected or scheduled)`. Nothing is scheduled in this
-version, in any copy: there is no command to turn monitoring on yet.
+gate**, `AtmMonitoringEnabled`, closed in every copy, and phase M3a the command that turns it on, `monitor enable`.
+`agent-temp version` shows the gate: `preventive monitoring: DISABLED in this release (monitor status only reads the
+history; nothing is collected or scheduled)`. With the gate closed, as in every copy, `monitor enable` refuses before
+asking anything, so nothing is scheduled.
 
 ```powershell
 agent-temp monitor status
+agent-temp monitor enable [-IntervalHours 1|2|4|6|12|24]
 ```
 
-`monitor status` only reads. It says whether monitoring is available, and what it finds in the history folder
-`%LOCALAPPDATA%\AgentTempManager\Monitor`:
+`monitor status` only reads. It says whether monitoring is available, the state of your collection task (also shown by
+`version`), and what it finds in the history folder `%LOCALAPPDATA%\AgentTempManager\Monitor`:
 
 * **No folder:** an empty history. The command never creates the folder.
 * **Records** (left by another copy, since this one writes none): how many, and the latest one's time, outcome, number
@@ -1077,14 +1079,68 @@ agent-temp monitor status
 * **A folder the product refuses** (a reparse point in its chain, another owner, or an ACL that lets other accounts
   change it): its code, and the folder is left as it is.
 
-It ends with "Nothing was collected, created or changed." Example, with the gate closed and no history:
+The collection task's line says one of:
+
+* **none for this user;**
+* **present:** its path in the Task Scheduler (`\AgentTempManager\Monitor-<16 hex digits>`; the name does not show your
+  account), enabled or disabled, the interval, the next run and the last run with its result;
+* **divergent:** a task with that name exists but is not exactly the product's collection task of this user, with the
+  reasons; it is never touched;
+* **unreadable,** with the scheduler's code.
+
+A present or divergent task with the gate closed was left by another copy: the line says its collector exits without
+collecting. This version has no command that removes it (it can be removed in Task Scheduler).
+
+It ends with "Nothing was collected, created or changed." Example, with the gate closed, no task and no history:
 
 ```
 Monitoring is not available in this release: nothing is collected, scheduled or written.
-It is opt-in: a later release may offer a command for you to turn it on yourself. This one has no such command.
+It is opt-in, through agent-temp monitor enable, which in this release refuses before asking anything.
+Collection task: none for this user.
 History: none (the folder %LOCALAPPDATA%\AgentTempManager\Monitor does not exist; this command never creates it).
 Nothing was collected, created or changed.
 ```
+
+### `monitor enable` (V0.5 M3a; refused in this release)
+
+`monitor enable` creates your own collection task. **With the gate closed, as in every copy, it refuses first**, before
+it reads your token, the console or the Task Scheduler and before it asks anything:
+
+```
+NOTHING WAS SCHEDULED: MONITORING_GATE_CLOSED
+  Monitoring is not available in this release: nothing was read, asked or created.
+```
+
+Where the gate is open (only inside the test suite), it checks, in this order, and refuses with nothing registered:
+
+1. `-IntervalHours`, when given, is one of 1, 2, 4, 6, 12 or 24 (default 6): `MONITOR_INTERVAL_INVALID`;
+2. a standard token, not elevated: `MONITOR_TASK_REQUIRES_STANDARD_TOKEN`;
+3. an installed copy with its collector: `MONITOR_TASK_NOT_INSTALLED`;
+4. an interactive console, observed by the engine: `CONSOLE_NOT_OBSERVED`;
+5. no collection task of yours, in any form (never replaced): `MONITOR_TASK_EXISTS`, or `MONITOR_TASK_UNREADABLE`
+   when the Task Scheduler cannot be read.
+
+It then shows the plan (the task's path; every N hours with no end date, a missed run at the next opportunity, also on
+battery, one run at a time, the first run and the one-hour limit; the action; that it runs as you, not elevated, only
+while your session is open, with no password; and what a run writes to the history and never writes), and asks you to
+type `ATIVAR MONITORAMENTO` (anything else: `MONITOR_TASK_NOT_CONFIRMED`). Only then it registers the task and reads it
+back; a task that does not read back exactly as planned is `MONITOR_TASK_NOT_VERIFIED`. Registering never starts a
+collection: the first run is at least one minute later.
+
+`-IntervalHours` is an option of `monitor enable` only: it takes a whole number from the list, and anything else (`5`,
+`6.5`, `abc`) is a usage error (exit code `2`, nothing read). `monitor status` and `recover` refuse it (`2`); the other
+commands ignore it, as they ignore other options they do not use.
+
+### The collector's entry point: `bin\agent-temp-monitor.ps1`
+
+The task's only action runs the installed `bin\agent-temp-monitor.ps1` with Windows PowerShell 5.1 (`-NoLogo -NoProfile
+-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File`), with no arguments. It can also be run by hand. It
+takes no arguments, checks the installation's manifest before it loads anything, loads only the audit, the providers
+and the monitoring engine, and reads the gate on every run. With the gate closed (every copy) it says so and exits
+without collecting, creating the history folder or taking the collectors' lock. Its exit codes: `0` one collection
+recorded; `2` an argument was given; `3` the gate is closed, or the collection was refused (another collection running,
+the folder refused, a record too large); `5` installation integrity (also a source checkout, which has no manifest);
+`10` unexpected.
 
 With the gate closed, as in every copy, `monitor status` shows no trend and no alert, and it does not read `monitor.json`
 (below): a history left by another copy feeds no alert in a copy that does not collect.
@@ -1119,7 +1175,9 @@ The two class sums leave out the "other" group, so they are a lower bound when a
 example with the gate open (planted values, not a real profile):
 
 ```
-Monitoring is available in this copy. No collection is scheduled by this release.
+Monitoring is available in this copy. agent-temp monitor enable creates your own collection task, after showing its plan and asking for its phrase.
+Collection task: none for this user.
+To create it (not elevated): agent-temp monitor enable
 History: 6 record(s) in %LOCALAPPDATA%\AgentTempManager\Monitor.
 Latest: 2026-11-18 12:00 UTC, outcome OK, 2 group(s), 15360 MB measured.
 Latest complete total: 15 GB (2026-11-18 12:00 UTC).
@@ -1175,9 +1233,11 @@ A refused file is left exactly as it is. Changing the file changes only which al
 The rotation of the history never removes `monitor.json`. A `monitor.json` with another owner, or a folder or junction
 with that name, makes the rotation refuse, as any other unexpected item does.
 
-Exit codes of `monitor`: `0` for `monitor status`; `2` usage (no subverb, a subverb other than `status`, or an option
-`monitor` does not take). `monitor status` takes no option other than `-Lang` and the display switches `-NoProgress`
-and `-Ascii`.
+Exit codes of `monitor`: `0` for `monitor status`, or the task created and read back by `monitor enable`; `2` usage (no
+subverb, a subverb other than `status` or `enable`, an option `monitor` does not take, `-IntervalHours` with `status`,
+or an interval not in the list); `3` `monitor enable` refused or not confirmed (nothing scheduled; always, with the gate
+closed); `6` `monitor enable` needs an interactive console. `monitor status` takes no option other than `-Lang` and the
+display switches `-NoProgress` and `-Ascii`; `monitor enable` also takes `-IntervalHours`.
 
 ## Verify (installed copy)
 
@@ -1210,11 +1270,11 @@ Version x.y.z; 0 mismatching file(s).
 `-IncludeOtherUsers`, or a `recover` usage error (`RECOVERY_NOT_DECLARED` included), or a `monitor` usage error · `3` clean aborted (nothing
 deleted), `isolate`, `quarantine restore` or `quarantine purge` stopped
 after the plan (nothing moved or purged), `quarantine schedule-autopurge` or `unschedule-autopurge` refused or not
-confirmed (nothing scheduled or removed), `recover plan` refused (nothing changed), or, only with
+confirmed (nothing scheduled or removed), `monitor enable` refused or not confirmed (nothing scheduled), `recover plan` refused (nothing changed), or, only with
 deletion enabled (not in any published copy), stopped before completing (Clean log, above); `authorize`: nothing recorded ·
 `4` no manifest (source checkout, `verify` only) · `5` integrity mismatch (a listed file missing, altered or
 unreadable, a missing or unreadable `providers` directory, an unlisted library or provider, an unreadable or
-invalid manifest, or an installed copy without one; nothing is loaded) · `6` TUI, `authorize`, `quarantine schedule-autopurge` or `unschedule-autopurge`, or `clean` with real deletion enabled (not in any published copy) needs an interactive console · `7` `gui`: the desktop GUI gate is closed (`GUI_GATE_CLOSED`, every copy; no window) · `8` `gui`: no window can be shown here (`GUI_NOT_STA`, `GUI_NO_INTERACTIVE_DESKTOP`, `GUI_WINFORMS_UNAVAILABLE`) · `10` unexpected error,
+invalid manifest, or an installed copy without one; nothing is loaded) · `6` TUI, `authorize`, `quarantine schedule-autopurge` or `unschedule-autopurge`, `monitor enable`, or `clean` with real deletion enabled (not in any published copy) needs an interactive console · `7` `gui`: the desktop GUI gate is closed (`GUI_GATE_CLOSED`, every copy; no window) · `8` `gui`: no window can be shown here (`GUI_NOT_STA`, `GUI_NO_INTERACTIVE_DESKTOP`, `GUI_WINFORMS_UNAVAILABLE`) · `10` unexpected error,
 or a `diagnose` export refused or not written (nothing deleted because of it), or a failed `recover` collection
 (nothing changed). `recover start` and `recover undo` also use `20` to `31` and `40` to `44`, listed under Recover
 (above); in every copy they end with `27`.

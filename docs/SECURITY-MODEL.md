@@ -879,8 +879,10 @@ credential. What a run may do is still decided only by `autoPurge = true` in the
   `quarantine unschedule-autopurge` (`Unregister-AtmAutoPurgeTask`), each the only place of its call, are reached only
   from the CLI; the scheduler is reached only through one helper (`Connect-AtmTaskScheduler`). `version`,
   `quarantine list` and the TUI only read the task's state; the TUI never schedules or unschedules (T-ISO-6), and the
-  installer never creates a task. Static suite tests check all of this. V0.5 plans a second task, the monitoring's
-  (below); until it is implemented, these two commands remain the only ones.
+  installer never creates a task. Static suite tests check all of this. V0.5 M3a adds a second task, the monitoring's,
+  registered only by `monitor enable` behind the monitoring gate (below). That gate is closed in every copy and
+  `monitor enable` then refuses before asking anything, so in a distributed copy these two commands remain the only
+  ones that change the Task Scheduler.
 * **The task.** One per user, `\AgentTempManager\AutoPurge-<first 16 hex digits of SHA-256(SID)>`: the name does not show
   the SID or the account. Principal: the user's SID, logon type Interactive (`InteractiveToken`: it runs only while that
   user's session is open, and no password is stored), run level Limited (never elevated). One action: Windows
@@ -923,31 +925,49 @@ credential. What a run may do is still decided only by `autoPurge = true` in the
   * **No run without a session.** By design the task does nothing while the user is signed out; a missed run starts at
     the next opportunity once the session is open.
 
-### Preventive monitoring: the second scheduled task (V0.5, planned)
+### Preventive monitoring: the second scheduled task (V0.5 M3a, behind the gate)
 
 Decision V05-D1 (2026-11-17, [ADR-0017](adr/ADR-0017-v05-preventive-monitoring.md) section 2): V0.5's persistent
 collection uses a **per-user scheduled task**, like the automatic purge's: interactive, limited, with no password, and
 with no elevation needed to create it. PRIV-3 ([ELEVATION.md](ELEVATION.md)) admits these two tasks and no other.
-**The task is not implemented.** Its gate `AtmMonitoringEnabled` (the ninth gate) is in the code since phase M1,
-`$false` in every copy, with the collector and the history (section "Monitoring gate" below). The task and the commands
-that register and remove it come in phases M3 and M4.
+**The task is implemented since phase M3a, behind the monitoring gate** `AtmMonitoringEnabled` (the ninth gate),
+`$false` in every copy (section "Monitoring gate" below): no distributed copy can create it. The real scheduler is
+validated only by phase M3b's CI harness; the command that removes the task comes in phase M4.
 
 * **The two tasks.**
   * The automatic purge's (above), implemented.
-  * The monitoring's, planned: `monitor enable` (ADR-0017 section 5, phase M3) registers it, and `monitor disable`
-    (phase M4) removes it after an exact match.
+  * The monitoring's, implemented behind the gate: `monitor enable` registers it (`Register-AtmMonitorTask`, the only
+    call), and `monitor disable` (phase M4) will remove it after an exact match. Until M4 no command of the product
+    removes it; `version` and `monitor status` show its state, and a task left by another copy is shown as a residue.
+* **The task.** One per user, `\AgentTempManager\Monitor-<first 16 hex digits of SHA-256(SID)>`: the name does not show
+  the SID or the account. Principal: the user's SID, logon type Interactive, run level Limited, no password. One time
+  trigger repeated every 1, 2, 4, 6, 12 or 24 hours (default 6, V05-D2 (a)) with no end, first run at least one minute
+  after registering; a missed run starts at the next opportunity, also on battery; one instance at a time; stopped
+  after one hour. One action: Windows PowerShell 5.1 by its absolute path, `-NoLogo -NoProfile -NonInteractive
+  -WindowStyle Hidden -ExecutionPolicy Bypass -File`, running the installed `bin\agent-temp-monitor.ps1` with no
+  arguments, and no working directory.
 * **A deliberate difference.**
   * `schedule-autopurge` registers its task while the purge gate is closed. A run then only plans.
   * `monitor enable` refuses with the monitoring gate closed (`MONITORING_GATE_CLOSED`), before asking anything. With
-    the gate open, it still needs:
-    * a standard token;
-    * an installed copy;
-    * a console the engine observes;
-    * no existing entry;
+    the gate open, it still needs, in this order:
+    * an interval in the list (`MONITOR_INTERVAL_INVALID`);
+    * a standard token (`MONITOR_TASK_REQUIRES_STANDARD_TOKEN`);
+    * an installed copy with its entry point (`MONITOR_TASK_NOT_INSTALLED`);
+    * a console the engine observes (`CONSOLE_NOT_OBSERVED`);
+    * no existing task, in any form (`MONITOR_TASK_EXISTS`, `MONITOR_TASK_UNREADABLE`; registered with `TASK_CREATE`,
+      never replaced);
     * the plan shown;
-    * a typed phrase of its own.
-  * The collector's entry point reads the gate again on every run. A copy whose gate is closed exits without
-    collecting.
+    * the typed phrase `ATIVAR MONITORAMENTO` (`MONITOR_TASK_NOT_CONFIRMED`).
+
+    It then registers the task and reads it back with an exact match (`MONITOR_TASK_NOT_VERIFIED` otherwise).
+  * The collector's entry point takes no arguments, checks the manifest before it loads any code, and reads the gate
+    again on every run. A copy whose gate is closed exits (code 3) without collecting, creating the history folder or
+    taking the mutex.
+* **Mitigations and declared risks.** As for the purge's task above: the action is only the installed entry point,
+  which fails closed after an uninstall (PRIV-7); another user can squat your task name in the shared folder (a denial
+  of service, shown as `DIVERGENT`, never an escalation); the task runs with your environment; a window may flash; and
+  nothing runs without a session. A run stopped at the one-hour limit leaves at most a `.partial` file, removed by the
+  rotation after a day.
 * **The shared folder.** Both tasks live in the Task Scheduler folder `\AgentTempManager`. The declared risks of the
   shared folder above apply to the monitoring task as well.
 * **Removal.** What happens to the folder when the product is removed or the last task is unscheduled was **pending
@@ -1017,7 +1037,7 @@ the mover; a static suite test checks it.
   after the measurement is caught by the second measurement (`VERIFY_REPARSE_POINT_FOUND`). The reparse point moves
   with the tree and is never followed.
 
-## Monitoring gate (V0.5 phases M1 and M2)
+## Monitoring gate (V0.5 phases M1, M2 and M3a)
 
 * **The ninth gate:** `$script:AtmMonitoringEnabled`, `$false` in every shipped copy
   ([ADR-0017](adr/ADR-0017-v05-preventive-monitoring.md) section 5). It is a single assignment in
@@ -1029,7 +1049,9 @@ the mover; a static suite test checks it.
     nothing is collected or scheduled)`.
 * **Closed** (every copy): nothing is collected, created or written. The collector, the folder, the writer, the
   rotation and the single removal function return `MONITORING_GATE_CLOSED` before anything else; the collector takes no
-  mutex and calls no audit. Nothing is scheduled in any state of the gate (phase M3). `monitor status` only reads.
+  mutex and calls no audit. Nothing is scheduled: `monitor enable` refuses before it reads or asks anything, and the
+  collector's entry point exits without collecting. `monitor status` and `version` only read, the collection task's
+  state included (a task left by another copy stays visible).
 * **The history folder:** `%LOCALAPPDATA%\AgentTempManager\Monitor`, per user, pinned with the T1 log's folder policy
   (no reparse point in its chain, owned by the user, created with a protected DACL, refused otherwise). Each collection
   is one new file, written as `.partial`, flushed and renamed; an existing name is refused. A reader never creates the

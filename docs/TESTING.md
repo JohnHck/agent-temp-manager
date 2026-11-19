@@ -950,6 +950,57 @@ The area "V0.5 M2" of `tests/Run-Tests.ps1` (ADR-0017 phase M2) runs in both she
 NAO_TESTADO: `monitor status` through the CLI with the gate open. The gate opens only inside the suite's process; the
 lines are checked through the presentation function there.
 
+### The collection task, `monitor enable` and the entry point (V0.5 M3a)
+
+The area "V0.5 M3a" of `tests/Run-Tests.ps1` (ADR-0017 phase M3a) runs in both shells. **The suite never registers a
+real task**: the scheduler is replaced by an in-memory fake (its methods throw real COM HResults through
+`Marshal.ThrowExceptionForHR`, so the engine's error paths see what the real scheduler raises), and the real scheduler
+is only read, under a test name `MonitorTest-<8 hex digits>`. The gate is opened only around a call, inside the suite's
+process. The real scheduler is phase M3b's, in a CI-only harness.
+* **The definition,** built with the real scheduler's `NewTask` and never registered, checked field by field in its XML
+  for each of the six intervals and the default: the SID, interactive logon, limited level, no password; one time
+  trigger repeated every N hours with no duration, the first run the next whole minute at least one minute ahead,
+  without an offset; a missed run at the next opportunity, also on battery; one instance; one hour; one exact action
+  with no working folder. The gate closed or an interval outside the list gives no definition.
+* **The name and the match:** the hash of the SID (never the SID); only the exact test form is accepted as an override
+  (a trailing line break included, any other value throws); each divergence reason alone; the product's own definition
+  matches; the token rule.
+* **`monitor enable` refusals,** each in order, with counters proving that nothing later was read or asked: the gate
+  closed reads neither the token, the console nor the scheduler; then the interval, the token, the installed copy, the
+  presenter and reader, the console, and a present, divergent or unreadable task. A wrong phrase registers nothing and
+  creates no folder.
+* **`monitor enable` with the fake:** the plan, then the phrase, then one registration with `TASK_CREATE`, the SID, no
+  password and interactive logon, the folder created when missing, and the read-back `PRESENT`; `-IntervalHours 12`;
+  `MONITOR_TASK_EXISTS` in a race (both `TASK_CREATE` refusals) and with a task already there; a folder created by
+  another process meanwhile; a registration that does not read back (`MONITOR_TASK_NOT_VERIFIED`); a scheduler code;
+  the gate closed on a direct registration. The plan and result texts in both languages.
+* **The entry:** `Invoke-AtmMonitorEntry` in process (closed: 3, with no native types, folder or mutex; open with the
+  collection seam: 0; refused: 3), and the entry point in a child process from a copy staged with its manifest: an
+  argument 2; the gate closed 3, with the user's real history folder never created; no manifest, a changed library or
+  entry point, and an unlisted provider 5, with nothing loaded.
+* **The state, read only:** the real scheduler under a test name (absent; the task folder neither created nor removed),
+  then the fake: absent without the folder, a residue present and divergent, the last run with its result, unreadable
+  with its code, an invalid test name.
+* **The lines** of `version` and `monitor status`, in both languages: absent (how to create it only with the gate
+  open), present, divergent, unreadable; a residue with the gate closed says it exists and that this version has no
+  command that removes it, with no phase and no command that does not exist.
+* **The CLI** in a new process, gate closed: `monitor enable` exits 3 with `MONITORING_GATE_CLOSED` before any plan or
+  question (with and without a valid `-IntervalHours`); an interval outside the list or not whole exits 2; `monitor
+  status -IntervalHours 6` exits 2; `recover` refuses the option (2); `version` ignores it (0); `version` and `monitor
+  status` show the task line in both languages; the help names `enable`.
+* **Statics:** no `Schedule.Service` in the monitoring engine (the scheduler only through `Connect-AtmTaskScheduler`,
+  whose callers the P6b static now lists with the two monitoring functions); the registration only from `monitor
+  enable`, the definition only from the registration, `monitor enable` only from the CLI's `monitor` block and the
+  entry only from the entry point; refusals, plan, phrase and registration in that order; no removal of a task or
+  folder in the monitoring engine; the foreign helpers declared and used only in the task functions; the collector's
+  path reachable only from the entry point's libraries; the entry point with no parameters, its integrity check before
+  any load, ASCII only and no `Write-Host`; `-IntervalHours` only in the `monitor` block and `recover`'s refusal; the TUI
+  and the GUI with none of the new functions, and their exact names in the GUI's forbidden list; the entry point in
+  `AtmRequiredFiles`; the texts in both languages; and the suite never calling the real registration.
+
+NAO_TESTADO: the real scheduler registering, running and removing the task (M3b, CI only); `monitor enable` through
+the CLI with the gate open (only its gate-closed path runs in a child process); the console a scheduled run gets.
+
 ## Future: isolation, quarantine and Recovery Mode (0.3.x and V0.4)
 
 Criteria proposed by [ADR-0013](adr/ADR-0013-isolation-quarantine-recovery-mode.md) for accepting an implementation.

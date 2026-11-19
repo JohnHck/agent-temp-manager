@@ -1,8 +1,9 @@
 # ADR-0017: Persistent preventive monitoring (V0.5)
 
-Status: ACCEPTED: V05-D1 to V05-D10 decided (D1-D7 2026-11-17, D8-D10 2026-11-18, as recommended); M0, M1 and M2
-implemented; gate closed in every copy. (Until 2026-11-17: PROPOSED, with V05-D1 to V05-D10 open. From 2026-11-17 to
-2026-11-18: ACCEPTED in part, with V05-D8, V05-D9 and V05-D10 open and only M0 implemented.)
+Status: ACCEPTED: V05-D1 to V05-D10 decided (D1-D7 2026-11-17, D8-D10 2026-11-18, as recommended); M0 to M2 and M3a
+implemented; M3b (real-scheduler CI harness) next; gate closed in every copy. (Until 2026-11-17: PROPOSED, with V05-D1
+to V05-D10 open. From 2026-11-17 to 2026-11-18: ACCEPTED in part, with V05-D8, V05-D9 and V05-D10 open and only M0
+implemented.)
 Date: 2026-11-17
 Phase: V0.5 (phases M0 to M6 below, each a future round with its own contract and tests)
 
@@ -694,3 +695,118 @@ them. Besides the files of section 6's M2 row, M2 changes the `monitor status` l
     launcher runs in a child process with the copy's closed gate. The lines are checked through the presentation
     function in the suite's process.
   * The real folder under `%LOCALAPPDATA%`, as in M1.
+
+## M3a implementation record (V05-M3a, 2026-11-18)
+
+The first half of phase M3: the collector's scheduled task, `monitor enable` and the entry point, behind the same ninth
+gate, closed in every copy. The scheduler is a seam: the suite registers only into an in-memory fake, and the real
+scheduler is only read. M3b, the CI-only harness that registers, runs and removes a real task on a disposable runner,
+comes next. Nothing removes the task or its folder (M4), and the TUI and the GUI are unchanged (M5). `Engine.Isolate.ps1`,
+`Engine.Audit.ps1`, B1, `RECENT` and eligibility are unchanged. The line numbers are those of the files as V05-M3a leaves
+them.
+
+* **How the engine reaches the scheduler** (the choice M0 left to M3). `Connect-AtmTaskScheduler` is **not moved**: it
+  stays in `Engine.Isolate.ps1`, the only place that creates `Schedule.Service`. The monitoring engine calls it and the
+  purge's read-only helpers (`Test-AtmTaskNotFound`, `Get-AtmTaskSchedulerCode`, `Resolve-AtmTaskUserSid`), plus
+  `Get-AtmEngineConsoleObservation` (`Engine.Clean.ps1`) and `Get-AtmIdentityState` (`Engine.Diagnose.ps1`), only inside
+  its task functions; the launcher already loads those engines before the `monitor` block. A static of the suite lists
+  them and where they may appear. Moving the connection would have changed `Engine.Isolate.ps1` and the P6b static for
+  no gain in M3a.
+* **Constants and seams** (`src/lib/Engine.Monitor.ps1:86-91`, `:109-110`).
+  * The task folder `\AgentTempManager` (shared with the purge's task), the prefix `Monitor-`, the intervals
+    `1, 2, 4, 6, 12, 24` and the default 6 (V05-D2 (a), unchanged), the time limit `PT1H` and the phrase
+    `ATIVAR MONITORAMENTO`.
+  * Two seams, `$null` in every copy: the suite's task name (only the exact form `MonitorTest-<8 hex digits>`, `:1140`;
+    any other value throws) and the token source.
+* **The task name** (`Get-AtmMonitorTaskName`, `:1134`): `Monitor-` and the first 16 hex digits of the SHA-256 of the
+  user's SID, never the SID.
+* **The definition** (`New-AtmMonitorTaskDefinition`, `:1260`), built and never registered by itself; `$null` with the
+  gate closed or an interval outside the list.
+  * Principal: the user's SID, logon type interactive (3), run level limited (0), no password.
+  * One time trigger (`Triggers.Create(1)`) starting at the next whole minute at least one minute ahead, local time
+    without an offset (`Get-AtmMonitorTaskStart`, `:1164`), repeated every `PT<N>H` with no duration (no end).
+  * Settings: enabled; `StartWhenAvailable` (a missed run starts at the next opportunity);
+    `DisallowStartIfOnBatteries` and `StopIfGoingOnBatteries` false; `ExecutionTimeLimit` `PT1H`; `MultipleInstances` 2
+    (IgnoreNew: one run at a time).
+  * One action (`Get-AtmMonitorTaskAction`, `:1153`): Windows PowerShell 5.1 by its absolute path under the system
+    folder, with `-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "<copy>\bin\agent-temp-monitor.ps1"`,
+    and no working directory.
+* **The registration** (`Register-AtmMonitorTask`, `:1293`), the only one, called only by `Invoke-AtmMonitorEnable`.
+  It reads the gate first, creates `\AgentTempManager` when missing (a folder created meanwhile by another process is
+  used), and registers with `TASK_CREATE` (2), logon type 3, no password. A task already there, or registered meanwhile
+  (`TASK_CREATE` refuses), is `MONITOR_TASK_EXISTS`: never replaced. Other scheduler errors return the purge's code form
+  (for example `TASK_SCHEDULER_0x80070005`).
+* **The state** (`Get-AtmMonitorTaskState`, `:1233`, with `Test-AtmMonitorTaskMatch`, `:1201`), read only, with the
+  gate open or closed, and never creating the task folder: `ABSENT`, `PRESENT`, `DIVERGENT` with its reasons
+  (`TASK_PATH`, `TASK_USER`, `TASK_LOGON_TYPE`, `TASK_RUN_LEVEL`, `TASK_ACTION_COUNT`, `TASK_ACTION_TYPE`,
+  `TASK_ACTION_PATH`, `TASK_ACTION_ARGUMENTS`, `TASK_ACTION_DIRECTORY`, `TASK_TRIGGER_COUNT`, `TASK_TRIGGER_TYPE`,
+  `TASK_INTERVAL`), or `UNREADABLE` with the scheduler's code. It also gives the path, enabled or not, the interval,
+  the next run and the last run with its result. Never the SID or the account name.
+* **`monitor enable`** (`Invoke-AtmMonitorEnable`, `:1331`; CLI `src/agent-temp.ps1:551-567`). In this order:
+  1. the gate closed: `MONITORING_GATE_CLOSED`, before anything is read or asked (`:1343`);
+  2. an interval outside the list: `MONITOR_INTERVAL_INVALID`;
+  3. a token that is not standard (elevated, full, or not medium integrity, or unreadable):
+     `MONITOR_TASK_REQUIRES_STANDARD_TOKEN`;
+  4. a copy that is not installed, or without its entry point: `MONITOR_TASK_NOT_INSTALLED`;
+  5. no presenter or reader: `SEM_APRESENTACAO_OU_CONFIRMACAO`;
+  6. the console, observed by the engine itself: `CONSOLE_NOT_OBSERVED`;
+  7. the task unreadable: `MONITOR_TASK_UNREADABLE`; present in any state: `MONITOR_TASK_EXISTS`;
+  8. the plan shown (`src/lib/Report.ps1:1634`);
+  9. the phrase `ATIVAR MONITORAMENTO`, typed exactly, else `MONITOR_TASK_NOT_CONFIRMED`;
+  10. the registration, then the read-back: anything but `PRESENT` is `MONITOR_TASK_NOT_VERIFIED`.
+
+  Nothing is asked before the plan. `-IntervalHours` is accepted only by `monitor enable` (`src/agent-temp.ps1:29`,
+  `:559-562`); a value that is not one of the six whole numbers is a usage error. `monitor status` and `recover` refuse
+  it (exit 2); the other verbs ignore it, as they ignore other foreign options. Exit codes of `monitor enable`: `0` the
+  task created and read back, `2` usage, `3` refused or not confirmed, `6` no interactive console. With the gate closed
+  it is always `3`.
+* **The entry point** `src/bin/agent-temp-monitor.ps1`, in the pattern of `agent-temp-autopurge.ps1`.
+  * No parameter block: any argument is exit `2`, before anything is read.
+  * It checks `manifest.json` before loading anything: every listed file's SHA-256, its own listing and that of every
+    file it loads (`:32`), and no unlisted provider. A failure, or no manifest (a source checkout), is exit `5`.
+  * It then loads only `Engine.Audit.ps1` (with `I18n.ps1`), the providers and `Engine.Monitor.ps1`, and calls
+    `Invoke-AtmMonitorEntry` (`src/lib/Engine.Monitor.ps1:712`), which reads the gate first: closed, exit `3`, with no
+    native types, no folder, no mutex and no audit. Open, one collection: `0` recorded, `3` refused.
+  * Output goes through `Write-Output` (a scheduled run has no console); an unexpected failure is exit `10`, with the
+    exception's type only.
+  * It is in the installer's required files (`install/InstallCommon.ps1:61`); the package list is built from the tree,
+    so `tools/Build-Release.ps1` is unchanged.
+* **Presentation** (`src/lib/Report.ps1`): `Get-AtmMonitorTaskLines` (`:1604`) in `version` (`src/agent-temp.ps1:589`)
+  and in `monitor status`, right after the gate lines (`Get-AtmMonitorStatusLines`, `:1528`). A present or divergent
+  task with the gate closed is a residue of another copy: the text says its collector exits without collecting and that
+  this version has no command that removes it. The plan and the result are `Show-AtmMonitorEnablePlan` (`:1634`) and
+  `Show-AtmMonitorEnableResult` (`:1647`). Texts in both languages (`src/lib/I18n.ps1:293-324`, `:1592-1623`).
+* **New codes:** `MONITOR_INTERVAL_INVALID`, `MONITOR_TASK_REQUIRES_STANDARD_TOKEN`, `MONITOR_TASK_NOT_INSTALLED`,
+  `MONITOR_TASK_UNREADABLE`, `MONITOR_TASK_EXISTS`, `MONITOR_TASK_NOT_CONFIRMED`, `MONITOR_TASK_NOT_VERIFIED`,
+  `MONITOR_TASK_TEST_NAME_INVALID` (suite only), the twelve `TASK_*` divergence reasons above, and the reused
+  `MONITORING_GATE_CLOSED`, `CONSOLE_NOT_OBSERVED`, `SEM_APRESENTACAO_OU_CONFIRMACAO` and `TASK_SCHEDULER_0x<hex>`.
+* **V05-D2 is unchanged.** M1's measured cost (section "M1 implementation record": at most 350 ms for a whole
+  collection of 12,000 planted files, on CI runners) is far below the shortest interval of 1 hour, so it gives no
+  reason to change the list or the default. That evidence is of planted trees, not of a real user's profile.
+* **Tests.** The suite's area "V0.5 M3a" (`tests/Run-Tests.ps1`), in both shells, with an in-memory fake scheduler
+  whose methods throw real COM HResults. The gate is opened only inside the suite's process, around each call. It
+  covers:
+  * the definition, built from the real scheduler's `NewTask` and never registered, checked field by field in its XML
+    for each interval and the default;
+  * the name, the test-name form, every divergence reason, and the token rule;
+  * every refusal of `monitor enable` in order, with counters proving nothing later was read or asked;
+  * the happy path, the races (the folder and the task created by another process), the read-back failure and a
+    scheduler code;
+  * `Invoke-AtmMonitorEntry` in process, and the entry point in a child process from a staged copy with its manifest
+    (an argument, the gate closed, no manifest, a changed file, an unlisted provider);
+  * the state read from the real scheduler under a test name (absent; the folder never created), then the fake;
+  * the lines and the CLI in both languages;
+  * the statics: the P6b static (`:5427`) now expects the registration calls in `Engine.Isolate.ps1` and
+    `Engine.Monitor.ps1` only; the GUI's forbidden list gains the four new exact names (`:15259`); and the M3a static
+    proves the call order, no removal, the declared foreign helpers, the entry point's facts, and that the suite never
+    registers a real task.
+* **NAO_TESTADO.**
+  * The real scheduler registering, running and removing the task: M3b's CI-only harness. The suite never registers a
+    real task, so the real `RegisterTaskDefinition` call, the scheduler's acceptance of the definition, a real
+    scheduled run of the entry point with a hidden window, and the console a scheduled run gets (section 8) are not
+    validated by M3a.
+  * `monitor enable` through the CLI with the gate open: only the gate-closed path runs in a child process.
+  * The real history folder under `%LOCALAPPDATA%`, as in M1.
+
+**Left for M3b to M5:** the CI-only real-scheduler harness (M3b); `monitor disable`, `monitor remove-history` and the
+uninstaller (M4, V05-D9 (a) plus (c)); and the TUI and the GUI (M5).

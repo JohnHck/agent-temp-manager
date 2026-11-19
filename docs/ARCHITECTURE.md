@@ -107,27 +107,31 @@ Collection -> normalization -> evidence -> correlation -> presentation:
   state (`Get-AtmAutoPurgeTaskState`); the TUI never schedules or unschedules (T-ISO-6). The uninstall
   (`InstallCommon.ps1`) only reads the folder and warns.
 
-### The scheduler layer: two tasks (V0.5 planned, ADR-0017)
+### The scheduler layer: two tasks (V0.5 M3a, ADR-0017)
 
-The Task Scheduler will hold at most two tasks per user, both in the folder `\AgentTempManager`: the automatic purge's
-(implemented, P6b above) and the preventive monitoring's (V05-D1, **planned; the task is not implemented**, gate
-`AtmMonitoringEnabled` closed in every copy; since phase M1 the collector and the history exist, below). Each follows
-the same four steps:
+The Task Scheduler holds at most two tasks per user, both in the folder `\AgentTempManager`: the automatic purge's
+(implemented, P6b above) and the preventive monitoring's (V05-D1, **implemented in phase M3a behind the gate**
+`AtmMonitoringEnabled`, closed in every copy, so no distributed copy creates it; the real scheduler is validated by
+phase M3b's CI harness). Each follows the same four steps:
 
-| Step | Automatic purge (implemented, `Engine.Isolate.ps1`) | Monitoring (planned, `Engine.Monitor.ps1`, phase M3) |
+| Step | Automatic purge (implemented, `Engine.Isolate.ps1`) | Monitoring (M3a, `Engine.Monitor.ps1`, behind the gate) |
 |---|---|---|
-| Build the definition, never registered by itself | `New-AtmAutoPurgeTaskDefinition` (name from `Get-AtmAutoPurgeTaskName`, action from `Get-AtmAutoPurgeTaskAction`) | its own builder: interactive, limited, no password, one action running the future entry point `src/bin/agent-temp-monitor.ps1` |
-| Register (`TASK_CREATE`, never replace) | `Register-AtmAutoPurgeTask`, called only by `Invoke-AtmAutoPurgeSchedule`, reached only from the CLI | its own register function, reached only from the CLI's `monitor enable`, and only with the gate open (ADR-0017 section 5) |
-| Read back and check the exact match | `Get-AtmAutoPurgeTaskObject`, `Test-AtmAutoPurgeTaskMatch`, `Get-AtmAutoPurgeTaskState` | its own read and exact match. Reading whether an entry exists is allowed with the gate closed, so that a leftover is visible. |
-| Remove after the exact match | `Unregister-AtmAutoPurgeTask`, called only by `Invoke-AtmAutoPurgeUnschedule` | `monitor disable` (phase M4) |
+| Build the definition, never registered by itself | `New-AtmAutoPurgeTaskDefinition` (name from `Get-AtmAutoPurgeTaskName`, action from `Get-AtmAutoPurgeTaskAction`) | `New-AtmMonitorTaskDefinition` (name from `Get-AtmMonitorTaskName`, action from `Get-AtmMonitorTaskAction`): interactive, limited, no password, one action running the entry point `src/bin/agent-temp-monitor.ps1`; `$null` with the gate closed |
+| Register (`TASK_CREATE`, never replace) | `Register-AtmAutoPurgeTask`, called only by `Invoke-AtmAutoPurgeSchedule`, reached only from the CLI | `Register-AtmMonitorTask`, called only by `Invoke-AtmMonitorEnable`, reached only from the CLI's `monitor enable`, and only with the gate open (ADR-0017 section 5) |
+| Read back and check the exact match | `Get-AtmAutoPurgeTaskObject`, `Test-AtmAutoPurgeTaskMatch`, `Get-AtmAutoPurgeTaskState` | `Get-AtmMonitorTaskObject`, `Test-AtmMonitorTaskMatch`, `Get-AtmMonitorTaskState`. Reading is allowed with the gate closed, so that a leftover is visible in `version` and `monitor status`. |
+| Remove after the exact match | `Unregister-AtmAutoPurgeTask`, called only by `Invoke-AtmAutoPurgeUnschedule` | `monitor disable` (phase M4); until then nothing removes it |
 
-* **The scheduler connection.** Today the Task Scheduler is reached only through `Connect-AtmTaskScheduler`, in
-  `Engine.Isolate.ps1`, and a static suite test pins its callers. How the monitoring engine reaches it is an option of
-  phase M3, not decided here. The options are to move `Connect-AtmTaskScheduler` to a shared place, which also changes
-  that static test, or to give the monitoring engine its own reach through a single helper.
-* **The collector's entry point,** `src/bin/agent-temp-monitor.ps1` (future, phase M3), is the only thing the
-  monitoring task runs. It reads `AtmMonitoringEnabled` again on every run, and exits without collecting when the gate
-  is closed, for example in a copy updated after the task was registered.
+* **The scheduler connection.** The Task Scheduler is reached only through `Connect-AtmTaskScheduler`, in
+  `Engine.Isolate.ps1`, the only place that creates `Schedule.Service`. Phase M3a decided **not to move it**: the
+  monitoring engine calls it, with the purge's read-only helpers (`Test-AtmTaskNotFound`, `Get-AtmTaskSchedulerCode`,
+  `Resolve-AtmTaskUserSid`), only from its task functions. The launcher loads `Engine.Isolate.ps1` before the
+  `monitor` and `version` blocks. The P6b static pins the callers of `Connect-AtmTaskScheduler` and expects the
+  registration calls in these two engines only; the M3a static pins where the monitoring engine uses each foreign
+  helper.
+* **The collector's entry point,** `src/bin/agent-temp-monitor.ps1` (phase M3a), is the only thing the monitoring task
+  runs. It takes no arguments, checks the manifest before it loads any code, loads only `Engine.Audit.ps1`, the
+  providers and `Engine.Monitor.ps1`, and calls `Invoke-AtmMonitorEntry`, which reads `AtmMonitoringEnabled` first on
+  every run: closed, it exits without collecting, for example in a copy updated after the task was registered.
 * **Presentation.** The TUI and the GUI never register, remove or run either task (T-ISO-6). In phase M5 they read the
   monitoring history through one read function (ADR-0014 section 3).
 * **Removal.** Whether the uninstaller or the unschedule commands do more than today about the shared folder was
@@ -210,16 +214,24 @@ default seams (ADR-0016's R6 record).
   from that collection, for a service of its list. Executing stays in the CLI (T-ISO-6): the GUI's closed list
   ([ADR-0014](adr/ADR-0014-desktop-gui-winforms.md) section 3) refuses the execution names.
 
-## Monitoring engine (V0.5 phases M1 and M2; `lib\Engine.Monitor.ps1`)
+## Monitoring engine (V0.5 phases M1, M2 and M3a; `lib\Engine.Monitor.ps1`)
 
 [ADR-0017](adr/ADR-0017-v05-preventive-monitoring.md), persistent preventive monitoring. The ninth release gate
-(`AtmMonitoringEnabled`) is closed in every copy. Phase M1 adds the collector and the history storage, and phase M2 the
-trends, the thresholds and the alerts; nothing is scheduled (M3).
+(`AtmMonitoringEnabled`) is closed in every copy. Phase M1 adds the collector and the history storage, phase M2 the
+trends, the thresholds and the alerts, and phase M3a the collection task, `monitor enable` and the collector's entry
+point (the scheduler layer above); with the gate closed nothing is scheduled or collected.
 
-* **Loading.** The launcher loads the engine only for `monitor` and `version`. It is in the launcher's integrity check,
+* **Loading.** The launcher loads the engine only for `monitor` and `version`, and the collector's entry point
+  `bin\agent-temp-monitor.ps1` loads it once; no other file loads it. It is in the launcher's integrity check,
   `AtmRequiredFiles` and the manifest. It depends on `Engine.Audit.ps1` and on the native pinned writer and folder
-  policy of `Native.cs`. It writes nothing to the terminal: `Report.ps1` presents `monitor status`
-  (`Show-AtmMonitorStatus`).
+  policy of `Native.cs`; its task functions also call the scheduler helpers of `Engine.Isolate.ps1`, the console
+  observation of `Engine.Clean.ps1` and the token state of `Engine.Diagnose.ps1`, which the launcher loads. It writes
+  nothing to the terminal: `Report.ps1` presents `monitor status` (`Show-AtmMonitorStatus`), the task's lines
+  (`Get-AtmMonitorTaskLines`) and `monitor enable`'s plan and result.
+* **`monitor enable`** (`Invoke-AtmMonitorEnable`) reads the gate first; closed, it returns `MONITORING_GATE_CLOSED`
+  before anything is read or asked. Past the gate, in the suite only: the interval, a standard token, an installed copy,
+  the console the engine observes, no existing task, the plan, the phrase `ATIVAR MONITORAMENTO`, the registration and
+  the read-back with an exact match.
 * **The collector** (`Invoke-AtmMonitorCollection`) reads the gate first; closed, it returns `MONITORING_GATE_CLOSED`
   with no mutex, no audit and no folder. Past the gate, in the suite only: a per-user mutex tried without waiting
   (never the clean lock B8), the audit and nothing else (V05-D8 (a)), one new record file in the pinned folder
@@ -236,11 +248,15 @@ trends, the thresholds and the alerts; nothing is scheduled (M3).
 
   `Report.ps1` adds their lines to `monitor status`. With the gate closed, `monitor.json` is not read and nothing is
   computed.
-* **Enforced by tests** (the suite's areas "V0.5 M1" and "V0.5 M2", static cases):
+* **Enforced by tests** (the suite's areas "V0.5 M1", "V0.5 M2" and "V0.5 M3a", static cases):
   * a single assignment of the gate and of each seam;
-  * every writing function reads the gate before anything else; the readers write nothing;
-  * no diagnose, clean, isolation, recovery, scheduler, lock B8 or network name in the engine;
-  * the removal of a file appears in one function only (`Invoke-AtmMonitorPrune`);
-  * the engine is loaded exactly in the `monitor` and `version` blocks;
+  * every writing function reads the gate before anything else (the M3a definition, registration, `monitor enable` and
+    entry function included); the readers write nothing;
+  * no diagnose, clean, isolation, recovery, lock B8 or network name in the engine, except the declared helpers of the
+    task functions: `Connect-AtmTaskScheduler` and the purge's read-only scheduler helpers, the console observation, and
+    `Get-AtmIdentityState` once, in `Test-AtmMonitorStandardToken`;
+  * the removal of a file appears in one function only (`Invoke-AtmMonitorPrune`), and nothing in the engine removes a
+    task or the task folder;
+  * the engine is loaded exactly in the `monitor` and `version` blocks and once by the collector's entry point;
   * the M2 functions call only a closed list of read functions, with no `&` and no write. They are called only by the
     status, inside the gate's `if`. Each command an alert names is a verb the launcher accepts.
