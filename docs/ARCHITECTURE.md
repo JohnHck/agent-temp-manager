@@ -105,7 +105,8 @@ Collection -> normalization -> evidence -> correlation -> presentation:
   `Unregister-AtmAutoPurgeTask`, called by `Invoke-AtmAutoPurgeSchedule`/`Invoke-AtmAutoPurgeUnschedule` and only from the
   CLI's `quarantine schedule-autopurge` and `unschedule-autopurge`. `version`, `quarantine list` and the TUI only read its
   state (`Get-AtmAutoPurgeTaskState`); the TUI never schedules or unschedules (T-ISO-6). The uninstall
-  (`InstallCommon.ps1`) only reads the folder and warns.
+  (`InstallCommon.ps1`) only reads the folder and warns, about the automatic purge's task and, since V0.5 M4b, about
+  the monitoring's tasks and history (`Get-AtmUninstallMonitorNotice`); it removes no task and no history.
 
 ### The scheduler layer: two tasks (V0.5 M3a, ADR-0017)
 
@@ -140,8 +141,10 @@ phase M3b's CI harness). Each follows the same four steps:
   M4a implements (c): one helper in `Engine.Isolate.ps1`, `Remove-AtmEmptyTaskFolder`, called by
   `Invoke-AtmAutoPurgeUnschedule` and `Invoke-AtmMonitorDisable` after their task reads back absent. It acts only on
   the constant folder, removes it only when it holds no task (hidden ones included) and no subfolder, and leaves the
-  final word to the Task Scheduler's `DeleteFolder`; its outcome never fails the command. The uninstaller (a) is a
-  later M4 phase.
+  final word to the Task Scheduler's `DeleteFolder`; its outcome never fails the command. Phase M4b implements (a):
+  `Get-AtmUninstallMonitorNotice` in `install/InstallCommon.ps1` only reads and warns, naming `monitor disable` for
+  this user's task (other users' tasks are counted, never named) and `monitor remove-history` for the history folder,
+  shown as the literal `%LOCALAPPDATA%\AgentTempManager\Monitor`. The uninstaller removes nothing of the monitoring.
 
 ### Planned layering (ADR-0013)
 

@@ -1059,20 +1059,21 @@ that only shows. Executing stays in the CLI (T-ISO-6), as restore does.
 * **Nothing else:** no service name is typed, and no key, button or menu starts, undoes, relaunches, elevates, takes the
   lock or writes a log.
 
-## Monitor (V0.5 M1 to M4a, unreleased; nothing is collected, scheduled or removed in any copy)
+## Monitor (V0.5 M1 to M4b, unreleased; nothing is collected, scheduled or removed in any copy)
 
 Preventive monitoring ([ADR-0017](adr/ADR-0017-v05-preventive-monitoring.md)) will keep a small local history of what
 the audit shows, one history per user. Phase M1 adds the collector and the history storage behind the **ninth release
-gate**, `AtmMonitoringEnabled`, closed in every copy; phase M3a the command that turns it on, `monitor enable`; and
-phase M4a the command that turns it off, `monitor disable`. `agent-temp version` shows the gate: `preventive
-monitoring: DISABLED in this release (monitor status only reads the history; nothing is collected or scheduled)`. With
-the gate closed, as in every copy, `monitor enable` and `monitor disable` refuse before asking anything, so nothing is
-scheduled or removed.
+gate**, `AtmMonitoringEnabled`, closed in every copy; phase M3a the command that turns it on, `monitor enable`; phase
+M4a the command that turns it off, `monitor disable`; and phase M4b the command that removes the history, `monitor
+remove-history`. `agent-temp version` shows the gate: `preventive monitoring: DISABLED in this release (monitor status
+only reads the history; nothing is collected or scheduled)`. With the gate closed, as in every copy, `monitor enable`,
+`monitor disable` and `monitor remove-history` refuse before asking anything, so nothing is scheduled or removed.
 
 ```powershell
 agent-temp monitor status
 agent-temp monitor enable [-IntervalHours 1|2|4|6|12|24]
 agent-temp monitor disable
+agent-temp monitor remove-history
 ```
 
 `monitor status` only reads. It says whether monitoring is available, the state of your collection task (also shown by
@@ -1166,7 +1167,49 @@ removed), and reads it back; a task that does not read back absent is `MONITOR_T
 the Task Scheduler folder `\AgentTempManager` is removed if it is empty, as `quarantine unschedule-autopurge` does: no
 task, hidden ones included, and no subfolder. Otherwise, or if the Task Scheduler refuses, it stays, the result says
 so with the counts or the scheduler's code, and nothing else is tried; the folder never makes the command fail. The
-history in `%LOCALAPPDATA%\AgentTempManager\Monitor` is not touched (V0.5 has no command that removes it yet).
+history in `%LOCALAPPDATA%\AgentTempManager\Monitor` is not touched: `monitor remove-history` removes it.
+
+### `monitor remove-history` (V0.5 M4b; refused in this release)
+
+`monitor remove-history` removes the history files the product created in `%LOCALAPPDATA%\AgentTempManager\Monitor`.
+**With the gate closed, as in every copy, it refuses first**, before it reads the console, the Task Scheduler or the
+folder and before it asks anything:
+
+```
+NOTHING WAS REMOVED: MONITORING_GATE_CLOSED
+  Monitoring is not available in this release: this command refuses, and the history stays as it is.
+```
+
+Where the gate is open (only inside the test suite), it checks, in this order, and refuses with nothing removed:
+
+1. an interactive console, observed by the engine: `CONSOLE_NOT_OBSERVED`;
+2. your collection task, which must be confirmed absent: one that exists, differs or cannot be read refuses with
+   `MONITOR_HISTORY_TASK_PRESENT`, since a run of it would create the history again. Run `monitor disable` first;
+3. the history folder: none (`MONITOR_HISTORY_ABSENT`, nothing to remove), or one the product refuses (a reparse point
+   in its chain, another owner, or an ACL that lets other accounts change it: `MONITOR_FOLDER_<code>`). Nothing is
+   created to check it;
+4. what is in it: records and unfinished `.partial` files with the product's names and your ownership are the
+   product's; your `monitor.json` is yours and stays. Anything else (another name, a folder, a link, another owner, a
+   `monitor.json` that is not your plain file) refuses the whole removal with how many items the product did not
+   create (`MONITOR_HISTORY_UNEXPECTED`); nothing is touched, and no name is shown.
+
+It then shows the plan (how many records and `.partial` files, and their bytes; whether `monitor.json` stays and so
+the folder too, or the folder goes when empty; and that `%LOCALAPPDATA%\AgentTempManager` is never removed) and asks
+you to type `REMOVER HISTORICO DO MONITORAMENTO` (anything else: `MONITOR_HISTORY_NOT_CONFIRMED`). Only then:
+
+* it takes the collectors' lock without waiting: a collection or another removal running refuses with nothing removed
+  (`MONITOR_HISTORY_BUSY`);
+* it lists the folder again: anything different from the plan refuses with nothing removed
+  (`MONITOR_HISTORY_CHANGED`);
+* it removes each file, one by one, each checked again just before. The first failure stops the rest: the result says
+  its code and how many files had been removed, and the folder stays;
+* with every file removed: with your `monitor.json` the folder stays; without it, the folder is removed if it is still
+  empty (not recursively; if the system refuses, it stays and the result says why). The folder never makes the command
+  fail.
+
+**What stays:** your `monitor.json`, and with it the history folder; the folder `%LOCALAPPDATA%\AgentTempManager`,
+which also holds the quarantine and the automatic purge's logs; and your collection task, which this command never
+touches.
 
 ### The collector's entry point: `bin\agent-temp-monitor.ps1`
 
@@ -1271,12 +1314,15 @@ The rotation of the history never removes `monitor.json`. A `monitor.json` with 
 with that name, makes the rotation refuse, as any other unexpected item does.
 
 Exit codes of `monitor`: `0` for `monitor status`, the task created and read back by `monitor enable`, or the task
-removed and read back absent by `monitor disable` (whatever happened to the folder); `2` usage (no subverb, a subverb
-other than `status`, `enable` or `disable`, an option `monitor` does not take, `-IntervalHours` with `status` or
-`disable`, or an interval not in the list); `3` `monitor enable` or `monitor disable` refused or not confirmed (nothing
-scheduled or removed; always, with the gate closed); `6` `monitor enable` or `monitor disable` needs an interactive
-console. `monitor status` and `monitor disable` take no option other than `-Lang` and the display switches
-`-NoProgress` and `-Ascii`; `monitor enable` also takes `-IntervalHours`.
+removed and read back absent by `monitor disable` (whatever happened to the folder), or every history file removed by
+`monitor remove-history` (whatever happened to the folder); `2` usage (no subverb, a subverb other than `status`,
+`enable`, `disable` or `remove-history`, an option `monitor` does not take, `-IntervalHours` with `status`, `disable`
+or `remove-history`, or an interval not in the list); `3` `monitor enable`, `monitor disable` or `monitor
+remove-history` refused, not confirmed or stopped (nothing scheduled or removed, except the files a stopped
+`remove-history` names in its count; always refused, with the gate closed); `6` `monitor enable`, `monitor disable` or
+`monitor remove-history` needs an interactive console. `monitor status`, `monitor disable` and `monitor
+remove-history` take no option other than `-Lang` and the display switches `-NoProgress` and `-Ascii`; `monitor
+enable` also takes `-IntervalHours`.
 
 ## Verify (installed copy)
 

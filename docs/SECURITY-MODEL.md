@@ -903,7 +903,8 @@ credential. What a run may do is still decided only by `autoPurge = true` in the
   task is read and compared again just before it is removed. Since V0.5 M4a, once the task is read back absent, the
   folder `\AgentTempManager` is removed if it is empty (section "Preventive monitoring", "Removal", below).
 * **Uninstall.** It never removes a task, the current user's or another user's. It warns when the current user's task
-  exists and counts other users' tasks, without naming them.
+  exists and counts other users' tasks, without naming them. Since V0.5 M4b it does the same for the monitoring's
+  tasks, and it warns about the current user's monitoring history (section "Preventive monitoring", "Removal", below).
 * **Mitigations.** The action is only the installed entry point, which checks the manifest before it loads any code and
   refuses arguments; it then acts only with `autoPurge = true` and within the limits above. After an uninstall the
   action points to a file that no longer exists, so the task fails closed. That relies on PRIV-7: the parent of the
@@ -984,8 +985,15 @@ removal.
 * **Removal.** What happens to the folder when the product is removed or the last task is unscheduled was **pending
   V05-D9** (the uninstaller and the shared task folder) until 2026-11-18. Decided then, (a) plus (c): the uninstaller
   warns and names `monitor disable` and `monitor remove-history`, and the unschedule commands remove the folder
-  `\AgentTempManager` when it is empty. Phase M4a implements (c); the uninstaller (a) comes in a later M4 phase and
-  until then only reads and warns.
+  `\AgentTempManager` when it is empty. Phase M4a implements (c), and phase M4b (a).
+  * **The uninstaller only reads and warns** (`Get-AtmUninstallMonitorNotice`, `install/InstallCommon.ps1`). It warns
+    about the current user's monitoring task by its path, naming `monitor disable`; it counts other users' monitoring
+    tasks (`Monitor-` and 16 hex digits) without naming them; and it warns about the current user's history folder,
+    shown only as the literal `%LOCALAPPDATA%\AgentTempManager\Monitor` (never the expanded path, which holds the
+    account name), naming `monitor remove-history`. Each warning says the item is the user's and stays, which command
+    removes it, and that in a copy where the monitoring is not available that command refuses (the gate is closed) and
+    the item stays. A read that fails is a warning with the exception's type only. It removes no task, no file and no
+    folder. The uninstaller runs elevated, so "the current user" is the elevated account, as for the purge's task.
   * **One helper, two callers.** `unschedule-autopurge` and `monitor disable` call one helper
     (`Remove-AtmEmptyTaskFolder`), each only after its own task is read back absent. The helper takes no path: it
     acts only on the product's constant folder.
@@ -1002,7 +1010,8 @@ removal.
     removal ends in the same refusal by the scheduler.
 * **Never.** The monitoring task never deletes, recovers or changes the user's system or the agents' data. It never
   elevates, and it never stores a credential. The only files it removes are the oldest files of its own history, by
-  exact name, in its pinned folder (V05-D4 (a); ADR-0017 section 3).
+  exact name, in its pinned folder (V05-D4 (a); ADR-0017 section 3). The rest of the history goes only by
+  `monitor remove-history`, which the person runs (section "Monitoring gate", below).
 
 ### Native primitives (0.3.x phase P1)
 
@@ -1062,7 +1071,7 @@ the mover; a static suite test checks it.
   after the measurement is caught by the second measurement (`VERIFY_REPARSE_POINT_FOUND`). The reparse point moves
   with the tree and is never followed.
 
-## Monitoring gate (V0.5 phases M1, M2 and M3a)
+## Monitoring gate (V0.5 phases M1 to M4b)
 
 * **The ninth gate:** `$script:AtmMonitoringEnabled`, `$false` in every shipped copy
   ([ADR-0017](adr/ADR-0017-v05-preventive-monitoring.md) section 5). It is a single assignment in
@@ -1073,9 +1082,9 @@ the mover; a static suite test checks it.
   * `version` shows it: `preventive monitoring: DISABLED in this release (monitor status only reads the history;
     nothing is collected or scheduled)`.
 * **Closed** (every copy): nothing is collected, created or written. The collector, the folder, the writer, the
-  rotation and the single removal function return `MONITORING_GATE_CLOSED` before anything else; the collector takes no
-  mutex and calls no audit. Nothing is scheduled: `monitor enable` refuses before it reads or asks anything, and the
-  collector's entry point exits without collecting. `monitor status` and `version` only read, the collection task's
+  rotation and both removal functions return `MONITORING_GATE_CLOSED` before anything else; the collector takes no
+  mutex and calls no audit. Nothing is scheduled or removed: `monitor enable`, `monitor disable` and `monitor
+  remove-history` refuse before they read or ask anything, and the collector's entry point exits without collecting. `monitor status` and `version` only read, the collection task's
   state included (a task left by another copy stays visible).
 * **The history folder:** `%LOCALAPPDATA%\AgentTempManager\Monitor`, per user, pinned with the T1 log's folder policy
   (no reparse point in its chain, owned by the user, created with a protected DACL, refused otherwise). Each collection
@@ -1088,15 +1097,25 @@ the mover; a static suite test checks it.
 * **Integrity, not authenticity.** A SHA-256 inside each record detects damage, not forgery: anyone with the user's
   rights can write the folder. The history authorizes nothing, so that is acceptable. A record that fails its schema,
   bounds or hash is `HISTORY_RECORD_INVALID` and skipped, never read as zero.
-* **The only removal** is of the product's own history files (V05-D4 (a)): after each write, the oldest by 90 days,
-  400 files and 8 MB, and `.partial` files older than a day. One function removes, by exact name, in the pinned folder,
-  after checking the name pattern, the item and its owner. A strange name, a reparse point or another owner refuses the
-  whole rotation.
+* **The only removals** are of the product's own history files and, since M4b, of the empty history folder:
+  * the rotation (V05-D4 (a)): after each write, the oldest by 90 days, 400 files and 8 MB, and `.partial` files older
+    than a day. One function removes files (`Invoke-AtmMonitorPrune`), by exact name, in the pinned folder, after
+    checking the name pattern, the item and its owner. A strange name, a reparse point or another owner refuses the
+    whole rotation;
+  * `monitor remove-history` (M4b), which the person runs, with its own plan and the phrase `REMOVER HISTORICO DO
+    MONITORAMENTO`. It refuses while the collection task is not confirmed absent, refuses the whole removal on any
+    unexpected item (counted, never named), takes the collector's mutex without waiting after the phrase, lists the
+    folder again under it, and removes each file through the same function, stopping at the first failure. The
+    folder then goes through the second and last removal (`Remove-AtmMonitorEmptyFolder`): the exact path only, its
+    chain, owner and emptiness checked again, and .NET's non-recursive removal, so a folder no longer empty is refused
+    by the system. The user's `monitor.json` is never removed, so with it the folder stays. The parent
+    `%LOCALAPPDATA%\AgentTempManager`, which also holds the quarantine, is never removed. A static checks that the
+    command removes only through these two functions.
 * **Concurrency.** A per-user mutex, `Global\AgentTempManager.Monitor-<16 hex digits of SHA-256(SID)>`, tried without
   waiting: busy, `MONITOR_BUSY` and nothing written. It is not the clean lock (B8), which monitoring never takes or
   waits for.
 * **The thresholds file (M2), `monitor.json`,** in the same folder, is the user's own file.
-  * The product never writes, creates or fixes it, and the rotation never removes it.
+  * The product never writes, creates or fixes it, and neither the rotation nor `monitor remove-history` removes it.
   * It is read only where the gate is open, so in no copy; it cannot open the gate.
   * It is refused as a whole, with the defaults applied and `MON_CONFIG_INVALID` shown, when:
     * it or the folder's chain holds a reparse point;

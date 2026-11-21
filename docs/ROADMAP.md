@@ -17,7 +17,7 @@ its gates closed or open, and no gate opens without the maintainer's decision.
 | [V0.3](#v03--selective-real-cleanup) | Selective real cleanup | Yes: deletes approved temporary paths only | Published (0.3.0); deletion gate closed |
 | [0.3.x](#03x--isolation-and-quarantine-of-the-own-profile) | Isolation and quarantine of the own profile (ADR-0013; after 0.3.0 is published) | Yes: moves approved temporary paths into a quarantine and back; purge deletes behind the purge gate of its own (J-ISO-1 (C)) | On `main`, isolation and purge gates closed; not published |
 | [V0.4](#v04--assisted-recovery) | Assisted recovery of services and environments; Recovery Mode for another user's profile (ADR-0013) | Yes: reversible operations, each authorized individually | Accepted in ADR-0016; R0 (read-only service fault signals in the diagnose) and R1 (`recover list` and `recover plan`, read only, eighth gate closed) implemented; R2 (start engine), R3 (undo engine) and R4 (`recover start` and `recover undo`, elevation on demand through UAC) implemented only past the gate, closed in every copy, so no recovery operation can be executed; R5 (the TUI and the GUI show `list` and `plan`, read only; executing stays CLI-only) implemented; R6 (a CI-only harness runs the real start and undo, through the default seams, on services it creates itself on disposable runners; never shipped) implemented |
-| [V0.5](#v05--preventive-monitoring) | Persistent preventive monitoring, alerts, growth trends | No (observes and alerts) | ADR-0017 accepted (V05-D1 to V05-D10 decided); M0 (documentation amendments), M1 (the collector and the history storage), M2 (trends, thresholds and alerts) and M3a (the scheduled task, `monitor enable` and the entry point, behind the gate) done; M3b (a CI-only harness runs the real scheduler under a test task name on disposable runners; never shipped) done; M4a (`monitor disable`, behind the gate, and the empty task folder removed by both unschedule commands) done; the rest of M4 (`monitor remove-history` and the uninstaller) next; M5 not implemented; M6 out of V0.5 (V05-D6 (a)); monitoring gate (ninth) closed in every copy; nothing scheduled in any copy |
+| [V0.5](#v05--preventive-monitoring) | Persistent preventive monitoring, alerts, growth trends | No (observes and alerts) | ADR-0017 accepted (V05-D1 to V05-D10 decided); M0 (documentation amendments), M1 (the collector and the history storage), M2 (trends, thresholds and alerts) and M3a (the scheduled task, `monitor enable` and the entry point, behind the gate) done; M3b (a CI-only harness runs the real scheduler under a test task name on disposable runners; never shipped) done; M4a (`monitor disable`, behind the gate, and the empty task folder removed by both unschedule commands) done; M4b (`monitor remove-history`, behind the gate, and the uninstaller's read-only warning) done; M5 (the TUI and the GUI) next; M6 out of V0.5 (V05-D6 (a)); monitoring gate (ninth) closed in every copy; nothing scheduled in any copy |
 | [V1.0](#v10--stabilization-and-multi-agent-support) | Stabilization and extensible multi-agent support | Same limits as V0.3 and V0.4 | Not started |
 
 ## Principles that apply to every version
@@ -415,15 +415,20 @@ and a log. These points need an explicit amendment of V0.4's limits before it is
   asking anything, and the entry point exits without collecting. M3b, the CI-only harness with the real scheduler
   (`tests/e2e/Invoke-MonitorE2E.ps1`, never shipped), is done. On disposable runners, under a test task name and with
   the gate opened only in the harness's memory, it covers:
-  * the install e2e's standard user registers, reads back, runs once and removes the task (with the product's removal
-    since M4a);
-  * the elevated runner account is refused.
+  * the install e2e's standard user registers the task, reads it back and removes it (with the product's removal since
+    M4a). Its run once was NOT_TESTED on every runner: the scheduler did not start an interactive task for a user with
+    no interactive session;
+  * the elevated runner account is refused by `monitor enable`. Its own test task ran once with last result 3, the
+    installed gate closed.
 
   M4a is done behind the gate: `monitor disable` removes the user's own collection task after an exact match and its
   own phrase, and refuses before asking anything in every copy. Both `monitor disable` and `quarantine
-  unschedule-autopurge` remove the shared task folder `\AgentTempManager` when it is empty (V05-D9 (c)). The rest of M4
-  (`monitor remove-history` and the uninstaller, V05-D9 (a)) is next; M5 is not implemented. M6, a system
-  notification, is out of V0.5 (V05-D6 (a)).
+  unschedule-autopurge` remove the shared task folder `\AgentTempManager` when it is empty (V05-D9 (c)). M4b is done
+  behind the gate: `monitor remove-history` removes the history files the product created, and the history folder
+  when it is empty, after its own plan and phrase; the user's `monitor.json` stays, and with it the folder; in every
+  copy it refuses before asking anything. The uninstaller only reads and warns about the monitoring's tasks and history,
+  naming the two commands (V05-D9 (a)). M5, the TUI and the GUI, is next. M6, a system notification, is out of V0.5
+  (V05-D6 (a)).
 * **The gate:** the monitoring gate `AtmMonitoringEnabled` (the ninth) is in the code since M1, `$false` in every copy.
   Nothing is collected, written or scheduled in any copy, and no gate is opened.
 

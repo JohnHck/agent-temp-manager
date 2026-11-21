@@ -87,7 +87,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install\Install-AgentTempM
 ```
 
 No configuration is required. Open a new terminal and run `agent-temp`. Update, rollback, uninstall and the
-clean-environment test: [docs/INSTALL.md](docs/INSTALL.md).
+clean-environment test: [docs/INSTALL.md](docs/INSTALL.md). The uninstall leaves what belongs to each user (their
+scheduled tasks and monitoring history) in place, and warns about it, naming the command that removes each.
 
 ## Documentation
 

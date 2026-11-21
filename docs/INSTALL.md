@@ -115,6 +115,19 @@ Removes the PATH entry and the product directories only. Agent temporary directo
 exported reports are left untouched. With a pending update or rollback (a transaction file or an
 `AgentTempManager.recovery-*` directory) it refuses before changing anything: resolve the recovery first.
 
+What belongs to each user also stays, and the uninstall only reads it and warns; it removes none of it:
+
+* the automatic purge's scheduled task: run `agent-temp quarantine unschedule-autopurge` before uninstalling;
+* the preventive monitoring's scheduled task (`\AgentTempManager\Monitor-<16 hex digits>`), which `agent-temp monitor
+  disable` removes; other users' tasks are only counted, never named;
+* the preventive monitoring's history, `%LOCALAPPDATA%\AgentTempManager\Monitor` (shown as that literal), which
+  `agent-temp monitor remove-history` removes; the user's own `monitor.json` stays even then.
+
+In a copy where the monitoring is not available (every copy so far: its gate is closed), those two commands refuse and
+the items stay. Run them before uninstalling: the uninstall removes the commands too. The uninstaller runs elevated, so
+"the current user" whose task and history it checks is the elevated account; when another account elevates, a
+standard user's task is only counted and their history is not checked.
+
 ## Clean-environment test (Windows Sandbox)
 
 To validate a release on a machine with no developer configuration, the machine owner can enable the optional

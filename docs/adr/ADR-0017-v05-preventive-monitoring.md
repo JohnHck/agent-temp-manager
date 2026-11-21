@@ -1,8 +1,8 @@
 # ADR-0017: Persistent preventive monitoring (V0.5)
 
 Status: ACCEPTED: V05-D1 to V05-D10 decided (D1-D7 2026-11-17, D8-D10 2026-11-18, as recommended); M0 to M3 (M3a and
-the M3b real-scheduler CI harness) and M4a (`monitor disable` and the empty task folder) implemented; the rest of M4
-(`monitor remove-history` and the uninstaller) next; gate closed in every copy. (Until 2026-11-17: PROPOSED, with V05-D1
+the M3b real-scheduler CI harness) and M4 (M4a: `monitor disable` and the empty task folder; M4b: `monitor
+remove-history` and the uninstaller's notice) implemented; M5 (the TUI and the GUI) next; gate closed in every copy. (Until 2026-11-17: PROPOSED, with V05-D1
 to V05-D10 open. From 2026-11-17 to 2026-11-18: ACCEPTED in part, with V05-D8, V05-D9 and V05-D10 open and only M0
 implemented.)
 Date: 2026-11-17
@@ -134,8 +134,8 @@ scheduler, registry key, startup folder or service of any machine for this recor
 | | (A) Per-user scheduled task | (B) `HKCU` Run entry | (C) Shortcut in the user's Startup folder | (D) Windows service | (E) No mechanism: collect when the TUI or GUI opens |
 |---|---|---|---|---|---|
 | **Install** | The user registers it with no elevation: logon type `TASK_LOGON_INTERACTIVE_TOKEN`, no password, run level LUA. A standard user can create a task for themselves. Precedent: `Engine.Isolate.ps1:1835-1862`. | A registry value in the user's hive | A file in a per-user known folder (`FOLDERID_Startup`, per user) | Creating a service needs `SC_MANAGER_CREATE_SERVICE`, which by default only administrators have | nothing |
-| **Complete removal** | Delete the task, after an exact match (precedent `Engine.Isolate.ps1:1893-1896`, `:1955-1980`) | Delete the value | Delete the file | An administrator deletes the service | nothing |
-| **Left behind** | The task folder `\AgentTempManager`, shared with the automatic purge. Today it stays after unscheduling (`Engine.Isolate.ps1:1896`), and a suite case checks that (`tests/Run-Tests.ps1:5644`). The history, until it is removed (section 3). | the history | the history | the service's registry entries if removal fails; the history | the history |
+| **Complete removal** | Delete the task, after an exact match (precedent `Unregister-AtmAutoPurgeTask` and `Invoke-AtmAutoPurgeUnschedule` in `Engine.Isolate.ps1`; since M4a, `Unregister-AtmMonitorTask` in `Engine.Monitor.ps1`) | Delete the value | Delete the file | An administrator deletes the service | nothing |
+| **Left behind** | The task folder `\AgentTempManager`, shared with the automatic purge. Until M4a it stayed after unscheduling; since M4a both unschedule commands remove it when it is empty (`Remove-AtmEmptyTaskFolder`), and with another task in it, it stays. The history, until `monitor remove-history` removes it (section 3; since M4b). The user's `monitor.json` stays, and with it the history folder. | the history | the history | the service's registry entries if removal fails; the history | the history |
 | **Sign-out and restart** | It runs only while the user's session is open. A missed time-based run starts when available. With battery saver on, only interactive-token tasks are triggered. | It runs at **each sign-in** of that user, with no promise of how soon. It does not run in Safe Mode. Periodic collection needs the started process to stay resident. | as (B) | It runs without a session, as a service account, for every user | only while open |
 | **Visibility** | It is listed in Task Scheduler under the product's folder. `version` and `monitor status` show its state. It is not hidden. | in the Startup list of the system's settings | in the Startup folder | in the services list | the open window |
 | **Consumption** | One short process per collection, which then exits. One instance at a time (`MultipleInstances` IgnoreNew). Bounded by `ExecutionTimeLimit` (72 hours unless set). | a resident process for the whole session, or one collection per sign-in only | as (B) | resident | none between openings |
@@ -200,14 +200,16 @@ Recommendation (V05-D1): (A), with the PRIV-3 amendment in M0.
     is exactly the product's entry for this user, and confirms it with a typed phrase.
   * `agent-temp monitor remove-history` removes the history files the product created: matching names, in the pinned
     folder. It removes the folder when it is empty. Anything unexpected refuses, and the refusal says how many items
-    were not touched.
+    were not touched. (As implemented in M4b: the user's `monitor.json` stays, and with it the folder; the parent
+    `%LOCALAPPDATA%\AgentTempManager` is never removed. See the M4b implementation record.)
   * Both are explicit commands that the person runs, each with its own confirmation. The product removes only what it
     created.
   * This is not an agent removing files. Tests run the commands only against a sandbox folder and a test task name,
     and the real scheduler only on a disposable CI runner.
   * The uninstaller today only reads the auto-purge task folder and warns (`docs/ARCHITECTURE.md:107-108`). V05-D9
     decides whether it does more. (Decided 2026-11-18, V05-D9 (a) plus (c): the uninstaller warns and names the two
-    commands, and the unschedule commands remove the task folder when it is empty. Phase M4 implements it.)
+    commands, and the unschedule commands remove the task folder when it is empty. M4a implements (c); M4b implements
+    (a): the uninstaller only reads and warns, and removes nothing of the monitoring.)
 
 ### 4. Trends, thresholds and alerts
 
@@ -299,7 +301,7 @@ records the maintainer's decisions of 2026-11-17 ("approved as recommended", V05
 | V05-D6 | A system notification | NotifyIcon needs a running process; toast requirements not confirmed | (a) none in V0.5; (b) balloon from the open GUI; (c) toast after a study | **(a)** | **(a)**, 2026-11-17: no system notification in V0.5, so M6 is out of V0.5 |
 | V05-D7 | Does V0.5 go ahead behind its gate without waiting for V0.3 and V0.4 (D-A)? | V0.5 changes nothing. Its alerts only name commands: V0.3's and 0.3.x's exist behind their gates; V0.4's is proposed. | (a) go ahead behind `AtmMonitoringEnabled`; an alert names only a command present in that copy; (b) wait | **(a)** | **(a)**, 2026-11-17: V0.5 goes ahead behind `AtmMonitoringEnabled`, and an alert names only a command present in that copy |
 | V05-D8 | Does a collection include the diagnose? | Diagnose cost: deadline 300 s, CPU sample, CIM queries. VMs are unattributed. Worktrees and handles are behind closed gates. | (a) the audit only; (b) the audit plus diagnose counts (row 7), with no CPU sample and a short deadline | **(a)** first; (b) once a provider attributes VMs | **(a)**, 2026-11-18: the audit only; row 7 is not collected. (Pending until then.) |
-| V05-D9 | What the uninstaller does, and the shared task folder | The uninstaller only reads and warns today. `\AgentTempManager` stays after `unschedule-autopurge` (`tests/Run-Tests.ps1:5644`). | (a) the uninstaller warns and names the two commands; the empty folder stays as declared residue; (b) the uninstaller runs the removal with its own confirmation; (c) the unschedule commands remove the task folder when it is empty (changes the auto-purge behaviour and its test) | **(a)** plus (c): the folder goes when empty, so "removed completely" holds | **(a)** plus **(c)**, 2026-11-18: the uninstaller warns and names the two commands; the unschedule commands remove the task folder when it is empty. Implemented in M4. (Pending until then.) |
+| V05-D9 | What the uninstaller does, and the shared task folder | The uninstaller only reads and warns today. Until M4a, `\AgentTempManager` stayed after `unschedule-autopurge`; M4a removes it when empty. | (a) the uninstaller warns and names the two commands; the empty folder stays as declared residue; (b) the uninstaller runs the removal with its own confirmation; (c) the unschedule commands remove the task folder when it is empty (changes the auto-purge behaviour and its test) | **(a)** plus (c): the folder goes when empty, so "removed completely" holds | **(a)** plus **(c)**, 2026-11-18: the uninstaller warns and names the two commands; the unschedule commands remove the task folder when it is empty. Implemented in M4 (M4a: (c); M4b: (a)). |
 | V05-D10 | Threshold defaults, and who sets them | Section 4 | (a) the per-user file with the defaults of section 4; (b) the installation's policy, set by the administrator, like `quarantine.policy.json` | **(a)** | **(a)**, 2026-11-18: the per-user file `monitor.json` with the defaults of section 4. Implemented in M2. (Pending until then.) |
 
 ### 8. Risks and limits
@@ -414,7 +416,7 @@ each. With them, every decision of this record is taken.
   collector calls no diagnose. Phase M1 implements it.
 * **D9 (a) plus (c):** the uninstaller warns and names `monitor disable` and `monitor remove-history`; the unschedule
   commands remove the shared task folder `\AgentTempManager` when it is empty, so "removed completely" holds. Phase M4
-  implements it; until then the uninstaller is unchanged.
+  implements it: M4a implements (c), and M4b implements (a), in which the uninstaller only reads and warns.
 * **D10 (a):** the thresholds live in the per-user file `monitor.json` with the defaults of section 4. Phase M2
   implements it.
 
@@ -581,7 +583,8 @@ them. Besides the files of section 6's M2 row, M2 changes the `monitor status` l
   * The rotation never removes it: the file is never in the rotation's plan, and `Invoke-AtmMonitorPrune` (`:498`)
     refuses the name because it is neither a record name nor a `.partial` name. A case of the suite proves both.
   * What `monitor remove-history` does with the user's `monitor.json` (leave it and report it, or remove it with the
-    rest) is M4's to decide, with V05-D9.
+    rest) is M4's to decide, with V05-D9. (Decided in M4b: it stays, and with it the folder. See the M4b
+    implementation record.)
 * **The thresholds** (`Get-AtmMonitorConfig`, `:883`, with `Get-AtmMonitorConfigFile`, `:806`, and
   `Get-AtmMonitorConfigValues`, `:853`). Read only: the product never writes, creates or fixes `monitor.json`.
   * No file: the defaults, no alert.
@@ -775,7 +778,8 @@ them.
 * **Presentation** (`src/lib/Report.ps1`): `Get-AtmMonitorTaskLines` (`:1604`) in `version` (`src/agent-temp.ps1:589`)
   and in `monitor status`, right after the gate lines (`Get-AtmMonitorStatusLines`, `:1528`). A present or divergent
   task with the gate closed is a residue of another copy: the text says its collector exits without collecting and that
-  this version has no command that removes it. The plan and the result are `Show-AtmMonitorEnablePlan` (`:1634`) and
+  this version has no command that removes it (superseded by M4a: `monitor disable` removes it, and with the gate
+  closed it refuses, so the task stays). The plan and the result are `Show-AtmMonitorEnablePlan` (`:1634`) and
   `Show-AtmMonitorEnableResult` (`:1647`). Texts in both languages (`src/lib/I18n.ps1:293-324`, `:1592-1623`).
 * **New codes:** `MONITOR_INTERVAL_INVALID`, `MONITOR_TASK_REQUIRES_STANDARD_TOKEN`, `MONITOR_TASK_NOT_INSTALLED`,
   `MONITOR_TASK_UNREADABLE`, `MONITOR_TASK_EXISTS`, `MONITOR_TASK_NOT_CONFIRMED`, `MONITOR_TASK_NOT_VERIFIED`,
@@ -800,7 +804,8 @@ them.
   * the statics: the P6b static (`:5427`) now expects the registration calls in `Engine.Isolate.ps1` and
     `Engine.Monitor.ps1` only; the GUI's forbidden list gains the four new exact names (`:15259`); and the M3a static
     proves the call order, no removal, the declared foreign helpers, the entry point's facts, and that the suite never
-    registers a real task.
+    registers a real task. (Superseded by M4a: the M3a area never registers a real task; since M4a, one CI-only case
+    does, outside that area.)
 * **NAO_TESTADO.**
   * The real scheduler registering, running and removing the task: M3b's CI-only harness. The suite never registers a
     real task, so the real `RegisterTaskDefinition` call, the scheduler's acceptance of the definition, a real
@@ -833,7 +838,8 @@ V05-M3b leaves them.
     * the exact form;
     * the run's name as the engine's override, so the engine names the test task and never the product's.
   * The product removes no task until M4. The harness's own `Remove-TestTask` is the only `DeleteTask`, of the test name
-    only. The `\AgentTempManager` folder stays.
+    only. The `\AgentTempManager` folder stays. (Superseded by M4a: the harness removes its task with
+    `Unregister-AtmMonitorTask` and runs the empty-folder helper.)
   * The harness writes only booleans, codes and counts.
 * **Leg A, the install e2e's temporary standard user.** It reuses the mechanism of the step
   `autopurge-task-standard-user` (`Start-Process -Credential`); there is no new account or credential mechanism. The
@@ -857,8 +863,9 @@ V05-M3b leaves them.
   * `Invoke-AtmMonitorEnable`, with the gate open in memory, refuses with `MONITOR_TASK_REQUIRES_STANDARD_TOKEN`. The
     plan is not shown, the phrase is not asked, and nothing is registered (read back `ABSENT`). The token is recorded
     as a readable elevated one, so the refusal is not an unreadable token's.
-  * Then, optionally, the same cycle for a test task of that account. The task runs with the limited token of run
-    level 0, to prove the exit code 3 on a runner where the scheduler starts it.
+  * Then, optionally, the same cycle for a test task of that account, registered with run level 0 (the product's
+    definition), to prove the exit code 3 on a runner where the scheduler starts it. The runners have UAC enabled, so
+    run level 0 gives the filtered token; the run's own token is not read.
 * **The gate closed, from outside (both legs).** The installed `agent-temp monitor enable -Lang en-US`, through
   `cmd /c` as a new process, exits `3` with `MONITORING_GATE_CLOSED`, asking no phrase. The product's task folder lists
   the same tasks before and after; the harness compares a count and a hash of the names.
@@ -871,7 +878,22 @@ V05-M3b leaves them.
   * the steps `monitor-m3b-leg-A-standard-user` and `monitor-m3b-leg-B-elevated`, after the R6 legs and before X2 and
     the uninstall.
 
-  Only the harness summaries are kept. The results per runner are in the CI run's install e2e summaries.
+  Only the harness summaries are kept.
+* **Measured** (first CI run 44452989213). All six install e2e jobs agreed: windows-2025, windows-2022 and
+  windows-11-arm, each with the installer in powershell and in pwsh.
+  * Leg A: 12 PASS and 2 NOT_TESTED.
+    * The token, the registration, the read-back, the duplicate, the removal and the absence all held.
+    * **The run once was NOT_TESTED.** `Run` was accepted with no error, but within the 45 seconds the task stayed
+      Ready (state 3) with last result `0x00041303` (never run). The likely cause, not observed directly: the scheduler
+      does not start an interactive task for a user with no interactive session, and that user exists on the runner
+      only as a secondary-logon process.
+    * The window was NOT_TESTED, as above.
+  * Leg B: 15 PASS and 1 NOT_TESTED (the window).
+    * The refusal held, and nothing was registered.
+    * **Its own test task ran once and ended with last result 3**, the installed gate closed, with the account's
+      history folder unchanged.
+  * Both legs: the installed `monitor enable` exited 3, and the installed copy was unchanged.
+  * The artifact privacy step (FINAL-B) scanned the summaries with no finding.
 * **Tests.** The suite's area "V0.5 M3b" (`tests/Run-Tests.ps1`), after the scale area. It covers:
   * the harness's refusal outside a disposable machine, in a child process with the runner markers cleared, which
     creates no summary;
@@ -888,8 +910,8 @@ V05-M3b leaves them.
   * the real run, NOT_TESTED in the suite.
 * **NOT_TESTED.**
   * The hidden window, as above.
-  * The run once on a runner where the scheduler does not start an interactive task for a user with no interactive
-    session, with the observed state and code per runner.
+  * A scheduled run by the standard user: the scheduler did not start it on any runner (state 3, `0x00041303`). The
+    only real scheduled run proven is in the runner's own account.
   * The real scheduler of any machine other than a disposable CI runner.
 
 **Left for M4 and M5:** `monitor disable`, `monitor remove-history` and the uninstaller (M4, V05-D9 (a) plus (c)); and
@@ -979,3 +1001,100 @@ numbers below are those of the files as V05-M4a leaves them.
     task of the same account.
 
 **Left for M4 and M5:** `monitor remove-history` and the uninstaller (V05-D9 (a)); and the TUI and the GUI (M5).
+(Superseded by M4b, below: only the TUI and the GUI (M5) are left.)
+
+## M4b implementation record (V05-M4b, 2026-11-21)
+
+The second and last part of phase M4: `agent-temp monitor remove-history`, and V05-D9 (a), the uninstaller's notice.
+The ninth gate stays `$false` in every copy, and `monitor remove-history` sits behind it, so in every distributed copy
+it refuses before it reads or asks anything. The uninstaller only reads: it removes nothing of the monitoring. The line
+numbers below are those of the files as V05-M4b leaves them.
+
+* **The decisions of this phase** (the auditor's, within V05-D9 (a) plus (c)):
+  * the user's `monitor.json` is never removed, so it stays, and with it the history folder (`KEPT_CONFIG`);
+  * a collection task in any state other than `ABSENT` refuses (its next run would create the history again);
+  * the collector's mutex is taken without waiting, after the phrase, and the inventory is taken again under it;
+  * the files go only through the engine's file removal (`Invoke-AtmMonitorPrune`, `Engine.Monitor.ps1:520`), and the
+    folder only through a second, non-recursive removal on its exact path;
+  * the parent folder `%LOCALAPPDATA%\AgentTempManager` is never removed. Besides `Monitor`, it holds the quarantine
+    root `Q` and the automatic purge's log `AutoPurgeLog` (`Engine.Isolate.ps1:52`, `:124-126`), neither of which
+    belongs to the monitoring.
+* **`monitor remove-history`,** `Invoke-AtmMonitorRemoveHistory` (`Engine.Monitor.ps1:1514`), called only from the
+  CLI's `monitor` block (`agent-temp.ps1:571`). In order, with nothing asked before the plan:
+  1. the gate closed refuses with `MONITORING_GATE_CLOSED` before anything is read or asked;
+  2. no presenter or reader (`SEM_APRESENTACAO_OU_CONFIRMACAO`);
+  3. the console, observed by the engine (`CONSOLE_NOT_OBSERVED`, exit 6);
+  4. the collection task not `ABSENT` (`MONITOR_HISTORY_TASK_PRESENT`; the text names `monitor disable`);
+  5. the history folder: unknown (`MONITOR_FOLDER_UNKNOWN`), absent (`MONITOR_HISTORY_ABSENT`, nothing to do), or
+     refused by its chain (`MONITOR_FOLDER_<status>`);
+  6. the identity (`MONITOR_IDENTITY_UNAVAILABLE`), then the record folder's rule, checked by the same pin the
+     collector uses and released at once, which creates nothing (`MONITOR_FOLDER_<error>`);
+  7. the inventory, `Get-AtmMonitorHistoryInventory` (`:1441`), read only: a listing failure
+     (`MONITOR_HISTORY_LIST_FAILED`), or anything unexpected (another name, a folder, a reparse point, another owner, a
+     `monitor.json` that is not the user's plain file) refuses the whole removal with the count of the items not
+     touched (`MONITOR_HISTORY_UNEXPECTED`). Names never reach the result: only counts.
+
+  Then the plan is shown (the folder, the counts of records and `.partial` files and their bytes, whether
+  `monitor.json` stays, whether the folder goes, and that the parent stays), and the phrase
+  `REMOVER HISTORICO DO MONITORAMENTO` (`:95`) is asked (`MONITOR_HISTORY_NOT_CONFIRMED`). Only then:
+  * the collector's per-user mutex is taken without waiting: held by a collection or another removal, it refuses with
+    nothing removed (`MONITOR_HISTORY_BUSY`); an abandoned one is taken, as the collector does;
+  * the inventory is taken again under it: any difference refuses with nothing removed (`MONITOR_HISTORY_CHANGED`);
+  * each file of the plan goes through `Invoke-AtmMonitorPrune`, which checks its name, chain and owner again; the
+    first failure stops the rest, with its code and the count of the files already removed;
+  * with every file removed: with `monitor.json` the folder stays (`KEPT_CONFIG`); without it, the folder goes through
+    the empty-folder removal below;
+  * the mutex is released in a `finally`.
+
+  Exit codes: `0` done (whatever the folder's outcome), `2` usage (`-IntervalHours`), `3` refused or not confirmed, `6`
+  no console.
+* **The empty history folder,** `Remove-AtmMonitorEmptyFolder` (`:1479`), the monitoring engine's second and last
+  removal, called only by `Invoke-AtmMonitorRemoveHistory`. Immediately before the removal it checks, in order: the
+  gate; that the path is exactly `Get-AtmMonitorFolder`'s; the chain (no reparse point); the item (a folder, not a
+  reparse point); its owner; that it is empty (`monitor.json` in it gives `KEPT_CONFIG`). The removal is .NET's
+  non-recursive `[IO.Directory]::Delete($path, $false)`, so a folder that is no longer empty makes the system refuse
+  (`MONITOR_FOLDER_REMOVE_<type>`). The product's recursive deleter is not used: a static forbids it in the monitoring
+  engine. It makes one attempt, with no retry. Its outcome, `REMOVED`, `KEPT_CONFIG` or `KEPT` with the code, is the
+  result's `Folder` field and never fails the command.
+* **The uninstaller (V05-D9 (a)),** `Get-AtmUninstallMonitorNotice` (`install/InstallCommon.ps1:860`), called by
+  `Invoke-AtmUninstallUnlocked` (`:930`) right after the automatic purge's notice. It only reads, and each line is a
+  warning:
+  * this user's collection task, by its path, naming `agent-temp monitor disable`;
+  * other users' collection tasks (`^Monitor-[0-9a-f]{16}$` in `\AgentTempManager`), counted and never named;
+  * the history folder, shown as the literal `%LOCALAPPDATA%\AgentTempManager\Monitor`, never expanded, naming
+    `agent-temp monitor remove-history`;
+  * a read that fails, with the exception's type only.
+
+  Each warning says that the item is the user's and stays after the uninstall, which command removes it, and that in a
+  copy where the monitoring is not available that command refuses (the gate is closed) and the item stays. The
+  installer repeats the engine's constants (`:848-851`); a static checks they are equal. The uninstaller runs
+  elevated, so "this user" is the elevated account.
+* **Presentation.** `Show-AtmMonitorRemoveHistoryPlan` and `Show-AtmMonitorRemoveHistoryResult` (`Report.ps1:1723`,
+  `:1734`), with `Get-AtmMonitorHistoryFolderLine` (`:1710`). Texts in both languages. The usage and the help name the
+  four subverbs.
+* **Tests.** The suite's area "V0.5 M4b" (`tests/Run-Tests.ps1`), after M4a. It covers:
+  * each refusal of `remove-history` in order, the closed gate proven with seams that fail if called;
+  * every kind of unexpected item, counted and never named;
+  * `MONITOR_HISTORY_BUSY`, with a child process holding the mutex, and `MONITOR_HISTORY_CHANGED`, with a file planted
+    between the phrase and the second inventory;
+  * the removals in the suite's sandbox only: all files and the folder; `monitor.json` kept with the folder; an empty
+    folder; a removal that fails on an open handle and stops the rest; an abandoned mutex;
+  * the empty-folder function on its own;
+  * the presentation and the CLI in both languages;
+  * the uninstaller's notice through seams (no task, own task, other users' tasks, the folder, unreadable);
+  * the statics: the call order; the two removals and their exact places (the M1, M2, M3a and P6b statics now expect
+    two `::Delete(` in the monitoring engine, one of them `Directory]::Delete(` with `$path, $false`); that
+    `monitor.json` is never removed; the callers; and that the uninstaller's notice removes nothing.
+
+  The install e2e asserts that the uninstall shows no monitoring warning with no task and no folder, and that an empty
+  history folder, planted in the disposable runner's account before the cross-version steps' final uninstall of this
+  build, makes that uninstall warn with the literal (never the expanded path) and leaves the folder in place.
+* **NOT_TESTED.**
+  * `monitor remove-history` with the gate open through the CLI: only the gate-closed path runs in a child process.
+  * The real history folder under `%LOCALAPPDATA%` of any machine: the removals run only in the suite's sandbox.
+  * The uninstaller's warning for a real collection task: no copy can create one with the gate closed, so the install
+    e2e covers only the folder's warning and the absence of both.
+  * The warning names `monitor disable` and `monitor remove-history`, which the uninstall itself takes away from the
+    machine. The text says the items stay; it does not say how to remove them once the product is gone.
+
+**Left for M5:** the TUI and the GUI.

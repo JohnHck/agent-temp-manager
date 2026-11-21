@@ -1055,9 +1055,13 @@ harness `tests/e2e/Invoke-MonitorE2E.ps1` it covers runs only in the install e2e
   * Both legs: the installed `monitor enable` exits 3 with `MONITORING_GATE_CLOSED`, and the task folder's listing is
     unchanged. The nine installed gates and the SHA-256 of every installed file are compared before and after.
   * Only a summary with booleans, codes and counts is uploaded.
+  * In the first CI run (44452989213), all six jobs agreed:
+    * leg A: 12 PASS and 2 NOT_TESTED. The run once was NOT_TESTED: the scheduler accepted the run request but did not
+      start the task (state Ready, last result `0x00041303`, never run). The window was NOT_TESTED too;
+    * leg B: 15 PASS and 1 NOT_TESTED (the window). The refusal held, and its own test task ran once with last result 3.
 * **Not tested here:**
   * the console window of a scheduled run (the action carries `-WindowStyle Hidden`; no window is captured);
-  * a run the scheduler does not start for a user with no interactive session (NOT_TESTED, with its code);
+  * a scheduled run by the standard user, who has no interactive session (NOT_TESTED, with its code);
   * the real scheduler of any machine other than a disposable runner.
 
 ### `monitor disable` and the empty task folder (V0.5 M4a)
@@ -1121,6 +1125,58 @@ On the CI only (each case `NAO_TESTADO` anywhere else):
 NAO_TESTADO in the suite: the real removal of the monitoring task outside the CI; `monitor disable` through the CLI
 with the gate open; a folder that holds another user's task on a real machine (only the scheduler's refusal of a folder
 with a task of the same account, on the CI).
+
+### `monitor remove-history`, the empty history folder and the uninstall notice (V0.5 M4b)
+
+The area "V0.5 M4b" of `tests/Run-Tests.ps1` (ADR-0017 phase M4b) runs in both shells, after the M4a area. **No case
+touches the real history folder** `%LOCALAPPDATA%\AgentTempManager\Monitor`: every case that reaches a removal sets the
+engine's folder seam to a folder of the suite's sandbox, shadows the Task Scheduler with the fake of the M4a area, and
+the area's static checks both. The monitoring gate is opened in this process only, around each call.
+* **`monitor remove-history` refusals,** in order, with nothing asked before the plan and nothing removed: the gate
+  closed, proven with seams for the console, the scheduler and the folder that fail if called; no presenter or reader;
+  the console; a collection task present, divergent or unreadable (`MONITOR_HISTORY_TASK_PRESENT`); no folder
+  (`MONITOR_HISTORY_ABSENT`); a reparse point in the chain; a wrong phrase, after the plan, with nothing removed.
+* **The unexpected items,** each refusing the whole removal before the phrase with the count and nothing touched:
+  another name, a record name with no valid time, a folder, a junction, a folder named `monitor.json`, a record of
+  another owner and a `monitor.json` of another owner (the owner seam). The user's own `monitor.json` is not
+  unexpected.
+* **The mutex and the second inventory:** the collector's mutex held by a child process gives `MONITOR_HISTORY_BUSY`
+  with nothing removed; a record, an unexpected item or a `monitor.json` that appears while the phrase is asked gives
+  `MONITOR_HISTORY_CHANGED` with nothing removed; the mutex is released afterwards.
+* **The removals in the sandbox:** every record and `.partial` file and then the folder (`REMOVED`), the parent
+  intact; with `monitor.json`, every product file removed and the folder kept (`KEPT_CONFIG`), the file intact; an
+  empty folder removed; a file held open stops the removal at the first failure
+  (`MONITOR_PRUNE_FAILED_IOException`), with the count of the files already removed and the folder kept; an abandoned
+  mutex taken, as the collector does.
+* **The empty-folder function on its own:** only the engine's exact path (another path: `MONITOR_FOLDER_REFUSED`,
+  nothing touched); absent; a reparse point in the chain; a file in the folder's place; another owner (seam); not
+  empty; with `monitor.json` (`KEPT_CONFIG`, nothing tried); empty: `REMOVED`, not recursive, the parent kept.
+* **Presentation,** in both languages: the plan (the counts, `monitor.json` stays or the folder goes, the parent never);
+  each refusal with its code and reason (the unexpected with both counts, the task present naming `monitor disable`,
+  the gate closed saying the history stays); done with the folder's line; stopped in the middle; the same keys and
+  placeholders in both languages.
+* **The CLI** in a new process, gate closed: `monitor remove-history` exits 3 with `MONITORING_GATE_CLOSED` before any
+  plan or question (en-US and pt-BR); `-IntervalHours 6` exits 2; the usage lists the four subverbs; the help names
+  `remove-history`; the real history folder is never created or removed.
+* **The uninstall notice** (`Get-AtmUninstallMonitorNotice`), read only, through seams for the task listing and the
+  folder, in both languages: only the user's own task (its path and `monitor disable`); the own task and two of other
+  users (counted, never named; an `AutoPurge-` task and a test name do not count); only the history folder (the
+  literal, never the expanded path, and `monitor remove-history`); nothing: no warning; unreadable: the exception's
+  type, for each. Each warning says the item stays and that, without the monitoring available, the command refuses.
+* **Statics:** the order of the checks in both functions; the monitoring engine's two removals and their exact places
+  (`::Delete(` twice: one in `Invoke-AtmMonitorPrune`, one `[IO.Directory]::Delete($path, $false)` in
+  `Remove-AtmMonitorEmptyFolder`); `monitor.json` never removed; `remove-history` removing only through those two
+  functions; their callers; counts only in the result; the installer's constants equal to the engine's; the notice
+  removing nothing; no call of the area's functions outside the area.
+
+In the install e2e (CI only): with no monitoring task and no history folder, the uninstall shows no monitoring warning
+(`uninstall-no-monitoring-warning`); an empty history folder planted in the disposable runner's account before the
+cross-version steps' final uninstall makes that uninstall warn with the literal and `monitor remove-history`, never
+the expanded path, and the folder is still there afterwards (`xversion-uninstall-monitoring-warning`). Without the
+published 0.1.0 package those steps are NOT_TESTED.
+
+NAO_TESTADO in the suite: the real history folder of any account; `monitor remove-history` through the CLI with the
+gate open; the uninstall warning for a real monitoring task (no copy can create one with the gate closed).
 
 ## Future: isolation, quarantine and Recovery Mode (0.3.x and V0.4)
 
