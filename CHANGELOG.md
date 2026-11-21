@@ -8,6 +8,7 @@ The code in this section reports version 0.3.1, which is not published: 0.3.0 is
 **A sixth, `AtmQuarantinePurgeEnabled`, is closed in every copy too**: in every copy `quarantine purge` only plans, and
 no space is freed.
 
+* Design, V10-ADR (docs only): [ADR-0018](docs/adr/ADR-0018-v10-stabilization-multi-agent.md), PROPOSED, designs V1.0: the provider contract today and its versioning, the machine-readable formats and their stability classes, the conformance suite, candidate providers beyond Claude, the security review, the acceptance CI cannot prove, and "stable" with the gates closed. It asks the maintainer V10-D1 to V10-D8; nothing is implemented and no gate, format or code changes.
 * Preventive monitoring, V05-M5 (ADR-0017 phase M5, the last phase of V0.5): the history and the alerts in the TUI, the GUI and the audit, **read only**, behind **the ninth gate, closed in every copy**. V0.5 is complete behind its gate.
   * TUI: new menu key `M`, "Preventive monitoring: history and alerts (view only)". Entering the screen reads the status and the collection task's state once; `U` reads again. It shows the lines of `monitor status`. A failed read shows its code only.
   * GUI (behind its own gate `AtmGuiEnabled`, closed in every copy): new area "Preventive monitoring", key `M` or its button. One status per opening. It shows the history, and with the gate open the total, the delta, the trend, up to 5 groups, the thresholds and the alerts, each command as text. The collection task's state is never shown. Nothing in the area runs.
