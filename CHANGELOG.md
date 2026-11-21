@@ -8,6 +8,10 @@ The code in this section reports version 0.3.1, which is not published: 0.3.0 is
 **A sixth, `AtmQuarantinePurgeEnabled`, is closed in every copy too**: in every copy `quarantine purge` only plans, and
 no space is freed.
 
+* Generic test-only provider and the third-party guide, V10-S3 (ADR-0018 phase S3; V10-D1 (d), part (c)): **tests and docs only**. No file of `src`, `install/`, `tools/` or `.github/` changes, and no gate, format, classification, eligibility, B1 or RECENT change.
+  * New suite area "Provider generico" (both shells). A test-only factory turns a JSON definition (data only) into a contract 2 provider whose members are fixed code. Two definitions, one with `runtime` and one without, go through the audit, preview and diagnose paths and the conformance checks of V10-S1, which are now shared functions. Bad definitions are refused with the exact key, including a shipped id or temporary subfolder. A generic root laid out like a `claude-code` root never gets the B1 restricted exception. Nothing of it is in `src` or the manifest.
+  * The V10-S1 dry addition also adds both definitions to the copy of `src`; the engines stay byte for byte the same.
+  * [PROVIDERS.md](docs/PROVIDERS.md#writing-a-provider): new section "Writing a provider", the guide for third parties.
 * Format contracts, V10-S2 (ADR-0018 phase S2; V10-D3 (a)): every output and input format has a class (stable, internal or log), rules and a test, in the new [FORMATS.md](docs/FORMATS.md). No gate, classification, eligibility, B1 or RECENT change, and no other format changes.
   * `audit -ExportJson` gains `"schema": "atm.audit/1"` as its first member; the rest of the document is byte for byte the same. A reader that ignores unknown fields reads it unchanged. It still writes the machine, account names, SIDs and paths without pseudonyms (SECURITY-MODEL note).
   * The per-verb exit codes are a stable contract, published in FORMATS.md and USAGE.md (the same table), with the overloads of `2`, `3`, `6` and `10`. No code changes.

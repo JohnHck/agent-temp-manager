@@ -265,3 +265,133 @@ change is expected. The conformance suite ("Contrato de provider" in `tests/Run-
 test-only fixture provider (never in `src/providers/` or the package) is added to a copy of `src`, the copy's manifest is
 rebuilt, `audit` and `diagnose` run against it in a child process, and the `Engine.*.ps1` hashes stay equal. The same
 suite checks every rule of this file against both shipped providers and the fixture; a new provider must pass it.
+
+## Writing a provider
+
+This section is the guide for a third party (V1.0, ADR-0018 phase S3). The examples use the fixture name
+`example-agent`. It is not a real agent, and no vendor layout is described here.
+
+### 1. Decide the capabilities first
+
+* **`temp`** is only for directories that are **temporary**: the agent creates one per session under `<TEMP>` and does
+  not need it once the session is over. These directories become partitions of the inventory. Behind the deletion gate,
+  they can become candidates for deletion.
+* **Session history is not temporary.** A folder the user resumes, reviews or syncs must not be declared as `temp`.
+  This holds even when the folder is organized per session and has a name like "tmp". ADR-0018 section 4 explains why:
+  declaring history as `temp` would change what "temporary" means for this tool and would compete with the agent's own
+  retention. Such an agent gets `runtime` only, or no provider.
+* **`runtime`** only attributes processes, services and VMs in `diagnose` and `recover`, which are read only. It never
+  makes anything eligible.
+
+### 2. Write the file
+
+Write one file, `src/providers/<Name>.ps1`, and start it with `Set-StrictMode -Version 2.0`. The file holds the
+provider's own helper functions and one `Register-AtmProvider` call. The minimum for each capability is:
+
+| Capability | Members |
+|---|---|
+| `runtime` only | `Id`, `DisplayName`, `ContractVersion = 2`, `Capabilities = @('runtime')`. Every runtime member is optional; leaving one out means "no hints". |
+| `temp` | The four above, with `Capabilities` including `temp`, plus the eleven members of "The `temp` members". |
+
+A `temp` skeleton, with fixture names only:
+
+```powershell
+Set-StrictMode -Version 2.0
+Register-AtmProvider ([pscustomobject]@{
+        Id                  = 'example-agent'
+        DisplayName         = 'Example agent'
+        ContractVersion     = 2
+        Capabilities        = @('temp')
+        TempSubdir          = 'example-agent'
+        ScopePattern        = '^[a-z0-9-]+$'
+        RootPattern         = '^run-[0-9]{4}$'
+        EnvVarNames         = @()
+        GetExtraTempDirs    = { param($ProfileInfo) @() }
+        GetConfigDirs       = { param($ProfileInfo) [pscustomobject]@{ Dirs = @(); Known = $true } }
+        GetSessionEvidence  = { param($ProfileInfo, $Snapshot) Get-AtmExampleSessionEvidence -ProfileInfo $ProfileInfo -Snapshot $Snapshot }
+        GetActivityEvidence = { param($ProfileInfo, $Scope, $RootName) Get-AtmExampleActivityEvidence -ProfileInfo $ProfileInfo -Scope $Scope -RootName $RootName }
+        GetProjectKey       = { param($Scope, $ProfilePath) [pscustomobject]@{ IsHome = $false; Key = $Scope } }
+    })
+```
+
+Three rules for the values:
+
+* **Never reuse a shipped `Id`** (`claude-code`, `claude-desktop`). Registration replaces the earlier object with the
+  same `Id`, so the new file would take over the shipped provider, including its B1 exception.
+* **`TempSubdir` is one folder name**, never `.` or `..`. Registration checks only its characters, so a name made of dots
+  passes it. A review must refuse one; the test-only generic factory below does.
+* **Keep the patterns as narrow as the agent's real names.** A scope that does not match the pattern is flagged and
+  blocked. A root that does not match is never a session root.
+
+### 3. The manifest
+
+An installed copy loads only the provider files that its `manifest.json` lists and that match their hashes. The release
+build writes the manifest over everything in `src` (`Write-AtmManifest`), so a new file in `src/providers/` is listed
+without any installer change (ADR-0008 decision 7). A file copied into an installed copy by hand is refused, because the
+manifest does not list it.
+
+### 4. The rules the members must keep
+
+* **"Cannot look" is not "nothing found"** (see that section). Only an absence the file system confirms is "nothing
+  found". Access denied, a file in place of a folder, a reparse point, or any other error is `Readable = $false`.
+* **Liveness.** Use the five `State` values. Never answer `DEAD` for a PID that is in the snapshot or when the snapshot
+  failed. A recorded start equal to the creation time is `LIVE`.
+* **No credential read.**
+  - Never open a credential, key or token file.
+  - When the member lists a folder, check every listed name against a deny list before opening it, whatever the file
+    pattern matches. A pattern like `*.json` also matches `.credentials.json`.
+  - Keep the deny list in a variable whose name ends in `DenyList`. The suite's static check accepts credential names
+    only there.
+  - For activity, read the file's times, never its content.
+* **No write, no deletion, no gate.** A provider only reads. It never classifies, gates or deletes.
+
+### 5. Run the conformance suite against it
+
+The suite works only inside its own sandbox (`%TEMP%\atm-tests-<random>`), which it removes at the end. To run only the
+provider areas:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\Run-Tests.ps1 -Only 'Contrato de provider :: *', 'Provider generico :: *'
+```
+
+**Checks that pick up a new file in `src/providers/` with no test change:**
+- the credential-name scan (`Get-AtmS1CredentialNameHits`);
+- the closed list of read-only calls (`Get-AtmS1ProviderCallViolations` with `$s1ProviderReadAllow`);
+- the scan of `src/lib/Engine.*.ps1` for the new `Id` and `DisplayName` as literals;
+- the dry addition, which loads every provider file of the copy.
+
+**Checks that need a change in the same pull request:**
+- **Shipped-provider lists.** Two assertions name the shipped files exactly (`ClaudeCode.ps1`, `ClaudeDesktop.ps1`):
+  "O provider de fixture vive so nos testes" and "Nada do provider generico se instala". They fail until the new file is
+  added to them. That is deliberate: adding a shipped provider is visible in the tests.
+- **The closed list of read-only calls.** A provider that calls a function, method or type not on the list fails. The
+  list is extended only under review, one read-only call at a time.
+
+**Dynamic checks, run on your own fixture profile.** Call the shared functions of the area "Contrato de provider", the
+way the area "Provider generico" does for its two definitions:
+- `Test-AtmS1Liveness` on your `GetSessionEvidence` result against a snapshot;
+- `Invoke-AtmS1WithDecoysHeld`, with decoy credential files in your own folders, at names your pattern would match;
+- `Get-StableTreeListing` of the profile before and after every member and an inventory;
+- `Get-AtmS1HardFlagViolations` and `Test-AtmS1ClosedGate` on your partitions.
+
+### 6. What a new provider does not get
+
+* **The B1 restricted exception.** It is tied to the id `claude-code` (`Engine.Clean.ps1:174`). A new provider's roots
+  stay under the full B1 rule: a root with one uninspectable process stays `BLOCKED`. The suite proves this with a
+  generic root laid out exactly like a `claude-code` root. Extending the exception is an eligibility change that needs
+  its own decision.
+* **No change to RECENT (72 hours), the hard flags, the classification or any gate.**
+
+### The generic test-only provider
+
+The area "Provider generico" builds providers from JSON definitions through a test-only factory,
+`New-AtmGenericTestProvider` in `tests/Run-Tests.ps1`. The definitions and their layout helpers are also there. This
+proves the criterion "a new provider can be added without changing the engines" in CI, with no real agent.
+
+* The factory's `Get*` members are fixed code. A definition is data only: it cannot carry code, take a shipped id or
+  temporary subfolder, point outside the profile, or name a credential file.
+* **It is a test mechanism, not a supported way to add a provider.** No file of `src` holds it, and the manifest never
+  lists it. The release zip carries the source tree's `tests\` folder, with the suite inside, as it already does for
+  the V10-S1 conformance fixture. Nothing of it installs.
+* A shipped generic provider would let any file make any folder pattern a deletion candidate. ADR-0018 section 4.1
+  rules that out: it must not ship with `temp`.

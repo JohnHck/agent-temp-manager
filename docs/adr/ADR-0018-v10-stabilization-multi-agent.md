@@ -606,3 +606,67 @@ as changed by S2.
 - **Unchanged:** B1, RECENT (72 hours), the flags, the classification, eligibility, every other format (name, member
   and version), the usage texts, `install/`, `tools/`, `.github/`, every other file of `src/`. The nine gates stay
   `$false`.
+
+## Implementation record (S3, 2026-11-21)
+
+S3 implemented on `main` at `b27f526` as the base. V10-D1 (d) applies, in part (c) only: the generic provider
+configured by a file, test only, never shipped. Part (a), the Copilot CLI provider with `runtime` only, is S4, after an
+operator observation.
+
+- **The generic test-only provider** (4.1, 4.2 (c)):
+  - The factory `New-AtmGenericTestProvider` lives in `tests/Run-Tests.ps1`. It reads a definition in JSON with these
+    fields: `Id`, `DisplayName`, `TempSubdir`, `ScopePattern`, `RootPattern`, `EnvVarNames`; the session files (a folder
+    relative to the profile, a name pattern, and the PID, session and optional start fields); the activity file (a
+    folder and a name with `{scope}` and `{root}`); and optional process matchers for `runtime`.
+  - It returns a contract 2 object, which passes `Register-AtmProvider` with no exception.
+  - The `Get*` members are fixed script blocks: closures over the validated values only. They read only the files the
+    definition names, inside the profile.
+  - A listed name that matches the credential deny list is never opened, whatever the pattern. Activity is a file time
+    only.
+  - The definitions are embedded in the suite as data. There is no `tests/fixtures/providers/` folder.
+- **Two definitions** prove the mechanism: `generic-a` (`temp` and `runtime`) and `generic-b` (`temp` only), with
+  different layouts and patterns. Each goes through:
+  - `Invoke-AtmInventory`, `Test-AtmCandidate`, `Invoke-AtmPreview` and `Invoke-AtmDiagnose` over fixture profiles;
+  - the conformance checks of S1: validation, "cannot look", liveness, no credential read, no write, no weaker gate.
+
+  To reuse the S1 checks without duplicating them, S3 lifts their bodies into shared functions, called by both areas.
+  The S1 cases keep their checks and results. The S1 dry addition writes both definitions into the same copy, so no
+  extra child process runs, and the `Engine.*.ps1` hashes stay equal.
+- **Bad definitions** are refused with the exact key.
+  - The factory refuses an unknown field, a missing field, a wrong type, invalid JSON, a `TempSubdir` of dots, a folder
+    that is absolute, rooted, UNC, upward or holds a variable, a file name with a folder or a drive, and a credential
+    name of the S1 deny list.
+  - The factory also refuses a shipped id or shipped temporary subfolder, in any case. This is central: registration
+    replaces a provider with the same id (`Engine.Audit.ps1:99`), and the B1 exception is granted by id
+    (`Engine.Clean.ps1:174`). The shipped lists are read from `src/providers`, and the factory refuses to run without
+    them.
+  - Registration refuses a separator in `TempSubdir` and a pattern that does not compile.
+- **B1 stays tied to `claude-code`** (section 8). In the S1 golden fixture's run B, a `generic-b` root laid out exactly
+  like a `claude-code` ORPHAN_SUSPECTED root:
+  - has the same kind, class, flags, B1 result and single gate reason;
+  - never gets the restricted exception (preview `BLOCKED`, `Get-AtmB1ExceptionRisk` `$null`), while the `claude-code`
+    root does.
+
+  The 30 golden `claude-code` rows are unchanged with the generic provider registered.
+- **Nothing of it installs.**
+  - The manifest written over a copy of `src` lists exactly the files of `src`. None holds the factory, the ids, the
+    names or the definition fields.
+  - The release zip carries the source tree's `tests\` folder (`tools/Build-Release.ps1`), so the suite, with the
+    definitions inside, is in the zip as source. The same is true of the S1 conformance fixture. Nothing of it is
+    installed.
+- **The guide for third parties:** a new section, "Writing a provider", in `docs/PROVIDERS.md`. It covers:
+  - the file and the manifest;
+  - the minimum for `temp` against `runtime`;
+  - the rules for "cannot look", liveness and no credential read;
+  - how to run the conformance suite against a provider, including which checks pick up a new file by themselves and
+    which need the same change;
+  - what a new provider does not get (the B1 exception);
+  - why session history must not declare `temp` (section 4).
+- **Found, not changed (out of scope):** `Register-AtmProvider` accepts a `TempSubdir` made of dots (`..`). Its
+  character rule allows dots, so the base would be the parent of a TEMP candidate. No shipped provider does this, the
+  generic factory refuses it, and the guide says a review must. Tightening the rule is a `src` change for a later
+  round.
+- **Tests:** the area "Provider generico" of `tests/Run-Tests.ps1`, both shells, 10 cases, listed in `docs/TESTING.md`.
+- **Unchanged:** every file of `src/`, `install/`, `tools/` and `.github/`; B1, RECENT (72 hours), the flags, the
+  classification, eligibility and every format. `src/providers/` holds only the two shipped providers, and the nine
+  gates stay `$false`.

@@ -1282,6 +1282,34 @@ own sandbox folder; every identity and path in its fixtures is synthetic.
 The exit codes are read statically. The child-process cases of other areas that already run them with every gate
 closed are cited in FORMATS.md rather than repeated.
 
+## Generic test-only provider in the suite (V1.0 S3)
+
+The area "Provider generico" of `tests/Run-Tests.ps1` ([ADR-0018](adr/ADR-0018-v10-stabilization-multi-agent.md) phase
+S3, V10-D1 (c)) runs in both shells. A test-only factory, `New-AtmGenericTestProvider`, reads a definition in JSON and
+returns a contract 2 provider. The factory's `Get*` members are fixed script blocks; a definition is data only. Two
+definitions, `generic-a` (`temp` and `runtime`) and `generic-b` (`temp` only), have different layouts and patterns.
+`generic-b` uses the scope and root patterns of a `claude-code` root. The factory and the definitions exist only as
+text inside the suite: they are never in `src`, and there is no `tests/fixtures/providers/` folder. The checks of the
+area "Contrato de provider" are shared functions (`Get-AtmS1CredentialNameHits`, `Get-AtmS1ProviderCallViolations`,
+`Get-AtmS1HardFlagViolations`, `Invoke-AtmS1WithDecoysHeld`, `Test-AtmS1ClosedGate`, `Test-AtmS1Liveness`), called by
+both areas.
+
+| Case | What it checks |
+|---|---|
+| Registration | both definitions become contract 2 objects and pass `Register-AtmProvider` unchanged; capabilities `temp,runtime` and `temp`; different layouts and patterns; the five `Get*` members are the factory's code (the same text for both); the definitions hold no code |
+| Bad definitions | refused with the exact key. The factory refuses: invalid JSON or not an object; an unknown field (code offered as a field, capabilities, another case, nested); a missing field; a wrong type; `TempSubdir` `.` or `..`; an absolute, rooted, UNC, upward or variable folder; a file name with a folder or a drive; a credential name of the deny list as the session file, the activity file or a folder; a shipped id or temporary subfolder, in any case (`GENERIC_DEF_*`). Registration refuses a separator in `TempSubdir` (`err.providerSubdir`) and a pattern that does not compile (`err.providerPattern`). The registry is left as it was, `claude-code` never replaced |
+| Read path | per definition, over a fixture profile: `Invoke-AtmInventory` (a `LIVE` session blocks; a `DEAD` session and a free root are orphan and eligible at the gate; recent activity gives `TRANSCRIPT_RECENT`), `Invoke-AtmPreview` at the gate's result, `Invoke-AtmDiagnose` (session coverage `COMPLETE`, runtime-hint coverage `COMPLETE` for `generic-a` and absent for `generic-b`, findings of the provider's roots) |
+| Cannot look / nothing found | per definition: an absent folder is readable with nothing found (the root is orphan); a file in place of the session and activity folders gives `SESSION_REGISTRY_UNREADABLE` and `TRANSCRIPTS_UNREADABLE`, never `DEAD` or eligible; an unreadable session file gives `SESSION_REGISTRY_ENTRY_UNPARSEABLE`; a failed snapshot gives `UNVERIFIABLE` |
+| Liveness | per definition, `Test-AtmS1Liveness`: `LIVE`, `LIVE` within 2 s, `PID_REUSED`, `LIVE_UNVERIFIED`, `DEAD` |
+| No credential read | decoys in each definition's own session folder, at names its file pattern would match, and in its activity folder, held with `FileShare.None`: no member result and no classification changes; control: a session file held the same way is reported unparseable, so an open would be seen; static: the generated provider file names credentials only in its deny list, and a read planted in it is found |
+| No write | the profile tree's listing is identical after every member, the runtime hints and an inventory; static: the generated provider file makes only the calls of the closed V10-S1 list plus three named read-only ones (the factory's name, `Replace`, `GetNewClosure`); a write planted in it is refused |
+| No weaker gate | per definition, a `LIVE` session with recent activity blocks; with the deletion gate closed the preview stays at the gate's result and clean is aborted (`Test-AtmS1ClosedGate`); every hard flag stays `BLOCKED` |
+| B1 tied to claude-code | in the V10-S1 golden fixture, run B (one uninspectable process), a `generic-b` root with the same layout as a `claude-code` ORPHAN_SUSPECTED root has the same fields (kind, class, no flags, B1 `BLOCKED` as the only reason, no runtime refusal, own profile). The `claude-code` root gets `ELIGIBLE_WITH_DECLARED_RISK`; the generic root stays `BLOCKED`, and `Get-AtmB1ExceptionRisk` is `$null` for it. The 30 golden `claude-code` rows are unchanged with `generic-b` registered |
+| Nothing installs | the manifest `Write-AtmManifest` writes over a copy of `src` lists exactly the files of `src`, only the two shipped providers, and no file holds the factory, the ids, the names or the definition fields |
+
+The V10-S1 dry addition also writes both definitions into the same copy of `src`: `verify` lists them, `audit` and
+`diagnose` show them, and the `Engine.*.ps1` hashes stay equal. The engine-literal scan also looks for their ids and
+names.
 ## Future: isolation, quarantine and Recovery Mode (0.3.x and V0.4)
 
 Criteria proposed by [ADR-0013](adr/ADR-0013-isolation-quarantine-recovery-mode.md) for accepting an implementation.
