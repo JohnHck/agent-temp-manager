@@ -1180,6 +1180,9 @@ function Get-S5Listing($Users) {
             try { $items = @(Get-ChildItem -LiteralPath $d -Recurse -Force -ErrorAction Stop) }
             catch { $lines.Add("$($u.Label)|$rel|UNREADABLE|$($_.Exception.GetType().Name)"); continue }
             foreach ($it in $items) {
+                # The entry's own times and length (an enumeration returns the copy in the parent folder's index, which
+                # NTFS updates lazily: a folder's time could differ between two listings with nothing written).
+                try { $it.Refresh() } catch { $null = $_ }
                 $len = $(if ($it.PSIsContainer) { -1 } else { $it.Length })
                 $lines.Add(('{0}|{1}|{2}|{3}|{4}' -f $u.Label, $rel, $it.FullName.Substring($d.Length), $len, $it.LastWriteTimeUtc.Ticks))
             }
@@ -1422,13 +1425,25 @@ Step 'multi-user-no-new-files' {
     foreach ($key in @($b.Keys | Sort-Object)) { if (-not $a.ContainsKey($key)) { $changes.Add("REMOVED $key") } }
     $hard = @($changes | Where-Object { -not $_.StartsWith('TIME ') })
     $time = @($changes | Where-Object { $_.StartsWith('TIME ') })
-    $show = { param([string[]]$C) (@($C) | Select-Object -First 12) -join ' ; ' }
+    # The session ids named as the old and the new root of the fixture.
+    $show = {
+        param([string[]]$C)
+        $t = (@($C) | Select-Object -First 12) -join ' ; '
+        foreach ($u in @($script:s5.Users)) { $t = $t.Replace([string]$u.Old, '<old-root>').Replace([string]$u.New, '<new-root>') }
+        $t
+    }
     Assert ($hard.Count -eq 0) "listagem antes/depois: $($hard.Count) entrada(s) nova(s), removida(s), com tamanho alterado ou arquivo gravado: $(& $show $hard)"
     "no file or folder added, removed or resized and no file written in both bases and the product's folders and .claude of both profiles across the audits, previews, clean and F-05 ($($after.Count) line(s), $(@($after | Where-Object { $_ -like '*|UNREADABLE|*' }).Count) folder(s) not listable by this account); folders with only their last write time changed: $($time.Count)$(if ($time.Count) { ' (' + (& $show $time) + ')' })"
 }
 # The fixture helpers end by themselves on their stop files (never terminated), whatever the steps above did.
-foreach ($h in @($script:s5Holders)) { try { [IO.File]::WriteAllText($h.Stop, '1') } catch { $null = $_ } }
-foreach ($h in @($script:s5Holders)) { try { $null = $h.Proc.WaitForExit(60000) } catch { $null = $_ } }
+# In a child scope, with a name of its own: at script level $h is already a typed variable (a [ref] out argument above).
+# Whatever happens here, the run goes on (a helper not told to stop ends by itself at its deadline).
+try {
+    & {
+        foreach ($s5Holder in $script:s5Holders.ToArray()) { try { [IO.File]::WriteAllText($s5Holder.Stop, '1') } catch { $null = $_ } }
+        foreach ($s5Holder in $script:s5Holders.ToArray()) { try { $null = $s5Holder.Proc.WaitForExit(60000) } catch { $null = $_ } }
+    }
+} catch { Write-Host "V10-S5: fixture helpers not told to stop ($($_.Exception.GetType().Name)); they end at their own deadline" -ForegroundColor Yellow }
 # <<< V10-S5 second standard user (end)
 
 # 0.3.x isolation, phase P6b: the uninstall and the task of the automatic purge. This account's task (the product's name)

@@ -1344,7 +1344,8 @@ before the uninstall, with every gate closed. The disposable-machine guard is un
   taken out).
 * **The listing** covers each user's base (`<profile>\AppData\Local\Temp\claude`, recursively) and, for each profile,
   `.claude` and the product's folders under `AppData\Local` and `AppData\Roaming`: existence, relative name, length and
-  last write time. A folder the runner account cannot list (a protected DACL of the product) is one line with the
+  last write time, read from each entry itself (an enumeration returns the copy in the parent folder's index, which
+  NTFS updates lazily). A folder the runner account cannot list (a protected DACL of the product) is one line with the
   exception's type, and the step details count them. The whole profile is not compared: while its hive is loaded,
   Windows itself writes there.
 * **Privacy.** Step details and messages carry codes, counts and the labels A and B only (the job log is not

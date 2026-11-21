@@ -9331,7 +9331,9 @@ try {
         $f0 = $s5.IndexOf("`$k.SetValue('TEMP', `$target, [Microsoft.Win32.RegistryValueKind]::ExpandString)")
         Assert-True ($f0 -gt 0 -and $s5.IndexOf("} finally { `$k.SetValue('TEMP', `$orig, `$kind) }") -gt $f0 -and $s5.IndexOf('if ($null -eq $orig) { $script:notTested = $true;') -lt $f0 -and $s5.IndexOf('if ($null -eq $orig) { $script:notTested = $true;') -gt 0) 'TEMP de F-05 restaurado em finally; sem valor proprio, nao testado'
         # The fixture helpers end by themselves (stop file or deadline); the stop files are written after the last S5 step.
-        Assert-True ($s5.Contains('AddMinutes(40)') -and $s5.Contains("[IO.File]::WriteAllText(`$h.Stop, '1')") -and $s5.IndexOf("[IO.File]::WriteAllText(`$h.Stop, '1')") -gt $s5.IndexOf("Step 'multi-user-no-new-files'")) 'helpers terminam sozinhos, por arquivo ou prazo'
+        Assert-True ($s5.Contains('AddMinutes(40)') -and $s5.Contains("[IO.File]::WriteAllText(`$s5Holder.Stop, '1')") -and $s5.IndexOf("[IO.File]::WriteAllText(`$s5Holder.Stop, '1')") -gt $s5.IndexOf("Step 'multi-user-no-new-files'")) 'helpers terminam sozinhos, por arquivo ou prazo'
+        # The script-level loops over the helpers never reuse a variable of the script (a typed slot fails at compile time).
+        Assert-True (-not [regex]::IsMatch($s5, '(?m)^foreach \(\$h in')) 'laco dos helpers sem reusar $h no nivel do script'
         # Raw outputs never in -OutDir (they name both test accounts).
         Assert-True (-not $s5.Contains('$OutDir') -and -not $s5.Contains('Invoke-Agent ')) 'saidas da S5 fora de -OutDir'
         $iX = $e2e.IndexOf("Step 'v3-x2-lock-across-identities'"); $iC = $e2e.IndexOf("Step 'multi-user-second-user-create'"); $iN = $e2e.IndexOf("Step 'multi-user-no-new-files'"); $iT = $e2e.IndexOf("Step 'autopurge-task-before-uninstall'"); $iU = $e2e.IndexOf("Step 'uninstall'")
