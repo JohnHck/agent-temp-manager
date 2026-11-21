@@ -227,7 +227,7 @@ function ConvertTo-AtmExportJson {
     param($Inventory)
     $inv = $Inventory
     $export = [ordered]@{
-        toolVersion = $inv.ToolVersion; language = (Get-AtmLanguage); machine = $inv.Machine; user = $inv.Identity.Name; startedUtc = $inv.StartedUtc.ToString('o'); coverageComplete = $inv.CoverageComplete
+        schema = 'atm.audit/1'; toolVersion = $inv.ToolVersion; language = (Get-AtmLanguage); machine = $inv.Machine; user = $inv.Identity.Name; startedUtc = $inv.StartedUtc.ToString('o'); coverageComplete = $inv.CoverageComplete
         processes = [ordered]@{ total = $inv.Snapshot.Total; readable = $inv.Snapshot.Readable; uninspectable = $inv.Snapshot.Uninspectable; failed = $inv.Snapshot.Failed }
         profiles = @($inv.Profiles | ForEach-Object { [ordered]@{ sid = $_.Sid; user = $_.UserName; path = $_.ProfilePath; origin = $_.Origin; status = (Get-AtmProfileStatusLabel -Inventory $inv -ProfileInfo $_) } })
         partitions = @($inv.Partitions | Where-Object { $_.Kind -ne 'NotScanned' } | ForEach-Object {

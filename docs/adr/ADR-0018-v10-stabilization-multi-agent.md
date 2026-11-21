@@ -563,3 +563,46 @@ are to the files as changed by S1.
     engine change outside S1.
 - **Unchanged:** B1, RECENT (72 hours), the hard and soft flags, the classification, eligibility, every output format,
   the usage texts, `src/providers/*`, `install/`, `tools/`, `.github/`. The nine gates stay `$false`.
+
+## Implementation record (S2, 2026-11-21)
+
+S2 implemented on `main` at `ede257d` as the base. V10-D3 (a) applies: three classes (stable, internal, log), and a
+removal or a break of a stable format needs notice in one published minor version. Line references are to the files
+as changed by S2.
+
+- **`atm.audit/1`** (2.3): `ConvertTo-AtmExportJson` (`src/lib/Report.ps1:225-241`) writes `schema = "atm.audit/1"` as
+  its first member. Nothing else in the function changed. The suite keeps the function of `ede257d` verbatim and proves,
+  over the V10-S1 golden fixture, that the export of before plus the `schema` line equals the export of now, byte for
+  byte. No consumer in the repository reads the export; the installer's end-to-end test only parses it.
+- **`docs/FORMATS.md`** (2.1, 2.2), new: for each output of 2.1, its class, schema id with file and line, producer,
+  consumer, rules and test; the two naming conventions (`atm.x/n` documents, `atm-x/n` hash domains) and why the
+  recovery plan ids keep their names; `schemaVersion` in `atm.diagnose/2` against `schema` elsewhere, both kept;
+  human-readable text is not an interface. The closed inventory of schema ids is checked both ways against `src`.
+  Four hash domains the table of 2.1 does not name (`atm-clean-plan/1`, `atm-isolate-plan/1`, `atm-restore-plan/1`,
+  `atm-purge-plan/1`) are classed internal, with the recovery plan ids.
+- **Per-verb exit codes** (2.1, 2.3): published as a stable contract in `docs/FORMATS.md` and `docs/USAGE.md`, the same
+  26 rows, with the overloads of `2`, `3`, `6` and `10`. A table test reads every `exit` of the launcher and of the two
+  scheduled entry points statically and compares the codes per verb with the table. The exits without a literal code
+  are resolved from `Invoke-AtmGuiCommand`, the recovery engine's code table and the collector's `ExitCode` values. An
+  undocumented code, a documented code that cannot be returned, and an exit that cannot be resolved each fail. A second
+  case checks the recovery engine's literal codes against its table, both ways. The child-process cases that already
+  run the codes with the gates closed are cited, not duplicated. Known limit, documented: a failure before the
+  launcher's main error handler ends with PowerShell's own code, usually `1`.
+- **Golden files** (2.2): one per version for `atm.audit/1` and `atm.diagnose/2`. Each is the value-free shape of the
+  document (every path, the members in order, the JSON type), checked field by field, with no member more or less. For
+  `monitor.json` and `atm.quarantine-policy/1`, a reader of the current version: the known keys accepted, unknown keys
+  refused with the existing codes (`MON_CONFIG_INVALID` with `UNKNOWN_KEY`; `QUARANTINE_POLICY_INVALID`). The phase
+  table of section 9 says "previous-version readers": no previous version of either input exists, so none was
+  invented. The rule "a new key is a new version of the file" is written in `docs/FORMATS.md`.
+- **Internal formats** (2.2): a fixed fixture of the current monitoring record (`atm.monitor/1`) and of the current
+  quarantine manifest (`atm.quarantine/1`), embedded in the suite and read by the current code; another version of
+  each is refused with a code (`SCHEMA`; `MANIFEST_INVALID`, the entry `ENTRY_MANIFEST_INVALID`). The existing reader
+  tests are cited.
+- **Logs** (2.2): `docs/FORMATS.md` lists the readers of each log and the schema each knows: the pilot summary
+  (`atm.cleanlog/1`, `atm.isolatelog/1`, `atm.purgelog/1`) and `recover undo` (`atm.recoverlog/1`). The existing
+  strict-read tests are cited.
+- **Tests:** the area "Contratos de formato" of `tests/Run-Tests.ps1`, both shells, 10 cases, listed in
+  `docs/TESTING.md`.
+- **Unchanged:** B1, RECENT (72 hours), the flags, the classification, eligibility, every other format (name, member
+  and version), the usage texts, `install/`, `tools/`, `.github/`, every other file of `src/`. The nine gates stay
+  `$false`.

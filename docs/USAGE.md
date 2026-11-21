@@ -74,6 +74,11 @@ a volume root (`C:\x.json`), a folder path of 240 characters or more, a network 
 cannot be opened (reported as a refusal, not as an error). A file exported from an elevated window may not be readable
 from a non-elevated one (its owner is then usually Administrators).
 
+**Export document (`atm.audit/1`, V1.0 S2).** The exported JSON starts with `"schema": "atm.audit/1"`; the rest of
+the document is unchanged. It is a stable format: its members, the rules for adding or removing one, and its tests are
+in [FORMATS.md](FORMATS.md). It holds the machine name, account names, SIDs and paths as they are, without pseudonyms:
+keep the file where you would keep the audit's own output.
+
 ## Preview (no deletion)
 
 ```powershell
@@ -1384,6 +1389,43 @@ invalid manifest, or an installed copy without one; nothing is loaded) · `6` TU
 or a `diagnose` export refused or not written (nothing deleted because of it), or a failed `recover` collection
 (nothing changed). `recover start` and `recover undo` also use `20` to `31` and `40` to `44`, listed under Recover
 (above); in every copy they end with `27`.
+
+### Exit codes by verb (stable contract)
+
+The same table as in [FORMATS.md](FORMATS.md#exit-codes), which gives its evolution rules. Each row lists the codes
+that verb's own code can return; every verb can also return the codes of the first row. Read the code together with
+the verb: `2`, `3`, `6` and `10` mean different outcomes in different verbs.
+
+<!-- atm-exit-codes:begin -->
+| Verb | Codes | Meaning |
+|---|---|---|
+| `(every verb)` | 5, 10 | `5` integrity mismatch, nothing loaded (also when the integrity check of an installed copy fails); `10` unexpected error (every verb except `verify`) |
+| `verify` | 0, 4, 5 | `0` every listed file matches; `4` no manifest (not an installation); `5` a problem |
+| `gui` | 0, 7, 8 | `0` the window opened and closed; `7` GUI gate closed (every copy); `8` no window can be shown here |
+| `tui` | 0, 6 | `0` closed; `6` no interactive console |
+| `audit` | 0 | `0` shown, and exported with `-ExportJson`; a refused export ends with `10` |
+| `preview` | 0 | `0` shown |
+| `diagnose` | 0, 2, 10 | `0` ran (partial coverage included); `2` key file refused; `10` export refused or not written (its gate is closed in every copy) |
+| `clean` | 0, 2, 3, 6 | `0` done; `2` invalid invocation; `3` aborted or stopped, nothing deleted; `6` interactive console needed (only with deletion enabled) |
+| `isolate` | 0, 2, 3, 6 | `0` done; `2` no path or allow list, a missing allow list, `-IncludeOtherUsers`, or a refused log file; `3` stopped after the plan, nothing moved; `6` interactive console needed (only past its gate) |
+| `authorize` | 0, 2, 3, 6 | `0` recorded; `2` missing `-Path` or `-RecordFile`; `3` not recorded; `6` no interactive console |
+| `quarantine` | 2 | no subcommand or an unknown one; with any subcommand, an `-Entry` that is not an entry id |
+| `quarantine list` | 0, 2 | `0` shown |
+| `quarantine inspect` | 0, 2, 3 | `0` shown; `2` no `-Entry`; `3` no such entry |
+| `quarantine verify` | 0, 2 | `0` checked; `2` neither `-Entry` nor `-All` |
+| `quarantine restore` | 0, 2, 3, 6 | `0` done; `2` no `-Entry`, or a refused log file; `3` stopped after the plan; `6` interactive console needed (only past its gate) |
+| `quarantine purge` | 0, 2, 3, 6 | `0` done; `2` no `-Entry`, or a refused log file; `3` stopped after the plan; `6` interactive console needed (only past its gate) |
+| `quarantine schedule-autopurge` | 0, 2, 3, 6 | `0` scheduled; `3` refused or not confirmed; `6` interactive console needed |
+| `quarantine unschedule-autopurge` | 0, 2, 3, 6 | `0` removed; `3` refused or not confirmed; `6` interactive console needed |
+| `recover list, plan` | 0, 2, 3, 10 | `0` shown or offered; `2` usage; `3` plan refused; `10` collection failed |
+| `recover start, undo` | 2, 3, 5, 10, 20-31, 40-44 | the codes of the recovery command, each outcome in its table in [USAGE.md](USAGE.md#recover-start-and-recover-undo-v04-r4); `27` in every copy |
+| `monitor` | 0, 2, 3, 6 | `0` status shown, or the action done and read back; `2` usage; `3` refused, not confirmed or stopped (always, with the gate closed); `6` interactive console needed |
+| `version` | 0 | `0` shown |
+| `help` | 0 | `0` shown (also `-h`, `--help` and `/?`) |
+| `(unknown command)` | 1 | `1` unknown command |
+| `bin\agent-temp-monitor.ps1` | 0, 2, 3, 5, 10 | collector entry point: `0` one collection recorded; `2` an argument; `3` gate closed or collection refused; `5` integrity; `10` unexpected |
+| `bin\agent-temp-autopurge.ps1` | 0, 2, 3, 5, 10 | automatic purge entry point: `0` off, report only, quarantine absent, or done; `2` an argument; `3` minimum retention, lock, or a pass stopped on an error; `5` integrity; `10` unexpected |
+<!-- atm-exit-codes:end -->
 
 ## Project names
 

@@ -1260,6 +1260,28 @@ restores the registry afterwards.
 The contract has no read or write seam in the engine, so the two "no read" and "no write" cases detect an attempt
 indirectly: an exclusive hold on the decoys, and a stable listing of the profile tree, each with a static closed list.
 
+## Format contracts in the suite (V1.0 S2)
+
+The area "Contratos de formato" of `tests/Run-Tests.ps1` ([ADR-0018](adr/ADR-0018-v10-stabilization-multi-agent.md)
+phase S2, sections 2.1 to 2.3) runs in both shells. It proves [FORMATS.md](FORMATS.md). Every file it writes is in its
+own sandbox folder; every identity and path in its fixtures is synthetic.
+
+| Case | What it checks |
+|---|---|
+| `atm.audit/1` compatibility | over the V10-S1 golden fixture, `schema` is the first member, and the export of before (the function of `ede257d`, embedded verbatim) plus the `schema` line equals the export of now, byte for byte |
+| `atm.audit/1` golden | the value-free shape of the export (each path, the members in order, the JSON type) equals the golden of the version; a member removed and one added are reported |
+| `atm.diagnose/2` golden | the same, over the golden fixture with every diagnose source injected (identity, processes, services, virtualization, the pseudonym key) |
+| Exit codes per verb | the delimited tables of FORMATS.md and USAGE.md equal the suite's table; a static reading of every `exit` of the launcher (per verb, quarantine per subcommand, recover split at the start/undo block) and of the two entry points equals the table, the non-literal exits resolved from `Invoke-AtmGuiCommand`, the recovery code table and the collector's `ExitCode` values; a planted `exit 9`, an unresolvable exit and a code removed from or added to the table each fail |
+| Recovery codes both ways | every literal code of the recovery engine's four exit functions is in its table; every code of the table is literal, relayed or an outcome |
+| `monitor.json` reader | the five keys accepted with their values; `schema`, a key in another case and another key each refuse the whole file with `MON_CONFIG_INVALID` (`UNKNOWN_KEY`); the key list pinned |
+| Policy reader | the four members of `atm.quarantine-policy/1` accepted with their values, the schema alone gives the defaults; an unknown key, another case, another version and no schema give `QUARANTINE_POLICY_INVALID` |
+| Monitoring record fixture | a fixed `atm.monitor/1` record, embedded as data, read by `Test-AtmMonitorRecordText`; another version (hash recomputed) refused with `SCHEMA` |
+| Quarantine manifest fixture | a fixed `atm.quarantine/1` manifest, embedded as data, read by `Get-AtmQuarantineEntrySummary` (`ISOLATED`, counts, verification, `EXPIRED` after the retention); another version gives `ENTRY_MANIFEST_INVALID` (`MANIFEST_INVALID`) |
+| Schema inventory | every schema id in `src` is listed in FORMATS.md with its file, every listed id is in `src`, and FORMATS.md names no other version |
+
+The exit codes are read statically. The child-process cases of other areas that already run them with every gate
+closed are cited in FORMATS.md rather than repeated.
+
 ## Future: isolation, quarantine and Recovery Mode (0.3.x and V0.4)
 
 Criteria proposed by [ADR-0013](adr/ADR-0013-isolation-quarantine-recovery-mode.md) for accepting an implementation.

@@ -1340,6 +1340,12 @@ and `procStart`, plus the leaf name of `cwd` (for project naming) - the full wor
 Reports contain paths and aggregates. `-ExportJson` output includes the machine name,
 user names, SIDs, profile paths and project slugs: review it before sharing.
 
+**Note (V1.0 S2): the two exports treat identities differently, on purpose.** `audit -ExportJson` (`atm.audit/1`)
+writes `machine`, `user`, `sid` and `path` as they are, without pseudonyms: it is a local file the operator asks for,
+created outside the audited directories. `atm.diagnose/2` pseudonymizes paths and session identifiers with a keyed
+pseudonym ([ADR-0010](adr/ADR-0010-pseudonymization-of-exported-identifiers.md)). A pseudonymized audit export would be
+a new version of the format and a decision of its own. See [FORMATS.md](FORMATS.md).
+
 CI artifacts (FINAL-B): test reports, install e2e evidence, static analysis and the release package pass through
 `tools\Protect-AtmArtifact.ps1` before upload. It replaces the runner's identifiers (paths under the profile and TEMP,
 account, machine, domain, profile folder names, account SIDs) with placeholders, then runs the privacy scanner. It

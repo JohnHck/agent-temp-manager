@@ -9,6 +9,11 @@ renders it, and by the tests. If written, it holds the machine name, the account
 [ADR-0010](adr/ADR-0010-pseudonymization-of-exported-identifiers.md). The V0.1 audit export (`agent-temp audit
 -ExportJson`) is a different document and is unchanged.
 
+**Format class: stable** (V1.0 S2, decision V10-D3 (a)). This document is the field-level specification of
+`atm.diagnose/2`. [FORMATS.md](FORMATS.md) holds the contract of every format: the classes, the evolution and
+deprecation rules, and the golden test of this version. The audit export named above carries `atm.audit/1` since
+V1.0 S2 and is described there.
+
 Rules:
 
 * Codes (statuses, reasons, states, evidence codes) are stable, upper-case and language-neutral; only `language`
