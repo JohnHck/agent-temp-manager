@@ -1329,7 +1329,7 @@ before the uninstall, with every gate closed. The disposable-machine guard is un
 | `multi-user-clean-gate-closed` | `clean -AllowListFile` with both old roots and `-IncludeOtherUsers`: exit 3, with `EXCLUSAO_REAL_DESABILITADA_V0_1` (gate reached) or `NENHUM_CAMINHO_ELEGIVEL` (blocked before the gate), the code recorded; both roots intact, content included |
 | `multi-user-audit-as-A-not-elevated` | `audit -ExportJson` as A, not elevated (`elevated administrator: NO`): A's own 2 partitions; no partition of B; B's profile `INACESSIVEL` or `TEMP_NAO_VERIFICAVEL`, never `SEM_TEMP_CLAUDE` ("cannot look" is never "nothing found") |
 | `multi-user-f05-two-owners` | F-05's owner rule with two real owners (below) |
-| `multi-user-no-new-files` | the listing again, identical to the one before the audits, previews, clean and F-05 |
+| `multi-user-no-new-files` | the listing again, against the one before the audits, previews, clean and F-05: no file or folder added or removed, no size changed, no file written (its last write time). A folder whose last write time alone changed is not a new file: it is counted and named in the step's detail (label, area and relative name), never hidden |
 
 * **F-05.** A root of another owner inside a base never reaches the F-05 attribution rule: that rule reads the owner of
   the base folder only (`src/lib/Engine.Audit.ps1`, F05-OWNER-ATTRIBUTION), and such a root meets the gate's owner check

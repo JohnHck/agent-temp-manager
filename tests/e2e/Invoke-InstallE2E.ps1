@@ -1163,8 +1163,9 @@ function Invoke-S5Agent([string]$ArgLine, [string]$File) {
     [IO.File]::WriteAllText($File, $text)
     return [pscustomobject]@{ Code = $code; Text = $text }
 }
-function Get-S5Parts($Export, $User) { return @(@($Export.partitions) | Where-Object { [string]$_.scope -eq $User.Scope }) }
-function Get-S5Root([object[]]$Parts, [string]$Id) { return @($Parts | Where-Object { (Split-Path -Leaf ([string]$_.path)) -eq $Id }) }
+# Always an array (one element or none included: under StrictMode a single object has no Count).
+function Get-S5Parts($Export, $User) { return , @(@($Export.partitions) | Where-Object { [string]$_.scope -eq $User.Scope }) }
+function Get-S5Root([object[]]$Parts, [string]$Id) { return , @(@($Parts) | Where-Object { (Split-Path -Leaf ([string]$_.path)) -eq $Id }) }
 function Get-S5Listing($Users) {
     # Each user's base, recursively, and the product's folders and .claude of each profile (existence, then recursively):
     # relative name, length (-1 for a folder) and last write time.
@@ -1407,9 +1408,23 @@ Step 'multi-user-f05-two-owners' {
 Step 'multi-user-no-new-files' {
     if ($null -eq $script:s5) { throw 'fixture da S5 indisponivel' }
     $after = Get-S5Listing $script:s5.Users
-    $diff = @(Compare-Object -ReferenceObject $script:s5.Before -DifferenceObject $after)
-    Assert ($diff.Count -eq 0) "listagem antes/depois diferente: $($diff.Count) linha(s)"
-    "both bases and the product's folders and .claude of both profiles identical before and after the audits, previews, clean and F-05 ($($after.Count) line(s), $(@($after | Where-Object { $_ -like '*|UNREADABLE|*' }).Count) folder(s) not listable by this account)"
+    # Per entry (label, area, relative name: synthetic fixture names or the product's own, never a profile path or an
+    # account): ADDED or REMOVED (a new or missing file or folder), SIZE (length changed), FILETIME (a file written) or
+    # TIME (a folder's last write time only: reported, never a new file).
+    $index = { param([string[]]$L) $m = @{}; foreach ($x in @($L)) { $p = $x.Split('|'); $m[(@($p[0..([Math]::Min(2, $p.Count - 1))]) -join '|')] = $p }; $m }
+    $b = & $index $script:s5.Before; $a = & $index $after
+    $changes = New-Object System.Collections.Generic.List[string]
+    foreach ($key in @($a.Keys | Sort-Object)) {
+        if (-not $b.ContainsKey($key)) { $changes.Add("ADDED $key"); continue }
+        $pa = $a[$key]; $pb = $b[$key]
+        if ($pa.Count -ge 5 -and $pb.Count -ge 5) { if ($pa[3] -cne $pb[3]) { $changes.Add("SIZE $key") } elseif ($pa[4] -cne $pb[4]) { $changes.Add($(if ($pa[3] -ceq '-1') { "TIME $key" } else { "FILETIME $key" })) } }
+    }
+    foreach ($key in @($b.Keys | Sort-Object)) { if (-not $a.ContainsKey($key)) { $changes.Add("REMOVED $key") } }
+    $hard = @($changes | Where-Object { -not $_.StartsWith('TIME ') })
+    $time = @($changes | Where-Object { $_.StartsWith('TIME ') })
+    $show = { param([string[]]$C) (@($C) | Select-Object -First 12) -join ' ; ' }
+    Assert ($hard.Count -eq 0) "listagem antes/depois: $($hard.Count) entrada(s) nova(s), removida(s), com tamanho alterado ou arquivo gravado: $(& $show $hard)"
+    "no file or folder added, removed or resized and no file written in both bases and the product's folders and .claude of both profiles across the audits, previews, clean and F-05 ($($after.Count) line(s), $(@($after | Where-Object { $_ -like '*|UNREADABLE|*' }).Count) folder(s) not listable by this account); folders with only their last write time changed: $($time.Count)$(if ($time.Count) { ' (' + (& $show $time) + ')' })"
 }
 # The fixture helpers end by themselves on their stop files (never terminated), whatever the steps above did.
 foreach ($h in @($script:s5Holders)) { try { [IO.File]::WriteAllText($h.Stop, '1') } catch { $null = $_ } }
