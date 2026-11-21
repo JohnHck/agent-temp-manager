@@ -21514,7 +21514,7 @@ exit 0
         Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('preventive monitoring: DISABLED in this release (monitor status only reads the history; nothing is collected or scheduled)')) "version: saida $($r.Exit)"
         Assert-Eq (Get-AtmPathPresence $monRealFolder) $before 'pasta real do usuario inalterada'
     }
-    Test-Case 'V0.5 M1' 'M1 (estatico): uma unica atribuicao da trava e de cada costura; cada funcao que escreve le a trava antes de tudo; leitores sem escrita; motor sem diagnose, clean, isolamento, recuperacao, agendador, lock B8 nem rede; a remocao numa unica funcao; CreateNewDirectory e o mutex so depois da trava; motor so em monitor e version, na verificacao de integridade, no instalador e no manifesto; nove travas; build, e2e e GUI com a nona' {
+    Test-Case 'V0.5 M1' 'M1 (estatico): uma unica atribuicao da trava e de cada costura; cada funcao que escreve le a trava antes de tudo; leitores sem escrita; motor sem diagnose, clean, isolamento, recuperacao, agendador, lock B8 nem rede; a remocao numa unica funcao; CreateNewDirectory e o mutex so depois da trava; motor so em monitor e version e, desde a V0.5 M5, em audit (a linha de alertas, trava primeiro) e no lancamento da TUI e da GUI (telas so de leitura), na verificacao de integridade, no instalador e no manifesto; nove travas; build, e2e e GUI com a nona' {
         $all = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Rel = $_.FullName.Substring($srcDir.Length + 1); Text = [IO.File]::ReadAllText($_.FullName) } })
         $monFile = Join-Path $srcDir 'lib\Engine.Monitor.ps1'
         $mon = [IO.File]::ReadAllText($monFile)
@@ -22117,7 +22117,7 @@ exit 0
         $script:caseSkipped = $true
         $script:caseNote = 'a trava so abre dentro do processo da suite; o lancador roda num processo filho com a trava fechada da copia (o M1 cobre essa saida). As linhas com a trava aberta sao conferidas pela funcao de apresentacao neste processo'
     }
-    Test-Case 'V0.5 M2' 'M2 (estatico): limiares, tendencias e alertas so leem - chamadas so de uma lista fechada, nenhum & nem ponto, nenhuma escrita, motor, processo, agendador nem rede (controle positivo); so com a trava aberta e so pelo status; cada comando citado e um verbo do agent-temp.ps1 (controle positivo); lista fechada de alertas sem MON_RECOVERY; monitor.json so lido; a remocao segue numa funcao; GUI e TUI sem a M2; textos nos dois idiomas' {
+    Test-Case 'V0.5 M2' 'M2 (estatico): limiares, tendencias e alertas so leem - chamadas so de uma lista fechada, nenhum & nem ponto, nenhuma escrita, motor, processo, agendador nem rede (controle positivo); so com a trava aberta e so pelo status; cada comando citado e um verbo do agent-temp.ps1 (controle positivo); lista fechada de alertas sem MON_RECOVERY; monitor.json so lido; a remocao segue numa funcao; GUI e TUI sem a M2, salvo os nomes exatos de leitura da V0.5 M5 (e as chaves do catalogo no modelo da GUI); textos nos dois idiomas' {
         $monFile = Join-Path $srcDir 'lib\Engine.Monitor.ps1'
         $mon = [IO.File]::ReadAllText($monFile)
         $strip = { param([string]$T) [regex]::Replace([regex]::Replace($T, '(?s)<#.*?#>', ''), '(?m)#.*$', '') }
@@ -22690,7 +22690,7 @@ exit 0
         Assert-Eq (Get-AtmPathPresence $monRealFolder) $before 'pasta real do usuario inalterada'
     }
 
-    Test-Case 'V0.5 M3a' 'M3a (estatico): sem Schedule.Service no motor (o agendador so por Connect-AtmTaskScheduler); registrar so pelo enable, a definicao so pelo registro, o enable so pela CLI no verbo monitor e a execucao so pelo ponto de entrada; recusas, plano, frase e registro nessa ordem; nenhuma remocao de tarefa ou pasta no monitoramento; os auxiliares de outros motores declarados e so nas funcoes da tarefa; o caminho do coletor so nas bibliotecas do ponto de entrada; o ponto de entrada sem parametros, integridade antes de carregar, so ASCII e sem Write-Host; -IntervalHours so no monitor (e na recusa do recover); GUI e TUI sem as funcoes novas; nomes exatos na lista proibida da GUI; no AtmRequiredFiles; textos nos dois idiomas; a area nunca registra tarefa real' {
+    Test-Case 'V0.5 M3a' 'M3a (estatico): sem Schedule.Service no motor (o agendador so por Connect-AtmTaskScheduler); registrar so pelo enable, a definicao so pelo registro, o enable so pela CLI no verbo monitor e a execucao so pelo ponto de entrada; recusas, plano, frase e registro nessa ordem; nenhuma remocao de tarefa ou pasta no monitoramento; os auxiliares de outros motores declarados e so nas funcoes da tarefa; o caminho do coletor so nas bibliotecas do ponto de entrada; o ponto de entrada sem parametros, integridade antes de carregar, so ASCII e sem Write-Host; -IntervalHours so no monitor (e na recusa do recover); GUI e TUI sem as funcoes novas (desde a V0.5 M5, so a tela de leitura da TUI le o estado da tarefa; a GUI nunca); nomes exatos na lista proibida da GUI; no AtmRequiredFiles; textos nos dois idiomas; a area nunca registra tarefa real' {
         $monFile = Join-Path $srcDir 'lib\Engine.Monitor.ps1'
         $strip = { param([string]$T) [regex]::Replace([regex]::Replace($T, '(?s)<#.*?#>', ''), '(?m)#.*$', '') }
         $code = & $strip ([IO.File]::ReadAllText($monFile))
