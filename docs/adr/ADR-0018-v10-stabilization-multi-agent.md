@@ -183,7 +183,7 @@ No member's meaning changes. The engine's safety logic (flags, gates, B1, RECENT
 | recovery log | `atm.recoverlog/1` (`Engine.Recover.ps1:337`, `:430`) | `recover start/undo` (past their gate) | `recover undo` (provenance) and the operator | **log**, read back strictly by `undo` |
 | pseudonym domains | `atm-session/2`, `atm-partition/1`, `atm-repository/1`, `atm-worktree/1`, `atm-repository-target/1`, `atm-virtual-machine/1`, `atm-key-id/1` (`Engine.Diagnose.ps1:2665-2973`, `:4126`) | the diagnose | the pseudonyms in `atm.diagnose/2` | **internal hash domains** |
 | `manifest.json`, `install-state.json` | none | the installer | the launcher and `verify` | **internal** |
-| exit codes | `docs/USAGE.md:1372-1386`, plus per-verb lists (`:229`, `:419`, `:687`, `:975`, `:1013`, `:1220`, `:1316`) | every verb | scripts and the scheduled tasks | **stable** |
+| exit codes | `docs/USAGE.md:1374-1387`, plus per-verb lists (`:229`, `:419`, `:687`, `:975`, `:1013`, `:1220`, `:1316`) | every verb | scripts and the scheduled tasks | **stable** |
 | human-readable text (audit, TUI, GUI, `version`) | none | the reports | people | **not stable** (translated text; never parse it) |
 
 **Exit codes per verb, as documented at `d7b03a9`.** This table is the starting point of the per-verb contract proposed
@@ -191,7 +191,7 @@ in 2.3; it adds no code and changes none.
 
 | Verb | Codes | Source |
 |---|---|---|
-| any (launcher) | `1` unknown command; `4` no manifest (`verify` only); `5` integrity mismatch, nothing loaded | `docs/USAGE.md:1374-1387` |
+| any (launcher) | `0` ok; `1` unknown command; `4` no manifest (`verify` only); `5` integrity mismatch, nothing loaded; `10` unexpected error (every verb, besides its own codes below) | `docs/USAGE.md:1374-1387` |
 | `diagnose` | `0` ran (partial coverage included); `2` key file refused; `10` export refused or not written, or unexpected | `docs/USAGE.md:229-231` |
 | `clean` | `2` invalid invocation; `3` aborted, nothing deleted; `6` interactive console needed (only with deletion enabled) | `docs/USAGE.md:1374-1387` |
 | `authorize` | `0` recorded; `2` missing `-Path` or `-RecordFile`; `3` not recorded; `6` no interactive console | `docs/USAGE.md:419-421` |
@@ -244,7 +244,7 @@ the code together with the verb.
 | `atm.diagnose/2` names its field `schemaVersion`; the logs and the monitoring record name it `schema` | keep both as they are and document the difference | renaming would break every reader of `atm.diagnose/2` |
 | `atm-recover-plan/1` and `atm-recover-undo-plan/1` use `atm-x/n`; the documents use `atm.x/n` | **no change.** `atm-x/n` is the convention of hash domains (the pseudonym domains use it too); these two are hash inputs, not documents. Document the two conventions | renaming would change every plan id, so a plan shown before an update would no longer match at `recover start`, and the `undo` provenance of recorded runs would break |
 | `audit -ExportJson` writes raw `machine`, `user`, `sid` and `path` (`Report.ps1:230-234`); `atm.diagnose/2` pseudonymizes (ADR-0010) | keep: the audit export is a local file the operator asks for, outside the bases. Document the difference in the format's document and in SECURITY-MODEL. A pseudonymized audit export would be `atm.audit/2` and a decision of its own | no |
-| Exit codes overload `2`, `3`, `6` and `10` across verbs (`USAGE.md:1374-1386`) | keep, and publish a per-verb table as the stable contract | a renumbering would break the scheduled tasks and scripts |
+| Exit codes overload `2`, `3`, `6` and `10` across verbs (`USAGE.md:1374-1387`) | keep, and publish a per-verb table as the stable contract | a renumbering would break the scheduled tasks and scripts |
 
 ## 3. "A new provider can be added without changing the engines"
 
