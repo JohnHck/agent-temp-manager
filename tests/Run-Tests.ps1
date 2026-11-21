@@ -24753,15 +24753,21 @@ $got = $m.WaitOne(0)
         $root = Join-Path $sandbox 's1-golden'
         [void][IO.Directory]::CreateDirectory($root)
         $gfx = New-AtmS1GoldenFixture -Root $root -OwnerSid $testOwnerSid -NowUtc $nowFuture
-        foreach ($set in @(@('so claude-code', $null), @('com o fixture', @((Get-AtmProviders)[0], (New-AtmS1FixtureProvider))))) {
-            $rows = @(Get-AtmS1GoldenRows -Fixture $gfx -NowUtc $nowFuture -ConfigDir $cfgDir -Providers $set[1])
-            $diff = New-Object System.Collections.Generic.List[string]
-            for ($k = 0; $k -lt [Math]::Max($rows.Count, $s1GoldenExpected.Count); $k++) {
-                $act = $(if ($k -lt $rows.Count) { $rows[$k] } else { '<nada>' }); $exp = $(if ($k -lt $s1GoldenExpected.Count) { $s1GoldenExpected[$k] } else { '<nada>' })
-                if ($act -cne $exp) { $diff.Add("[$k] esperado '$exp' obtido '$act'") }
+        # The same runtime-evidence sources as when the rows were generated (no service, no VM), pinned in this case so
+        # that no earlier area's state can reach the preview; restored afterwards.
+        $prevSources = $script:AtmRuntimeEvidenceSources
+        $script:AtmRuntimeEvidenceSources = @{ ServiceSource = { param($Names) @() }; VirtualizationSource = { param($Op) @() } }
+        try {
+            foreach ($set in @(@('so claude-code', $null), @('com o fixture', @((Get-AtmProviders)[0], (New-AtmS1FixtureProvider))))) {
+                $rows = @(Get-AtmS1GoldenRows -Fixture $gfx -NowUtc $nowFuture -ConfigDir $cfgDir -Providers $set[1])
+                $diff = New-Object System.Collections.Generic.List[string]
+                for ($k = 0; $k -lt [Math]::Max($rows.Count, $s1GoldenExpected.Count); $k++) {
+                    $act = $(if ($k -lt $rows.Count) { $rows[$k] } else { '<nada>' }); $exp = $(if ($k -lt $s1GoldenExpected.Count) { $s1GoldenExpected[$k] } else { '<nada>' })
+                    if ($act -cne $exp) { $diff.Add("[$k] esperado '$exp' obtido '$act'") }
+                }
+                Assert-True ($diff.Count -eq 0 -and $rows.Count -eq $s1GoldenExpected.Count) "$($set[0]): $($rows.Count) linhas, diferencas: $($diff -join ' | ')"
             }
-            Assert-True ($diff.Count -eq 0 -and $rows.Count -eq $s1GoldenExpected.Count) "$($set[0]): $($rows.Count) linhas, diferencas: $($diff -join ' | ')"
-        }
+        } finally { $script:AtmRuntimeEvidenceSources = $prevSources }
     }
 } finally {
     # The console encoding of this process is restored, even when the suite aborts (a redirected console may refuse it).

@@ -38,8 +38,10 @@ it completely and does not change its number.
 | `GetActivityEvidence` | script block `{ param($ProfileInfo, $Scope, $RootName) }` | `{ Readable; LastWriteUtc }` of the activity artifact of one session root (`$Scope` = scope directory name, `$RootName` = root directory name). |
 | `GetProjectKey` | script block `{ param($Scope, $ProfilePath) }` | `{ IsHome; Key }`, used only to name projects in reports. |
 
-`Register-AtmProvider` checks, in this order, and refuses with one error key per rule. Every message names the member,
-and the keys added in V1.0 (`err.providerTempMember`, `err.providerPattern`) never repeat the refused value:
+`Register-AtmProvider` checks, in this order, and refuses with one error key per rule. Every message names the member.
+The keys added in V1.0 (`err.providerTempMember`, `err.providerPattern`) never repeat the refused value; the older
+keys (`err.providerContract`, `err.providerCapabilities`, `err.providerId`, `err.providerSubdir`) also show the
+refused value:
 
 | Rule | Key |
 |---|---|
