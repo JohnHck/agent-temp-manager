@@ -1232,6 +1232,34 @@ or summary call, and closed again. The TUI gets the statuses through its two rea
 NAO_TESTADO: pressing `M` or the button `ScreenM` in a real window with the engine's real status, and `M` in a real
 console with a keyboard.
 
+## Provider contract conformance in the suite (V1.0 S1)
+
+The area "Contrato de provider" of `tests/Run-Tests.ps1` ([ADR-0018](adr/ADR-0018-v10-stabilization-multi-agent.md)
+phase S1, sections 3.1 and 3.2) runs in both shells. It checks the contract of [PROVIDERS.md](PROVIDERS.md) against the
+two shipped providers (`claude-code`, `claude-desktop`) and a fixture provider, `atm-conformance-fixture` (`temp` and
+`runtime`), which exists only as text inside the suite: it is registered in the suite process or written into a copy of
+`src` in the sandbox, never into the repository's `src/providers/` or the package. Every case that registers a provider
+restores the registry afterwards.
+
+| Case | What it checks |
+|---|---|
+| Validation | every registration rule, one refused fixture per rule with the exact error key (`err.providerMember`, `err.providerId`, `err.providerSubdir`, `err.providerCapabilities`, `err.providerRuntimeMember`); the v1 case-insensitive `Id` and a `GetWorktreeHints` script block accepted; the same `Id` replaces the earlier registration |
+| Stricter registration | V10-D5 (b): with `temp`, each of the five `Get*` members not a script block gives `err.providerTempMember`, and `ScopePattern`/`RootPattern` that do not compile give `err.providerPattern`, in v1 and v2; both languages; the message names the member and never the value; a `[regex]` is accepted |
+| Unknown version | `3`, `' 2 '`, `'2.0'`, `2.0`, `-2`, `$null`, `'2'` and `@(2)` refused with `err.providerContract`; in diagnose and recover each becomes `PROVIDER_CONTRACT_INVALID` and the other providers run |
+| Shipped providers | both shipped providers and the fixture pass the stricter registration |
+| Cannot look / nothing found | `Readable = $false` gives `SESSION_REGISTRY_UNREADABLE` or `TRANSCRIPTS_UNREADABLE`, never `DEAD` or "no activity" (claude-code and the fixture); `UNVERIFIABLE` gives `SESSION_LIVENESS_UNVERIFIABLE`; a `temp` member that throws refuses the inventory (nothing classified) and diagnose reports `inventory` `FAILED`; a runtime member that throws gives `HINT_FAILED_*` (fixture and claude-desktop) |
+| Liveness | the provider-side rule over snapshot fixtures: equal creation time and recorded start is `LIVE`, within 2 s `LIVE`, beyond `PID_REUSED`, no start `LIVE_UNVERIFIED`; a PID that exists is never `DEAD`; a failed snapshot is never `DEAD`; the checker refuses a provider that answers `DEAD` for a present PID |
+| No credential read | decoys `.credentials.json` and `*.key` (claude-code and the fixture), created by the case in its own sandbox and held open with `FileShare.None`, so any open by a provider would fail: no member result and no classification changes. No ACL is changed. Static part: no provider file names a credential file outside a deny list (planted in a copy: refused; inside a `*DenyList`: accepted) |
+| No write | the profile tree's listing is identical after each member of claude-code, the fixture and claude-desktop and after an inventory; static part: provider files use only commands, static members, methods and types from a closed read-only list (a write call planted in a copy: refused) |
+| No weaker gate | a provider answering `LIVE`, `Readable` and recent activity blocks; with the deletion gate closed the preview stays at the gate's result and clean is aborted by the gate (nothing deleted); one fixture per hard flag, never eligible, even with the most permissive provider |
+| Static literal proof | no `src/lib/Engine.*.ps1` holds a provider id or display name as a string literal, outside the closed set of one entry (`Engine.Clean.ps1`, the B1 restricted exception); literals planted in a copy are refused, a comment is ignored |
+| Dry addition | `src` copied into the sandbox, the fixture provider file added to `providers\`, the copy's manifest rebuilt; `verify`, `audit` and `diagnose` in a child process against the copy; the fixture appears; the `Engine.*.ps1` hashes equal the originals |
+| Fixture only in tests | no file of `src` (what the package carries) names the fixture's id or display name; `src\providers` holds only the two shipped providers |
+| Golden comparison | `Invoke-AtmInventory` over a fixed fixture (four profiles; live, reused, dead and unverified sessions; recent and old transcripts; a direct reference; unrecognized scope, a non-session folder and loose files; a second run with one uninspectable process, where the B1 restricted exception shows), compared field by field with rows generated at `072c0e5`, before the stricter registration: class, sorted flags, the gate's category, the B1 result (`ProcessCoverageGate`), `TRANSCRIPT_RECENT` and the preview's category; identical again with the fixture provider registered alongside |
+
+The contract has no read or write seam in the engine, so the two "no read" and "no write" cases detect an attempt
+indirectly: an exclusive hold on the decoys, and a stable listing of the profile tree, each with a static closed list.
+
 ## Future: isolation, quarantine and Recovery Mode (0.3.x and V0.4)
 
 Criteria proposed by [ADR-0013](adr/ADR-0013-isolation-quarantine-recovery-mode.md) for accepting an implementation.

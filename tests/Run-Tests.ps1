@@ -24156,6 +24156,613 @@ $got = $m.WaitOne(0)
         $script:caseSkipped = $true
         $script:caseNote = 'ninguem pressiona M nem o botao ScreenM numa janela real com o status real do motor, nem a tecla M num console real (a janela de P6 so confere o botao ScreenM na ordem de tabulacao e o seu texto no catalogo); o modelo coberto: Get-AtmGuiPrevmonLines, a tela prevmon de Get-AtmGuiScreen, Invoke-AtmGuiNavKey M, Invoke-AtmGuiPrevmon e Invoke-AtmGuiNavPrevmon pelo seam, o tick e o F5; a TUI por Start-AtmTui sem console com teclas, leitores e quadros injetados'
     }
+    # ------------------------------------------------------------------ V10-S1: provider contract 2 (ADR-0018 S1)
+    # The conformance suite of the provider contract (docs/PROVIDERS.md, "Contract 2"): validation of every registration
+    # rule with its exact error key, the stricter registration of V10-D5 (b), the unknown version refused (registration,
+    # diagnose, recover), "cannot look" against "nothing found", the provider-side liveness rule, no credential read
+    # (decoys held with FileShare.None: no seam exists, any open would fail), no write (stable tree listing before and
+    # after; a closed list of read-only calls), no provider weakens a gate, the static proof of provider literals in the
+    # engines, the dry addition of a provider to a copy, and the golden comparison of the classification.
+    # >>> V10-S1 golden fixture (begin). Self-contained: fixed names, times relative to -NowUtc only, an explicit identity
+    # and process list, no lock probe. The same text generated the expected rows at 072c0e5, before the stricter
+    # registration (Get-AtmS1GoldenRows output, embedded below as $s1GoldenExpected).
+    function New-AtmS1GoldenFixture {
+        param([string]$Root, [string]$OwnerSid, [datetime]$NowUtc)
+        $u = @{}
+        foreach ($n in 1..13) { $u[$n] = ('{0:x8}-0000-4000-8000-{0:x12}' -f $n) }
+        $mkProfile = {
+            param([string]$Name, [hashtable]$EnvValues, [bool]$EnvKnown)
+            $pp = Join-Path $Root $Name
+            $temp = Join-Path $pp 'AppData\Local\Temp'
+            [void][IO.Directory]::CreateDirectory((Join-Path $temp 'claude'))
+            [void][IO.Directory]::CreateDirectory((Join-Path $pp '.claude\sessions')); [void][IO.Directory]::CreateDirectory((Join-Path $pp '.claude\projects'))
+            [pscustomobject]@{ Sid = $OwnerSid; UserName = "GOLD\$Name"; ProfilePath = $pp; Loaded = $true; Special = $false; Origin = 'Test'; EnvStatus = 'OK'
+                TempCandidates = @([pscustomobject]@{ TempPath = $temp; Source = 'test' }); EnvValues = $EnvValues; EnvKnown = $EnvKnown; Notes = @() }
+        }
+        $mkRoot = {
+            param($P, [string]$Slug, [string]$Name)
+            $d = Join-Path (Join-Path (Join-Path $P.TempCandidates[0].TempPath 'claude') $Slug) $Name
+            [void][IO.Directory]::CreateDirectory((Join-Path $d 'sub'))
+            [IO.File]::WriteAllBytes((Join-Path $d 'a.txt'), (New-Object byte[] 100)); [IO.File]::WriteAllBytes((Join-Path $d 'sub\b.bin'), (New-Object byte[] 2048))
+            return $d
+        }
+        $mkSession = {
+            param($P, [int]$ProcId, [string]$SessionId, $StartUtc)
+            $o = [ordered]@{ pid = $ProcId; sessionId = $SessionId }
+            if ($null -ne $StartUtc) { $o['procStart'] = [string]([datetime]$StartUtc).ToFileTimeUtc() }
+            [IO.File]::WriteAllText((Join-Path $P.ProfilePath ('.claude\sessions\' + $ProcId + '.json')), ($o | ConvertTo-Json -Compress))
+        }
+        $mkTranscript = {
+            param($P, [string]$Slug, [string]$Name, [datetime]$WriteUtc)
+            $dir = Join-Path $P.ProfilePath ('.claude\projects\' + $Slug)
+            [void][IO.Directory]::CreateDirectory($dir)
+            $f = Join-Path $dir ($Name + '.jsonl'); [IO.File]::WriteAllText($f, '{}'); [IO.File]::SetLastWriteTimeUtc($f, $WriteUtc)
+        }
+        $tk = $NowUtc.ToUniversalTime().AddDays(-12).Ticks
+        $t0 = New-Object DateTime (($tk - ($tk % 10000000L)), ([DateTimeKind]::Utc))
+        $slug = 'C--gold-proj'
+        $a = & $mkProfile 'gold-a' @{} $true
+        $roots = @{}
+        foreach ($n in 1..9) { $roots[$n] = & $mkRoot $a $slug $u[$n] }
+        & $mkSession $a 4242 $u[2] $t0          # LIVE: the recorded start equals the process creation time
+        & $mkSession $a 4343 $u[3] $t0          # PID_REUSED: the process started an hour later
+        & $mkSession $a 9999 $u[4] $t0          # DEAD: no such process
+        & $mkSession $a 4444 $u[5] $null        # LIVE_UNVERIFIED: no recorded start
+        & $mkTranscript $a $slug $u[6] $NowUtc.AddHours(-1)
+        & $mkTranscript $a $slug $u[7] $NowUtc.AddHours(-100)
+        foreach ($f in @((Join-Path $roots[8] 'a.txt'), (Join-Path $roots[8] 'sub\b.bin'))) { [IO.File]::SetLastWriteTimeUtc($f, $NowUtc.AddHours(-1)) }
+        foreach ($d in @((Join-Path $roots[8] 'sub'), $roots[8])) { [IO.Directory]::SetLastWriteTimeUtc($d, $NowUtc.AddHours(-1)) }
+        [void][IO.Directory]::CreateDirectory((Join-Path $a.TempCandidates[0].TempPath ('claude\' + $slug + '\not-a-session')))
+        $null = & $mkRoot $a 'bad slug!' $u[10]
+        [IO.File]::WriteAllBytes((Join-Path $a.TempCandidates[0].TempPath 'claude\loose.txt'), (New-Object byte[] 7))
+        $b = & $mkProfile 'gold-b' @{ CLAUDE_CONFIG_DIR = '\\gold-host\share\cfg' } $true
+        $null = & $mkRoot $b $slug $u[11]
+        $c = & $mkProfile 'gold-c' @{} $true
+        $null = & $mkRoot $c $slug $u[12]
+        [IO.File]::WriteAllText((Join-Path $c.ProfilePath '.claude\sessions\broken.json'), 'not json {')
+        $d = & $mkProfile 'gold-d' @{} $false
+        $null = & $mkRoot $d $slug $u[13]
+        $procs = @(
+            [pscustomobject]@{ ProcessId = 1; Name = 'idle.exe'; ParentProcessId = 0; CommandLine = 'idle.exe'; CreationDate = $t0.AddHours(-1) },
+            [pscustomobject]@{ ProcessId = 4242; Name = 'claude.exe'; ParentProcessId = 1; CommandLine = 'claude.exe'; CreationDate = $t0 },
+            [pscustomobject]@{ ProcessId = 4343; Name = 'claude.exe'; ParentProcessId = 1; CommandLine = 'claude.exe'; CreationDate = $t0.AddHours(1) },
+            [pscustomobject]@{ ProcessId = 4444; Name = 'claude.exe'; ParentProcessId = 1; CommandLine = 'claude.exe'; CreationDate = $t0 },
+            [pscustomobject]@{ ProcessId = 5555; Name = 'tool.exe'; ParentProcessId = 1; CommandLine = ('tool.exe "' + $roots[9] + '"'); CreationDate = $t0 })
+        $procsB1 = @($procs + @([pscustomobject]@{ ProcessId = 860; Name = 'svc-gold.exe'; ParentProcessId = 1; CommandLine = $null; CreationDate = $t0 }))
+        return [pscustomobject]@{ Profiles = @($a, $b, $c, $d); Procs = $procs; ProcsB1 = $procsB1; Identity = [pscustomobject]@{ Sid = $OwnerSid; Name = 'GOLD\owner'; IsAdmin = $false } }
+    }
+    function Get-AtmS1GoldenRows {
+        # One line per partition and run: relative key (profile folder, scope, name, kind; never a path or a SID) and the
+        # class, the sorted flags, the gate category, the B1 result (ProcessCoverageGate) and TRANSCRIPT_RECENT; run B
+        # (one uninspectable process) adds the preview category, where the B1 restricted exception shows.
+        param($Fixture, [datetime]$NowUtc, [string]$ConfigDir, $Providers)
+        $rows = New-Object System.Collections.Generic.List[string]
+        foreach ($run in @(@('A', $Fixture.Procs), @('B', $Fixture.ProcsB1))) {
+            $ia = @{ ProfilesOverride = $Fixture.Profiles; ProcessesOverride = $run[1]; NowUtc = $NowUtc; IdentityOverride = $Fixture.Identity; NoProgress = $true; ConfigDir = $ConfigDir }
+            if ($null -ne $Providers) { $ia['Providers'] = @($Providers) }
+            $inv = Invoke-AtmInventory @ia
+            $pv = @{}
+            if ($run[0] -ceq 'B') { foreach ($r in @(Invoke-AtmPreview -Inventory $inv -InventoryArgs $ia)) { $pv[[string]$r.Partition.Path] = [string]$r.Gate.Category } }
+            foreach ($p in @($inv.Partitions)) {
+                $g = Test-AtmCandidate -Partition $p -Inventory $inv -SkipLockProbe
+                $key = '{0}|{1}|{2}|{3}|{4}|{5}' -f $run[0], (Split-Path -Leaf $p.ProfilePath), $p.Provider, $p.Slug, $(if ($p.Kind -ceq 'BaseLooseFiles') { '<loose>' } else { $p.Name }), $p.Kind
+                $fl = [string[]]@($p.Flags); [Array]::Sort($fl, [StringComparer]::Ordinal)
+                $tr = $(if (@($p.Flags) -ccontains 'TRANSCRIPT_RECENT') { 'yes' } else { 'no' })
+                $line = '{0} => class={1}; flags={2}; category={3}; b1={4}; transcriptRecent={5}' -f $key, $p.Class, ($fl -join ','), $g.Category, $g.ProcessCoverageGate, $tr
+                if ($run[0] -ceq 'B') { $line += '; preview=' + $(if ($pv.ContainsKey([string]$p.Path)) { $pv[[string]$p.Path] } else { '-' }) }
+                $rows.Add($line)
+            }
+        }
+        $out = $rows.ToArray(); [Array]::Sort($out, [StringComparer]::Ordinal)
+        return $out
+    }
+    # <<< V10-S1 golden fixture (end)
+    $s1GoldenExpected = @(
+        'A|gold-a|claude-code|C--gold-proj|00000001-0000-4000-8000-000000000001|SessionRoot => class=ORPHAN_SUSPECTED; flags=; category=ELIGIBLE; b1=PASSED; transcriptRecent=no',
+        'A|gold-a|claude-code|C--gold-proj|00000002-0000-4000-8000-000000000002|SessionRoot => class=ACTIVE_EVIDENCE; flags=; category=BLOCKED; b1=NOT_EVALUATED; transcriptRecent=no',
+        'A|gold-a|claude-code|C--gold-proj|00000003-0000-4000-8000-000000000003|SessionRoot => class=ORPHAN_SUSPECTED; flags=; category=ELIGIBLE; b1=PASSED; transcriptRecent=no',
+        'A|gold-a|claude-code|C--gold-proj|00000004-0000-4000-8000-000000000004|SessionRoot => class=ORPHAN_SUSPECTED; flags=; category=ELIGIBLE; b1=PASSED; transcriptRecent=no',
+        'A|gold-a|claude-code|C--gold-proj|00000005-0000-4000-8000-000000000005|SessionRoot => class=LIVENESS_UNKNOWN; flags=SESSION_PID_ALIVE_UNVERIFIED; category=INVESTIGATE; b1=NOT_EVALUATED; transcriptRecent=no',
+        'A|gold-a|claude-code|C--gold-proj|00000006-0000-4000-8000-000000000006|SessionRoot => class=LIVENESS_UNKNOWN; flags=TRANSCRIPT_RECENT; category=INVESTIGATE; b1=NOT_EVALUATED; transcriptRecent=yes',
+        'A|gold-a|claude-code|C--gold-proj|00000007-0000-4000-8000-000000000007|SessionRoot => class=ORPHAN_SUSPECTED; flags=; category=ELIGIBLE; b1=PASSED; transcriptRecent=no',
+        'A|gold-a|claude-code|C--gold-proj|00000008-0000-4000-8000-000000000008|SessionRoot => class=RECENT; flags=; category=BLOCKED; b1=NOT_EVALUATED; transcriptRecent=no',
+        'A|gold-a|claude-code|C--gold-proj|00000009-0000-4000-8000-000000000009|SessionRoot => class=ACTIVE_EVIDENCE; flags=; category=BLOCKED; b1=NOT_EVALUATED; transcriptRecent=no',
+        'A|gold-a|claude-code|C--gold-proj|not-a-session|UnrecognizedDir => class=LIVENESS_UNKNOWN; flags=NOT_SESSION_ROOT; category=BLOCKED; b1=NOT_EVALUATED; transcriptRecent=no',
+        'A|gold-a|claude-code|bad slug!|0000000a-0000-4000-8000-00000000000a|SessionRoot => class=LIVENESS_UNKNOWN; flags=UNRECOGNIZED_SLUG; category=BLOCKED; b1=NOT_EVALUATED; transcriptRecent=no',
+        'A|gold-a|claude-code||<loose>|BaseLooseFiles => class=LIVENESS_UNKNOWN; flags=NOT_SESSION_ROOT; category=BLOCKED; b1=NOT_EVALUATED; transcriptRecent=no',
+        'A|gold-b|claude-code|C--gold-proj|0000000b-0000-4000-8000-00000000000b|SessionRoot => class=LIVENESS_UNKNOWN; flags=SESSION_REGISTRY_UNREADABLE,TRANSCRIPTS_UNREADABLE; category=INVESTIGATE; b1=NOT_EVALUATED; transcriptRecent=no',
+        'A|gold-c|claude-code|C--gold-proj|0000000c-0000-4000-8000-00000000000c|SessionRoot => class=LIVENESS_UNKNOWN; flags=SESSION_REGISTRY_ENTRY_UNPARSEABLE; category=INVESTIGATE; b1=NOT_EVALUATED; transcriptRecent=no',
+        'A|gold-d|claude-code|C--gold-proj|0000000d-0000-4000-8000-00000000000d|SessionRoot => class=LIVENESS_UNKNOWN; flags=CONFIG_DIR_UNKNOWN; category=INVESTIGATE; b1=NOT_EVALUATED; transcriptRecent=no',
+        'B|gold-a|claude-code|C--gold-proj|00000001-0000-4000-8000-000000000001|SessionRoot => class=ORPHAN_SUSPECTED; flags=; category=BLOCKED; b1=BLOCKED; transcriptRecent=no; preview=ELIGIBLE_WITH_DECLARED_RISK',
+        'B|gold-a|claude-code|C--gold-proj|00000002-0000-4000-8000-000000000002|SessionRoot => class=ACTIVE_EVIDENCE; flags=; category=BLOCKED; b1=NOT_EVALUATED; transcriptRecent=no; preview=BLOCKED',
+        'B|gold-a|claude-code|C--gold-proj|00000003-0000-4000-8000-000000000003|SessionRoot => class=ORPHAN_SUSPECTED; flags=; category=BLOCKED; b1=BLOCKED; transcriptRecent=no; preview=ELIGIBLE_WITH_DECLARED_RISK',
+        'B|gold-a|claude-code|C--gold-proj|00000004-0000-4000-8000-000000000004|SessionRoot => class=ORPHAN_SUSPECTED; flags=; category=BLOCKED; b1=BLOCKED; transcriptRecent=no; preview=ELIGIBLE_WITH_DECLARED_RISK',
+        'B|gold-a|claude-code|C--gold-proj|00000005-0000-4000-8000-000000000005|SessionRoot => class=LIVENESS_UNKNOWN; flags=SESSION_PID_ALIVE_UNVERIFIED; category=INVESTIGATE; b1=NOT_EVALUATED; transcriptRecent=no; preview=INVESTIGATE',
+        'B|gold-a|claude-code|C--gold-proj|00000006-0000-4000-8000-000000000006|SessionRoot => class=LIVENESS_UNKNOWN; flags=TRANSCRIPT_RECENT; category=INVESTIGATE; b1=NOT_EVALUATED; transcriptRecent=yes; preview=INVESTIGATE',
+        'B|gold-a|claude-code|C--gold-proj|00000007-0000-4000-8000-000000000007|SessionRoot => class=ORPHAN_SUSPECTED; flags=; category=BLOCKED; b1=BLOCKED; transcriptRecent=no; preview=ELIGIBLE_WITH_DECLARED_RISK',
+        'B|gold-a|claude-code|C--gold-proj|00000008-0000-4000-8000-000000000008|SessionRoot => class=RECENT; flags=; category=BLOCKED; b1=NOT_EVALUATED; transcriptRecent=no; preview=BLOCKED',
+        'B|gold-a|claude-code|C--gold-proj|00000009-0000-4000-8000-000000000009|SessionRoot => class=ACTIVE_EVIDENCE; flags=; category=BLOCKED; b1=NOT_EVALUATED; transcriptRecent=no; preview=BLOCKED',
+        'B|gold-a|claude-code|C--gold-proj|not-a-session|UnrecognizedDir => class=LIVENESS_UNKNOWN; flags=NOT_SESSION_ROOT; category=BLOCKED; b1=NOT_EVALUATED; transcriptRecent=no; preview=BLOCKED',
+        'B|gold-a|claude-code|bad slug!|0000000a-0000-4000-8000-00000000000a|SessionRoot => class=LIVENESS_UNKNOWN; flags=UNRECOGNIZED_SLUG; category=BLOCKED; b1=NOT_EVALUATED; transcriptRecent=no; preview=BLOCKED',
+        'B|gold-a|claude-code||<loose>|BaseLooseFiles => class=LIVENESS_UNKNOWN; flags=NOT_SESSION_ROOT; category=BLOCKED; b1=NOT_EVALUATED; transcriptRecent=no; preview=BLOCKED',
+        'B|gold-b|claude-code|C--gold-proj|0000000b-0000-4000-8000-00000000000b|SessionRoot => class=LIVENESS_UNKNOWN; flags=SESSION_REGISTRY_UNREADABLE,TRANSCRIPTS_UNREADABLE; category=INVESTIGATE; b1=NOT_EVALUATED; transcriptRecent=no; preview=INVESTIGATE',
+        'B|gold-c|claude-code|C--gold-proj|0000000c-0000-4000-8000-00000000000c|SessionRoot => class=LIVENESS_UNKNOWN; flags=SESSION_REGISTRY_ENTRY_UNPARSEABLE; category=INVESTIGATE; b1=NOT_EVALUATED; transcriptRecent=no; preview=INVESTIGATE',
+        'B|gold-d|claude-code|C--gold-proj|0000000d-0000-4000-8000-00000000000d|SessionRoot => class=LIVENESS_UNKNOWN; flags=CONFIG_DIR_UNKNOWN; category=INVESTIGATE; b1=NOT_EVALUATED; transcriptRecent=no; preview=INVESTIGATE'
+    )
+    # The conformance fixture: a test-only provider (contract 2, temp and runtime). It lives only here: never in
+    # src\providers of the repository and never in a package (checked below); the dry addition writes it into a copy.
+    $s1FixtureObjectText = @'
+[pscustomobject]@{
+        Id                  = 'atm-conformance-fixture'
+        DisplayName         = 'ATM conformance fixture'
+        ContractVersion     = 2
+        Capabilities        = @('temp', 'runtime')
+        TempSubdir          = 'atm-conformance-fixture'
+        ScopePattern        = '^scope[0-9]+$'
+        RootPattern         = '^run-[0-9]{4}$'
+        EnvVarNames         = @()
+        GetExtraTempDirs    = { param($ProfileInfo) @() }
+        GetConfigDirs       = { param($ProfileInfo) [pscustomobject]@{ Dirs = @(); Known = $true } }
+        GetSessionEvidence  = { param($ProfileInfo, $Snapshot) [pscustomobject]@{ Readable = $true; Unparseable = 0; Entries = @() } }
+        GetActivityEvidence = { param($ProfileInfo, $Scope, $RootName) [pscustomobject]@{ Readable = $true; LastWriteUtc = $null } }
+        GetProjectKey       = { param($Scope, $ProfilePath) [pscustomobject]@{ IsHome = $false; Key = $Scope } }
+        GetProcessMatchers  = { @() }
+    }
+'@
+    $s1FixtureFileText = "# Test-only provider: the V10-S1 conformance fixture (tests\Run-Tests.ps1). Never shipped.`r`nRegister-AtmProvider (" + $s1FixtureObjectText + ")`r`n"
+    $s1FixtureId = 'atm-conformance-fixture'
+    $s1FixtureName = 'ATM conformance fixture'
+    $s1TempMembers = @('GetExtraTempDirs', 'GetConfigDirs', 'GetSessionEvidence', 'GetActivityEvidence', 'GetProjectKey')
+    function New-AtmS1FixtureProvider {
+        param([hashtable]$Set = @{})
+        $o = & ([scriptblock]::Create($s1FixtureObjectText))
+        foreach ($k in @($Set.Keys)) { if ($o.PSObject.Properties[$k]) { $o.$k = $Set[$k] } else { $o | Add-Member -NotePropertyName $k -NotePropertyValue $Set[$k] } }
+        return $o
+    }
+    function Invoke-AtmS1Register {
+        # Registers in this process and puts the registry back exactly as it was; returns the error text or $null.
+        param($Provider)
+        $before = @(Get-AtmProviders)
+        try { Register-AtmProvider $Provider; return $null } catch { return $_.Exception.Message }
+        finally { $script:AtmProviders.Clear(); foreach ($x in $before) { $script:AtmProviders.Add($x) } }
+    }
+    function Get-AtmS1ShippedProvider {
+        # A shipped provider file loaded in this process; the registry is put back as it was.
+        param([string]$File, [string]$Id)
+        $before = @(Get-AtmProviders)
+        try { . (Join-Path $srcDir ('providers\' + $File)); return @(Get-AtmProviders | Where-Object { $_.Id -ceq $Id })[0] }
+        finally { $script:AtmProviders.Clear(); foreach ($x in $before) { $script:AtmProviders.Add($x) } }
+    }
+    function Test-AtmS1Liveness {
+        # The provider-side liveness rule (PROVIDERS.md, contract 2): State is one of the five values; a PID present in
+        # the snapshot is never DEAD; a failed snapshot is never DEAD; a recorded start equal to the process creation time
+        # is LIVE. Returns the violations (empty: conforms).
+        param($Evidence, $Snapshot)
+        $bad = New-Object System.Collections.Generic.List[string]
+        $byPid = @{}; foreach ($p in @($Snapshot.Processes)) { $byPid[[int]$p.Pid] = $p }
+        foreach ($e in @($Evidence.Entries)) {
+            $st = [string]$e.State
+            if (@('LIVE', 'LIVE_UNVERIFIED', 'PID_REUSED', 'DEAD', 'UNVERIFIABLE') -cnotcontains $st) { $bad.Add("STATE_UNKNOWN:$($e.SessionId)"); continue }
+            if ($Snapshot.Failed -and $st -ceq 'DEAD') { $bad.Add("DEAD_WITH_FAILED_SNAPSHOT:$($e.SessionId)") }
+            if ($byPid.ContainsKey([int]$e.Pid) -and $st -ceq 'DEAD') { $bad.Add("DEAD_WITH_PID_PRESENT:$($e.SessionId)") }
+            $hasStart = (@($e.PSObject.Properties.Name) -contains 'StartUtc') -and $null -ne $e.StartUtc
+            if (-not $Snapshot.Failed -and $hasStart -and $byPid.ContainsKey([int]$e.Pid) -and $null -ne $byPid[[int]$e.Pid].CreationUtc -and ([datetime]$e.StartUtc) -eq ([datetime]$byPid[[int]$e.Pid].CreationUtc) -and $st -cne 'LIVE') { $bad.Add("EQUAL_START_NOT_LIVE:$($e.SessionId)") }
+        }
+        return $bad.ToArray()
+    }
+
+    Test-Case 'Contrato de provider' 'Validacao 1.1: cada regra recusada com a chave exata (membros v1 e v2, DisplayName do runtime, Id v1 e v2, TempSubdir, capacidades, membro de runtime, GetWorktreeHints reservado); aceitos: v1 com Id em maiusculas, GetWorktreeHints script block; nova inscricao do mesmo Id substitui; registro restaurado' {
+        $claude = (Get-AtmProviders)[0]
+        $v1 = ConvertTo-AtmTestV1Provider $claude
+        $cases = New-Object System.Collections.Generic.List[object]
+        foreach ($m in $script:AtmProviderMembers) {
+            $o = $v1.PSObject.Copy(); $o.PSObject.Properties.Remove($m); $cases.Add(@("v1 sem $m", $o, (Get-AtmText 'err.providerMember' $m)))
+            $o = New-AtmS1FixtureProvider; $o.PSObject.Properties.Remove($m); $cases.Add(@("v2 temp sem $m", $o, (Get-AtmText 'err.providerMember' $m)))
+        }
+        $cases.Add(@('runtime sem DisplayName', [pscustomobject]@{ Id = 's1-rt'; ContractVersion = 2; Capabilities = @('runtime') }, (Get-AtmText 'err.providerMember' 'DisplayName')))
+        $o = $v1.PSObject.Copy(); $o.Id = 'Bad Id'; $cases.Add(@('v1 Id invalido', $o, (Get-AtmText 'err.providerId' 'Bad Id')))
+        $cases.Add(@('v2 Id em maiusculas', (New-AtmS1FixtureProvider @{ Id = 'Fixture-Upper' }), (Get-AtmText 'err.providerId' 'Fixture-Upper')))
+        $cases.Add(@('TempSubdir com traversal', (New-AtmS1FixtureProvider @{ TempSubdir = '..\fora' }), (Get-AtmText 'err.providerSubdir' '..\fora')))
+        $cases.Add(@('capacidades vazias', [pscustomobject]@{ Id = 's1-c1'; DisplayName = 'C'; ContractVersion = 2; Capabilities = @() }, (Get-AtmText 'err.providerCapabilities' '-')))
+        $cases.Add(@('capacidade com maiuscula', [pscustomobject]@{ Id = 's1-c2'; DisplayName = 'C'; ContractVersion = 2; Capabilities = @('Runtime') }, (Get-AtmText 'err.providerCapabilities' 'Runtime')))
+        $cases.Add(@('capacidade repetida', [pscustomobject]@{ Id = 's1-c3'; DisplayName = 'C'; ContractVersion = 2; Capabilities = @('runtime', 'runtime') }, (Get-AtmText 'err.providerCapabilities' 'runtime,runtime')))
+        $cases.Add(@('capacidade desconhecida', [pscustomobject]@{ Id = 's1-c4'; DisplayName = 'C'; ContractVersion = 2; Capabilities = @('gui') }, (Get-AtmText 'err.providerCapabilities' 'gui')))
+        $cases.Add(@('capacidade nao texto', [pscustomobject]@{ Id = 's1-c5'; DisplayName = 'C'; ContractVersion = 2; Capabilities = @(5) }, (Get-AtmText 'err.providerCapabilities' '5')))
+        $o = $v1.PSObject.Copy(); $o.Id = 's1-v1rt'; $o | Add-Member -NotePropertyName GetServiceHints -NotePropertyValue { @() }
+        $cases.Add(@('membro de runtime sem a capacidade (v1)', $o, (Get-AtmText 'err.providerRuntimeMember' 'GetServiceHints')))
+        $cases.Add(@('membro de runtime que nao e script block', [pscustomobject]@{ Id = 's1-r2'; DisplayName = 'R'; ContractVersion = 2; Capabilities = @('runtime'); GetServiceHints = 'FakeAgentService' }, (Get-AtmText 'err.providerRuntimeMember' 'GetServiceHints')))
+        $cases.Add(@('GetWorktreeHints reservado e validado', [pscustomobject]@{ Id = 's1-r3'; DisplayName = 'R'; ContractVersion = 2; Capabilities = @('runtime'); GetWorktreeHints = 'x' }, (Get-AtmText 'err.providerRuntimeMember' 'GetWorktreeHints')))
+        $before = @(Get-AtmProviders | ForEach-Object { $_.Id }) -join ','
+        $wrong = New-Object System.Collections.Generic.List[string]
+        foreach ($c in $cases) {
+            $msg = Invoke-AtmS1Register $c[1]
+            if ($msg -cne $c[2]) { $wrong.Add("$($c[0]): '$msg'") }
+        }
+        Assert-True ($wrong.Count -eq 0) "regras de 1.1 com a chave exata ($($cases.Count) fixtures): $($wrong -join ' | ')"
+        $o = $v1.PSObject.Copy(); $o.Id = 'S1-Upper-V1'; $o.TempSubdir = 's1-upper'
+        Assert-True ($null -eq (Invoke-AtmS1Register $o)) 'v1 com Id em maiusculas aceito (como na V0.1)'
+        Assert-True ($null -eq (Invoke-AtmS1Register ([pscustomobject]@{ Id = 's1-wt'; DisplayName = 'W'; ContractVersion = 2; Capabilities = @('runtime'); GetWorktreeHints = { param($ProfileInfo, $Registry) [pscustomobject]@{ Readable = $true; Dirs = @() } } }))) 'GetWorktreeHints script block aceito (reservado, nunca chamado na 1.x)'
+        $snap = @(Get-AtmProviders)
+        try {
+            Register-AtmProvider (New-AtmS1FixtureProvider)
+            Register-AtmProvider (New-AtmS1FixtureProvider @{ DisplayName = 'Segunda inscricao' })
+            $mine = @(Get-AtmProviders | Where-Object { $_.Id -ceq $s1FixtureId })
+            Assert-True ($mine.Count -eq 1 -and $mine[0].DisplayName -ceq 'Segunda inscricao' -and @(Get-AtmProviders).Count -eq ($snap.Count + 1)) 'o mesmo Id inscrito de novo substitui o anterior'
+        } finally { $script:AtmProviders.Clear(); foreach ($x in $snap) { $script:AtmProviders.Add($x) } }
+        Assert-Eq (@(Get-AtmProviders | ForEach-Object { $_.Id }) -join ',') $before 'registro restaurado (somente claude-code)'
+    }
+    Test-Case 'Contrato de provider' 'Registro mais estrito (V10-D5 (b)): com temp, os cinco membros Get* precisam ser script block e ScopePattern/RootPattern precisam compilar como regex, em v1 e v2; chaves err.providerTempMember e err.providerPattern nos dois idiomas, citando o membro e nunca o valor; [regex] aceito' {
+        $claude = (Get-AtmProviders)[0]
+        $v1 = ConvertTo-AtmTestV1Provider $claude
+        $wrong = New-Object System.Collections.Generic.List[string]
+        $n = 0
+        foreach ($m in $s1TempMembers) {
+            foreach ($bad in @('SEGREDO-texto', $null, 5, @({ @() }))) {
+                foreach ($kind in @('v1', 'v2')) {
+                    $o = $(if ($kind -ceq 'v1') { $v1.PSObject.Copy() } else { New-AtmS1FixtureProvider }); $o.$m = $bad; $n++
+                    $msg = Invoke-AtmS1Register $o
+                    if ($msg -cne (Get-AtmText 'err.providerTempMember' $m) -or ([string]$msg).Contains('SEGREDO')) { $wrong.Add("$kind $m=$([string]$bad): '$msg'") }
+                }
+            }
+        }
+        foreach ($m in @('ScopePattern', 'RootPattern')) {
+            foreach ($bad in @('[SEGREDO', '(?<SEGREDO', 'SEGREDO)', $null, 5, @('^a$'), { '^a$' })) {
+                foreach ($kind in @('v1', 'v2')) {
+                    $o = $(if ($kind -ceq 'v1') { $v1.PSObject.Copy() } else { New-AtmS1FixtureProvider }); $o.$m = $bad; $n++
+                    $msg = Invoke-AtmS1Register $o
+                    if ($msg -cne (Get-AtmText 'err.providerPattern' $m) -or ([string]$msg).Contains('SEGREDO')) { $wrong.Add("$kind $m=$([string]$bad): '$msg'") }
+                }
+            }
+        }
+        Assert-True ($wrong.Count -eq 0) "regras novas com a chave exata, sem o valor ($n fixtures): $($wrong -join ' | ')"
+        Assert-True ($null -eq (Invoke-AtmS1Register (New-AtmS1FixtureProvider @{ ScopePattern = [regex]'^scope[0-9]+$'; RootPattern = [regex]'^run-[0-9]{4}$' }))) 'padroes como [regex] aceitos'
+        $old = Get-AtmLanguage
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                foreach ($k in @('err.providerTempMember', 'err.providerPattern')) {
+                    $t = Get-AtmText $k 'MembroX'
+                    Assert-True ($t.Contains('MembroX') -and $t -cne $k) "$($lang): $k traduzida e cita o membro ($t)"
+                }
+            }
+        } finally { Set-AtmLanguage -Requested $old }
+        Assert-True ((Get-AtmText 'err.providerTempMember' 'GetProjectKey') -cne (Get-AtmText 'err.providerPattern' 'GetProjectKey')) 'uma chave por regra'
+    }
+    Test-Case 'Contrato de provider' 'Versao desconhecida (3, " 2 ", "2.0", 2.0, -2, $null, "2", @(2)) recusada no registro com err.providerContract; no diagnose e no recover cada uma sai PROVIDER_CONTRACT_INVALID e os outros providers rodam' {
+        $versions = @(@('tres', 3), @('espacos', ' 2 '), @('texto20', '2.0'), @('real20', [double]2.0), @('negativo', -2), @('nulo', $null), @('texto2', '2'), @('lista', @(2)))
+        $wrong = New-Object System.Collections.Generic.List[string]
+        $bad = New-Object System.Collections.Generic.List[object]
+        foreach ($v in $versions) {
+            $o = [pscustomobject]@{ Id = ('s1-v-' + $v[0]); DisplayName = 'V'; ContractVersion = $v[1]; Capabilities = @('temp', 'runtime') }
+            $bad.Add($o)
+            $msg = Invoke-AtmS1Register $o
+            if ($msg -cne (Get-AtmText 'err.providerContract' ([string]$v[1]))) { $wrong.Add("$($v[0]): '$msg'") }
+            $threw = $false; try { $null = Get-AtmProviderContract $o } catch { $threw = $true }
+            if (-not $threw) { $wrong.Add("$($v[0]): Get-AtmProviderContract aceitou") }
+        }
+        Assert-True ($wrong.Count -eq 0) "versoes recusadas com o motivo: $($wrong -join ' | ')"
+        Assert-Eq (Get-AtmProviderContract (New-AtmS1FixtureProvider)).Version 2 'o inteiro 2 aceito'
+        Assert-Eq (Get-AtmProviderContract (New-AtmS1FixtureProvider @{ ContractVersion = [long]2 })).Version 2 'inteiro de outro tamanho com valor 2 aceito'
+        $p = New-TestProfile 's1ver'
+        $r = New-TestRoot -ProfileInfo $p
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -Providers (@((Get-AtmProviders)[0]) + $bad.ToArray()) -CpuSampleMs 0
+        foreach ($b in $bad) {
+            $c = @($d.Coverage | Where-Object { $_.Collector -ceq ('provider-' + $b.Id) })
+            Assert-True ($c.Count -eq 1 -and $c[0].Status -ceq 'FAILED' -and (@($c[0].Reasons) -join ',') -ceq 'PROVIDER_CONTRACT_INVALID') "diagnose: $($b.Id) PROVIDER_CONTRACT_INVALID"
+        }
+        Assert-Eq (@($d.Coverage | Where-Object { $_.Collector -ceq 'provider-claude-code' })[0].Status) 'COMPLETE' 'diagnose: claude-code roda'
+        Assert-Eq (@($d.Coverage | Where-Object { $_.Collector -ceq 'inventory' })[0].Status) 'COMPLETE' 'diagnose: inventario roda'
+        $fp = @($d.Findings | Where-Object { $_.PSObject.Properties['Provider'] } | ForEach-Object { [string]$_.Provider })
+        Assert-True (@($fp | Where-Object { $_ -ceq 'claude-code' }).Count -ge 1 -and @($fp | Where-Object { $_ -like 's1-v-*' }).Count -eq 0) 'diagnose: achados so do provider valido'
+        Assert-Eq (@($d.Providers | ForEach-Object { $_.Id }) -join ',') 'claude-code' 'diagnose: lista de providers so com o valido'
+        $good = & $r1Prov @((& $r1Hint 'R'))
+        $coll = & $r1Coll (@($good) + $bad.ToArray()) @((& $r1Row 'R'))
+        foreach ($b in $bad) {
+            $c = @($coll.Coverage | Where-Object { $_.Collector -ceq ('provider-' + $b.Id) })
+            Assert-True ($c.Count -eq 1 -and $c[0].Status -ceq 'FAILED' -and (@($c[0].Reasons) -join ',') -ceq 'PROVIDER_CONTRACT_INVALID') "recover: $($b.Id) PROVIDER_CONTRACT_INVALID"
+        }
+        Assert-Eq (@($coll.Coverage | Where-Object { $_.Collector -ceq 'provider-test-rec' })[0].Status) 'COMPLETE' 'recover: o provider valido roda'
+        Assert-True (@($coll.DeclaredNames) -ccontains 'R') 'recover: o servico do provider valido declarado'
+    }
+    Test-Case 'Contrato de provider' 'Os providers distribuidos (claude-code, claude-desktop) e o de fixture passam no registro mais estrito; registro restaurado' {
+        $before = @(Get-AtmProviders)
+        try {
+            . (Join-Path $srcDir 'providers\ClaudeDesktop.ps1')
+            $dsk = @(Get-AtmProviders | Where-Object { $_.Id -ceq 'claude-desktop' })
+            Assert-True ($dsk.Count -eq 1 -and (Get-AtmProviderContract $dsk[0]).Version -eq 2) 'claude-desktop registrado (v2, runtime)'
+            . (Join-Path $srcDir 'providers\ClaudeCode.ps1')
+            Assert-Eq @(Get-AtmProviders | Where-Object { $_.Id -ceq 'claude-code' }).Count 1 'claude-code registrado de novo pelo proprio arquivo'
+            Register-AtmProvider (New-AtmS1FixtureProvider)
+            Assert-Eq (@(Get-AtmProviders | ForEach-Object { $_.Id } | Sort-Object) -join ',') "atm-conformance-fixture,claude-code,claude-desktop" 'os tres registrados'
+        } finally { $script:AtmProviders.Clear(); foreach ($x in $before) { $script:AtmProviders.Add($x) } }
+        Assert-Eq (@(Get-AtmProviders | ForEach-Object { $_.Id }) -join ',') 'claude-code' 'registro restaurado'
+    }
+    Test-Case 'Contrato de provider' 'Nao consigo olhar contra nada encontrado: Readable=$false da a flag (SESSION_REGISTRY_UNREADABLE, TRANSCRIPTS_UNREADABLE), nunca DEAD nem sem atividade (claude-code e fixture); UNVERIFIABLE vira SESSION_LIVENESS_UNVERIFIABLE; um provider que lanca: inventario recusado (nada classificado), diagnose inventory FAILED, membro de runtime HINT_FAILED (fixture e claude-desktop)' {
+        $claude = (Get-AtmProviders)[0]
+        $p = New-TestProfile 's1look'
+        $p.EnvValues = @{ CLAUDE_CONFIG_DIR = '\\s1-host\share\cfg' }
+        $rc = New-TestRoot -ProfileInfo $p
+        $fxRoot = Join-Path $p.TempCandidates[0].TempPath 'atm-conformance-fixture\scope1\run-0001'
+        [void][IO.Directory]::CreateDirectory($fxRoot); [IO.File]::WriteAllBytes((Join-Path $fxRoot 'x.bin'), (New-Object byte[] 9))
+        $fxRoot2 = Join-Path $p.TempCandidates[0].TempPath 'atm-conformance-fixture\scope1\run-0002'
+        [void][IO.Directory]::CreateDirectory($fxRoot2); [IO.File]::WriteAllBytes((Join-Path $fxRoot2 'x.bin'), (New-Object byte[] 9))
+        $fx = New-AtmS1FixtureProvider @{
+            GetSessionEvidence  = { param($ProfileInfo, $Snapshot) [pscustomobject]@{ Readable = $false; Unparseable = 0; Entries = @([pscustomobject]@{ SessionId = 'run-0002'; Pid = 77; State = 'UNVERIFIABLE' }) } }
+            GetActivityEvidence = { param($ProfileInfo, $Scope, $RootName) [pscustomobject]@{ Readable = $false; LastWriteUtc = $null } } }
+        $a = Get-InvArgs -Profiles @($p); $a['Providers'] = @($claude, $fx)
+        $i = Invoke-AtmInventory @a
+        foreach ($x in @((Find-Part $i $rc), (Find-Part $i $fxRoot), (Find-Part $i $fxRoot2))) {
+            $fl = @($x.Flags)
+            Assert-True ($fl -ccontains 'SESSION_REGISTRY_UNREADABLE' -and $fl -ccontains 'TRANSCRIPTS_UNREADABLE') "$($x.Provider) $($x.Name): flags de nao consigo olhar ($($fl -join ','))"
+            Assert-True ($x.Class -cne 'ORPHAN_SUSPECTED' -and (Test-AtmCandidate -Partition $x -Inventory $i -SkipLockProbe).Category -cne 'ELIGIBLE') "$($x.Provider) $($x.Name): nunca orfa nem elegivel"
+            Assert-True ([string]$x.Session -notmatch 'DEAD') "$($x.Provider) $($x.Name): nenhuma sessao dada como encerrada ($($x.Session))"
+        }
+        Assert-True (@((Find-Part $i $fxRoot2).Flags) -ccontains 'SESSION_LIVENESS_UNVERIFIABLE') 'UNVERIFIABLE vira SESSION_LIVENESS_UNVERIFIABLE'
+        $ev = & $claude.GetSessionEvidence $p ([pscustomobject]@{ Processes = @(); Failed = $false })
+        Assert-True (-not $ev.Readable -and @($ev.Entries).Count -eq 0) 'claude-code: pasta de configuracao recusada: Readable falso, nunca nada encontrado'
+        $q = New-TestProfile 's1look2'
+        Write-TestSessionFile $q ([guid]::NewGuid().ToString()) 7001 ((Get-Date).ToUniversalTime().AddHours(-2)) 'f1.json'
+        $ev = & $claude.GetSessionEvidence $q ([pscustomobject]@{ Processes = @(); Failed = $true })
+        Assert-True (@($ev.Entries).Count -eq 1 -and @($ev.Entries)[0].State -ceq 'UNVERIFIABLE') 'claude-code: snapshot que falhou da UNVERIFIABLE, nunca DEAD'
+        $thrower = New-AtmS1FixtureProvider @{ GetSessionEvidence = { param($ProfileInfo, $Snapshot) throw (New-Object IO.IOException 's1') } }
+        $a2 = Get-InvArgs -Profiles @($p); $a2['Providers'] = @($claude, $thrower)
+        $inv2 = $null; $threw = $false
+        try { $inv2 = Invoke-AtmInventory @a2 } catch { $threw = $true }
+        Assert-True ($threw -and $null -eq $inv2) 'membro de temp que lanca: o inventario inteiro e recusado (nenhuma particao classificada, nada elegivel)'
+        $d = Invoke-AtmDiagnose -InventoryArgs (Get-InvArgs -Profiles @($p)) -IdentitySource $diagIdUser -Providers @($claude, $thrower) -CpuSampleMs 0
+        $ic = @($d.Coverage | Where-Object { $_.Collector -ceq 'inventory' })[0]
+        Assert-True ($ic.Status -ceq 'FAILED' -and @($ic.Reasons) -ccontains 'INVENTORY_FAILED' -and -not $d.CoverageComplete -and @($d.Findings | Where-Object { $_.PSObject.Properties['Provider'] -and $_.Provider }).Count -eq 0) "diagnose: inventory FAILED (INVENTORY_FAILED) e nenhum achado de particao ($(@($ic.Reasons) -join ','))"
+        $h = Get-AtmProviderRuntimeHints (New-AtmS1FixtureProvider @{ GetProcessMatchers = { throw (New-Object InvalidOperationException 's1') } })
+        Assert-True ($h.Coverage.Status -ceq 'FAILED' -and @($h.Coverage.Reasons) -ccontains 'HINT_FAILED_PROCESS_MATCHERS') "fixture: membro de runtime que lanca da HINT_FAILED ($(@($h.Coverage.Reasons) -join ','))"
+        $dsk = Get-AtmS1ShippedProvider 'ClaudeDesktop.ps1' 'claude-desktop'
+        Assert-Eq (Get-AtmProviderRuntimeHints $dsk).Coverage.Status 'COMPLETE' 'claude-desktop: dicas validas'
+        $dskBad = $dsk.PSObject.Copy(); $dskBad.GetServiceHints = { throw (New-Object InvalidOperationException 's1') }
+        $h = Get-AtmProviderRuntimeHints $dskBad
+        Assert-True ($h.Coverage.Status -ceq 'FAILED' -and @($h.Coverage.Reasons) -ccontains 'HINT_FAILED_SERVICE_HINTS') "claude-desktop com membro que lanca: HINT_FAILED ($(@($h.Coverage.Reasons) -join ','))"
+    }
+    Test-Case 'Contrato de provider' 'Vida (regra do lado do provider): hora de criacao igual ao inicio registrado da LIVE, ate 2 s LIVE, alem PID_REUSED, sem inicio LIVE_UNVERIFIED; um PID que existe nunca DEAD; snapshot que falhou nunca DEAD; o verificador recusa um provider que devolve DEAD com o PID presente' {
+        $claude = (Get-AtmProviders)[0]
+        $p = New-TestProfile 's1life'
+        $t0 = ConvertTo-TestMicroUtc ((Get-Date).ToUniversalTime().AddHours(-3))
+        $ids = @{}; foreach ($k in 1..5) { $ids[$k] = [guid]::NewGuid().ToString() }
+        Write-TestSessionFile $p $ids[1] 7001 $t0 'l1.json'
+        Write-TestSessionFile $p $ids[2] 7002 ($t0.AddMilliseconds(1500)) 'l2.json'
+        Write-TestSessionFile $p $ids[3] 7003 ($t0.AddMilliseconds(2500)) 'l3.json'
+        Write-TestSessionFile $p $ids[4] 7004 $null 'l4.json'
+        Write-TestSessionFile $p $ids[5] 7005 $t0 'l5.json'
+        $snap = [pscustomobject]@{ Failed = $false; Processes = @(7001, 7002, 7003, 7004 | ForEach-Object { [pscustomobject]@{ Pid = $_; CreationUtc = $t0 } }) }
+        $ev = & $claude.GetSessionEvidence $p $snap
+        $st = @{}; foreach ($e in @($ev.Entries)) { $st[[string]$e.SessionId] = [string]$e.State }
+        Assert-Eq ((1..5 | ForEach-Object { $st[$ids[$_]] }) -join ',') 'LIVE,LIVE,PID_REUSED,LIVE_UNVERIFIED,DEAD' 'estados do claude-code'
+        Assert-Eq (@(Test-AtmS1Liveness $ev $snap) -join ',') '' 'claude-code conforme'
+        $snapF = [pscustomobject]@{ Failed = $true; Processes = @() }
+        $evF = & $claude.GetSessionEvidence $p $snapF
+        Assert-True (@($evF.Entries | Where-Object { $_.State -cne 'UNVERIFIABLE' }).Count -eq 0 -and @(Test-AtmS1Liveness $evF $snapF).Count -eq 0) 'snapshot que falhou: todas UNVERIFIABLE'
+        $fxOk = New-AtmS1FixtureProvider @{ GetSessionEvidence = { param($ProfileInfo, $Snapshot)
+                $e = foreach ($x in @($Snapshot.Processes)) { [pscustomobject]@{ SessionId = "run-$($x.Pid)"; Pid = $x.Pid; State = $(if ($Snapshot.Failed) { 'UNVERIFIABLE' } else { 'LIVE_UNVERIFIED' }) } }
+                [pscustomobject]@{ Readable = $true; Unparseable = 0; Entries = @($e) } } }
+        Assert-Eq (@(Test-AtmS1Liveness (& $fxOk.GetSessionEvidence $p $snap) $snap) -join ',') '' 'fixture conforme'
+        $fxBad = New-AtmS1FixtureProvider @{ GetSessionEvidence = { param($ProfileInfo, $Snapshot) [pscustomobject]@{ Readable = $true; Unparseable = 0; Entries = @([pscustomobject]@{ SessionId = 'run-7001'; Pid = 7001; State = 'DEAD'; StartUtc = $null }) } } }
+        Assert-Eq (@(Test-AtmS1Liveness (& $fxBad.GetSessionEvidence $p $snap) $snap) -join ',') 'DEAD_WITH_PID_PRESENT:run-7001' 'controle negativo: DEAD com o PID presente recusado'
+        Assert-Eq (@(Test-AtmS1Liveness (& $fxBad.GetSessionEvidence $p $snapF) $snapF) -join ',') 'DEAD_WITH_FAILED_SNAPSHOT:run-7001' 'controle negativo: DEAD com o snapshot falho recusado'
+    }
+    Test-Case 'Contrato de provider' 'Nenhuma leitura de credencial: iscas .credentials.json e *.key do Claude Code (e do fixture) presas com FileShare.None nao mudam nenhum resultado dos membros nem a classificacao; estatico: nenhum arquivo de provider nomeia credencial fora de uma lista de negacao (plantado numa copia: recusado; numa *DenyList: aceito)' {
+        $claude = (Get-AtmProviders)[0]
+        $fx = New-AtmS1FixtureProvider
+        $p = New-TestProfile 's1cred'
+        $r = New-TestRoot -ProfileInfo $p
+        $slug = Split-Path (Split-Path $r -Parent) -Leaf; $name = Split-Path $r -Leaf
+        $t0 = ConvertTo-TestMicroUtc ((Get-Date).ToUniversalTime().AddHours(-1))
+        Write-TestSessionFile $p $name 7101 $t0 'c1.json'
+        $null = New-TestTranscript $p $r
+        $fxRoot = Join-Path $p.TempCandidates[0].TempPath 'atm-conformance-fixture\scope1\run-0001'
+        [void][IO.Directory]::CreateDirectory($fxRoot); [IO.File]::WriteAllBytes((Join-Path $fxRoot 'x.bin'), (New-Object byte[] 5))
+        $snap = [pscustomobject]@{ Failed = $false; Processes = @([pscustomobject]@{ Pid = 7101; CreationUtc = $t0 }) }
+        $run = {
+            $o = [ordered]@{}
+            foreach ($pv in @($claude, $fx)) {
+                $o[$pv.Id] = [ordered]@{ X = @(& $pv.GetExtraTempDirs $p); C = (& $pv.GetConfigDirs $p); S = (& $pv.GetSessionEvidence $p $snap); A = (& $pv.GetActivityEvidence $p $slug $name); K = (& $pv.GetProjectKey $slug $p.ProfilePath) }
+            }
+            $a = Get-InvArgs -Profiles @($p); $a['Providers'] = @($claude, $fx)
+            $i = Invoke-AtmInventory @a
+            $o['inv'] = @($i.Partitions | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Provider, $_.Name, $_.Class, (@($_.Flags) -join ',') } | Sort-Object)
+            return ($o | ConvertTo-Json -Depth 8 -Compress)
+        }
+        $r0 = & $run
+        $cfg = Join-Path $p.ProfilePath '.claude'
+        # Outside every temporary base (a file there would be a partition of its own): the agent's documented credential
+        # names beside its configuration and sessions, and two for the fixture under the profile.
+        $decoys = @((Join-Path $cfg '.credentials.json'), (Join-Path $cfg 'sessions\c1.key'), (Join-Path $cfg 'sessions\api.key'), (Join-Path $cfg 'projects\token.key'),
+            (Join-Path $p.ProfilePath '.credentials.json'), (Join-Path $p.ProfilePath 'fixture.key'))
+        foreach ($f in $decoys) { [IO.File]::WriteAllText($f, '{"marker":"ATM-S1-DECOY"}') }
+        $held = New-Object System.Collections.Generic.List[object]
+        try {
+            foreach ($f in $decoys) { $held.Add([IO.File]::Open($f, 'Open', 'ReadWrite', 'None')) }
+            $other = $false; try { ([IO.File]::Open($decoys[0], 'Open', 'Read', 'ReadWrite')).Dispose() } catch { $other = $true }
+            Assert-True $other 'controle: com a isca presa, qualquer outra abertura falha'
+            $r1 = & $run
+        } finally { foreach ($h in $held) { $h.Dispose() } }
+        Assert-True (-not $r1.Contains('ATM-S1-DECOY')) 'conteudo da isca nunca no resultado'
+        Assert-Eq $r1 $r0 'resultado dos membros (claude-code e fixture) e classificacao identicos com as iscas presas'
+        $credOf = {
+            param([string]$Path)
+            $ast = [Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$null)
+            $hits = New-Object System.Collections.Generic.List[string]
+            foreach ($s in $ast.FindAll({ param($x) $x -is [Management.Automation.Language.StringConstantExpressionAst] -or $x -is [Management.Automation.Language.ExpandableStringExpressionAst] }, $true)) {
+                if ([string]$s.Value -notmatch '(?i)credential|\.key\b|token|secret|password') { continue }
+                $deny = $false; $up = $s.Parent
+                while ($up) { if ($up -is [Management.Automation.Language.AssignmentStatementAst] -and $up.Left.Extent.Text -like '*DenyList') { $deny = $true; break }; $up = $up.Parent }
+                if (-not $deny) { $hits.Add(('{0}:{1}' -f (Split-Path -Leaf $Path), $s.Extent.StartLineNumber)) }
+            }
+            return $hits.ToArray()
+        }
+        foreach ($f in Get-ChildItem -LiteralPath (Join-Path $srcDir 'providers') -Filter '*.ps1' -File) { Assert-Eq (@(& $credOf $f.FullName) -join ',') '' "$($f.Name): nenhum nome de credencial" }
+        $pl = Join-Path $sandbox 's1-cred-plant'; [void][IO.Directory]::CreateDirectory($pl)
+        $txt = [IO.File]::ReadAllText((Join-Path $srcDir 'providers\ClaudeCode.ps1'))
+        [IO.File]::WriteAllText((Join-Path $pl 'a.ps1'), ($txt + "`r`n`$atmS1 = [IO.File]::ReadAllText('C:\x\.credentials.json')`r`n"))
+        [IO.File]::WriteAllText((Join-Path $pl 'b.ps1'), ($txt + "`r`n`$atmS1DenyList = @('.credentials.json', '*.key')`r`n"))
+        Assert-Eq @(& $credOf (Join-Path $pl 'a.ps1')).Count 1 'plantado numa copia: recusado'
+        Assert-Eq @(& $credOf (Join-Path $pl 'b.ps1')).Count 0 'numa lista de negacao: aceito'
+    }
+    Test-Case 'Contrato de provider' 'Nenhuma escrita: a arvore do perfil identica (listagem estavel) depois de cada membro de claude-code, fixture e claude-desktop e de um inventario; estatico: os arquivos de provider so usam comandos, membros estaticos, metodos e tipos de uma lista fechada de leitura (uma chamada de escrita plantada numa copia: recusada)' {
+        $claude = (Get-AtmProviders)[0]
+        $fx = New-AtmS1FixtureProvider
+        $dsk = Get-AtmS1ShippedProvider 'ClaudeDesktop.ps1' 'claude-desktop'
+        $p = New-TestProfile 's1write'
+        $r = New-TestRoot -ProfileInfo $p
+        $slug = Split-Path (Split-Path $r -Parent) -Leaf; $name = Split-Path $r -Leaf
+        Write-TestSessionFile $p $name 7201 ((Get-Date).ToUniversalTime().AddHours(-1)) 'w1.json'
+        $null = New-TestTranscript $p $r
+        $fxRoot = Join-Path $p.TempCandidates[0].TempPath 'atm-conformance-fixture\scope1\run-0001'
+        [void][IO.Directory]::CreateDirectory($fxRoot); [IO.File]::WriteAllBytes((Join-Path $fxRoot 'x.bin'), (New-Object byte[] 5))
+        $before = Get-StableTreeListing $p.ProfilePath
+        $snap = [pscustomobject]@{ Failed = $false; Processes = @([pscustomobject]@{ Pid = 7201; CreationUtc = [datetime]::UtcNow }) }
+        foreach ($pv in @($claude, $fx)) {
+            $null = & $pv.GetExtraTempDirs $p; $null = & $pv.GetConfigDirs $p; $null = & $pv.GetSessionEvidence $p $snap
+            $null = & $pv.GetActivityEvidence $p $slug $name; $null = & $pv.GetProjectKey $slug $p.ProfilePath
+        }
+        foreach ($pv in @($claude, $fx, $dsk)) { $null = Get-AtmProviderRuntimeHints $pv }
+        $a = Get-InvArgs -Profiles @($p); $a['Providers'] = @($claude, $fx)
+        $null = Invoke-AtmInventory @a
+        Assert-Eq (Get-StableTreeListing $p.ProfilePath) $before 'arvore do perfil identica (nomes, tamanhos, datas, atributos)'
+        $allow = @{
+            Cmd      = @('ConvertFrom-Json', 'ConvertTo-AtmClaudeSlug', 'Get-AtmClaudeActivityEvidence', 'Get-AtmClaudeConfigDirs', 'Get-AtmClaudeSessionEvidence', 'Get-AtmFileErrorKind', 'Get-AtmInnerException', 'Get-AtmPathPresence', 'Get-AtmText', 'Join-AtmPath', 'New-Object', 'Register-AtmProvider', 'Select-Object', 'Set-StrictMode', 'Split-Path', 'Test-AtmLocalPathForm')
+            Static   = @('AgentTempManager.AtmPathCheck::Chain', 'datetime::FromFileTimeUtc', 'int::TryParse', 'IO.Directory::GetFiles', 'IO.File::GetAttributes', 'IO.File::ReadAllText', 'long::TryParse', 'math::Abs', 'regex::Replace', 'Security.Principal.WindowsIdentity::GetCurrent')
+            Instance = @('Add', 'AddDays', 'ContainsKey', 'EndsWith', 'GetType', 'StartsWith', 'Substring', 'ToArray', 'ToLowerInvariant', 'TrimEnd')
+            NewType  = @('System.Collections.Generic.List[string]', 'System.Collections.Generic.List[object]', 'IO.FileInfo')
+        }
+        $callsOf = {
+            param([string]$Path)
+            $ast = [Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$null)
+            $out = New-Object System.Collections.Generic.List[string]
+            foreach ($c in $ast.FindAll({ param($x) $x -is [Management.Automation.Language.CommandAst] }, $true)) {
+                $cn = $c.GetCommandName()
+                if ($allow.Cmd -notcontains $cn) { $out.Add("cmd:$cn") }
+                elseif ($cn -ceq 'New-Object' -and $allow.NewType -notcontains $c.CommandElements[1].Extent.Text) { $out.Add("new:$($c.CommandElements[1].Extent.Text)") }
+            }
+            foreach ($m in $ast.FindAll({ param($x) $x -is [Management.Automation.Language.InvokeMemberExpressionAst] }, $true)) {
+                if ($m.Static) { $k = '{0}::{1}' -f $m.Expression.TypeName.FullName, $m.Member.Value; if ($allow.Static -notcontains $k) { $out.Add("static:$k") } }
+                elseif ($allow.Instance -notcontains [string]$m.Member.Value) { $out.Add("method:$($m.Member.Value)") }
+            }
+            return $out.ToArray()
+        }
+        foreach ($f in Get-ChildItem -LiteralPath (Join-Path $srcDir 'providers') -Filter '*.ps1' -File) { Assert-Eq (@(& $callsOf $f.FullName) -join ',') '' "$($f.Name): so chamadas de leitura da lista fechada" }
+        $pl = Join-Path $sandbox 's1-write-plant'; [void][IO.Directory]::CreateDirectory($pl)
+        $txt = [IO.File]::ReadAllText((Join-Path $srcDir 'providers\ClaudeCode.ps1'))
+        [IO.File]::WriteAllText((Join-Path $pl 'a.ps1'), ($txt + "`r`n[IO.File]::WriteAllText('C:\x\y.txt', 'x')`r`n"))
+        [IO.File]::WriteAllText((Join-Path $pl 'b.ps1'), ($txt + "`r`n`$fi = New-Object IO.FileInfo('C:\x\y.txt'); `$fi.Delete()`r`n"))
+        [IO.File]::WriteAllText((Join-Path $pl 'c.ps1'), ($txt + "`r`nSet-Content -LiteralPath 'C:\x\y.txt' -Value 'x'`r`n"))
+        Assert-Eq (@(& $callsOf (Join-Path $pl 'a.ps1')) -join ',') 'static:IO.File::WriteAllText' 'escrita estatica plantada: recusada'
+        Assert-Eq (@(& $callsOf (Join-Path $pl 'b.ps1')) -join ',') 'method:Delete' 'metodo de escrita plantado: recusado'
+        Assert-Eq (@(& $callsOf (Join-Path $pl 'c.ps1')) -join ',') 'cmd:Set-Content' 'comando de escrita plantado: recusado'
+    }
+    Test-Case 'Contrato de provider' 'Um provider nunca enfraquece uma trava: LIVE, Readable e atividade recente bloqueiam; com a trava de exclusao fechada o preview fica no resultado do portao e o clean e abortado pela trava (nada apagado); cada flag dura (uma fixture por flag) nunca elegivel, mesmo com o provider mais permissivo' {
+        $claude = (Get-AtmProviders)[0]
+        $p = New-TestProfile 's1gate'
+        $mk = { param([string]$Name) $d = Join-Path $p.TempCandidates[0].TempPath ('atm-conformance-fixture\scope1\' + $Name); [void][IO.Directory]::CreateDirectory($d); [IO.File]::WriteAllBytes((Join-Path $d 'x.bin'), (New-Object byte[] 11)); $d }
+        $rLive = & $mk 'run-0001'; $rFree = & $mk 'run-0002'
+        $recent = $nowFuture.AddHours(-1)
+        $fx = New-AtmS1FixtureProvider @{
+            GetSessionEvidence  = { param($ProfileInfo, $Snapshot) [pscustomobject]@{ Readable = $true; Unparseable = 0; Entries = @([pscustomobject]@{ SessionId = 'run-0001'; Pid = 1; State = 'LIVE' }) } }
+            GetActivityEvidence = ({ param($ProfileInfo, $Scope, $RootName) [pscustomobject]@{ Readable = $true; LastWriteUtc = $(if ($RootName -ceq 'run-0001') { $recent } else { $null }) } }.GetNewClosure()) }
+        $a = Get-InvArgs -Profiles @($p); $a['Providers'] = @($claude, $fx)
+        $i = Invoke-AtmInventory @a
+        $xl = Find-Part $i $rLive; $xf = Find-Part $i $rFree
+        Assert-True ($xl.Class -ceq 'ACTIVE_EVIDENCE' -and @($xl.Flags) -ccontains 'TRANSCRIPT_RECENT' -and (Test-AtmCandidate -Partition $xl -Inventory $i -SkipLockProbe).Category -ceq 'BLOCKED') "LIVE e atividade recente bloqueiam ($($xl.Class); $(@($xl.Flags) -join ','))"
+        Assert-True ($xf.Class -ceq 'ORPHAN_SUSPECTED' -and @($xf.Flags).Count -eq 0) 'controle: a outra raiz do mesmo provider e orfa sem flags'
+        $w = New-TestCleanLogWriter; $del = New-TestCleanDeleter -Writer $w
+        $entries = @($rLive, $rFree | ForEach-Object { [pscustomobject]@{ Source = 's1'; Path = $_; Fingerprint = $null } })
+        $script:AtmRealDeletionEnabled = $shippedDeletionGate
+        try {
+            Assert-Eq $script:AtmRealDeletionEnabled $false 'trava distribuida fechada'
+            $rows = @(Invoke-AtmPreview -Inventory $i -InventoryArgs $a)
+            foreach ($rp in @($rLive, $rFree)) {
+                $row = Get-TestPreviewRow $rows $rp
+                $g = Test-AtmCandidate -Partition $row.Partition -Inventory $i -RuntimeEvidence $row.Runtime
+                Assert-Eq $row.Gate.Category $g.Category "$(Split-Path -Leaf $rp): preview no resultado do portao"
+            }
+            Assert-Eq (Get-TestPreviewRow $rows $rLive).Gate.Category 'BLOCKED' 'preview: LIVE bloqueada'
+            $c = Invoke-AtmClean -Entries $entries -PlanPresenter $presenter -ConfirmationReader ${function:Confirm-Correct} -InventoryArgs $a -LogWriter $w -DeleteTreeImpl $del.Delete -PathPresenceImpl $del.Present
+            Assert-True ($c.Aborted -ceq 'EXCLUSAO_REAL_DESABILITADA_V0_1' -and $del.Calls.Count -eq 0 -and [IO.Directory]::Exists($rLive) -and [IO.Directory]::Exists($rFree)) "clean abortado pela trava, nada apagado ($($c.Aborted))"
+        } finally { $script:AtmRealDeletionEnabled = $true }
+        $wrong = New-Object System.Collections.Generic.List[string]
+        foreach ($hf in $script:AtmHardFlags) {
+            $cl = $xf.PSObject.Copy(); $cl.Flags = @($hf)
+            $g = Test-AtmCandidate -Partition $cl -Inventory $i -SkipLockProbe
+            if ($g.Category -cne 'BLOCKED' -or @($g.Reasons) -cnotcontains $hf) { $wrong.Add("$hf -> $($g.Category)") }
+        }
+        Assert-True ($wrong.Count -eq 0 -and @($script:AtmHardFlags).Count -eq 10) "cada flag dura bloqueia ($(@($script:AtmHardFlags).Count) fixtures): $($wrong -join ', ')"
+        Assert-True (@($xf.Flags).Count -eq 0) 'a particao original nao foi alterada pelas copias'
+    }
+    Test-Case 'Contrato de provider' 'Prova estatica (3.1.2): nenhum src\lib\Engine.*.ps1 tem um id ou nome de exibicao de provider como literal, fora do conjunto fechado de uma entrada (Engine.Clean.ps1, a excecao restrita de B1); literais plantados numa copia recusados, comentario ignorado' {
+        $needles = New-Object System.Collections.Generic.List[string]
+        foreach ($f in Get-ChildItem -LiteralPath (Join-Path $srcDir 'providers') -Filter '*.ps1' -File) {
+            foreach ($mm in [regex]::Matches([IO.File]::ReadAllText($f.FullName), "(?m)^\s*(?:Id|DisplayName)\s*=\s*'([^']+)'")) { $needles.Add($mm.Groups[1].Value) }
+        }
+        $needles.Add($s1FixtureId); $needles.Add($s1FixtureName)
+        foreach ($nd in @('claude-code', 'Claude Code', 'claude-desktop', 'Claude Desktop')) { Assert-True ($needles -ccontains $nd) "agulha lida dos providers: $nd" }
+        $scan = {
+            param([string]$Dir)
+            $hits = New-Object System.Collections.Generic.List[string]
+            foreach ($f in Get-ChildItem -LiteralPath $Dir -Filter 'Engine.*.ps1' -File | Sort-Object Name) {
+                $lines = [IO.File]::ReadAllLines($f.FullName)
+                foreach ($t in [Management.Automation.PSParser]::Tokenize([IO.File]::ReadAllText($f.FullName), [ref]$null)) {
+                    if ($t.Type -ne 'String') { continue }
+                    foreach ($nd in $needles) {
+                        if ($t.Content.IndexOf($nd, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $hits.Add(('{0}|{1}|{2}' -f $f.Name, $nd, $lines[$t.StartLine - 1].Trim())); break }
+                    }
+                }
+            }
+            return $hits.ToArray()
+        }
+        $allowed = { param($h) $h.StartsWith('Engine.Clean.ps1|claude-code|', [StringComparison]::Ordinal) -and $h.Contains("[string]`$p.Provider -cne 'claude-code'") }
+        $hits = @(& $scan (Join-Path $srcDir 'lib'))
+        Assert-True ($hits.Count -eq 1 -and (& $allowed $hits[0])) "literais nos motores: exatamente a entrada listada ($($hits -join ' || '))"
+        $cp = Join-Path $sandbox 's1-literal-plant'; [void][IO.Directory]::CreateDirectory($cp)
+        foreach ($f in Get-ChildItem -LiteralPath (Join-Path $srcDir 'lib') -Filter 'Engine.*.ps1' -File) { [IO.File]::Copy($f.FullName, (Join-Path $cp $f.Name)) }
+        [IO.File]::AppendAllText((Join-Path $cp 'Engine.Monitor.ps1'), "`r`n`$atmS1Planted = 'claude-desktop'`r`n# a comment naming Claude Code is not a literal`r`n")
+        [IO.File]::AppendAllText((Join-Path $cp 'Engine.Isolate.ps1'), "`r`n`$atmS1Planted2 = `"only for $s1FixtureName`"`r`n")
+        $ph = @(& $scan $cp)
+        Assert-True ($ph.Count -eq 3 -and @($ph | Where-Object { & $allowed $_ }).Count -eq 1 -and @($ph | Where-Object { $_.StartsWith('Engine.Monitor.ps1|claude-desktop|') }).Count -eq 1 -and @($ph | Where-Object { $_.StartsWith("Engine.Isolate.ps1|$s1FixtureName|") }).Count -eq 1) "plantados recusados, comentario ignorado ($($ph -join ' || '))"
+    }
+    Test-Case 'Contrato de provider' 'Adicao a seco (3.1.3): copia de src com o provider de fixture em providers\ e manifesto refeito; verify, audit e diagnose num processo filho contra a copia; o fixture aparece; os hashes de Engine.*.ps1 iguais aos originais; claude-desktop carregado' {
+        $copy = Join-Path $sandbox 's1-dry-add\AgentTempManager'
+        [void][IO.Directory]::CreateDirectory($copy)
+        Copy-AtmTree -From $srcDir -To $copy
+        [IO.File]::WriteAllText((Join-Path $copy 'providers\AtmConformanceFixture.ps1'), $s1FixtureFileText, (New-Object Text.UTF8Encoding($true)))
+        New-AtmNativeAssembly -Root $copy
+        Write-AtmManifest -Root $copy -Version (Get-AtmSourceVersion -SourceDir $srcDir)
+        $engines = @(Get-ChildItem -LiteralPath (Join-Path $srcDir 'lib') -Filter 'Engine.*.ps1' -File)
+        Assert-True ($engines.Count -ge 6) "motores encontrados ($($engines.Count))"
+        foreach ($e in $engines) { Assert-Eq (Get-FileHash -LiteralPath (Join-Path $copy ('lib\' + $e.Name)) -Algorithm SHA256).Hash (Get-FileHash -LiteralPath $e.FullName -Algorithm SHA256).Hash "$($e.Name) identico na copia" }
+        $cmd = Join-Path $copy 'bin\agent-temp.cmd'
+        $v = Invoke-AtmTestChild -CommandLine ("`"$cmd`" verify -Lang en-US") -TimeoutSec 300
+        Assert-True ($v.Exit -eq 0 -and $v.Text.Contains('providers\AtmConformanceFixture.ps1')) "verify da copia com o fixture no manifesto (exit $($v.Exit))"
+        $au = Invoke-AtmTestChild -CommandLine ("`"$cmd`" audit -NoProgress -Lang en-US") -TimeoutSec 900
+        Assert-True ($au.Exit -eq 0 -and $au.Text.Contains("$s1FixtureName [<TEMP>\$s1FixtureId]") -and $au.Text.Contains('Claude Code [<TEMP>\claude]')) "audit da copia lista o fixture (exit $($au.Exit))"
+        $dg = Invoke-AtmTestChild -CommandLine ("`"$cmd`" diagnose -NoProgress -Lang en-US") -TimeoutSec 900
+        Assert-True ($dg.Exit -eq 0 -and $dg.Text.Contains("$s1FixtureId v2 [temp,runtime]") -and $dg.Text.Contains('claude-desktop v2 [runtime]') -and $dg.Text.Contains('claude-code v2 [temp,runtime]')) "diagnose da copia lista o fixture e os distribuidos (exit $($dg.Exit))"
+        foreach ($e in $engines) { Assert-Eq (Get-FileHash -LiteralPath (Join-Path $copy ('lib\' + $e.Name)) -Algorithm SHA256).Hash (Get-FileHash -LiteralPath $e.FullName -Algorithm SHA256).Hash "$($e.Name) identico depois das execucoes" }
+    }
+    Test-Case 'Contrato de provider' 'O provider de fixture vive so nos testes: nenhum arquivo de src (o que o pacote leva) tem o id ou o nome do fixture; src\providers so com os dois distribuidos' {
+        $hits = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.cmd', '.json', '.cs', '.md', '.txt') } | Where-Object { $t = [IO.File]::ReadAllText($_.FullName); $t.Contains($s1FixtureId) -or $t.Contains($s1FixtureName) } | ForEach-Object { $_.FullName.Substring($srcDir.Length) })
+        Assert-Eq ($hits -join ',') '' 'fixture ausente de src'
+        Assert-Eq (@(Get-ChildItem -LiteralPath (Join-Path $srcDir 'providers') -File | ForEach-Object { $_.Name } | Sort-Object) -join ',') 'ClaudeCode.ps1,ClaudeDesktop.ps1' 'providers distribuidos'
+    }
+    Test-Case 'Contrato de provider' 'Comparacao dourada: Invoke-AtmInventory sobre a fixture fixa compara campo a campo Class, Flags, categoria do portao, resultado B1 (ProcessCoverageGate), TRANSCRIPT_RECENT e a categoria do preview com os valores gerados em 072c0e5 (antes do registro mais estrito); igual tambem com o provider de fixture junto' {
+        $root = Join-Path $sandbox 's1-golden'
+        [void][IO.Directory]::CreateDirectory($root)
+        $gfx = New-AtmS1GoldenFixture -Root $root -OwnerSid $testOwnerSid -NowUtc $nowFuture
+        foreach ($set in @(@('so claude-code', $null), @('com o fixture', @((Get-AtmProviders)[0], (New-AtmS1FixtureProvider))))) {
+            $rows = @(Get-AtmS1GoldenRows -Fixture $gfx -NowUtc $nowFuture -ConfigDir $cfgDir -Providers $set[1])
+            $diff = New-Object System.Collections.Generic.List[string]
+            for ($k = 0; $k -lt [Math]::Max($rows.Count, $s1GoldenExpected.Count); $k++) {
+                $act = $(if ($k -lt $rows.Count) { $rows[$k] } else { '<nada>' }); $exp = $(if ($k -lt $s1GoldenExpected.Count) { $s1GoldenExpected[$k] } else { '<nada>' })
+                if ($act -cne $exp) { $diff.Add("[$k] esperado '$exp' obtido '$act'") }
+            }
+            Assert-True ($diff.Count -eq 0 -and $rows.Count -eq $s1GoldenExpected.Count) "$($set[0]): $($rows.Count) linhas, diferencas: $($diff -join ' | ')"
+        }
+    }
 } finally {
     # The console encoding of this process is restored, even when the suite aborts (a redirected console may refuse it).
     if ($null -ne $prevOutputEncoding) { try { [Console]::OutputEncoding = $prevOutputEncoding } catch { $null = $_ } }

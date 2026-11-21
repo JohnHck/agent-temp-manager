@@ -92,3 +92,26 @@ Decision 6 implemented: `src/providers/ClaudeDesktop.ps1` (id `claude-desktop`, 
   a P1 provider and is left to a later decision.
 * **What the diagnose can say about Cowork:** a running `CoworkVMService` with a verified process (local service
   evidence); never that a Cowork VM runs or does not run, and nothing about Cowork in a remote environment.
+
+## Implementation record (V1.0 S1, 2026-11-21)
+
+Contract 2 is frozen as the stable contract of V1.0 ([ADR-0018](ADR-0018-v10-stabilization-multi-agent.md), phase S1,
+V10-D5 (b) and V10-D8 (a), decided 2026-11-21). Its number does not change.
+
+* **Documented completely** in `docs/PROVIDERS.md`: the inputs (`$ProfileInfo`: `Sid`, `ProfilePath`, `EnvValues`,
+  `EnvKnown`; `$Snapshot`: `Failed`, `Processes[].Pid`, `.CreationUtc`), the return shapes (the `{ TempPath; Source }`
+  items of `GetExtraTempDirs`, `Entries[].StartUtc` and the rest), the `Readable` semantics, the five `State` values and
+  the provider-side liveness rule, `GetWorktreeHints` reserved (not called in 1.x), `Dirs`, `Refused` and `Notes`
+  private to the provider, the versioning rules, and the B1 restricted exception tied to `claude-code`.
+* **Stricter registration** (`Register-AtmProvider`, `src/lib/Engine.Audit.ps1`): with the capability `temp`, the five
+  `Get*` members must be script blocks (`err.providerTempMember`) and `ScopePattern`/`RootPattern` must compile as
+  regular expressions (`err.providerPattern`); each message names the member, never the value. `ContractVersion` must be
+  the value 2 of an integer type: text (`'2'`, `' 2 '`), a fractional number, a list and `$null` are now refused with
+  `err.providerContract`, as `docs/PROVIDERS.md` already stated ("any other value is refused"). The two checks of the
+  `temp` members apply to v1 providers too, which tightens "same validation" of decision 2: ADR-0018 section 1.4
+  classes this as a compatible change, since no shipped or documented provider used those forms. Both shipped
+  providers pass unchanged. The launcher's loading is unchanged: a provider file whose
+  registration throws still stops it.
+* **Proof:** the suite area "Contrato de provider" (both shells) and a golden comparison of the inventory against rows
+  generated before the change: identical. No classification, flag, eligibility, B1, RECENT, gate or output format
+  changes.

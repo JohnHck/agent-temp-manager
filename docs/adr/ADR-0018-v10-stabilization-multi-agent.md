@@ -1,6 +1,6 @@
 # ADR-0018: V1.0 stabilization and multi-agent support
 
-Status: PROPOSED (V10-D1 to V10-D8 open; nothing implemented)
+Status: ACCEPTED (V10-D1 to V10-D8 decided 2026-11-21, as recommended; S1 implemented, see the implementation record)
 Date: 2026-11-21
 Phase: V1.0 (phases S0 to S7 below, each a future round with its own contract and tests)
 
@@ -457,36 +457,44 @@ S5 and must close after them.
     - (c) the generic provider, test-only;
     - (d) (a) + (c).
   - **Recommendation: (d), with GitHub Copilot CLI for (a).** (c) proves the acceptance in CI. (a) gives a real agent without touching eligibility. Copilot CLI has the best-documented layout.
+  - **Decided: (d), with GitHub Copilot CLI for (a)** (2026-11-21, as recommended): S3 brings the generic test-only provider, S4 Copilot CLI with `runtime` only.
 - **V10-D2, "stable" with the gates closed (section 7):**
   - Options: (a) publish 1.0 dark; (b) wait for the pilot and chosen gates; (c) land dark and decide numbering and publication later.
   - **Recommendation: (c).** It follows D-A, and the number promises nothing the gates hold back.
+  - **Decided: (c)** (2026-11-21, as recommended).
 - **V10-D3, the format stability policy (section 2):**
   - Options:
     - (a) the classes of 2.2: stable, internal and log, with one published minor version of deprecation;
     - (b) everything machine-readable stable;
     - (c) only `atm.diagnose/2` and the exit codes stable.
   - **Recommendation: (a).** It promises stability where outside readers exist and keeps the product free to change its own files safely.
+  - **Decided: (a)** (2026-11-21, as recommended).
 - **V10-D4, who signs the security review (section 5):**
   - Options:
     - (a) the auditor reviews, the maintainer accepts;
     - (b) an external reviewer;
     - (c) the maintainer alone.
   - **Recommendation: (a)**, with (b) optional before a public 1.0. It separates the writer from the acceptor without an outside dependency.
+  - **Decided: (a)**, with (b) optional before a public 1.0 (2026-11-21, as recommended).
 - **V10-D5, the contract's strictness:**
   - Options:
     - (a) documentation only;
     - (b) also stricter registration (script blocks, regexes);
     - (c) (b) and a provider whose file throws while loading is refused alone and recorded, while the others run.
   - **Recommendation: (b).** It fails earlier, with no behaviour change for shipped providers. (c) changes the launcher's failure mode and deserves its own review.
+  - **Decided: (b)** (2026-11-21, as recommended): stricter registration; the launcher's loading stays as it is. Implemented in S1.
 - **V10-D6, open acceptance rows:**
   - Options: (a) V1.0 is accepted only with every operator row executed; (b) the maintainer may accept named rows as open, listed in the release notes.
   - **Recommendation: (a) for a published 1.0; (b) for landing dark.**
+  - **Decided: (a) for a published 1.0; (b) for landing dark** (2026-11-21, as recommended).
 - **V10-D7, multi-user in CI (S5):**
   - Options: (a) a second disposable standard user in the install e2e; (b) operator only.
   - **Recommendation: (a).** It reuses a proven pattern and removes rows from the operator's list.
+  - **Decided: (a)** (2026-11-21, as recommended).
 - **V10-D8, the v1 contract's lifetime:**
   - Options: (a) accepted throughout 1.x; (b) deprecated in 1.0, removed in 1.1.
   - **Recommendation: (a).** Third-party v1 providers keep working, and removal can be announced later.
+  - **Decided: (a)** (2026-11-21, as recommended).
 
 ## Rejected alternatives
 
@@ -515,3 +523,43 @@ S5 and must close after them.
 - **Each phase brings its own tests (section 9).** None may open a gate or change B1, RECENT, the classification or
   eligibility. The golden inventory comparison (1.5) and the conformance suite (3.2) prove the provider changes;
   golden files prove the format changes.
+
+## Implementation record (S1, 2026-11-21)
+
+S1 implemented on `main` at `072c0e5` as the base. V10-D5 (b) and V10-D8 (a) apply. Line references in this record
+are to the files as changed by S1.
+
+- **Contract 2 frozen and documented** in `docs/PROVIDERS.md` (1.3 to 1.5): the inputs `$ProfileInfo` and `$Snapshot`,
+  the return shapes, the `Readable` semantics, the five `State` values and the provider-side liveness rule,
+  `GetWorktreeHints` reserved (not called in 1.x), `Dirs`/`Refused`/`Notes` private to the provider, the versioning
+  rules of 1.4, and the B1 restricted exception tied to `claude-code` (a new provider stays under the full B1 rule; not
+  a bug). The number stays 2. ADR-0008 records it too.
+- **Stricter registration** (`src/lib/Engine.Audit.ps1`, `Get-AtmProviderContract`, `Test-AtmProviderPattern`,
+  `Register-AtmProvider`):
+  - with `temp`, the five `Get*` members must be script blocks (`err.providerTempMember`), and `ScopePattern` and
+    `RootPattern` must compile as regular expressions (`err.providerPattern`); both keys in en and pt, naming the member,
+    never the value;
+  - `ContractVersion` must be the value 2 of an integer type. Before S1 the check parsed the text of the value, so
+    `' 2 '`, `'2'`, `2.0` and `@(2)` passed. Now they are refused with `err.providerContract`, with `3`, negative
+    values and `$null`. This is the "stricter validation of a value that no shipped or documented provider uses"
+    of 1.4: compatible;
+  - the launcher's loading is unchanged (V10-D5 kept it): a provider file whose registration throws still stops it.
+- **Conformance suite (3.2), static proof (3.1.2) and dry addition (3.1.3):** the area "Contrato de provider" of
+  `tests/Run-Tests.ps1`, both shells, 13 cases, listed in `docs/TESTING.md`. The fixture provider
+  `atm-conformance-fixture` exists only in the suite. The closed set of provider literals in the engines has its one
+  entry, `Engine.Clean.ps1:174`.
+- **Golden comparison (1.5):** the rows of a fixed inventory fixture were generated at `072c0e5`, before the change, and
+  are embedded in the suite: class, sorted flags, the gate's category, the B1 result, `TRANSCRIPT_RECENT` and the
+  preview's category. They are identical after the change, alone and with the fixture provider alongside.
+- **How 3.2 was met where the text differs:**
+  - "no credential reads": there is no file-system seam in the engine, and the case changes no ACL. The decoys are
+    created by the case in its own sandbox and held open with `FileShare.None`, so any open by a provider fails; the
+    case requires that no member result and no classification changes;
+  - "no writes": there is no write seam either. The case compares a listing of the profile tree before and after each
+    member, plus a static closed list of the read-only calls a provider file may use;
+  - "a provider that throws gives `UNVERIFIABLE`/`FAILED`": a runtime member that throws gives that provider's coverage
+    `FAILED` (`HINT_FAILED_*`). A `temp` member that throws stops the whole inventory (fail closed: nothing is
+    classified), and diagnose reports its `inventory` coverage `FAILED`. A per-provider result for `temp` would be an
+    engine change outside S1.
+- **Unchanged:** B1, RECENT (72 hours), the hard and soft flags, the classification, eligibility, every output format,
+  the usage texts, `src/providers/*`, `install/`, `tools/`, `.github/`. The nine gates stay `$false`.

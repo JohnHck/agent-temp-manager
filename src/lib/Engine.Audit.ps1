@@ -38,14 +38,21 @@ $script:AtmProviderMembers = @('Id', 'DisplayName', 'TempSubdir', 'ScopePattern'
 # v1 provider with the single capability 'temp', validated exactly as before.
 $script:AtmProviderCapabilityNames = @('temp', 'runtime')
 $script:AtmProviderRuntimeMembers = @('GetProcessMatchers', 'GetServiceHints', 'GetVirtualizationHints', 'GetWorktreeHints')
+# V10-S1 (ADR-0018, V10-D5 (b)): with the capability temp, these five members must be script blocks and the two patterns
+# must compile as regular expressions, checked at registration (a bad value used to fail later, at use).
+$script:AtmProviderTempScriptMembers = @('GetExtraTempDirs', 'GetConfigDirs', 'GetSessionEvidence', 'GetActivityEvidence', 'GetProjectKey')
+$script:AtmProviderPatternMembers = @('ScopePattern', 'RootPattern')
 
 function Get-AtmProviderContract {
     # Works on unregistered objects too (the -Providers override of Invoke-AtmInventory skips registration).
+    # V10-S1: ContractVersion must be an integer value 2 of an integer type; text (' 2 ', '2', '2.0'), a fractional number,
+    # a list or $null is an unknown version, refused with the reason (fail closed).
     param($Provider)
     $names = @($Provider.PSObject.Properties.Name)
     if ($names -notcontains 'ContractVersion') { return [pscustomobject]@{ Version = 1; Capabilities = @('temp') } }
-    $v = 0
-    if (-not [int]::TryParse([string]$Provider.ContractVersion, [ref]$v) -or $v -ne 2) { throw (Get-AtmText 'err.providerContract' ([string]$Provider.ContractVersion)) }
+    $cv = $Provider.ContractVersion
+    $isInt = ($cv -is [int] -or $cv -is [long] -or $cv -is [int16] -or $cv -is [byte] -or $cv -is [sbyte] -or $cv -is [uint16] -or $cv -is [uint32] -or $cv -is [uint64])
+    if (-not $isInt -or [decimal]$cv -ne 2) { throw (Get-AtmText 'err.providerContract' ([string]$Provider.ContractVersion)) }
     $caps = @(if ($names -contains 'Capabilities') { @($Provider.Capabilities) | Where-Object { $null -ne $_ } })
     if ($caps.Count -eq 0) { throw (Get-AtmText 'err.providerCapabilities' '-') }
     foreach ($c in $caps) { if (-not ($c -is [string]) -or $script:AtmProviderCapabilityNames -cnotcontains $c) { throw (Get-AtmText 'err.providerCapabilities' ([string]$c)) } }
@@ -63,6 +70,14 @@ function Test-AtmProviderId {
     return ($Id -match '^[a-z0-9-]+$')
 }
 
+function Test-AtmProviderPattern {
+    # V10-S1: a text (or a [regex]) that compiles as a regular expression. The pattern itself is never put in a message.
+    param($Value)
+    if ($Value -is [regex]) { return $true }
+    if (-not ($Value -is [string])) { return $false }
+    try { $null = New-Object System.Text.RegularExpressions.Regex($Value); return $true } catch { return $false }
+}
+
 function Register-AtmProvider {
     param($Provider)
     $names = @($Provider.PSObject.Properties.Name)
@@ -72,6 +87,11 @@ function Register-AtmProvider {
     foreach ($m in $required) { if ($names -notcontains $m) { throw (Get-AtmText 'err.providerMember' $m) } }
     if (-not (Test-AtmProviderId -Id $Provider.Id -Contract $contract)) { throw (Get-AtmText 'err.providerId' $Provider.Id) }
     if ($isTemp -and $Provider.TempSubdir -notmatch '^[A-Za-z0-9._-]+$') { throw (Get-AtmText 'err.providerSubdir' $Provider.TempSubdir) }
+    if ($isTemp) {
+        # V10-D5 (b): one key per rule; the message names the member, never its value.
+        foreach ($m in $script:AtmProviderTempScriptMembers) { if (-not ($Provider.$m -is [scriptblock])) { throw (Get-AtmText 'err.providerTempMember' $m) } }
+        foreach ($m in $script:AtmProviderPatternMembers) { if (-not (Test-AtmProviderPattern $Provider.$m)) { throw (Get-AtmText 'err.providerPattern' $m) } }
+    }
     foreach ($m in $script:AtmProviderRuntimeMembers) {
         if ($names -notcontains $m) { continue }
         if ($contract.Capabilities -cnotcontains 'runtime' -or -not ($Provider.$m -is [scriptblock])) { throw (Get-AtmText 'err.providerRuntimeMember' $m) }

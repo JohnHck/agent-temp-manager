@@ -18,7 +18,7 @@ its gates closed or open, and no gate opens without the maintainer's decision.
 | [0.3.x](#03x--isolation-and-quarantine-of-the-own-profile) | Isolation and quarantine of the own profile (ADR-0013; after 0.3.0 is published) | Yes: moves approved temporary paths into a quarantine and back; purge deletes behind the purge gate of its own (J-ISO-1 (C)) | On `main`, isolation and purge gates closed; not published |
 | [V0.4](#v04--assisted-recovery) | Assisted recovery of services and environments; Recovery Mode for another user's profile (ADR-0013) | Yes: reversible operations, each authorized individually | Accepted in ADR-0016; R0 (read-only service fault signals in the diagnose) and R1 (`recover list` and `recover plan`, read only, eighth gate closed) implemented; R2 (start engine), R3 (undo engine) and R4 (`recover start` and `recover undo`, elevation on demand through UAC) implemented only past the gate, closed in every copy, so no recovery operation can be executed; R5 (the TUI and the GUI show `list` and `plan`, read only; executing stays CLI-only) implemented; R6 (a CI-only harness runs the real start and undo, through the default seams, on services it creates itself on disposable runners; never shipped) implemented |
 | [V0.5](#v05--preventive-monitoring) | Persistent preventive monitoring, alerts, growth trends | No (observes and alerts) | ADR-0017 accepted (V05-D1 to V05-D10 decided); M0 (documentation amendments), M1 (the collector and the history storage), M2 (trends, thresholds and alerts) and M3a (the scheduled task, `monitor enable` and the entry point, behind the gate) done; M3b (a CI-only harness runs the real scheduler under a test task name on disposable runners; never shipped) done; M4a (`monitor disable`, behind the gate, and the empty task folder removed by both unschedule commands) done; M4b (`monitor remove-history`, behind the gate, and the uninstaller's read-only warning) done; M5 (the history and the alerts in the TUI, the GUI and a line under the header of `audit`, read only) done: V0.5 complete behind its gate; M6 out of V0.5 (V05-D6 (a)); monitoring gate (ninth) closed in every copy; nothing scheduled in any copy |
-| [V1.0](#v10--stabilization-and-multi-agent-support) | Stabilization and extensible multi-agent support | Same limits as V0.3 and V0.4 | Designed in [ADR-0018](adr/ADR-0018-v10-stabilization-multi-agent.md) (proposed); not implemented |
+| [V1.0](#v10--stabilization-and-multi-agent-support) | Stabilization and extensible multi-agent support | Same limits as V0.3 and V0.4 | [ADR-0018](adr/ADR-0018-v10-stabilization-multi-agent.md) accepted; in progress: S1 (provider contract 2 frozen and documented, conformance suite) implemented |
 
 ## Principles that apply to every version
 
@@ -471,7 +471,7 @@ installation and removal in a sandbox.
 
 ## V1.0 — Stabilization and multi-agent support
 
-**Status: designed in [ADR-0018](adr/ADR-0018-v10-stabilization-multi-agent.md) (proposed); not implemented.** It lands on `main` under the order rule above: dark, with its acceptance proven in CI.
+**Status: [ADR-0018](adr/ADR-0018-v10-stabilization-multi-agent.md) accepted (V10-D1 to V10-D8 decided 2026-11-21); in progress. S1 implemented: provider contract 2 frozen and documented in [PROVIDERS.md](PROVIDERS.md), stricter registration, the conformance suite. S2 to S7 not started.** It lands on `main` under the order rule above: dark, with its acceptance proven in CI.
 
 **Objectives.** A stable, documented tool that supports several AI agents through the provider contract.
 
