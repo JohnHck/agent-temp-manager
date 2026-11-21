@@ -25342,7 +25342,7 @@ function New-AtmGenericTestProvider {
             Assert-True (@($xf.Flags).Count -eq 0) "$($n): a particao original nao foi alterada pelas copias"
         }
     }
-    Test-Case 'Provider generico' 'B1 continua preso a claude-code: na fixture dourada da V10-S1 (execucao B, um processo nao inspecionavel), uma raiz de generic-b com o mesmo layout de uma raiz claude-code ORPHAN_SUSPECTED tem os mesmos campos (classe, flags, B1 BLOCKED com a unica razao de cobertura) e nunca recebe a excecao restrita (preview BLOCKED, Get-AtmB1ExceptionRisk nulo) enquanto a de claude-code recebe; as 30 linhas douradas de claude-code iguais com generic-b registrado' {
+    Test-Case 'Provider generico' 'B1 continua preso a claude-code: com as travas fechadas, na fixture dourada da V10-S1 (execucao B, um processo nao inspecionavel), uma raiz de generic-b com o mesmo layout de uma raiz claude-code ORPHAN_SUSPECTED tem os mesmos campos (classe, flags, B1 BLOCKED com a unica razao de cobertura) e nunca recebe a excecao restrita (preview BLOCKED, Get-AtmB1ExceptionRisk nulo) enquanto a de claude-code recebe; as 30 linhas douradas de claude-code iguais com generic-b registrado' {
         $root = Join-Path $sandbox 's3-b1'
         [void][IO.Directory]::CreateDirectory($root)
         $gfx = New-AtmS1GoldenFixture -Root $root -OwnerSid $testOwnerSid -NowUtc $nowFuture
@@ -25356,7 +25356,10 @@ function New-AtmGenericTestProvider {
         Assert-True ($null -eq $genB.PSObject.Properties['GetProcessMatchers']) 'a gemea vem da definicao sem runtime (nenhuma recusa de runtime por outra causa)'
         $prevSources = $script:AtmRuntimeEvidenceSources
         $script:AtmRuntimeEvidenceSources = @{ ServiceSource = { param($Names) @() }; VirtualizationSource = { param($Op) @() } }
+        # With the gates closed: the shipped deletion gate (the suite opens it for its own process only), restored after.
+        $script:AtmRealDeletionEnabled = $shippedDeletionGate
         try {
+            Assert-Eq $script:AtmRealDeletionEnabled $false 'trava de exclusao distribuida fechada'
             $ia = @{ ProfilesOverride = $gfx.Profiles; ProcessesOverride = $gfx.ProcsB1; NowUtc = $nowFuture; IdentityOverride = $gfx.Identity; NoProgress = $true; ConfigDir = $cfgDir; Providers = @($claude, $genB) }
             $inv = Invoke-AtmInventory @ia
             $rows = @(Invoke-AtmPreview -Inventory $inv -InventoryArgs $ia)
@@ -25381,7 +25384,7 @@ function New-AtmGenericTestProvider {
                 if ($act -cne $exp) { $diff.Add("[$k] esperado '$exp' obtido '$act'") }
             }
             Assert-True ($diff.Count -eq 0) "linhas douradas de claude-code com generic-b registrado: $($diff -join ' | ')"
-        } finally { $script:AtmRuntimeEvidenceSources = $prevSources }
+        } finally { $script:AtmRuntimeEvidenceSources = $prevSources; $script:AtmRealDeletionEnabled = $true }
     }
     Test-Case 'Provider generico' 'Nada do provider generico se instala: o manifesto que Write-AtmManifest escreve sobre uma copia de src (o conjunto que o instalador instala) lista exatamente os arquivos de src, nenhum com a fabrica, os ids, os nomes ou os campos das definicoes; src\providers so com os dois distribuidos; nenhum tests\fixtures\providers (as definicoes vivem na suite)' {
         $copy = Join-Path $sandbox 's3-manifest\src'

@@ -351,7 +351,7 @@ The suite works only inside its own sandbox (`%TEMP%\atm-tests-<random>`), which
 provider areas:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tests\Run-Tests.ps1 -Only 'Contrato de provider :: *', 'Provider generico :: *'
+powershell -NoProfile -ExecutionPolicy Bypass -Command "& .\tests\Run-Tests.ps1 -Only 'Contrato de provider :: *', 'Provider generico :: *'"
 ```
 
 **Checks that pick up a new file in `src/providers/` with no test change:**
@@ -363,7 +363,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\Run-Tests.ps1 -Only 'C
 **Checks that need a change in the same pull request:**
 - **Shipped-provider lists.** Two assertions name the shipped files exactly (`ClaudeCode.ps1`, `ClaudeDesktop.ps1`):
   "O provider de fixture vive so nos testes" and "Nada do provider generico se instala". They fail until the new file is
-  added to them. That is deliberate: adding a shipped provider is visible in the tests.
+  added to them. That is deliberate: adding a shipped provider is visible in the tests. For the same reason, the case
+  "As duas definicoes" of the area "Provider generico" pins the shipped ids and temporary subfolders read from
+  `src/providers` (`claude-code`, `claude-desktop`; `claude`).
 - **The closed list of read-only calls.** A provider that calls a function, method or type not on the list fails. The
   list is extended only under review, one read-only call at a time.
 
