@@ -9314,6 +9314,31 @@ try {
         Assert-True ($x2.Contains('# Order 1') -and $x2.Contains('# Order 2') -and $x2.Contains("-ceq 'BUSY'") -and -not $x2.Contains('Kill') -and -not $x2.Contains('Stop-Process')) 'X2: duas ordens, BUSY esperado, nenhum processo encerrado'
         Assert-True ($e2e.IndexOf("Step 'v2-clean-leg-B-elevated'") -lt $e2e.IndexOf("Step 'v3-x2-lock-across-identities'")) 'X2 depois das duas pernas e antes da desinstalacao'
     }
+    Test-Case 'Ambiente de teste' 'V10-S5: segundo usuario padrao descartavel no e2e da instalacao criado como o primeiro (senha so SecureString, so Users, nao administrador); guarda de maquina descartavel intacta; nada removido nem encerrado; TEMP de F-05 restaurado em finally; passos entre o X2 e a desinstalacao' {
+        $e2e = [IO.File]::ReadAllText((Join-Path $testsDir 'e2e\Invoke-InstallE2E.ps1'))
+        $b0 = $e2e.IndexOf('# >>> V10-S5 second standard user (begin)'); $b1 = $e2e.IndexOf('# <<< V10-S5 second standard user (end)')
+        Assert-True ($b0 -gt 0 -and $b1 -gt $b0) 'regiao da S5 delimitada'
+        $s5 = $e2e.Substring($b0, $b1 - $b0)
+        # The second user exactly like the first one: a random SecureString built char by char, Users by SID, not an administrator.
+        Assert-True ($s5.Contains("`$userNameB = 'atme2eb' + (Get-Random -Minimum 1000 -Maximum 9999)") -and $s5.Contains('$sec = New-Object Security.SecureString') -and $s5.Contains('$sec.AppendChar($ch)') -and $s5.Contains('$sec.MakeReadOnly()')) 'senha aleatoria construida direto como SecureString'
+        Assert-True (-not $s5.Contains('ConvertTo-' + 'SecureString') -and -not $s5.Contains('AsPlain' + 'Text')) 'senha nunca em texto'
+        Assert-True ($s5.Contains("Add-LocalGroupMember -SID 'S-1-5-32-545' -Member `$userNameB") -and $s5.Contains("Get-LocalGroupMember -SID 'S-1-5-32-544'") -and $s5.Contains("Assert (-not `$isAdmin) 'segundo usuario de teste nao pode ser administrador'")) 'so Users (por SID) e assert de nao administrador'
+        # The guard of the disposable machine is unchanged.
+        Assert-True ($e2e.Contains("if (-not `$DisposableMachine -and -not (`$env:GITHUB_ACTIONS -eq 'true' -and `$env:RUNNER_ENVIRONMENT -eq 'github-hosted')) {") -and $e2e.IndexOf('$DisposableMachine -and') -lt $e2e.IndexOf("Step 'build-release'")) 'guarda de maquina descartavel intacta e antes de qualquer passo'
+        # Nothing removed, nothing terminated, no value of the registry taken out (the users and profiles stay on the runner).
+        foreach ($pat in @(('Remove-' + 'LocalUser'), ('Remove-' + 'Item'), ('.Delete' + '('), ('Delete' + 'Value'), ('Delete' + 'SubKey'), 'Kill', ('Stop-' + 'Process'), ('task' + 'kill'))) { Assert-True (-not $s5.Contains($pat)) "regiao da S5 sem '$pat'" }
+        # F-05: the namer's TEMP is restored in a finally, with its original kind; never created when absent.
+        $f0 = $s5.IndexOf("`$k.SetValue('TEMP', `$target, [Microsoft.Win32.RegistryValueKind]::ExpandString)")
+        Assert-True ($f0 -gt 0 -and $s5.IndexOf("} finally { `$k.SetValue('TEMP', `$orig, `$kind) }") -gt $f0 -and $s5.IndexOf('if ($null -eq $orig) { $script:notTested = $true;') -lt $f0 -and $s5.IndexOf('if ($null -eq $orig) { $script:notTested = $true;') -gt 0) 'TEMP de F-05 restaurado em finally; sem valor proprio, nao testado'
+        # The fixture helpers end by themselves (stop file or deadline); the stop files are written after the last S5 step.
+        Assert-True ($s5.Contains('AddMinutes(40)') -and $s5.Contains("[IO.File]::WriteAllText(`$h.Stop, '1')") -and $s5.IndexOf("[IO.File]::WriteAllText(`$h.Stop, '1')") -gt $s5.IndexOf("Step 'multi-user-no-new-files'")) 'helpers terminam sozinhos, por arquivo ou prazo'
+        # Raw outputs never in -OutDir (they name both test accounts).
+        Assert-True (-not $s5.Contains('$OutDir') -and -not $s5.Contains('Invoke-Agent ')) 'saidas da S5 fora de -OutDir'
+        $iX = $e2e.IndexOf("Step 'v3-x2-lock-across-identities'"); $iC = $e2e.IndexOf("Step 'multi-user-second-user-create'"); $iN = $e2e.IndexOf("Step 'multi-user-no-new-files'"); $iT = $e2e.IndexOf("Step 'autopurge-task-before-uninstall'"); $iU = $e2e.IndexOf("Step 'uninstall'")
+        Assert-True ($iX -gt 0 -and $iX -lt $iC -and $iC -lt $iN -and $iN -lt $iT -and $iT -lt $iU) 'S5 depois do X2 e antes da desinstalacao'
+        $order = @('multi-user-second-user-create', 'multi-user-fixtures', 'multi-user-audit-elevated', 'multi-user-preview-elevated', 'multi-user-clean-gate-closed', 'multi-user-audit-as-A-not-elevated', 'multi-user-f05-two-owners', 'multi-user-no-new-files')
+        for ($i = 1; $i -lt $order.Count; $i++) { Assert-True ($s5.IndexOf("Step '$($order[$i - 1])'") -gt 0 -and $s5.IndexOf("Step '$($order[$i - 1])'") -lt $s5.IndexOf("Step '$($order[$i])'")) "ordem: $($order[$i - 1]) antes de $($order[$i])" }
+    }
 
     Test-Case 'Analise estatica' 'Excecoes revisadas: justificadas, restritas e sem enfraquecer as regras impostas' {
         $root = Split-Path -Parent $testsDir
