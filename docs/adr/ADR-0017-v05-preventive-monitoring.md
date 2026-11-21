@@ -206,8 +206,8 @@ Recommendation (V05-D1): (A), with the PRIV-3 amendment in M0.
     created.
   * This is not an agent removing files. Tests run the commands only against a sandbox folder and a test task name,
     and the real scheduler only on a disposable CI runner.
-  * The uninstaller today only reads the auto-purge task folder and warns (`docs/ARCHITECTURE.md:107-108`). V05-D9
-    decides whether it does more. (Decided 2026-11-18, V05-D9 (a) plus (c): the uninstaller warns and names the two
+  * Until M4b, the uninstaller only read the auto-purge task folder and warned (`docs/ARCHITECTURE.md:107-108`).
+    V05-D9 decided whether it does more. (Decided 2026-11-18, V05-D9 (a) plus (c): the uninstaller warns and names the two
     commands, and the unschedule commands remove the task folder when it is empty. M4a implements (c); M4b implements
     (a): the uninstaller only reads and warns, and removes nothing of the monitoring.)
 
