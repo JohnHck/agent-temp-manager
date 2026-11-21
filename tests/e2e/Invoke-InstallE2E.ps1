@@ -1113,6 +1113,38 @@ try {
     "this account's task registered by the installed engine ($($script:apTaskPath)); version shows it PRESENT"
 }
 
+# V0.5 M4b (ADR-0017, V05-D9 (a)): the uninstall's notice about the monitoring only reads. Before the uninstall this
+# account has no collection task of the product's name and no history folder, and no other user's collection task
+# exists (the M3b legs use test names and never collect); so the uninstall gives no monitoring warning (checked after
+# it). Read only: the harness creates and removes nothing here.
+$monHistoryHere = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'AgentTempManager\Monitor'
+$monPresence = {
+    param([string]$Path)
+    try { $null = [IO.File]::GetAttributes($Path); return $true } catch {
+        $e = $_.Exception; while ($e -is [Management.Automation.MethodInvocationException] -and $null -ne $e.InnerException) { $e = $e.InnerException }
+        if ($e -is [IO.FileNotFoundException] -or $e -is [IO.DirectoryNotFoundException]) { return $false }
+        throw
+    }
+}
+Step 'monitor-absent-before-uninstall' {
+    $names = @()
+    $svc = New-Object -ComObject 'Schedule.Service'
+    $svc.Connect()
+    $folder = $null
+    try { $folder = $svc.GetFolder('\AgentTempManager') } catch {
+        $e = $_.Exception; while ($e -is [Management.Automation.MethodInvocationException] -and $null -ne $e.InnerException) { $e = $e.InnerException }
+        if (@(-2147024894, -2147024893) -notcontains [int]$e.HResult) { throw }
+    }
+    if ($null -ne $folder) { $ts = $folder.GetTasks(1); for ($i = 1; $i -le [int]$ts.Count; $i++) { $names += [string]$ts.Item($i).Name } }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $h = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)) } finally { $sha.Dispose() }
+    $own = 'Monitor-' + (-join ($h[0..7] | ForEach-Object { $_.ToString('x2') }))
+    Assert ($names -cnotcontains $own) 'a tarefa de coleta desta conta existe antes da desinstalacao'
+    Assert (@($names | Where-Object { $_ -cmatch '^Monitor-[0-9a-f]{16}$' }).Count -eq 0) 'tarefas de coleta de outros usuarios existem antes da desinstalacao'
+    Assert ((& $monPresence $monHistoryHere) -eq $false) 'a pasta do historico desta conta existe antes da desinstalacao'
+    "no collection task of the product's name and no history folder of this account before the uninstall ($($names.Count) task(s) in the product's task folder)"
+}
+
 Step 'uninstall' {
     & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pkg 'install\Uninstall-AgentTempManager.ps1') *> (Join-Path $OutDir 'uninstall.txt')
     Assert ($LASTEXITCODE -eq 0) "uninstall exit $LASTEXITCODE"
@@ -1128,6 +1160,16 @@ Step 'recover-log-folder-kept-on-uninstall' {
     $t = [IO.File]::ReadAllText((Join-Path $OutDir 'uninstall.txt')) -replace '\s+', ''
     Assert ($t.Contains('waskept:itistherecordofwhatrecoverydid')) 'a desinstalacao nao disse que manteve a pasta'
     'kept with its content; the uninstaller said so'
+}
+Step 'uninstall-no-monitoring-warning' {
+    # V0.5 M4b: without a collection task and without a history folder, no monitoring warning (in either language).
+    $u = [IO.File]::ReadAllText((Join-Path $OutDir 'uninstall.txt')) -replace '\s+', ''
+    # Only the notice's distinctive fragments (whitespace removed): its two commands, the folder's literal and the
+    # stems of its two unreadable warnings in both languages.
+    foreach ($frag in @('agent-tempmonitordisable', 'agent-tempmonitorremove-history', '%LOCALAPPDATA%\AgentTempManager\Monitor', 'Thescheduledtasksofthemonitoring', 'Themonitoringhistorycouldnotberead', 'tarefasagendadasdomonitoramento', 'históricodomonitoramento')) {
+        Assert (-not $u.Contains($frag)) "a desinstalacao avisou do monitoramento sem tarefa de coleta nem pasta do historico ($frag)"
+    }
+    'no collection task and no history folder: the uninstall gave no monitoring warning'
 }
 Step 'autopurge-task-after-uninstall' {
     if (-not $script:apTaskPath) { throw 'tarefa desta conta nao foi criada antes da desinstalacao' }
@@ -1199,6 +1241,18 @@ Step 'xversion-rollback-to-0.1.0' {
     $r = Invoke-Agent 'verify' 'xversion-verify-rolledback'; Assert ($r.Code -eq 0) "verify exit $($r.Code)"
     "back to 0.1.0, verified"
 }
+# V0.5 M4b (optional, ADR-0017 V05-D9 (a)): a history folder planted in this disposable runner account's profile (an
+# empty folder: no record, no task) makes the next uninstall of this package warn with the environment form of the
+# folder, never the expanded path, naming monitor remove-history. The harness never removes it: it stays on the
+# disposable runner (later steps do not read it).
+$script:monPlanted = $false
+Step 'monitor-history-planted-before-xversion-uninstall' {
+    if (-not $script:v010Pkg) { $script:notTested = $true; return '0.1.0 package unavailable (the next uninstall does not run)' }
+    Assert ((& $monPresence $monHistoryHere) -eq $false) 'a pasta do historico desta conta ja existia'
+    [void][IO.Directory]::CreateDirectory($monHistoryHere)
+    $script:monPlanted = $true
+    'an empty history folder planted in this disposable account (never removed by the harness)'
+}
 Step 'xversion-update-again-and-uninstall' {
     if (-not $script:v010Pkg) { $script:notTested = $true; return '0.1.0 package unavailable' }
     & $installerExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pkg 'install\Install-AgentTempManager.ps1') -Update *> (Join-Path $OutDir 'xversion-update2.txt')
@@ -1209,6 +1263,16 @@ Step 'xversion-update-again-and-uninstall' {
     Assert (-not (Test-Path $installDir) -and -not (Test-Path "$installDir.previous")) 'diretorios ainda existem'
     Assert (-not (([Environment]::GetEnvironmentVariable('Path', 'Machine')) -match 'AgentTempManager')) 'PATH ainda contem o produto'
     "updated to $rcVersion again, uninstalled"
+}
+Step 'xversion-uninstall-monitoring-warning' {
+    if (-not $script:monPlanted -or -not (Test-Path -LiteralPath (Join-Path $OutDir 'xversion-uninstall.txt'))) { $script:notTested = $true; return 'no planted history folder or no uninstall output (0.1.0 package unavailable)' }
+    # Whitespace ignored: a redirected warning is wrapped at the console width.
+    $u = [IO.File]::ReadAllText((Join-Path $OutDir 'xversion-uninstall.txt')) -replace '\s+', ''
+    Assert ($u.Contains('%LOCALAPPDATA%\AgentTempManager\Monitor') -and $u.Contains('agent-tempmonitorremove-history')) 'a desinstalacao nao avisou da pasta do historico pelo literal, com o remove-history'
+    Assert (-not $u.Contains(($monHistoryHere -replace '\s+', ''))) 'a desinstalacao escreveu o caminho expandido da pasta do historico'
+    Assert (-not $u.Contains('agent-tempmonitordisable')) 'a desinstalacao avisou de uma tarefa de coleta que nao existe'
+    Assert ((& $monPresence $monHistoryHere) -eq $true) 'a desinstalacao removeu a pasta do historico'
+    'the uninstall warned with %LOCALAPPDATA%\AgentTempManager\Monitor (never expanded), named monitor remove-history, and left the folder'
 }
 # V0.2 stage 2: from the published 0.1.1 (the current published version) to this package and back, after the 0.1.0
 # path above (which ends uninstalled). The 0.1.1 package is the asset of the GitHub Release v0.1.1, accepted only with

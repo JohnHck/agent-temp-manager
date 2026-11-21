@@ -5467,6 +5467,20 @@ foreach ($k in @($r.Listed.Keys | Where-Object { $_ -match '^providers\\[^\\]+\.
         Assert-True ($ic.Contains("`$script:AtmInstallAutoPurgeTaskFolder = '\AgentTempManager'") -and $iso.Contains("`$script:AtmAutoPurgeTaskFolder = '\AgentTempManager'") -and $iso.Contains("`$script:AtmAutoPurgeTaskPrefix = 'AutoPurge-'")) 'mesma pasta e prefixo no motor e no desinstalador'
         $i = 0
         foreach ($s in @('S-1-5-80-1000-2000-3000-4000-5000', 'S-1-5-18', 'S-1-5-32-545', 'S-1-12-1-1-2-3-4')) { $i++; Assert-Eq (Get-AtmInstallAutoPurgeTaskName -Sid $s) (Get-AtmAutoPurgeTaskName -Sid $s) "mesmo nome no motor e no desinstalador (SID sintetico $i)" }
+        # V0.5 M4b (V05-D9 (a)): the monitoring's constants repeated in the installer, equal to the engine's; the notice
+        # only reads (no removal of any kind in its body).
+        Assert-True ($ic.Contains("`$script:AtmInstallMonitorTaskFolder = '\AgentTempManager'") -and $ic.Contains("`$script:AtmInstallMonitorTaskPrefix = 'Monitor-'") -and $ic.Contains("`$script:AtmInstallMonitorFolderName = 'Monitor'") -and $ic.Contains("`$script:AtmInstallMonitorFolderLiteral = '%LOCALAPPDATA%\AgentTempManager\Monitor'")) 'monitoramento: constantes repetidas no desinstalador'
+        Assert-True ($script:AtmInstallMonitorTaskFolder -ceq $script:AtmMonitorTaskFolder -and $script:AtmInstallMonitorTaskPrefix -ceq $script:AtmMonitorTaskPrefix -and $script:AtmInstallMonitorFolderName -ceq $script:AtmMonitorFolderName -and $script:AtmInstallMonitorFolderLiteral -ceq ('%LOCALAPPDATA%\AgentTempManager\' + $script:AtmMonitorFolderName)) 'monitoramento: mesma pasta de tarefas, prefixo e pasta do historico no motor e no desinstalador'
+        $oldOverride = $script:AtmMonitorTaskNameOverride
+        try {
+            $script:AtmMonitorTaskNameOverride = $null
+            $i = 0
+            foreach ($s in @('S-1-5-80-1000-2000-3000-4000-5000', 'S-1-5-18', 'S-1-5-32-545', 'S-1-12-1-1-2-3-4')) { $i++; Assert-Eq (Get-AtmInstallMonitorTaskName -Sid $s) (Get-AtmMonitorTaskName -Sid $s) "monitoramento: mesmo nome no motor e no desinstalador (SID sintetico $i)" }
+        } finally { $script:AtmMonitorTaskNameOverride = $oldOverride }
+        $mn = [regex]::Replace((Get-ApFnBody (Join-Path $root 'install\InstallCommon.ps1') 'Get-AtmUninstallMonitorNotice'), '(?m)#.*$', '')
+        Assert-True ($mn.Contains('GetTasks(1)') -and $mn.Contains('GetAttributes(')) 'aviso do monitoramento lido (controle positivo)'
+        foreach ($pat in @('Delete', 'Remove-', 'Move', 'Rename', 'Write', 'Create', 'Set-', 'New-Item', 'Out-File', 'Register', 'Unregister', 'schtasks', 'AtmDeleter', 'Remove-AtmOwnTree', 'Invoke-AtmMonitor')) { Assert-True ($mn.IndexOf($pat, [StringComparison]::OrdinalIgnoreCase) -lt 0) "aviso do monitoramento so le: sem '$pat'" }
+        Assert-True ($ic.Contains('foreach ($wl in @(Get-AtmUninstallMonitorNotice)) { Write-Warning $wl }')) 'o desinstalar chama o aviso do monitoramento'
         $def = Get-ApFnBody $isoFile 'New-AtmAutoPurgeTaskDefinition'
         foreach ($s in @('$td.Principal.UserId = $Sid', '$td.Principal.LogonType = 3', '$td.Principal.RunLevel = 0', '$td.Triggers.Create(2)', '$tr.DaysInterval = 1', '$tr.RandomDelay = $script:AtmAutoPurgeTaskRandomDelay', '$s.StartWhenAvailable = $true', '$s.DisallowStartIfOnBatteries = $false', '$s.StopIfGoingOnBatteries = $false', '$s.MultipleInstances = 2', '$td.Actions.Create(0)')) { Assert-True $def.Contains($s) "definicao: $s" }
         Assert-Eq ([regex]::Matches($def, '\.Actions\.Create\(').Count) 1 'uma acao'
@@ -15383,6 +15397,7 @@ try {
     # the monitoring either, which another static checks). V0.5 M4a: and of its removal and the empty task folder's.
     $guiForbidden = @('Invoke-AtmClean', 'Invoke-AtmIsolate', 'Invoke-AtmRestore', 'Invoke-AtmPurge', 'Invoke-AtmAutoPurgeSchedule', 'Invoke-AtmAutoPurgeUnschedule', 'Invoke-AtmDiscardAuthorization',
         'Invoke-AtmMonitorEnable', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'Invoke-AtmMonitorEntry', 'Invoke-AtmMonitorDisable', 'Unregister-AtmMonitorTask', 'Remove-AtmEmptyTaskFolder',
+        'Invoke-AtmMonitorRemoveHistory', 'Remove-AtmMonitorEmptyFolder', 'Get-AtmMonitorHistoryInventory',
         'AtmDeleter', 'AtmLockProbe', 'DeleteTree', 'Remove-Item', 'Move-Item', '::Delete(', '.Delete(', '::Move(', 'Set-Content', 'Add-Content', 'Out-File', 'New-Item', 'Set-ItemProperty', 'Set-Acl',
         '::WriteAll', '::AppendAll', '::Create(', '::OpenWrite(', 'CreateSubKey', 'SetValue', 'Start-Process', 'Stop-Process', 'Start-Service', 'Stop-Service', 'Set-Service', 'Restart-Service',
         'Suspend-Service', 'ScheduledTask', 'schtasks', 'Invoke-CimMethod', 'Invoke-WmiMethod', 'Set-CimInstance', 'Remove-CimInstance', 'Clipboard', 'Invoke-Expression', 'sc.exe', 'net stop', 'net start',
@@ -21478,7 +21493,7 @@ exit 0
         Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('Monitoramento preventivo (V0.5)') -and $r.Text.Contains('Nada foi coletado, criado ou alterado.')) "status pt-BR: saida $($r.Exit)"
         foreach ($u in @('monitor', 'monitor collect')) {
             $r = & $launch "$u -Lang en-US"
-            Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('Usage: agent-temp monitor status | agent-temp monitor enable [-IntervalHours 1|2|4|6|12|24] | agent-temp monitor disable. Nothing was changed.')) "${u}: uso 2 ($($r.Exit))"
+            Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('Usage: agent-temp monitor status | agent-temp monitor enable [-IntervalHours 1|2|4|6|12|24] | agent-temp monitor disable | agent-temp monitor remove-history. Nothing was changed.')) "${u}: uso 2 ($($r.Exit))"
         }
         $r = & $launch 'version -Lang en-US'
         Assert-True ($r.Exit -eq 0 -and $r.Text.Contains('preventive monitoring: DISABLED in this release (monitor status only reads the history; nothing is collected or scheduled)')) "version: saida $($r.Exit)"
@@ -21519,29 +21534,38 @@ exit 0
         Assert-True ($diagFns -ccontains 'Get-AtmIdentityState') 'controle positivo: a excecao declarada e uma funcao do diagnose'
         foreach ($pat in @('Invoke-AtmDiagnose', 'Engine.Diagnose', 'Invoke-AtmClean', 'Invoke-AtmIsolat', 'Invoke-AtmRecover', 'Invoke-AtmPurge', 'Invoke-AtmRestore', 'Schedule.Service', 'Register-ScheduledTask', 'ScheduledTask',
                 'AtmCleanLock', 'AtmCleanLockName', 'Invoke-WebRequest', 'Invoke-RestMethod', 'Net.WebClient', 'HttpClient', 'Net.Sockets', 'Start-Process', 'Read-Host', 'Write-Host', 'AtmDeleter', 'AtmMover', 'PinForMove',
-                'OpenExisting', 'Remove-Item', 'Move-Item', 'Directory]::Delete', '.Delete(', 'Set-Acl', 'SetAccessControl', 'Add-Type', ('run' + 'as'), 'ShellExecute')) {
+                'OpenExisting', 'Remove-Item', 'Move-Item', '.Delete(', 'Set-Acl', 'SetAccessControl', 'Add-Type', ('run' + 'as'), 'ShellExecute')) {
             Assert-True ($code.IndexOf($pat, [StringComparison]::OrdinalIgnoreCase) -lt 0) "motor de monitoramento sem '$pat'"
         }
         $ast = [Management.Automation.Language.Parser]::ParseFile($monFile, [ref]$null, [ref]$null)
         $defs = @{}; foreach ($d in @($ast.FindAll({ param($a) $a -is [Management.Automation.Language.FunctionDefinitionAst] }, $true))) { $defs[$d.Name] = $d }
         $fnOf = { param([string]$Pat) @($defs.Keys | Where-Object { $defs[$_].Extent.Text.Contains($Pat) } | Sort-Object) -join ',' }
-        # The single removal: one file system call, in Invoke-AtmMonitorPrune, after its checks in order; called only by
-        # the rotation, and the rotation only by the collector.
-        Assert-Eq ([regex]::Matches($code, '::Delete\(').Count) 1 'uma unica chamada de remocao no motor'
-        Assert-Eq (& $fnOf '[IO.File]::Delete(') 'Invoke-AtmMonitorPrune' 'remocao so em Invoke-AtmMonitorPrune'
+        # The removals (since V0.5 M4b two): one file system call each. The file removal in Invoke-AtmMonitorPrune, after
+        # its checks in order, called only by the rotation (the rotation only by the collector) and by monitor
+        # remove-history; the empty history folder's in Remove-AtmMonitorEmptyFolder, non-recursive, after its checks in
+        # order, called only by monitor remove-history. No recursive deleter (AtmDeleter, above) in the engine.
+        Assert-Eq ([regex]::Matches($code, '::Delete\(').Count) 2 'duas chamadas de remocao no motor (V0.5 M4b: o arquivo e a pasta vazia)'
+        Assert-Eq (& $fnOf '[IO.File]::Delete(') 'Invoke-AtmMonitorPrune' 'remocao de arquivo so em Invoke-AtmMonitorPrune'
+        Assert-Eq (& $fnOf 'Directory]::Delete(') 'Remove-AtmMonitorEmptyFolder' 'remocao de pasta so em Remove-AtmMonitorEmptyFolder (V0.5 M4b)'
+        Assert-Eq ([regex]::Matches($code, [regex]::Escape('[IO.Directory]::Delete($path, $false)')).Count) 1 'a pasta: uma vez, nao recursiva, no caminho conferido'
         $pr = $defs['Invoke-AtmMonitorPrune'].Extent.Text
         $order = @('if (-not $script:AtmMonitoringEnabled)', 'AtmMonitorNamePattern', 'Get-AtmMonitorFolder', 'Test-AtmPathChain', 'ReparsePoint', 'Get-AtmMonitorFileOwner', '[IO.File]::Delete(')
         for ($i = 1; $i -lt $order.Count; $i++) { Assert-True ($pr.IndexOf($order[$i - 1]) -ge 0 -and $pr.IndexOf($order[$i - 1]) -lt $pr.IndexOf($order[$i])) "remocao: '$($order[$i - 1])' antes de '$($order[$i])'" }
-        Assert-Eq (& $fnOf 'Invoke-AtmMonitorPrune -') 'Invoke-AtmMonitorRotation' 'a remocao so chamada pela rotacao'
+        $ef = [regex]::Replace([regex]::Replace($defs['Remove-AtmMonitorEmptyFolder'].Extent.Text, '(?s)<#.*?#>', ''), '(?m)#.*$', '')
+        $order = @('if (-not $script:AtmMonitoringEnabled)', 'Get-AtmMonitorFolder', "'MONITOR_FOLDER_REFUSED'", 'Test-AtmPathChain', 'ReparsePoint', 'Directory) -eq 0', 'Get-AtmMonitorFileOwner', 'GetFileSystemInfos', "State = 'KEPT_CONFIG'", "'MONITOR_FOLDER_NOT_EMPTY'", '[IO.Directory]::Delete($path, $false)')
+        for ($i = 1; $i -lt $order.Count; $i++) { Assert-True ($ef.IndexOf($order[$i - 1]) -ge 0 -and $ef.IndexOf($order[$i - 1]) -lt $ef.IndexOf($order[$i])) "pasta vazia: '$($order[$i - 1])' antes de '$($order[$i])'" }
+        Assert-True (-not $ef.Contains('$Folder)') -and -not $ef.Contains('Delete($Folder')) 'pasta vazia: o caminho removido e o do motor, nunca o recebido'
+        Assert-Eq (& $fnOf 'Invoke-AtmMonitorPrune -') 'Invoke-AtmMonitorRemoveHistory,Invoke-AtmMonitorRotation' 'a remocao de arquivo so chamada pela rotacao e pelo remove-history (V0.5 M4b)'
+        Assert-Eq (& $fnOf 'Remove-AtmMonitorEmptyFolder -') 'Invoke-AtmMonitorRemoveHistory' 'a remocao da pasta vazia so chamada pelo remove-history (V0.5 M4b)'
         Assert-Eq (& $fnOf 'Invoke-AtmMonitorRotation -') 'Invoke-AtmMonitorCollectionCore' 'a rotacao so chamada pelo coletor'
         Assert-Eq (& $fnOf 'Invoke-AtmMonitorCollectionCore -') 'Invoke-AtmMonitorCollection' 'o nucleo so pelo coletor, com o mutex tomado'
         Assert-Eq (& $fnOf '::CreateNewDirectory(') 'Open-AtmMonitorFolder' 'CreateNewDirectory so em Open-AtmMonitorFolder'
         Assert-Eq (& $fnOf '::CreateNew(') 'Write-AtmMonitorRecordFile' 'CreateNew so no escritor'
         Assert-Eq (& $fnOf 'File]::Move(') 'Write-AtmMonitorRecordFile' 'troca de nome so no escritor'
-        Assert-Eq (& $fnOf 'Threading.Mutex') 'Invoke-AtmMonitorCollection' 'mutex so no coletor'
+        Assert-Eq (& $fnOf 'Threading.Mutex') 'Invoke-AtmMonitorCollection,Invoke-AtmMonitorRemoveHistory' 'mutex so no coletor e no remove-history (V0.5 M4b)'
         Assert-Eq (& $fnOf 'Invoke-AtmInventory @') 'Invoke-AtmMonitorCollectionCore' 'auditoria so no nucleo do coletor'
         # Since M3a also the entry point's run, the task's definition, its registration and monitor enable.
-        foreach ($fn in @('Open-AtmMonitorFolder', 'Write-AtmMonitorRecordFile', 'Invoke-AtmMonitorPrune', 'Invoke-AtmMonitorRotation', 'Invoke-AtmMonitorCollection', 'Invoke-AtmMonitorEntry', 'New-AtmMonitorTaskDefinition', 'Register-AtmMonitorTask', 'Invoke-AtmMonitorEnable')) {
+        foreach ($fn in @('Open-AtmMonitorFolder', 'Write-AtmMonitorRecordFile', 'Invoke-AtmMonitorPrune', 'Invoke-AtmMonitorRotation', 'Invoke-AtmMonitorCollection', 'Invoke-AtmMonitorEntry', 'New-AtmMonitorTaskDefinition', 'Register-AtmMonitorTask', 'Invoke-AtmMonitorEnable', 'Remove-AtmMonitorEmptyFolder', 'Invoke-AtmMonitorRemoveHistory')) {
             $first = @($defs[$fn].Body.EndBlock.Statements)[0].Extent.Text
             Assert-True ($first.StartsWith('if (-not $script:AtmMonitoringEnabled) { return ')) "${fn}: a trava e a primeira instrucao"
         }
@@ -21549,7 +21573,7 @@ exit 0
         # task's state, its reading, its comparison, its name and its interval.
         foreach ($fn in @('Get-AtmMonitorHistory', 'Get-AtmMonitorStatus', 'Get-AtmMonitorNewestName', 'Test-AtmMonitorRecordText', 'Get-AtmMonitorFolder', 'Get-AtmMonitorConfig', 'Get-AtmMonitorConfigFile', 'Get-AtmMonitorConfigValues',
                 'Get-AtmMonitorRecordBytes', 'Get-AtmMonitorGroupKey', 'Get-AtmMonitorSlope', 'Get-AtmMonitorEntryNames', 'Get-AtmMonitorTrends', 'Get-AtmMonitorAlerts',
-                'Get-AtmMonitorTaskState', 'Get-AtmMonitorTaskObject', 'Test-AtmMonitorTaskMatch', 'Get-AtmMonitorTaskName', 'Get-AtmMonitorTaskInterval')) {
+                'Get-AtmMonitorTaskState', 'Get-AtmMonitorTaskObject', 'Test-AtmMonitorTaskMatch', 'Get-AtmMonitorTaskName', 'Get-AtmMonitorTaskInterval', 'Get-AtmMonitorHistoryInventory')) {
             $t = $defs[$fn].Extent.Text
             foreach ($pat in @('CreateNew', '::Pin(', 'File]::Move', 'Mutex', '::Delete(', 'WriteAll', 'CreateDirectory', 'Invoke-AtmMonitor', 'Open-AtmMonitorFolder', 'Write-AtmMonitorRecordFile', 'RegisterTaskDefinition', 'CreateFolder', 'NewTask', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition')) { Assert-True (-not $t.Contains($pat)) "leitor $fn sem '$pat'" }
         }
@@ -22117,11 +22141,16 @@ exit 0
         # the history reader; not a record name, so neither the writer nor the removal accepts it.
         $code = & $strip $mon
         Assert-Eq ([regex]::Matches($code, [regex]::Escape("'monitor.json'")).Count) 1 'o nome uma vez no codigo'
-        Assert-Eq ((@($defs.Keys | Where-Object { (& $strip $defs[$_].Extent.Text).Contains('AtmMonitorConfigName') } | Sort-Object)) -join ',') 'Get-AtmMonitorConfigFile,Get-AtmMonitorHistory,Invoke-AtmMonitorRotation' 'o nome so no leitor dos limiares, no leitor do historico e na rotacao'
+        Assert-Eq ((@($defs.Keys | Where-Object { (& $strip $defs[$_].Extent.Text).Contains('AtmMonitorConfigName') } | Sort-Object)) -join ',') 'Get-AtmMonitorConfigFile,Get-AtmMonitorHistory,Get-AtmMonitorHistoryInventory,Invoke-AtmMonitorRotation,Remove-AtmMonitorEmptyFolder' 'o nome so no leitor dos limiares, no leitor do historico, na rotacao e (V0.5 M4b) no inventario e na pasta vazia, que o mantem'
+        foreach ($fn in @('Get-AtmMonitorHistoryInventory', 'Remove-AtmMonitorEmptyFolder')) {
+            $ft = & $strip $defs[$fn].Extent.Text
+            $fi = $ft.IndexOf('AtmMonitorConfigName'); $fc = $ft.IndexOf('}', $fi)
+            Assert-True ($fi -gt 0 -and $fc -gt $fi -and -not $ft.Substring($fi, $fc - $fi).Contains('Delete') -and -not $ft.Substring($fi, $fc - $fi).Contains('Prune') -and -not $ft.Substring($fi, $fc - $fi).Contains('Names')) "${fn}: monitor.json nunca removido nem planejado (V0.5 M4b)"
+        }
         $rt = & $strip $defs['Invoke-AtmMonitorRotation'].Extent.Text
         $ri = $rt.IndexOf('AtmMonitorConfigName'); $rc = $rt.IndexOf('continue', $ri)
         Assert-True ($ri -gt 0 -and $rc -gt $ri -and -not $rt.Substring($ri, $rc - $ri).Contains('plan') -and -not $rt.Substring($ri, $rc - $ri).Contains('Prune')) 'a rotacao nunca planeja remover monitor.json'
-        Assert-Eq ([regex]::Matches($code, '::Delete\(').Count) 1 'a remocao segue numa unica chamada'
+        Assert-Eq ([regex]::Matches($code, '::Delete\(').Count) 2 'a remocao segue em duas chamadas (V0.5 M4b: o arquivo e a pasta vazia)'
         # The alerts: the closed list, and each command named is a verb the launcher accepts.
         Assert-Eq (@($script:AtmMonitorAlertCommands.Keys) -join ',') 'MON_TOTAL,MON_GROWTH,MON_ORPHAN_SUSPECTED,MON_LIVENESS_UNKNOWN,MON_COLLECTION,MON_CONFIG_INVALID' 'lista fechada dos alertas, sem MON_RECOVERY'
         Assert-True (-not $code.Contains('MON_RECOVERY')) 'MON_RECOVERY fora do codigo (D8 (a))'
@@ -22589,16 +22618,17 @@ exit 0
                 Assert-True ($keys.Count -ge 35) "textos da M3a lidos ($l, $($keys.Count))"
                 foreach ($key in $keys) {
                     $t = [string]$script:AtmMessages[$l][$key]
-                    Assert-True ($t -cnotmatch '\bM[0-9]\b' -and -not $t.Contains('remove-history') -and -not $t.Contains('V0.6')) "${key} ($l): sem fase nem comando futuro"
+                    Assert-True ($t -cnotmatch '\bM[0-9]\b' -and -not $t.Contains('V0.6')) "${key} ($l): sem fase nem comando futuro"
                     foreach ($m in [regex]::Matches($t, 'agent-temp ([a-z-]+)(?: ([a-z-]+))?')) {
                         $vb = $m.Groups[1].Value; $sb = $m.Groups[2].Value
-                        Assert-True ($verbs -ccontains $vb -and ($vb -cne 'monitor' -or @('', 'status', 'enable', 'disable') -ccontains $sb)) "${key} ($l): cita so comando que existe ($($m.Value))"
+                        Assert-True ($verbs -ccontains $vb -and ($vb -cne 'monitor' -or @('', 'status', 'enable', 'disable', 'remove-history') -ccontains $sb)) "${key} ($l): cita so comando que existe ($($m.Value))"
                     }
                 }
             }
-            # V0.5 M4a: disable exists now; remove-history does not yet.
-            $subOk = { param([string]$S) @('', 'status', 'enable', 'disable') -ccontains $S }
-            Assert-True ((& $subOk 'disable') -and -not (& $subOk 'remove-history') -and $launcher.Contains("`$monSub -cne 'disable'")) 'controle positivo: disable aceito pelo lancador; um subverbo inexistente (remove-history) nao passa'
+            # V0.5 M4b: disable and remove-history exist now (the launcher accepts both); a subverb that does not exist
+            # still does not pass.
+            $subOk = { param([string]$S) @('', 'status', 'enable', 'disable', 'remove-history') -ccontains $S }
+            Assert-True ((& $subOk 'disable') -and (& $subOk 'remove-history') -and -not (& $subOk 'purge-history') -and $launcher.Contains("`$monSub -cne 'disable'") -and $launcher.Contains("`$monSub -cne 'remove-history'") -and $launcher.Contains("`$monSub -ceq 'remove-history'")) 'controle positivo: disable e remove-history aceitos pelo lancador; um subverbo inexistente (purge-history) nao passa'
         } finally { Set-AtmLanguage -Requested $old; Reset-MonSeams }
     }
 
@@ -22615,7 +22645,7 @@ exit 0
             Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('-IntervalHours takes only one of these numbers of hours: 1, 2, 4, 6, 12, 24. Nothing was changed.')) "${al}: uso 2 ($($r.Exit))"
         }
         $r = & $launch 'monitor status -IntervalHours 6 -Lang en-US'
-        Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('Usage: agent-temp monitor status | agent-temp monitor enable [-IntervalHours 1|2|4|6|12|24] | agent-temp monitor disable. Nothing was changed.')) "monitor status -IntervalHours 6: uso 2 ($($r.Exit))"
+        Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('Usage: agent-temp monitor status | agent-temp monitor enable [-IntervalHours 1|2|4|6|12|24] | agent-temp monitor disable | agent-temp monitor remove-history. Nothing was changed.')) "monitor status -IntervalHours 6: uso 2 ($($r.Exit))"
         $r = & $launch 'recover list -IntervalHours 6 -Lang en-US'
         Assert-True ($r.Exit -eq 2 -and $r.Text.Contains('recover does not take -IntervalHours. Nothing was changed.')) "recover recusa a opcao do enable: 2 ($($r.Exit))"
         $r = & $launch 'version -IntervalHours 6 -Lang en-US'
@@ -22639,7 +22669,10 @@ exit 0
         Assert-Eq (& $uniq 'New-AtmMonitorTaskDefinition') 'Engine.Monitor.ps1:Register-AtmMonitorTask' 'a definicao so pelo registro'
         Assert-Eq (& $uniq 'Invoke-AtmMonitorEnable') 'agent-temp.ps1:script' 'o enable so pela CLI'
         Assert-Eq (& $uniq 'Invoke-AtmMonitorEntry') 'agent-temp-monitor.ps1:script' 'a execucao do coletor so pelo ponto de entrada'
-        Assert-Eq (& $uniq 'Get-AtmMonitorTaskState') 'agent-temp.ps1:script,Engine.Monitor.ps1:Invoke-AtmMonitorDisable,Engine.Monitor.ps1:Invoke-AtmMonitorEnable' 'o estado: version, monitor status, o enable e o disable (V0.5 M4a)'
+        Assert-Eq (& $uniq 'Get-AtmMonitorTaskState') 'agent-temp.ps1:script,Engine.Monitor.ps1:Invoke-AtmMonitorDisable,Engine.Monitor.ps1:Invoke-AtmMonitorEnable,Engine.Monitor.ps1:Invoke-AtmMonitorRemoveHistory' 'o estado: version, monitor status, o enable, o disable (V0.5 M4a) e o remove-history (V0.5 M4b)'
+        Assert-Eq (& $uniq 'Invoke-AtmMonitorRemoveHistory') 'agent-temp.ps1:script' 'o remove-history so pela CLI (V0.5 M4b)'
+        Assert-Eq (& $uniq 'Remove-AtmMonitorEmptyFolder') 'Engine.Monitor.ps1:Invoke-AtmMonitorRemoveHistory' 'a pasta vazia do historico so pelo remove-history (V0.5 M4b)'
+        Assert-Eq (& $uniq 'Get-AtmMonitorHistoryInventory') 'Engine.Monitor.ps1:Invoke-AtmMonitorRemoveHistory' 'o inventario so pelo remove-history (V0.5 M4b)'
         Assert-Eq (& $uniq 'Unregister-AtmMonitorTask') 'Engine.Monitor.ps1:Invoke-AtmMonitorDisable' 'remover so pelo disable (V0.5 M4a)'
         Assert-Eq (& $uniq 'Invoke-AtmMonitorDisable') 'agent-temp.ps1:script' 'o disable so pela CLI (V0.5 M4a)'
         $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
@@ -22648,6 +22681,8 @@ exit 0
         Assert-True ($iM -gt 0 -and $iE -gt $iM -and $iE -lt $iV -and $cli.IndexOf($enCall, $iE + 1) -lt 0) 'o enable uma vez, so no verbo monitor'
         $disCall = 'Invoke-AtmMonitorDisable' + ' -'; $iD = $cli.IndexOf($disCall)
         Assert-True ($iD -gt $iM -and $iD -lt $iV -and $cli.IndexOf($disCall, $iD + 1) -lt 0) 'o disable uma vez, so no verbo monitor (V0.5 M4a)'
+        $rhCall = 'Invoke-AtmMonitorRemoveHistory' + ' -'; $iR = $cli.IndexOf($rhCall)
+        Assert-True ($iR -gt $iM -and $iR -lt $iV -and $cli.IndexOf($rhCall, $iR + 1) -lt 0) 'o remove-history uma vez, so no verbo monitor (V0.5 M4b)'
         $blk = $null; $ivBlocks = New-Object System.Collections.Generic.List[string]
         foreach ($ln in @($cli -split "`r?`n")) {
             if ($ln -cmatch "^        '([a-z-]+)' \{\s*$") { $blk = $Matches[1] }
@@ -22687,10 +22722,10 @@ exit 0
         foreach ($pat in @('DeleteFolder', 'Unregister-ScheduledTask', 'Unregister-AtmAutoPurge', 'schtasks')) { Assert-True (-not $monCode.Contains($pat)) "lib\Engine.Monitor.ps1 sem '$pat'" }
         foreach ($n in @('bin\agent-temp-monitor.ps1', 'lib\Report.ps1')) {
             $t = & $strip ([IO.File]::ReadAllText((Join-Path $srcDir $n)))
-            foreach ($pat in @('DeleteTask', 'DeleteFolder', 'Unregister-ScheduledTask', 'Unregister-Atm', 'schtasks', 'Remove-AtmEmptyTaskFolder', 'Invoke-AtmMonitorDisable')) { Assert-True (-not $t.Contains($pat)) "$n sem '$pat' (o ponto de entrada e a apresentacao nao removem nada)" }
+            foreach ($pat in @('DeleteTask', 'DeleteFolder', 'Unregister-ScheduledTask', 'Unregister-Atm', 'schtasks', 'Remove-AtmEmptyTaskFolder', 'Invoke-AtmMonitorDisable', 'Invoke-AtmMonitorRemoveHistory', 'Remove-AtmMonitorEmptyFolder', 'Invoke-AtmMonitorPrune', '::Delete(', 'Remove-Item')) { Assert-True (-not $t.Contains($pat)) "$n sem '$pat' (o ponto de entrada e a apresentacao nao removem nada)" }
         }
         $entryBody = & $strip (Get-ApFnBody $monFile 'Invoke-AtmMonitorEntry')
-        foreach ($pat in @('Unregister-', 'Remove-AtmEmptyTaskFolder', 'Invoke-AtmMonitorDisable', 'DeleteTask', 'DeleteFolder')) { Assert-True (-not $entryBody.Contains($pat)) "Invoke-AtmMonitorEntry sem '$pat'" }
+        foreach ($pat in @('Unregister-', 'Remove-AtmEmptyTaskFolder', 'Invoke-AtmMonitorDisable', 'DeleteTask', 'DeleteFolder', 'Invoke-AtmMonitorRemoveHistory', 'Remove-AtmMonitorEmptyFolder', 'Invoke-AtmMonitorPrune')) { Assert-True (-not $entryBody.Contains($pat)) "Invoke-AtmMonitorEntry sem '$pat'" }
         # Every command the engine calls that another file of lib defines: the audit's and the messages' (the entry point
         # loads them), plus the declared helpers of the isolation, clean and diagnose engines, each only in the task's
         # functions (never reached by the collector's path).
@@ -22700,7 +22735,7 @@ exit 0
             foreach ($d in @($t.FindAll({ param($a) $a -is [Management.Automation.Language.FunctionDefinitionAst] }, $true))) { if (-not $defsAll.ContainsKey($d.Name)) { $defsAll[$d.Name] = [pscustomobject]@{ File = $fi.Name; Ast = $d } } }
         }
         $declared = @{ 'Connect-AtmTaskScheduler' = 'Engine.Isolate.ps1'; 'Get-AtmTaskSchedulerCode' = 'Engine.Isolate.ps1'; 'Test-AtmTaskNotFound' = 'Engine.Isolate.ps1'; 'Resolve-AtmTaskUserSid' = 'Engine.Isolate.ps1'; 'Remove-AtmEmptyTaskFolder' = 'Engine.Isolate.ps1'; 'Get-AtmEngineConsoleObservation' = 'Engine.Clean.ps1'; 'Get-AtmIdentityState' = 'Engine.Diagnose.ps1' }
-        $taskFns = @('Get-AtmMonitorTaskObject', 'Test-AtmMonitorTaskMatch', 'Get-AtmMonitorTaskState', 'Register-AtmMonitorTask', 'Test-AtmMonitorStandardToken', 'Invoke-AtmMonitorEnable', 'Unregister-AtmMonitorTask', 'Invoke-AtmMonitorDisable')
+        $taskFns = @('Get-AtmMonitorTaskObject', 'Test-AtmMonitorTaskMatch', 'Get-AtmMonitorTaskState', 'Register-AtmMonitorTask', 'Test-AtmMonitorStandardToken', 'Invoke-AtmMonitorEnable', 'Unregister-AtmMonitorTask', 'Invoke-AtmMonitorDisable', 'Invoke-AtmMonitorRemoveHistory')
         $monAst = [Management.Automation.Language.Parser]::ParseFile($monFile, [ref]$null, [ref]$null)
         $foreign = @{}; $where = New-Object System.Collections.Generic.List[string]
         foreach ($c in @($monAst.FindAll({ param($a) $a -is [Management.Automation.Language.CommandAst] }, $true))) {
@@ -22741,12 +22776,13 @@ exit 0
         # GUI and TUI: no new function; the GUI's forbidden list has the exact names (never a prefix).
         foreach ($n in @('lib\Tui.ps1', 'lib\Gui.ps1', 'lib\GuiModel.ps1')) {
             $t = [IO.File]::ReadAllText((Join-Path $srcDir $n))
-            foreach ($fn in @('Invoke-AtmMonitorEnable', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'Invoke-AtmMonitorEntry', 'Get-AtmMonitorTaskState', 'Get-AtmMonitorTaskLines', 'Show-AtmMonitorEnablePlan', 'Show-AtmMonitorEnableResult', 'Invoke-AtmMonitorDisable', 'Unregister-AtmMonitorTask', 'Remove-AtmEmptyTaskFolder', 'Show-AtmMonitorDisablePlan', 'Show-AtmMonitorDisableResult', 'Get-AtmTaskFolderLine')) { Assert-True (-not $t.Contains($fn)) "$n sem $fn" }
+            foreach ($fn in @('Invoke-AtmMonitorEnable', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'Invoke-AtmMonitorEntry', 'Get-AtmMonitorTaskState', 'Get-AtmMonitorTaskLines', 'Show-AtmMonitorEnablePlan', 'Show-AtmMonitorEnableResult', 'Invoke-AtmMonitorDisable', 'Unregister-AtmMonitorTask', 'Remove-AtmEmptyTaskFolder', 'Show-AtmMonitorDisablePlan', 'Show-AtmMonitorDisableResult', 'Get-AtmTaskFolderLine',
+                    'Invoke-AtmMonitorRemoveHistory', 'Remove-AtmMonitorEmptyFolder', 'Get-AtmMonitorHistoryInventory', 'Invoke-AtmMonitorPrune', 'Show-AtmMonitorRemoveHistoryPlan', 'Show-AtmMonitorRemoveHistoryResult', 'Get-AtmMonitorHistoryFolderLine')) { Assert-True (-not $t.Contains($fn)) "$n sem $fn" }
         }
-        foreach ($fn in @('Invoke-AtmMonitorEnable', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'Invoke-AtmMonitorEntry', 'Invoke-AtmMonitorDisable', 'Unregister-AtmMonitorTask', 'Remove-AtmEmptyTaskFolder')) { Assert-True ($guiForbidden -ccontains $fn) "lista proibida da GUI: $fn" }
+        foreach ($fn in @('Invoke-AtmMonitorEnable', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'Invoke-AtmMonitorEntry', 'Invoke-AtmMonitorDisable', 'Unregister-AtmMonitorTask', 'Remove-AtmEmptyTaskFolder', 'Invoke-AtmMonitorRemoveHistory', 'Remove-AtmMonitorEmptyFolder', 'Get-AtmMonitorHistoryInventory')) { Assert-True ($guiForbidden -ccontains $fn) "lista proibida da GUI: $fn" }
         Assert-True ($guiForbidden -cnotcontains 'AtmMonitor' -and $guiForbidden -cnotcontains 'Get-AtmMonitor') 'lista proibida da GUI sem prefixo do monitoramento'
         $rep = & $strip ([IO.File]::ReadAllText((Join-Path $srcDir 'lib\Report.ps1')))
-        foreach ($fn in @('Invoke-AtmMonitorEnable', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'Invoke-AtmMonitorEntry', 'Get-AtmMonitorTaskState', 'Invoke-AtmMonitorDisable', 'Unregister-AtmMonitorTask', 'Remove-AtmEmptyTaskFolder')) { Assert-True (-not $rep.Contains($fn)) "apresentacao sem chamar $fn (so mostra o que recebe)" }
+        foreach ($fn in @('Invoke-AtmMonitorEnable', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'Invoke-AtmMonitorEntry', 'Get-AtmMonitorTaskState', 'Invoke-AtmMonitorDisable', 'Unregister-AtmMonitorTask', 'Remove-AtmEmptyTaskFolder', 'Invoke-AtmMonitorRemoveHistory', 'Remove-AtmMonitorEmptyFolder', 'Get-AtmMonitorHistoryInventory')) { Assert-True (-not $rep.Contains($fn)) "apresentacao sem chamar $fn (so mostra o que recebe)" }
         # The texts of the M3a in both languages, with the same fields.
         $ph = { param([string]$T) (@([regex]::Matches($T, '\{\d\}') | ForEach-Object { $_.Value } | Sort-Object -Unique) -join ',') }
         $mk = { param($l) @($script:AtmMessages[$l].Keys | Where-Object { $_ -like 'mon.task.*' -or $_ -like 'mon.plan.*' -or $_ -like 'monep.*' }) }
@@ -23226,7 +23262,7 @@ exit 0
         Assert-True ($r.Exit -eq 3 -and $r.Text.Contains('NOTHING WAS REMOVED: MONITORING_GATE_CLOSED') -and $r.Text.Contains('Monitoring is not available in this release: nothing was read, asked or removed.') -and -not $r.Text.Contains('DESATIVAR MONITORAMENTO') -and -not $r.Text.Contains('REMOVE THE COLLECTION TASK') -and -not $r.Text.Contains('Collection task:')) "monitor disable: exit 3 sem plano nem frase ($($r.Exit))"
         $r = & $launch 'monitor disable -Lang pt-BR'
         Assert-True ($r.Exit -eq 3 -and $r.Text.Contains('NADA FOI REMOVIDO: MONITORING_GATE_CLOSED')) "monitor disable pt-BR: exit 3 ($($r.Exit))"
-        $usage = 'Usage: agent-temp monitor status | agent-temp monitor enable [-IntervalHours 1|2|4|6|12|24] | agent-temp monitor disable. Nothing was changed.'
+        $usage = 'Usage: agent-temp monitor status | agent-temp monitor enable [-IntervalHours 1|2|4|6|12|24] | agent-temp monitor disable | agent-temp monitor remove-history. Nothing was changed.'
         $r = & $launch 'monitor disable -IntervalHours 6 -Lang en-US'
         Assert-True ($r.Exit -eq 2 -and $r.Text.Contains($usage)) "monitor disable -IntervalHours 6: uso 2 ($($r.Exit))"
         $r = & $launch 'monitor frobnicate -Lang en-US'
@@ -23238,7 +23274,8 @@ exit 0
 
     Test-Case 'V0.5 M4a' 'M4a (estatico): a area nunca remove tarefa nem pasta reais - todo caso que chega a remocao, ao disable, a pasta vazia ou ao unschedule-autopurge sombreia o agendador; sem caso so de CI e sem espera real; o agendador real da area nem chamado; fora da area, nenhuma chamada a remocao, ao disable ou a pasta vazia, salvo o unico caso real do disable (so na CI: a guarda primeiro, o nome de teste, so o disable, o finally fecha a trava e tira a tarefa de teste)' {
         $self = [IO.File]::ReadAllText((Join-Path $testsDir 'Run-Tests.ps1'))
-        $a0 = $self.IndexOf('-----' + ' V0.5 M4a ('); $a1 = $self.IndexOf("`n" + '} fin' + 'ally {', $a0)
+        # The area ends where the V0.5 M4b area begins.
+        $a0 = $self.IndexOf('-----' + ' V0.5 M4a ('); $a1 = $self.IndexOf('-----' + ' V0.5 M4b (', $a0)
         Assert-True ($a0 -gt 0 -and $a1 -gt $a0) 'area V0.5 M4a encontrada'
         $area = $self.Substring($a0, $a1 - $a0)
         $uses = @([regex]::Matches($area, 'm3RealSvc\.([A-Za-z]+)\(') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
@@ -23271,6 +23308,439 @@ exit 0
         $out = @($calls | Where-Object { ($_.Extent.StartOffset -lt $a0 -or $_.Extent.StartOffset -ge $a1) -and -not ($_.Extent.StartOffset -ge $rs -and $_.Extent.StartOffset -lt $re) } | ForEach-Object { [string]$_.GetCommandName() + '@' + $_.Extent.StartLineNumber })
         Assert-Eq ($out -join ', ') '' 'fora da area (e do caso real), nenhuma chamada ao disable, a remocao ou a pasta vazia'
         Assert-True (@($calls | Where-Object { [string]$_.GetCommandName() -ceq $names[0] }).Count -ge 10 -and @($calls | Where-Object { [string]$_.GetCommandName() -ceq $names[2] }).Count -ge 5) "controle positivo: chamadas encontradas na area ($($calls.Count))"
+    }
+
+    # ------------------------------------------------------------------ V0.5 M4b (preventive monitoring: monitor remove-history, the empty history folder and the uninstall notice, gate closed, ADR-0017)
+    # Every history folder of this area is a folder of the sandbox (the folder seam), created by the engine itself
+    # (Open-MonFolder) so that its rule (owner and permissions) passes; this user's %LOCALAPPDATA%\AgentTempManager\Monitor
+    # is never created or removed (checked). Every case that reaches monitor remove-history shadows
+    # Connect-AtmTaskScheduler with the fake scheduler of M4a (New-M4Service), checked by the static of this area. The
+    # removals are real, in the sandbox only, and only through the engine's two removal functions. The gate is opened
+    # inside this process only, around each call, and closed again. The uninstall notice runs with its two seams only.
+    function New-M4bHistory {
+        # A history folder of the sandbox, created by the engine, with -Records records (10, 11, ... bytes), -Partials
+        # .partial files (5 bytes each) and (-Config) a thresholds file of this user. $null when the sandbox's permissions
+        # refuse the folder (the case is then NAO_TESTADO, as in M1).
+        param([int]$Records = 2, [int]$Partials = 1, [bool]$Config = $false)
+        $f = New-MonFolder
+        $code = Open-MonFolder $f
+        if (Test-MonFolderSkip $code) { return $null }
+        if ($code) { throw "pasta do sandbox recusada: $code" }
+        for ($i = 0; $i -lt $Records; $i++) { Write-MonPlanted $f (Get-MonName ($monT0.AddHours(-$i)) ('a000000' + $i)) (10 + $i) }
+        for ($i = 0; $i -lt $Partials; $i++) { Write-MonPlanted $f ((Get-MonName ($monT0.AddHours(-100 - $i)) ('b000000' + $i)) + '.partial') 5 }
+        if ($Config) { [IO.File]::WriteAllText((Join-Path $f 'monitor.json'), '{"totalGiB":40}') }
+        return $f
+    }
+    function Invoke-M4bRemove {
+        # monitor remove-history with the folder seam on -Folder and the gate open in this process only; the case shadows
+        # the scheduler and sets the console seam.
+        param([string]$Folder, [scriptblock]$Presenter, [scriptblock]$Reader)
+        $script:AtmMonitorFolderPath = $Folder
+        $script:AtmMonitoringEnabled = $true
+        try { return (Invoke-AtmMonitorRemoveHistory -PlanPresenter $Presenter -ConfirmationReader $Reader) } finally { $script:AtmMonitoringEnabled = $false }
+    }
+    function Invoke-M4bEmptyFolder {
+        # The removal of the empty history folder, called directly, with the folder seam on -Seam and the gate open in this
+        # process only.
+        param([string]$Seam, [string]$Folder)
+        $script:AtmMonitorFolderPath = $Seam
+        $script:AtmMonitoringEnabled = $true
+        try { return (Remove-AtmMonitorEmptyFolder -Folder $Folder -Owners @((Get-AtmMonitorIdentity).Owners)) } finally { $script:AtmMonitoringEnabled = $false }
+    }
+    $m4bNoNames = { param($Obj, [string[]]$Names) $j = ($Obj | ConvertTo-Json -Depth 5 -Compress); @($Names | Where-Object { $_ -and $j.Contains($_) }).Count -eq 0 }
+
+    Test-Case 'V0.5 M4b' 'M4b: monitor remove-history (agendador falso, pasta do sandbox) - cada recusa na ordem, sem pergunta antes do plano e nada removido: trava fechada antes de ler qualquer coisa (costuras que falham se chamadas: agendador, console e dono), tambem na pasta vazia direta; sem apresentador ou leitor; console nao observado; tarefa presente ou ilegivel (qualquer estado diferente de ABSENT); pasta ausente (nada criado); reparse na cadeia; frase errada so depois do plano (contagens, monitor.json fica, a pasta fica ou sai); nenhum nome de arquivo no resultado' {
+        $prevConsole = $script:AtmCleanConsoleSource
+        function Connect-AtmTaskScheduler { $script:m4k.Connects++; return $script:m4Svc }
+        $script:m4asked = New-Object System.Collections.Generic.List[string]
+        $pres = { param($p) $script:m4asked.Add('plan'); $script:m4bPlan = $p }
+        $rd = { param($ph, $k) $script:m4asked.Add($k); 'nao' }
+        try {
+            $f = New-M4bHistory -Records 2 -Partials 1 -Config $true
+            if ($null -eq $f) { return }
+            $before = (Get-MonNames $f) -join ','
+            $same = { ((Get-MonNames $f) -join ',') -ceq $before }
+            # The gate closed: seams that fail when called (the scheduler, the console and the owner).
+            $script:AtmCleanConsoleSource = { throw 'SEAM: console lido com a trava fechada' }
+            $script:AtmMonitorOwnerSource = { param($p) throw 'SEAM: dono lido com a trava fechada' }
+            $script:AtmMonitorFolderPath = $f
+            $r = & { function Connect-AtmTaskScheduler { throw 'SEAM: agendador alcancado com a trava fechada' }; Invoke-AtmMonitorRemoveHistory -PlanPresenter $pres -ConfirmationReader $rd }
+            Assert-True ($r.Operation -ceq 'remove-history' -and $r.Aborted -ceq 'MONITORING_GATE_CLOSED' -and -not $r.Done -and $null -eq $r.Plan -and $r.Removed -eq 0 -and $r.Problems -eq 0 -and -not $r.ConfigKept -and $null -eq $r.Folder -and $script:m4asked.Count -eq 0 -and (& $same)) "trava fechada: recusa antes de ler o agendador, o console, a pasta ou o dono ($($r.Aborted))"
+            $ef = Remove-AtmMonitorEmptyFolder -Folder $f -Owners @('S-1-5-21-1-2-3-4444')
+            Assert-True ([string]$ef.State -ceq 'KEPT' -and [string]$ef.Code -ceq 'MONITORING_GATE_CLOSED' -and [IO.Directory]::Exists($f) -and (& $same)) "pasta vazia direta com a trava fechada: KEPT antes de tudo ($($ef.State) $($ef.Code))"
+            $pc = Invoke-AtmMonitorPrune -Folder $f -Name (@(Get-MonNames $f)[0]) -Owners @('S-1-5-21-1-2-3-4444')
+            Assert-True ($pc -ceq 'MONITORING_GATE_CLOSED' -and (& $same)) "remocao de arquivo com a trava fechada: recusa ($pc)"
+            $script:AtmMonitorOwnerSource = $null
+            $script:AtmCleanConsoleSource = { $true }
+            $null = New-M4Service
+            $r = Invoke-M4bRemove -Folder $f -Reader $rd
+            Assert-True ($r.Aborted -ceq 'SEM_APRESENTACAO_OU_CONFIRMACAO' -and $script:m4asked.Count -eq 0 -and $script:m4k.Connects -eq 0 -and (& $same)) "sem apresentador ($($r.Aborted))"
+            $r = Invoke-M4bRemove -Folder $f -Presenter $pres
+            Assert-True ($r.Aborted -ceq 'SEM_APRESENTACAO_OU_CONFIRMACAO' -and $script:m4asked.Count -eq 0 -and $script:m4k.Connects -eq 0 -and (& $same)) "sem leitor ($($r.Aborted))"
+            $script:AtmCleanConsoleSource = { $false }
+            $r = Invoke-M4bRemove -Folder $f -Presenter $pres -Reader $rd
+            Assert-True ($r.Aborted -ceq 'CONSOLE_NOT_OBSERVED' -and $script:m4asked.Count -eq 0 -and $script:m4k.Connects -eq 0 -and (& $same)) "console nao observado, antes do agendador ($($r.Aborted))"
+            $script:AtmCleanConsoleSource = { $true }
+            # The collection task in a state other than ABSENT: present; the scheduler unreadable.
+            $script:AtmMonitorTaskNameOverride = 'MonitorTest-0a1b2c3d'
+            $null = New-M4Service -Folder $true -Task (New-M3Task -Name 'MonitorTest-0a1b2c3d' -Definition (New-M3Definition))
+            $r = Invoke-M4bRemove -Folder $f -Presenter $pres -Reader $rd
+            Assert-True ($r.Aborted -ceq 'MONITOR_HISTORY_TASK_PRESENT' -and $null -eq $r.Plan -and $script:m4asked.Count -eq 0 -and $script:m4k.Deletes -eq 0 -and $script:m4k.Tasks.ContainsKey('MonitorTest-0a1b2c3d') -and (& $same)) "tarefa presente: recusa sem perguntar, a tarefa intacta ($($r.Aborted))"
+            $null = New-M4Service -Folder $true
+            $script:m4k.ReadHr = -2147024891
+            $r = Invoke-M4bRemove -Folder $f -Presenter $pres -Reader $rd
+            Assert-True ($r.Aborted -ceq 'MONITOR_HISTORY_TASK_PRESENT' -and $script:m4asked.Count -eq 0 -and (& $same)) "agendador ilegivel: recusa ($($r.Aborted))"
+            $script:AtmMonitorTaskNameOverride = $null
+            $null = New-M4Service
+            # The folder absent: nothing to do, nothing created.
+            $gone = Join-Path (Join-Path $sandbox ('m4b-absent-' + [guid]::NewGuid().ToString('N').Substring(0, 8))) 'AgentTempManager\Monitor'
+            $r = Invoke-M4bRemove -Folder $gone -Presenter $pres -Reader $rd
+            Assert-True ($r.Aborted -ceq 'MONITOR_HISTORY_ABSENT' -and $null -eq $r.Plan -and $script:m4asked.Count -eq 0 -and -not (Test-Path -LiteralPath (Split-Path (Split-Path $gone -Parent) -Parent))) "pasta ausente: nada a fazer, nada criado ($($r.Aborted))"
+            # A reparse point in the folder's chain.
+            $jl = Join-Path $sandbox ('m4b-j-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Junction -Link $jl -Target (Split-Path (Split-Path $f -Parent) -Parent)
+            $r = Invoke-M4bRemove -Folder (Join-Path $jl 'AgentTempManager\Monitor') -Presenter $pres -Reader $rd
+            Assert-True ($r.Aborted -ceq 'MONITOR_FOLDER_REPARSE_IN_PATH' -and $null -eq $r.Plan -and $script:m4asked.Count -eq 0 -and (& $same)) "reparse na cadeia: recusa sem perguntar ($($r.Aborted))"
+            # The phrase only after the plan; the wrong phrase removes nothing. With the thresholds file: it stays, and the folder too.
+            $r = Invoke-M4bRemove -Folder $f -Presenter $pres -Reader $rd
+            if (Test-MonFolderSkip $r.Aborted) { return }
+            $p = $r.Plan
+            Assert-True ($r.Aborted -ceq 'MONITOR_HISTORY_NOT_CONFIRMED' -and ($script:m4asked -join ',') -ceq 'plan,monitor-remove-history' -and $p.Records -eq 2 -and $p.Partials -eq 1 -and $p.Bytes -eq 26 -and $p.ConfigKept -and -not $p.FolderGoes -and $p.Phrase -ceq 'REMOVER HISTORICO DO MONITORAMENTO' -and $r.ConfigKept -and $r.Removed -eq 0 -and -not $r.Done -and $null -eq $r.Folder -and (& $same)) "frase errada: plano (2 registros, 1 .partial, 26 bytes, monitor.json fica, a pasta fica) e frase, nada removido ($($r.Aborted) $($script:m4asked -join ','))"
+            Assert-True (& $m4bNoNames $r @(Get-MonNames $f | Where-Object { $_ -cne 'monitor.json' })) 'nenhum nome de arquivo no resultado nem no plano'
+            $f2 = New-M4bHistory -Records 1 -Partials 0
+            $script:m4asked.Clear()
+            $r = Invoke-M4bRemove -Folder $f2 -Presenter $pres -Reader $rd
+            Assert-True ($r.Aborted -ceq 'MONITOR_HISTORY_NOT_CONFIRMED' -and $r.Plan.Records -eq 1 -and $r.Plan.Partials -eq 0 -and -not $r.Plan.ConfigKept -and $r.Plan.FolderGoes -and @(Get-MonNames $f2).Count -eq 1) "sem monitor.json: o plano diz que a pasta sai; frase errada nao remove ($($r.Aborted))"
+        } finally { Reset-M3Seams $prevConsole }
+        Assert-Eq $script:AtmMonitoringEnabled $false 'trava fechada de novo'
+    }
+
+    Test-Case 'V0.5 M4b' 'M4b: monitor remove-history (agendador falso, pasta do sandbox) - qualquer inesperado recusa a remocao inteira antes da frase, com a contagem e nada tocado: outro nome, nome de registro sem hora valida, pasta, juncao, pasta chamada monitor.json, registro de outro dono, monitor.json de outro dono (costura do dono); o monitor.json do proprio usuario nao e inesperado' {
+        $prevConsole = $script:AtmCleanConsoleSource
+        function Connect-AtmTaskScheduler { $script:m4k.Connects++; return $script:m4Svc }
+        $script:m4asked = New-Object System.Collections.Generic.List[string]
+        $pres = { param($p) $script:m4asked.Add('plan') }
+        $rd = { param($ph, $k) $script:m4asked.Add($k); $ph }
+        # Every entry has every key (StrictMode 2.0: a missing key is an error).
+        $kinds = @(
+            @{ Why = 'outro nome'; Owner = $null; Config = $false; Plant = { param($d) [IO.File]::WriteAllText((Join-Path $d 'notas.txt'), 'x') } },
+            @{ Why = 'nome de registro sem hora valida'; Owner = $null; Config = $false; Plant = { param($d) [IO.File]::WriteAllText((Join-Path $d '20261332T250000000Z-0000abcd.json'), 'x') } },
+            @{ Why = 'pasta'; Owner = $null; Config = $false; Plant = { param($d) [void][IO.Directory]::CreateDirectory((Join-Path $d 'sub')) } },
+            @{ Why = 'juncao'; Owner = $null; Config = $false; Plant = { param($d) New-Junction -Link (Join-Path $d 'j') -Target $sandbox } },
+            @{ Why = 'pasta chamada monitor.json'; Owner = $null; Config = $false; Plant = { param($d) [void][IO.Directory]::CreateDirectory((Join-Path $d 'monitor.json')) } },
+            @{ Why = 'registro de outro dono'; Owner = '-a0000001.json'; Config = $false; Plant = $null },
+            @{ Why = 'monitor.json de outro dono'; Owner = '\monitor.json'; Config = $true; Plant = $null }
+        )
+        try {
+            $script:AtmCleanConsoleSource = { $true }
+            foreach ($c in $kinds) {
+                $null = New-M4Service
+                $script:m4asked.Clear()
+                $f = New-M4bHistory -Records 2 -Partials 1 -Config ([bool]$c.Config)
+                if ($null -eq $f) { return }
+                if ($c.Plant) { & $c.Plant $f }
+                if ($c.Owner) { $sfx = $c.Owner; $foreign = $monForeignSid; $script:AtmMonitorOwnerSource = { param($p) if ($p.EndsWith($sfx)) { $foreign } else { [string](Get-Acl -LiteralPath $p).GetOwner([Security.Principal.SecurityIdentifier]).Value } }.GetNewClosure() }
+                $before = (Get-MonNames $f) -join ','
+                try { $r = Invoke-M4bRemove -Folder $f -Presenter $pres -Reader $rd } finally { $script:AtmMonitorOwnerSource = $null }
+                if (Test-MonFolderSkip $r.Aborted) { return }
+                $files = $(if ($c.Owner -and $c.Owner -cne '\monitor.json') { 2 } else { 3 })
+                Assert-True ($r.Aborted -ceq 'MONITOR_HISTORY_UNEXPECTED' -and $r.Problems -eq 1 -and ($r.Plan.Records + $r.Plan.Partials) -eq $files -and $null -eq $r.Plan.Phrase -and -not $r.Plan.FolderGoes -and $script:m4asked.Count -eq 0 -and $r.Removed -eq 0 -and -not $r.Done -and $null -eq $r.Folder -and ((Get-MonNames $f) -join ',') -ceq $before) "$($c.Why): recusa inteira antes da frase, 1 item nao tocado e $files do produto ($($r.Aborted) $($r.Problems))"
+                Assert-True (& $m4bNoNames $r @(Get-MonNames $f | Where-Object { $_ -cne 'monitor.json' })) "$($c.Why): nenhum nome no resultado"
+            }
+            # Control: the user's own thresholds file is not unexpected (it is kept).
+            $null = New-M4Service
+            $script:m4asked.Clear()
+            $f = New-M4bHistory -Records 1 -Partials 0 -Config $true
+            $r = Invoke-M4bRemove -Folder $f -Presenter $pres -Reader { param($ph, $k) $script:m4asked.Add($k); 'nao' }
+            Assert-True ($r.Aborted -ceq 'MONITOR_HISTORY_NOT_CONFIRMED' -and $r.Problems -eq 0 -and $r.ConfigKept -and $r.Plan.ConfigKept) "controle: o monitor.json do usuario e mantido, nao inesperado ($($r.Aborted))"
+        } finally { Reset-M3Seams $prevConsole }
+    }
+
+    Test-Case 'V0.5 M4b' 'M4b: monitor remove-history (agendador falso, pasta do sandbox) - o mutex do coletor so depois da frase e sem espera: tomado por outro processo, MONITOR_HISTORY_BUSY e nada removido; o inventario refeito sob o mutex: um registro novo, um inesperado ou um monitor.json que aparece durante a frase dao MONITOR_HISTORY_CHANGED e nada removido; o mutex liberado depois' {
+        $prevConsole = $script:AtmCleanConsoleSource
+        function Connect-AtmTaskScheduler { $script:m4k.Connects++; return $script:m4Svc }
+        $script:m4asked = New-Object System.Collections.Generic.List[string]
+        $pres = { param($p) $script:m4asked.Add('plan') }
+        $child = Join-Path $sandbox 'm4b-mutex-holder.ps1'
+        [IO.File]::WriteAllText($child, @'
+param([string]$Name, [string]$HeldFile, [string]$GoFile)
+$ErrorActionPreference = 'Stop'
+$m = New-Object Threading.Mutex($false, $Name)
+$got = $m.WaitOne(0)
+[IO.File]::WriteAllText($HeldFile + '.tmp', [string]$got); [IO.File]::Move($HeldFile + '.tmp', $HeldFile)
+$sw = [Diagnostics.Stopwatch]::StartNew()
+while (-not (Test-Path -LiteralPath $GoFile) -and $sw.Elapsed.TotalSeconds -lt 120) { [Threading.Thread]::Sleep(100) }
+$m.ReleaseMutex()
+exit 0
+'@, (New-Object Text.UTF8Encoding $true))
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $mutexFree = { $m = New-Object Threading.Mutex($false, $script:AtmMonitorMutexName); try { $ok = $m.WaitOne(0); if ($ok) { $m.ReleaseMutex() }; $ok } finally { $m.Dispose() } }
+        try {
+            $script:AtmCleanConsoleSource = { $true }
+            $null = New-M4Service
+            $f = New-M4bHistory -Records 2 -Partials 1
+            if ($null -eq $f) { return }
+            $before = (Get-MonNames $f) -join ','
+            $d = Join-Path $sandbox ('m4b-holder-' + [guid]::NewGuid().ToString('N').Substring(0, 8)); [void][IO.Directory]::CreateDirectory($d)
+            $held = Join-Path $d 'held.txt'; $go = Join-Path $d 'go.txt'
+            $p = Start-AtmTestHelperProcess -File $shell -Arguments ("-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Name `"$($script:AtmMonitorMutexName)`" -HeldFile `"$held`" -GoFile `"$go`"")
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            while (-not (Test-Path -LiteralPath $held) -and -not $p.HasExited -and $sw.Elapsed.TotalSeconds -lt 120) { $null = $p.WaitForExit(100) }
+            try {
+                Assert-Eq $(if (Test-Path -LiteralPath $held) { [IO.File]::ReadAllText($held) } else { '<sem sinal>' }) 'True' 'o outro processo tomou o mutex'
+                $sw = [Diagnostics.Stopwatch]::StartNew()
+                $r = Invoke-M4bRemove -Folder $f -Presenter $pres -Reader { param($ph, $k) $script:m4asked.Add($k); $ph }
+                $sw.Stop()
+            } finally { [IO.File]::WriteAllText($go, 'go'); $null = $p.WaitForExit(120000) }
+            if (Test-MonFolderSkip $r.Aborted) { return }
+            Assert-True ($r.Aborted -ceq 'MONITOR_HISTORY_BUSY' -and ($script:m4asked -join ',') -ceq 'plan,monitor-remove-history' -and $r.Removed -eq 0 -and -not $r.Done -and ((Get-MonNames $f) -join ',') -ceq $before -and $sw.Elapsed.TotalSeconds -lt 10) "ocupado: depois da frase, sem espera, nada removido ($($r.Aborted), $([int]$sw.Elapsed.TotalMilliseconds) ms)"
+            $plantings = @(
+                @{ Why = 'um registro novo'; Plant = { param($x) Write-MonPlanted $x (Get-MonName ($monT0.AddHours(1)) 'c0000001') 7 } },
+                @{ Why = 'um inesperado'; Plant = { param($x) [IO.File]::WriteAllText((Join-Path $x 'notas.txt'), 'x') } },
+                @{ Why = 'um monitor.json'; Plant = { param($x) [IO.File]::WriteAllText((Join-Path $x 'monitor.json'), '{}') } }
+            )
+            foreach ($c in $plantings) {
+                $f = New-M4bHistory -Records 2 -Partials 1
+                $script:m4asked.Clear()
+                # Not a closure: the planting runs in this script's scope, where the suite's helpers are.
+                $script:m4bPlant = $c.Plant; $script:m4bFolder = $f
+                $r = Invoke-M4bRemove -Folder $f -Presenter $pres -Reader { param($ph, $k) $script:m4asked.Add($k); & $script:m4bPlant $script:m4bFolder; $ph }
+                $after = @(Get-MonNames $f)
+                Assert-True ($r.Aborted -ceq 'MONITOR_HISTORY_CHANGED' -and $r.Removed -eq 0 -and -not $r.Done -and $null -eq $r.Folder -and $after.Count -eq 4) "$($c.Why) durante a frase: MONITOR_HISTORY_CHANGED, nada removido ($($r.Aborted), $($after.Count) itens)"
+                Assert-True (& $mutexFree) "$($c.Why): o mutex foi liberado"
+            }
+        } finally { Reset-M3Seams $prevConsole }
+    }
+
+    Test-Case 'V0.5 M4b' 'M4b: monitor remove-history (agendador falso, remocoes reais so no sandbox) - sem monitor.json: cada arquivo do produto pela remocao de arquivo e a pasta vazia removida (REMOVED), a pasta-mae fica; com monitor.json: os arquivos saem, monitor.json e a pasta ficam (KEPT_CONFIG), monitor.json byte a byte; pasta vazia: 0 arquivos e REMOVED; a primeira falha para o resto (um arquivo aberto sem compartilhar a remocao) com o codigo e a contagem, a pasta nao tocada; mutex abandonado e tomado; o mutex liberado; nenhum nome na saida' {
+        $prevConsole = $script:AtmCleanConsoleSource
+        function Connect-AtmTaskScheduler { $script:m4k.Connects++; return $script:m4Svc }
+        $script:m4asked = New-Object System.Collections.Generic.List[string]
+        $pres = { param($p) $script:m4asked.Add('plan') }
+        $rd = { param($ph, $k) $script:m4asked.Add($k); $ph }
+        $mutexFree = { $m = New-Object Threading.Mutex($false, $script:AtmMonitorMutexName); try { $ok = $m.WaitOne(0); if ($ok) { $m.ReleaseMutex() }; $ok } finally { $m.Dispose() } }
+        $old = Get-AtmLanguage
+        try {
+            $script:AtmCleanConsoleSource = { $true }
+            $null = New-M4Service
+            $f = New-M4bHistory -Records 2 -Partials 1
+            if ($null -eq $f) { return }
+            $names = @(Get-MonNames $f)
+            $parent = Split-Path $f -Parent
+            $r = Invoke-M4bRemove -Folder $f -Presenter $pres -Reader $rd
+            if (Test-MonFolderSkip $r.Aborted) { return }
+            Assert-True ($r.Done -and $null -eq $r.Aborted -and $r.Removed -eq 3 -and $r.Problems -eq 0 -and -not $r.ConfigKept -and [string]$r.Folder.State -ceq 'REMOVED' -and ($script:m4asked -join ',') -ceq 'plan,monitor-remove-history' -and -not [IO.Directory]::Exists($f) -and [IO.Directory]::Exists($parent)) "sem monitor.json: 3 arquivos e a pasta vazia removidos, a pasta-mae fica ($($r.Aborted) $($r.Removed) $($r.Folder.State))"
+            Assert-True (& $mutexFree) 'o mutex foi liberado'
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                $t = Get-RstHost { Show-AtmMonitorRemoveHistoryResult -Result $r }
+                Assert-True ($t.Contains((Get-AtmText 'mon.hist.removed' 3)) -and $t.Contains((Get-AtmText 'mon.hist.folderRemoved')) -and @($names | Where-Object { $t.Contains($_) }).Count -eq 0) "${lang}: a saida so com contagens"
+            }
+            Set-AtmLanguage -Requested $old
+            # With the thresholds file.
+            $script:m4asked.Clear()
+            $f = New-M4bHistory -Records 2 -Partials 1 -Config $true
+            $cfg = [IO.File]::ReadAllBytes((Join-Path $f 'monitor.json'))
+            $r = Invoke-M4bRemove -Folder $f -Presenter $pres -Reader $rd
+            Assert-True ($r.Done -and $r.Removed -eq 3 -and $r.ConfigKept -and [string]$r.Folder.State -ceq 'KEPT_CONFIG' -and ((Get-MonNames $f) -join ',') -ceq 'monitor.json' -and ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $f 'monitor.json'))) -ceq [Convert]::ToBase64String($cfg))) "com monitor.json: os arquivos saem, monitor.json intacto e a pasta fica ($($r.Removed) $($r.Folder.State))"
+            # An empty history folder.
+            $f = New-M4bHistory -Records 0 -Partials 0
+            $r = Invoke-M4bRemove -Folder $f -Presenter $pres -Reader $rd
+            Assert-True ($r.Done -and $r.Removed -eq 0 -and [string]$r.Folder.State -ceq 'REMOVED' -and -not [IO.Directory]::Exists($f) -and [IO.Directory]::Exists((Split-Path $f -Parent))) "pasta vazia: 0 arquivos e a pasta removida ($($r.Removed) $($r.Folder.State))"
+            # The first failure stops the rest: the second file (ordinal order) open without sharing its removal.
+            $f = New-M4bHistory -Records 3 -Partials 0
+            $names = @(Get-MonNames $f)
+            $h = [IO.File]::Open((Join-Path $f $names[1]), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+            try { $r = Invoke-M4bRemove -Folder $f -Presenter $pres -Reader $rd } finally { $h.Dispose() }
+            $left = @(Get-MonNames $f)
+            Assert-True (-not $r.Done -and $r.Aborted -ceq 'MONITOR_PRUNE_FAILED_IOException' -and $r.Removed -eq 1 -and $null -eq $r.Folder -and ($left -join ',') -ceq (($names[1], $names[2]) -join ',') -and [IO.Directory]::Exists($f)) "a primeira falha para o resto: o codigo, 1 removido, os outros e a pasta ficam ($($r.Aborted) $($r.Removed) $($left.Count))"
+            Assert-True (& $mutexFree) 'o mutex foi liberado depois da falha'
+            $t = Get-RstHost { Show-AtmMonitorRemoveHistoryResult -Result $r }
+            Assert-True ($t.Contains((Get-AtmText 'mon.hist.stopped' 'MONITOR_PRUNE_FAILED_IOException' 1 3)) -and -not $t.Contains((Get-AtmText 'mon.hist.notRemoved' 'MONITOR_PRUNE_FAILED_IOException')) -and @($names | Where-Object { $t.Contains($_) }).Count -eq 0) 'a saida diz quantos saíram antes da falha, sem dizer que nada foi removido, sem nomes'
+            # An abandoned mutex is taken, as the collector does (this process keeps a handle so the object outlives the holder).
+            $f = New-M4bHistory -Records 1 -Partials 0
+            $child = Join-Path $sandbox 'm4b-mutex-abandon.ps1'
+            [IO.File]::WriteAllText($child, @'
+param([string]$Name, [string]$HeldFile)
+$m = New-Object Threading.Mutex($false, $Name)
+$got = $m.WaitOne(0)
+[IO.File]::WriteAllText($HeldFile, [string]$got)
+[Environment]::Exit(0)
+'@, (New-Object Text.UTF8Encoding $true))
+            $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+            $keep = New-Object Threading.Mutex($false, $script:AtmMonitorMutexName)
+            try {
+                $held = Join-Path $sandbox ('m4b-abandon-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.txt')
+                $p = Start-AtmTestHelperProcess -File $shell -Arguments ("-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Name `"$($script:AtmMonitorMutexName)`" -HeldFile `"$held`"")
+                $null = $p.WaitForExit(120000)
+                Assert-Eq $(if (Test-Path -LiteralPath $held) { [IO.File]::ReadAllText($held) } else { '<sem sinal>' }) 'True' 'o outro processo tomou o mutex e terminou sem liberar'
+                $r = Invoke-M4bRemove -Folder $f -Presenter $pres -Reader $rd
+                Assert-True ($r.Done -and $r.Removed -eq 1 -and [string]$r.Folder.State -ceq 'REMOVED') "mutex abandonado: tomado e a remocao seguiu ($($r.Aborted) $($r.Removed))"
+            } finally { $keep.Dispose() }
+        } finally { Set-AtmLanguage -Requested $old; Reset-M3Seams $prevConsole }
+    }
+
+    Test-Case 'V0.5 M4b' 'M4b: remocao da pasta vazia do historico (direta, pasta do sandbox) - so o caminho exato do motor (outro caminho: MONITOR_FOLDER_REFUSED e nada tocado); ausente; reparse na cadeia; um arquivo no lugar da pasta; outro dono (costura); nao vazia (MONITOR_FOLDER_NOT_EMPTY); com monitor.json (KEPT_CONFIG, nada tentado); vazia: REMOVED, nao recursiva, a pasta-mae fica' {
+        try {
+            $f = New-M4bHistory -Records 0 -Partials 0
+            if ($null -eq $f) { return }
+            $other = New-M4bHistory -Records 0 -Partials 0
+            $ef = Invoke-M4bEmptyFolder -Seam $f -Folder $other
+            Assert-True ([string]$ef.State -ceq 'KEPT' -and [string]$ef.Code -ceq 'MONITOR_FOLDER_REFUSED' -and [IO.Directory]::Exists($other) -and [IO.Directory]::Exists($f)) "outro caminho: recusado, nada tocado ($($ef.Code))"
+            $gone = Join-Path (Join-Path $sandbox ('m4b-absent-' + [guid]::NewGuid().ToString('N').Substring(0, 8))) 'AgentTempManager\Monitor'
+            $ef = Invoke-M4bEmptyFolder -Seam $gone -Folder $gone
+            Assert-True ([string]$ef.State -ceq 'KEPT' -and [string]$ef.Code -ceq 'MONITOR_FOLDER_NOT_FOUND') "ausente: KEPT com o codigo ($($ef.Code))"
+            $jl = Join-Path $sandbox ('m4b-j-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Junction -Link $jl -Target (Split-Path (Split-Path $f -Parent) -Parent)
+            $viaJ = Join-Path $jl 'AgentTempManager\Monitor'
+            $ef = Invoke-M4bEmptyFolder -Seam $viaJ -Folder $viaJ
+            Assert-True ([string]$ef.State -ceq 'KEPT' -and [string]$ef.Code -ceq 'MONITOR_FOLDER_REPARSE_IN_PATH' -and [IO.Directory]::Exists($f)) "reparse na cadeia: KEPT, nada tocado ($($ef.Code))"
+            $fileBase = Join-Path $sandbox ('m4b-file-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            [void][IO.Directory]::CreateDirectory((Join-Path $fileBase 'AgentTempManager'))
+            $asFile = Join-Path $fileBase 'AgentTempManager\Monitor'
+            [IO.File]::WriteAllText($asFile, 'x')
+            $ef = Invoke-M4bEmptyFolder -Seam $asFile -Folder $asFile
+            Assert-True ([string]$ef.State -ceq 'KEPT' -and [string]$ef.Code -ceq 'MONITOR_FOLDER_NOT_A_FOLDER' -and [IO.File]::Exists($asFile)) "um arquivo no lugar da pasta: KEPT, intacto ($($ef.Code))"
+            $foreign = $monForeignSid; $target = $f
+            $script:AtmMonitorOwnerSource = { param($p) if ($p.TrimEnd('\') -ceq $target.TrimEnd('\')) { $foreign } else { [string](Get-Acl -LiteralPath $p).GetOwner([Security.Principal.SecurityIdentifier]).Value } }.GetNewClosure()
+            try { $ef = Invoke-M4bEmptyFolder -Seam $f -Folder $f } finally { $script:AtmMonitorOwnerSource = $null }
+            Assert-True ([string]$ef.State -ceq 'KEPT' -and [string]$ef.Code -ceq 'MONITOR_FOLDER_FOREIGN_OWNER' -and [IO.Directory]::Exists($f)) "outro dono: KEPT, nada tocado ($($ef.Code))"
+            $nf = New-M4bHistory -Records 1 -Partials 0
+            $ef = Invoke-M4bEmptyFolder -Seam $nf -Folder $nf
+            Assert-True ([string]$ef.State -ceq 'KEPT' -and [string]$ef.Code -ceq 'MONITOR_FOLDER_NOT_EMPTY' -and @(Get-MonNames $nf).Count -eq 1) "nao vazia: KEPT, nada tocado ($($ef.Code))"
+            $cf = New-M4bHistory -Records 0 -Partials 0 -Config $true
+            $ef = Invoke-M4bEmptyFolder -Seam $cf -Folder $cf
+            Assert-True ([string]$ef.State -ceq 'KEPT_CONFIG' -and $null -eq $ef.Code -and ((Get-MonNames $cf) -join ',') -ceq 'monitor.json') "com monitor.json: KEPT_CONFIG, nada tentado ($($ef.State))"
+            $ef = Invoke-M4bEmptyFolder -Seam ($f + '\') -Folder $f
+            Assert-True ([string]$ef.State -ceq 'REMOVED' -and $null -eq $ef.Code -and -not [IO.Directory]::Exists($f) -and [IO.Directory]::Exists((Split-Path $f -Parent))) "vazia: REMOVED, a pasta-mae fica ($($ef.State) $($ef.Code))"
+        } finally { Reset-MonSeams }
+    }
+
+    Test-Case 'V0.5 M4b' 'M4b: apresentacao (en-US e pt-BR) - plano do remove-history (contagens, monitor.json fica ou a pasta sai, a pasta-mae nunca); resultado de cada recusa com o codigo e o motivo (inesperado com as duas contagens, tarefa presente nomeia o disable, trava fechada diz que o historico fica); feito com a linha da pasta (removida, mantida pelo monitor.json, mantida com o codigo); parado no meio; mesmas chaves e campos nos dois idiomas; textos sem fase nem comando inexistente' {
+        $old = Get-AtmLanguage
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                foreach ($ck in @($true, $false)) {
+                    $plan = [pscustomobject]@{ Folder = 'X:\h'; Records = 4; Partials = 1; Bytes = 1234; ConfigKept = $ck; FolderGoes = (-not $ck); Phrase = 'REMOVER HISTORICO DO MONITORAMENTO' }
+                    $t = Get-RstHost { Show-AtmMonitorRemoveHistoryPlan -Plan $plan }
+                    $line = $(if ($ck) { 'mon.plan.historyConfigStays' } else { 'mon.plan.historyFolderGoes' }); $notLine = $(if ($ck) { 'mon.plan.historyFolderGoes' } else { 'mon.plan.historyConfigStays' })
+                    Assert-True ($t.Contains((Get-AtmText 'mon.plan.historyHeader')) -and $t.Contains((Get-AtmText 'mon.plan.historyFiles' 4 1 1234)) -and $t.Contains((Get-AtmText $line)) -and -not $t.Contains((Get-AtmText $notLine)) -and $t.Contains((Get-AtmText 'mon.plan.historyParentStays')) -and $t.Contains('%LOCALAPPDATA%\AgentTempManager\Monitor')) "${lang}: plano (monitor.json $ck)"
+                }
+                foreach ($c in @('MONITORING_GATE_CLOSED', 'SEM_APRESENTACAO_OU_CONFIRMACAO', 'CONSOLE_NOT_OBSERVED', 'MONITOR_HISTORY_TASK_PRESENT', 'MONITOR_HISTORY_ABSENT', 'MONITOR_FOLDER_REPARSE_IN_PATH', 'MONITOR_HISTORY_NOT_CONFIRMED', 'MONITOR_HISTORY_BUSY', 'MONITOR_HISTORY_CHANGED')) {
+                    $t = Get-RstHost { Show-AtmMonitorRemoveHistoryResult -Result ([pscustomobject]@{ Operation = 'remove-history'; Aborted = $c; Plan = $null; Done = $false; Removed = 0; Problems = 0; ConfigKept = $false; Folder = $null }) }
+                    $why = 'mon.hist.why.' + $c
+                    Assert-True ($t.Contains((Get-AtmText 'mon.hist.notRemoved' $c)) -and (-not $script:AtmMessages['en-US'].ContainsKey($why) -or $t.Contains((Get-AtmText $why)))) "${lang}: resultado $c"
+                }
+                Assert-True ((Get-AtmText 'mon.hist.why.MONITOR_HISTORY_TASK_PRESENT').Contains('agent-temp monitor disable')) "${lang}: a tarefa presente nomeia o disable"
+                $uplan = [pscustomobject]@{ Folder = 'X:\h'; Records = 2; Partials = 1; Bytes = 9; ConfigKept = $false; FolderGoes = $false; Phrase = $null }
+                $t = Get-RstHost { Show-AtmMonitorRemoveHistoryResult -Result ([pscustomobject]@{ Operation = 'remove-history'; Aborted = 'MONITOR_HISTORY_UNEXPECTED'; Plan = $uplan; Done = $false; Removed = 0; Problems = 2; ConfigKept = $false; Folder = $null }) }
+                Assert-True ($t.Contains((Get-AtmText 'mon.hist.why.MONITOR_HISTORY_UNEXPECTED' 2 3))) "${lang}: inesperado com as duas contagens"
+                foreach ($fo in @([pscustomobject]@{ State = 'REMOVED'; Code = $null }, [pscustomobject]@{ State = 'KEPT_CONFIG'; Code = $null }, [pscustomobject]@{ State = 'KEPT'; Code = 'MONITOR_FOLDER_NOT_EMPTY' })) {
+                    $t = Get-RstHost { Show-AtmMonitorRemoveHistoryResult -Result ([pscustomobject]@{ Operation = 'remove-history'; Aborted = $null; Plan = $uplan; Done = $true; Removed = 3; Problems = 0; ConfigKept = ($fo.State -ceq 'KEPT_CONFIG'); Folder = $fo }) }
+                    $fl = switch ($fo.State) { 'REMOVED' { Get-AtmText 'mon.hist.folderRemoved' } 'KEPT_CONFIG' { Get-AtmText 'mon.hist.folderKeptConfig' } default { Get-AtmText 'mon.hist.folderKept' 'MONITOR_FOLDER_NOT_EMPTY' } }
+                    Assert-True ($t.Contains((Get-AtmText 'mon.hist.removed' 3)) -and $t.Contains($fl) -and $t.Contains((Get-AtmText 'mon.plan.historyParentStays'))) "${lang}: feito com a linha da pasta $($fo.State)"
+                }
+            }
+            $ph = { param([string]$T) (@([regex]::Matches($T, '\{\d\}') | ForEach-Object { $_.Value } | Sort-Object -Unique) -join ',') }
+            $hk = { param($l) @($script:AtmMessages[$l].Keys | Where-Object { $_ -like 'mon.hist.*' -or $_ -like 'mon.plan.history*' -or $_ -like 'inst.mon*' }) }
+            Assert-Eq (Get-MonSorted (& $hk 'pt-BR')) (Get-MonSorted (& $hk 'en-US')) 'as mesmas chaves da M4b nos dois idiomas'
+            Assert-True (@(& $hk 'en-US').Count -ge 25) "chaves da M4b lidas ($(@(& $hk 'en-US').Count))"
+            $launcher = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+            $verbs = @([regex]::Matches($launcher, "(?m)^        '([a-z-]+)' \{\s*$") | ForEach-Object { $_.Groups[1].Value })
+            foreach ($key in @(@(& $hk 'en-US') + @('cli.monitorUsage', 'help.monitor'))) {
+                Assert-Eq (& $ph $script:AtmMessages['pt-BR'][$key]) (& $ph $script:AtmMessages['en-US'][$key]) "${key}: mesmos campos nos dois idiomas"
+                foreach ($l in @('en-US', 'pt-BR')) {
+                    $t = [string]$script:AtmMessages[$l][$key]
+                    Assert-True ($t -cnotmatch '\bM[0-9]\b' -and -not $t.Contains('V0.6')) "${key} ($l): sem fase"
+                    foreach ($m in [regex]::Matches($t, 'agent-temp ([a-z-]+)(?: ([a-z-]+))?')) { Assert-True ($verbs -ccontains $m.Groups[1].Value -and ($m.Groups[1].Value -cne 'monitor' -or @('', 'status', 'enable', 'disable', 'remove-history') -ccontains $m.Groups[2].Value)) "${key} ($l): cita so comando que existe ($($m.Value))" }
+                }
+            }
+        } finally { Set-AtmLanguage -Requested $old }
+    }
+
+    Test-Case 'V0.5 M4b' 'M4b: CLI (processo novo deste shell, trava fechada) - monitor remove-history: 3 com MONITORING_GATE_CLOSED antes de qualquer plano ou pergunta (en-US e pt-BR), o historico fica; monitor remove-history -IntervalHours 6: 2; o uso lista status, enable, disable e remove-history; ajuda com o remove-history; a pasta real do historico nunca criada nem removida' {
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $launch = { param([string]$CliArgs) Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$(Join-Path $srcDir 'agent-temp.ps1')`" " + $CliArgs) -TimeoutSec 300 }
+        $before = Get-AtmPathPresence $monRealFolder
+        $r = & $launch 'monitor remove-history -Lang en-US'
+        Assert-True ($r.Exit -eq 3 -and $r.Text.Contains('NOTHING WAS REMOVED: MONITORING_GATE_CLOSED') -and $r.Text.Contains('Monitoring is not available in this release: this command refuses, and the history stays as it is.') -and -not $r.Text.Contains('REMOVER HISTORICO DO MONITORAMENTO') -and -not $r.Text.Contains('PLAN: REMOVE THE MONITORING HISTORY')) "monitor remove-history: exit 3 sem plano nem frase ($($r.Exit))"
+        $r = & $launch 'monitor remove-history -Lang pt-BR'
+        Assert-True ($r.Exit -eq 3 -and $r.Text.Contains('NADA FOI REMOVIDO: MONITORING_GATE_CLOSED')) "monitor remove-history pt-BR: exit 3 ($($r.Exit))"
+        $usage = 'Usage: agent-temp monitor status | agent-temp monitor enable [-IntervalHours 1|2|4|6|12|24] | agent-temp monitor disable | agent-temp monitor remove-history. Nothing was changed.'
+        $r = & $launch 'monitor remove-history -IntervalHours 6 -Lang en-US'
+        Assert-True ($r.Exit -eq 2 -and $r.Text.Contains($usage)) "monitor remove-history -IntervalHours 6: uso 2 ($($r.Exit))"
+        $r = & $launch 'monitor purge-history -Lang en-US'
+        Assert-True ($r.Exit -eq 2 -and $r.Text.Contains($usage)) "subverbo desconhecido: uso 2 com os quatro subverbos ($($r.Exit))"
+        $r = & $launch 'help -Lang en-US'
+        Assert-True ($r.Text.Contains('remove-history: removes the history files the product created')) 'a ajuda mostra o remove-history'
+        Assert-Eq (Get-AtmPathPresence $monRealFolder) $before 'pasta real do historico do usuario inalterada'
+    }
+
+    Test-Case 'V0.5 M4b' 'M4b: aviso do desinstalador (so leitura, costuras da listagem e da pasta, en-US e pt-BR) - so a propria tarefa (o caminho e o disable); a propria e duas de outros usuarios (contadas, nunca nomeadas; AutoPurge e nome de teste nao contam); so a pasta do historico (o literal, nunca o caminho expandido, e o remove-history); nada: nenhum aviso; ilegivel: o tipo da excecao, nos dois; cada aviso diz que o item fica e que, sem o monitoramento disponivel, o comando recusa' {
+        $old = Get-AtmLanguage
+        $own = Get-AtmInstallMonitorTaskName -Sid ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+        $o1 = 'Monitor-0123456789abcdef'; $o2 = 'Monitor-fedcba9876543210'
+        $expanded = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'AgentTempManager\Monitor'
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                $none = { $false }
+                $w = @(Get-AtmUninstallMonitorNotice -TaskLister { @($own) }.GetNewClosure() -FolderProbe $none)
+                Assert-True ($w.Count -eq 1 -and $w[0] -ceq (Get-AtmText 'inst.monTaskWarn' ('\AgentTempManager\' + $own)) -and $w[0].Contains('agent-temp monitor disable')) "${lang}: so a propria tarefa (o caminho e o disable)"
+                $w = @(Get-AtmUninstallMonitorNotice -TaskLister { @($o1, $own, 'AutoPurge-0123456789abcdef', $o2, 'MonitorTest-0a1b2c3d') }.GetNewClosure() -FolderProbe $none)
+                Assert-True ($w.Count -eq 2 -and $w[0] -ceq (Get-AtmText 'inst.monTaskWarn' ('\AgentTempManager\' + $own)) -and $w[1] -ceq (Get-AtmText 'inst.monTaskOthers' 2) -and -not ($w -join ' ').Contains($o1) -and -not ($w -join ' ').Contains($o2)) "${lang}: a propria e duas de outros usuarios, contadas e nao nomeadas"
+                $w = @(Get-AtmUninstallMonitorNotice -TaskLister { @() } -FolderProbe { $true })
+                Assert-True ($w.Count -eq 1 -and $w[0] -ceq (Get-AtmText 'inst.monHistoryWarn' '%LOCALAPPDATA%\AgentTempManager\Monitor') -and $w[0].Contains('agent-temp monitor remove-history') -and -not $w[0].Contains($expanded)) "${lang}: so a pasta do historico, pelo literal"
+                $w = @(Get-AtmUninstallMonitorNotice -TaskLister { @('AutoPurge-0123456789abcdef') } -FolderProbe $none)
+                Assert-Eq $w.Count 0 "${lang}: nada, nenhum aviso"
+                $w = @(Get-AtmUninstallMonitorNotice -TaskLister { throw (New-Object UnauthorizedAccessException('x')) } -FolderProbe { throw (New-Object IO.IOException('x')) })
+                Assert-True ($w.Count -eq 2 -and $w[0] -ceq (Get-AtmText 'inst.monTaskUnreadable' 'UnauthorizedAccessException') -and $w[1] -ceq (Get-AtmText 'inst.monHistoryUnreadable' 'IOException')) "${lang}: ilegivel, com o tipo da excecao ($($w -join ' | '))"
+                foreach ($key in @('inst.monTaskWarn', 'inst.monTaskOthers', 'inst.monHistoryWarn')) {
+                    $t = [string]$script:AtmMessages[$lang][$key]
+                    $stays = $(if ($lang -ceq 'en-US') { 'stay' } else { 'fica' })
+                    $refuses = $(if ($lang -ceq 'en-US') { 'refuses (the gate is closed)' } else { 'recusa (a trava está fechada)' })
+                    Assert-True ($t.Contains($stays) -and $t.Contains($refuses) -and $t.Contains('agent-temp monitor ')) "${key} (${lang}): o item fica, o comando que o remove e a recusa com a trava fechada"
+                }
+            }
+        } finally { Set-AtmLanguage -Requested $old }
+    }
+
+    Test-Case 'V0.5 M4b' 'M4b (estatico): remove-history na ordem da rodada (trava, apresentador, console, tarefa, pasta, conferencia sem criar, inventario, inesperado, plano, frase, mutex sem espera, ocupado, inventario de novo, mudado, remocao de cada arquivo, pasta vazia, liberacao); o resultado so com contagens; a area nunca toca a pasta real - todo caso que chega ao remove-history sombreia o agendador e usa a pasta do sandbox; o aviso do desinstalador so com as costuras; fora da area, nenhuma chamada ao remove-history ou a pasta vazia' {
+        $monFile = Join-Path $srcDir 'lib\Engine.Monitor.ps1'
+        $strip = { param([string]$T) [regex]::Replace([regex]::Replace($T, '(?s)<#.*?#>', ''), '(?m)#.*$', '') }
+        $rh = & $strip (Get-ApFnBody $monFile 'Invoke-AtmMonitorRemoveHistory')
+        $ix = @(@('if (-not $script:AtmMonitoringEnabled)', "'SEM_APRESENTACAO_OU_CONFIRMACAO'", "'CONSOLE_NOT_OBSERVED'", 'Get-AtmMonitorTaskState', "'MONITOR_HISTORY_TASK_PRESENT'", 'Test-AtmPathChain', "'MONITOR_HISTORY_ABSENT'", '::Pin(', 'Get-AtmMonitorHistoryInventory -', "'MONITOR_HISTORY_UNEXPECTED'", '& $PlanPresenter', '& $ConfirmationReader', "'MONITOR_HISTORY_NOT_CONFIRMED'", 'Threading.Mutex', 'WaitOne(0)', "'MONITOR_HISTORY_BUSY'", "'MONITOR_HISTORY_CHANGED'", 'Invoke-AtmMonitorPrune -', '$st.Done = $true', 'Remove-AtmMonitorEmptyFolder -', 'ReleaseMutex') | ForEach-Object { $rh.IndexOf($_) })
+        Assert-True (@($ix | Where-Object { $_ -lt 0 }).Count -eq 0 -and ((@($ix | Sort-Object) -join ',') -ceq ($ix -join ','))) "remove-history na ordem da rodada ($($ix -join ','))"
+        Assert-True ($rh.Contains("& `$ConfirmationReader `$script:AtmMonitorRemoveHistoryPhrase 'monitor-remove-history'") -and [regex]::Matches($rh, 'Remove-AtmMonitorEmptyFolder -').Count -eq 1 -and [regex]::Matches($rh, 'Invoke-AtmMonitorPrune -').Count -eq 1 -and $rh.Contains('.WaitOne(0)') -and -not $rh.Contains('WaitOne()') -and -not [regex]::IsMatch($rh, 'WaitOne\([1-9]')) 'remove-history: a sua propria frase; a pasta vazia e a remocao de arquivo uma vez cada; o mutex sem espera'
+        Assert-True ($rh.Contains('AbandonedMutexException') -and $rh.Contains('$mutex.Dispose()')) 'remove-history: abandonado e tomado; o mutex sempre descartado'
+        foreach ($pat in @('::Delete(', '.Delete(', 'DeleteTask', 'DeleteFolder', 'Remove-Item', 'AtmDeleter', 'DeleteTree', 'Unregister-', 'Remove-AtmEmptyTaskFolder', 'Move-Item', 'File]::Move')) { Assert-True ($rh.IndexOf($pat, [StringComparison]::OrdinalIgnoreCase) -lt 0) "remove-history so remove pelas duas funcoes do motor: sem '$pat'" }
+        Assert-True ((Get-ApFnBody $monFile 'Invoke-AtmMonitorRemoveHistory') -cmatch "Operation = 'remove-history'; Aborted = \`$null; Plan = \`$null; Done = \`$false; Removed = 0; Problems = 0; ConfigKept = \`$false; Folder = \`$null \}" -and -not [regex]::IsMatch($rh, '\$st\.(Names|Files|Items)\b') -and -not $rh.Contains('$st.Plan = $inv')) 'o resultado so com contagens: nenhum nome de arquivo'
+        Assert-True ((Get-ApFnBody $monFile 'Invoke-AtmMonitorRemoveHistory').Contains("`$script:AtmMonitorRemoveHistoryPhrase") -and ([IO.File]::ReadAllText($monFile) -match "(?m)^\`$script:AtmMonitorRemoveHistoryPhrase = 'REMOVER HISTORICO DO MONITORAMENTO'\r?$")) 'a frase fixa no codigo'
+        $self = [IO.File]::ReadAllText((Join-Path $testsDir 'Run-Tests.ps1'))
+        $a0 = $self.IndexOf('-----' + ' V0.5 M4b ('); $a1 = $self.IndexOf("`n" + '} fin' + 'ally {', $a0)
+        Assert-True ($a0 -gt 0 -and $a1 -gt $a0) 'area V0.5 M4b encontrada'
+        $area = $self.Substring($a0, $a1 - $a0)
+        Assert-True (-not $area.Contains('GITHUB_' + 'ACTIONS') -and -not $area.Contains('Start-' + 'Sleep') -and -not $area.Contains('m3RealSvc' + '.')) 'area sem caso so de CI, sem espera real e sem o agendador real'
+        $shadow = 'function Connect-AtmTask' + 'Scheduler {'
+        $needing = 0
+        foreach ($c in @([regex]::Split($area, "(?m)^\s*Test-Case 'V0\.5 M4b' ") | Select-Object -Skip 1)) {
+            if ($c.StartsWith("'M4b (estatico)")) { continue }
+            if ($c.Contains('Invoke-M4b' + 'Remove ') -or $c.Contains('Invoke-AtmMonitor' + 'RemoveHistory -')) { $needing++; Assert-True ($c.Contains($shadow)) "caso que chega ao remove-history sombreia o agendador: $($c.Substring(0, [Math]::Min(60, $c.Length)))" }
+            Assert-True (-not $c.Contains('$monRealFolder -') -and -not [regex]::IsMatch($c, 'AtmMonitorFolderPath = \$monRealFolder')) "caso sem a pasta real como alvo: $($c.Substring(0, [Math]::Min(60, $c.Length)))"
+        }
+        Assert-True ($needing -ge 4) "casos que chegam ao remove-history: $needing"
+        Assert-True ($area.Contains('$script:AtmMonitorFolderPath = $Folder') -and $area.Contains('$script:AtmMonitorFolderPath = $Seam')) 'os auxiliares da area poem a costura da pasta antes de abrir a trava'
+        # Calls, not text: the parser tells a call apart from the statics' strings.
+        $selfAst = [Management.Automation.Language.Parser]::ParseInput($self, [ref]$null, [ref]$null)
+        $names = @(('Invoke-AtmMonitor' + 'RemoveHistory'), ('Remove-AtmMonitor' + 'EmptyFolder'))
+        $calls = @($selfAst.FindAll({ param($x) $x -is [Management.Automation.Language.CommandAst] -and $names -ccontains [string]$x.GetCommandName() }, $true))
+        Assert-True ($calls.Count -ge 3) "controle positivo: chamadas encontradas na area ($($calls.Count))"
+        $out = @($calls | Where-Object { $_.Extent.StartOffset -lt $a0 -or $_.Extent.StartOffset -ge $a1 } | ForEach-Object { [string]$_.GetCommandName() + '@' + $_.Extent.StartLineNumber })
+        Assert-Eq ($out -join ', ') '' 'fora da area, nenhuma chamada ao remove-history ou a pasta vazia'
+        $notice = @($selfAst.FindAll({ param($x) $x -is [Management.Automation.Language.CommandAst] -and [string]$x.GetCommandName() -ceq ('Get-AtmUninstall' + 'MonitorNotice') }, $true))
+        Assert-True ($notice.Count -ge 5 -and @($notice | Where-Object { -not ($_.Extent.Text.Contains('-TaskLister') -and $_.Extent.Text.Contains('-FolderProbe')) }).Count -eq 0) "o aviso do desinstalador so com as duas costuras na suite ($($notice.Count))"
+        Assert-Eq (Get-AtmPathPresence $monRealFolder) $monRealBefore 'a pasta real do historico deste usuario como estava no inicio da suite'
     }
 } finally {
     # The console encoding of this process is restored, even when the suite aborts (a redirected console may refuse it).

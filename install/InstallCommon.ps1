@@ -839,6 +839,77 @@ function Get-AtmUninstallAutoPurgeTaskNotice {
     return $out.ToArray()
 }
 
+# The monitoring (ADR-0017, V05-D9 (a)): the collection task and the history folder belong to the user who created them.
+# The uninstall only reads and warns, naming the command that removes each item; it never removes a task, a folder or a
+# file of the history, the current user's or another user's. The task folder, the name prefix and rule and the history
+# folder's name are the engine's (Engine.Monitor.ps1: AtmMonitorTaskFolder, AtmMonitorTaskPrefix, Get-AtmMonitorTaskName,
+# AtmMonitorFolderName), repeated here because the installer does not load the engine; the suite checks that they are the
+# same. The history folder is written in its environment form, never expanded.
+$script:AtmInstallMonitorTaskFolder = '\AgentTempManager'
+$script:AtmInstallMonitorTaskPrefix = 'Monitor-'
+$script:AtmInstallMonitorFolderName = 'Monitor'
+$script:AtmInstallMonitorFolderLiteral = '%LOCALAPPDATA%\AgentTempManager\Monitor'
+
+function Get-AtmInstallMonitorTaskName {
+    param([string]$Sid)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $h = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Sid)) } finally { $sha.Dispose() }
+    return $script:AtmInstallMonitorTaskPrefix + (-join ($h[0..7] | ForEach-Object { $_.ToString('x2') }))
+}
+
+function Get-AtmUninstallMonitorNotice {
+    # Read only: the warnings of the uninstall about the monitoring. The current user's collection task (by its path,
+    # naming agent-temp monitor disable), how many collection tasks of other users the task folder holds (counted, never
+    # named), and the current user's history folder (the environment form, never expanded, naming agent-temp monitor
+    # remove-history). What cannot be read is a warning with the type of the error. -TaskLister (the names in the task
+    # folder; none when the folder does not exist) and -FolderProbe (whether the history folder exists) are the suite's
+    # seams; without them both are real reads.
+    param([scriptblock]$TaskLister, [scriptblock]$FolderProbe)
+    if (-not $TaskLister) {
+        $TaskLister = {
+            $svc = New-Object -ComObject 'Schedule.Service'
+            $svc.Connect()
+            $folder = $null
+            try { $folder = $svc.GetFolder($script:AtmInstallMonitorTaskFolder) } catch {
+                $e = $_.Exception
+                for ($i = 0; $i -lt 4 -and $e -is [Management.Automation.MethodInvocationException] -and $null -ne $e.InnerException; $i++) { $e = $e.InnerException }
+                if (@(-2147024894, -2147024893) -contains [int]$e.HResult) { return }
+                throw
+            }
+            $names = New-Object System.Collections.Generic.List[string]
+            # Indexed (1-based), never enumerated: the same in Windows PowerShell and in PowerShell 7. Hidden ones too.
+            $tasks = $folder.GetTasks(1)
+            for ($i = 1; $i -le [int]$tasks.Count; $i++) { $names.Add([string]$tasks.Item($i).Name) }
+            return $names.ToArray()
+        }
+    }
+    if (-not $FolderProbe) {
+        $FolderProbe = {
+            $la = [Environment]::GetFolderPath('LocalApplicationData')
+            if (-not $la) { throw (New-Object InvalidOperationException('LocalApplicationData')) }
+            try { $null = [IO.File]::GetAttributes((Join-Path $la ('AgentTempManager\' + $script:AtmInstallMonitorFolderName))); return $true }
+            catch {
+                $e = $_.Exception
+                for ($i = 0; $i -lt 4 -and $e -is [Management.Automation.MethodInvocationException] -and $null -ne $e.InnerException; $i++) { $e = $e.InnerException }
+                if ($e -is [IO.FileNotFoundException] -or $e -is [IO.DirectoryNotFoundException]) { return $false }
+                throw
+            }
+        }
+    }
+    $out = New-Object System.Collections.Generic.List[string]
+    try {
+        $names = @(& $TaskLister)
+        $own = Get-AtmInstallMonitorTaskName -Sid ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+        if ($names -ccontains $own) { $out.Add((Get-AtmText 'inst.monTaskWarn' ($script:AtmInstallMonitorTaskFolder + '\' + $own))) }
+        $others = @($names | Where-Object { [string]$_ -cmatch '^Monitor-[0-9a-f]{16}$' -and [string]$_ -cne $own }).Count
+        if ($others -gt 0) { $out.Add((Get-AtmText 'inst.monTaskOthers' $others)) }
+    } catch { $out.Add((Get-AtmText 'inst.monTaskUnreadable' $_.Exception.GetType().Name)) }
+    try {
+        if ([bool](& $FolderProbe)) { $out.Add((Get-AtmText 'inst.monHistoryWarn' $script:AtmInstallMonitorFolderLiteral)) }
+    } catch { $out.Add((Get-AtmText 'inst.monHistoryUnreadable' $_.Exception.GetType().Name)) }
+    return $out.ToArray()
+}
+
 function Uninstall-AtmProduct {
     # Runs under the operation lock of InstallDir (R-B6).
     param([string]$InstallDir, [string]$TestPathKey)
@@ -855,6 +926,8 @@ function Invoke-AtmUninstallUnlocked {
     if (-not (Test-Path -LiteralPath (Join-Path $InstallDir 'install-state.json'))) { throw (Get-AtmText 'inst.notInstalled' $InstallDir) }
     # Scheduled tasks of the automatic purge (P6b): read and warned about, never removed.
     foreach ($wl in @(Get-AtmUninstallAutoPurgeTaskNotice)) { Write-Warning $wl }
+    # The monitoring's collection task and history (ADR-0017, V05-D9 (a)): read and warned about, never removed.
+    foreach ($wl in @(Get-AtmUninstallMonitorNotice)) { Write-Warning $wl }
     # Only remove the PATH entry if this product added it (never an entry that pre-existed).
     $added = $false
     # Unreadable install state: never remove a PATH entry we cannot prove we added.

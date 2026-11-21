@@ -1706,3 +1706,52 @@ function Show-AtmMonitorDisableResult {
     if ($Result.Aborted -ceq 'MONITOR_TASK_NOT_VERIFIED') { Write-Host ('  ' + (Get-AtmText 'mon.task.notVerifiedDisable')) -ForegroundColor Yellow }
     foreach ($tl in (Get-AtmMonitorTaskLines -Task $Result.Task)) { Write-Host ('  ' + $tl.Text) -ForegroundColor $tl.Color }
 }
+
+function Get-AtmMonitorHistoryFolderLine {
+    # The line of the history folder after monitor remove-history (V0.5 M4b), or $null: removed, kept because of the
+    # user's thresholds file (which is the user's), or kept with the code. The folder is named by its environment form,
+    # never resolved.
+    param($Folder)
+    if ($null -eq $Folder) { return $null }
+    switch ([string]$Folder.State) {
+        'REMOVED' { return [pscustomobject]@{ Text = (Get-AtmText 'mon.hist.folderRemoved'); Color = 'Green' } }
+        'KEPT_CONFIG' { return [pscustomobject]@{ Text = (Get-AtmText 'mon.hist.folderKeptConfig'); Color = 'Cyan' } }
+        default { return [pscustomobject]@{ Text = (Get-AtmText 'mon.hist.folderKept' ([string]$Folder.Code)); Color = 'Yellow' } }
+    }
+}
+
+function Show-AtmMonitorRemoveHistoryPlan {
+    # monitor remove-history: the plan of the engine, before its phrase. Counts only (records, .partial files, bytes),
+    # never a file name; whether the user's thresholds file stays and with it the folder; that the parent folder stays.
+    param($Plan)
+    Write-AtmHeader (Get-AtmText 'mon.plan.historyHeader')
+    Write-Host ('  ' + (Get-AtmText 'mon.plan.historyFiles' $Plan.Records $Plan.Partials $Plan.Bytes))
+    if ($Plan.ConfigKept) { Write-Host ('  ' + (Get-AtmText 'mon.plan.historyConfigStays')) -ForegroundColor Cyan }
+    else { Write-Host ('  ' + (Get-AtmText 'mon.plan.historyFolderGoes')) -ForegroundColor Cyan }
+    Write-Host ('  ' + (Get-AtmText 'mon.plan.historyParentStays')) -ForegroundColor Gray
+}
+
+function Show-AtmMonitorRemoveHistoryResult {
+    # The result of monitor remove-history: how many files were removed and the line of the history folder, or the
+    # refusal (its code and why). Counts only: no file name is shown. A removal stopped part way says how many files
+    # were removed before it stopped.
+    param($Result)
+    if ($Result.Done) {
+        Write-Host (Get-AtmText 'mon.hist.removed' $Result.Removed) -ForegroundColor Green
+        $fl = Get-AtmMonitorHistoryFolderLine -Folder $Result.Folder
+        if ($null -ne $fl) { Write-Host ('  ' + $fl.Text) -ForegroundColor $fl.Color }
+        Write-Host ('  ' + (Get-AtmText 'mon.plan.historyParentStays')) -ForegroundColor Gray
+        return
+    }
+    if ([int]$Result.Removed -gt 0) {
+        $total = $(if ($null -ne $Result.Plan) { [int]$Result.Plan.Records + [int]$Result.Plan.Partials } else { [int]$Result.Removed })
+        Write-Host (Get-AtmText 'mon.hist.stopped' $Result.Aborted $Result.Removed $total) -ForegroundColor Yellow
+        return
+    }
+    Write-Host (Get-AtmText 'mon.hist.notRemoved' $Result.Aborted) -ForegroundColor Yellow
+    $why = 'mon.hist.why.' + [string]$Result.Aborted
+    if ($Result.Aborted -ceq 'MONITOR_HISTORY_UNEXPECTED') {
+        $files = $(if ($null -ne $Result.Plan) { [int]$Result.Plan.Records + [int]$Result.Plan.Partials } else { 0 })
+        Write-Host ('  ' + (Get-AtmText $why $Result.Problems $files))
+    } elseif ($script:AtmMessages['en-US'].ContainsKey($why)) { Write-Host ('  ' + (Get-AtmText $why)) }
+}

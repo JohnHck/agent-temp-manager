@@ -1,6 +1,6 @@
 # AgentTempManager MONITORING ENGINE (V0.5, docs/adr/ADR-0017, phase M1): the collector and the storage of the preventive
 # monitoring history. Depends on Engine.Audit.ps1: a collection runs the audit and nothing else (V05-D8 (a)). No terminal
-# output of its own; presentation lives in Report.ps1. Nothing here removes the history on request (a later M4 phase).
+# output of its own; presentation lives in Report.ps1. Phase M4b removes the history on request (monitor remove-history).
 # Phase M2 adds the trends, the thresholds (monitor.json, read only) and the alerts: pure functions over what the reader
 # found, computed only with the gate open; an alert NAMES a command and runs none. Phase M3a adds the user's own
 # scheduled task of the collector (monitor enable) and the entry point's run (bin\agent-temp-monitor.ps1); phase M4a
@@ -8,8 +8,9 @@
 # engine's generic helpers (Connect-AtmTaskScheduler and the code, absence and user helpers next to it), not moved.
 #
 # With the monitoring gate closed (every distributed copy) nothing is collected, created or written: the collector, the
-# folder, the writer, the rotation and the single removal function return MONITORING_GATE_CLOSED before anything else,
-# and the collector takes no mutex and calls no audit. Reading the history needs no gate, so a leftover stays visible.
+# folder, the writer, the rotation, the two removal functions (a file, and since M4b the empty history folder) and
+# monitor remove-history return MONITORING_GATE_CLOSED before anything else, and the collector takes no mutex and calls
+# no audit. Reading the history needs no gate, so a leftover stays visible.
 #
 # A record (schema atm.monitor/1, one new file per collection, never appended to) keeps aggregates only, the values the
 # audit already shows locally (ADR-0017 section 1, rows 1 to 6; row 8 as NOT_OBSERVABLE, never zero; row 9 not collected):
@@ -90,6 +91,8 @@ $script:AtmMonitorTaskDefaultInterval = 6
 $script:AtmMonitorTaskTimeLimit = 'PT1H'
 $script:AtmMonitorEnablePhrase = 'ATIVAR MONITORAMENTO'
 $script:AtmMonitorDisablePhrase = 'DESATIVAR MONITORAMENTO'
+# monitor remove-history (phase M4b) asks its own phrase too.
+$script:AtmMonitorRemoveHistoryPhrase = 'REMOVER HISTORICO DO MONITORAMENTO'
 
 # Test seams, a single assignment each, all $null in every distributed copy: the CLI never sets them. The suite replaces
 # them inside its own process only.
@@ -516,7 +519,8 @@ function Write-AtmMonitorRecordFile {
 
 function Invoke-AtmMonitorPrune {
     <#
-      THE ONLY REMOVAL OF THE MONITORING ENGINE (V05-D4 (a)): one file of the product's own history, by exact name, in the
+      THE FILE REMOVAL OF THE MONITORING ENGINE (V05-D4 (a); since M4b one of its two removals, the other being the empty
+      history folder's): one file of the product's own history, by exact name, in the
       product's history folder. Immediately before the removal it checks, in this order: the gate; the name (the exact
       pattern of a record or of a .partial file); the folder (the product's history folder, with no reparse point in its
       chain); the item (a plain file, not a reparse point); its owner (the user, or the token's default owner). Any
@@ -1422,4 +1426,159 @@ function Invoke-AtmMonitorDisable {
     $st.Done = $true
     $st.Folder = Remove-AtmEmptyTaskFolder
     return (& $end)
+}
+
+# ---------------------------------------------------------------------------------------------
+# The removal of the history (phase M4b; ADR-0017 section 3, "Complete removal")
+# ---------------------------------------------------------------------------------------------
+# monitor remove-history removes the history files the product created (records and .partial files, matching names,
+# with the expected owner) from the pinned history folder, each through the engine's file removal (the prune), and then
+# the history folder itself when it is empty, through the second and last removal of this engine. The user's thresholds
+# file (monitor.json) is never removed: the product never creates it, so it stays, and with it the history folder.
+# Anything unexpected refuses the whole removal and says how many items were not touched. The parent folder
+# %LOCALAPPDATA%\AgentTempManager is never removed. Both removals and the command are past the gate only.
+
+function Get-AtmMonitorHistoryInventory {
+    <#
+      Read only: the items of the history folder, classified as the rotation classifies them. Records and .partial
+      files (the exact name patterns, a time that parses) with the expected owner are the product's files; the user's
+      thresholds file (a plain file with the expected owner) is reported as kept; anything else (another name, a
+      folder, a reparse point, another owner, a thresholds file of another owner or that is a folder or a reparse point)
+      is unexpected and counted, never named in a result. Returns Code ($null, or the listing failure), Names (the
+      product's file names, sorted ordinally), Records, Partials, Bytes, ConfigKept and Unexpected.
+    #>
+    param([string]$Folder, [string[]]$Owners)
+    $out = [ordered]@{ Code = $null; Names = @(); Records = 0; Partials = 0; Bytes = [long]0; ConfigKept = $false; Unexpected = 0 }
+    $items = $null
+    try { $items = @((New-Object IO.DirectoryInfo($Folder)).GetFileSystemInfos()) } catch { $out.Code = 'MONITOR_HISTORY_LIST_FAILED'; return [pscustomobject]$out }
+    $names = New-Object System.Collections.Generic.List[string]
+    foreach ($it in $items) {
+        if (($it.Attributes -band ([IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::Directory)) -ne 0) { $out.Unexpected++; continue }
+        if ($it.Name -ceq $script:AtmMonitorConfigName) {
+            $cOwner = Get-AtmMonitorFileOwner $it.FullName
+            if (-not $cOwner -or @($Owners) -cnotcontains $cOwner) { $out.Unexpected++ } else { $out.ConfigKept = $true }
+            continue
+        }
+        $mf = [regex]::Match($it.Name, $script:AtmMonitorNamePattern)
+        $mp = [regex]::Match($it.Name, $script:AtmMonitorPartialPattern)
+        $t = $null
+        if ($mf.Success) { $t = ConvertFrom-AtmMonitorTimeText $mf.Groups[1].Value } elseif ($mp.Success) { $t = ConvertFrom-AtmMonitorTimeText $mp.Groups[1].Value }
+        if ($null -eq $t) { $out.Unexpected++; continue }
+        $owner = Get-AtmMonitorFileOwner $it.FullName
+        if (-not $owner -or @($Owners) -cnotcontains $owner) { $out.Unexpected++; continue }
+        $names.Add($it.Name)
+        if ($mf.Success) { $out.Records++ } else { $out.Partials++ }
+        $out.Bytes += [long]$it.Length
+    }
+    $sorted = $names.ToArray()
+    [Array]::Sort($sorted, [StringComparer]::Ordinal)
+    $out.Names = $sorted
+    return [pscustomobject]$out
+}
+
+function Remove-AtmMonitorEmptyFolder {
+    <#
+      THE SECOND AND LAST REMOVAL OF THE MONITORING ENGINE (phase M4b): the product's history folder itself, only when it
+      is empty, and only at the exact path of Get-AtmMonitorFolder (-Folder must be that path; it is compared, never
+      used). Immediately before the removal it checks, in this order: the gate; the path; the folder's chain (no reparse
+      point); the item (a folder, not a reparse point); its owner (the user, or the token's default owner); that it is
+      empty. The removal is the non-recursive one of .NET, so a folder that is no longer empty makes the system refuse.
+      The parent folder (%LOCALAPPDATA%\AgentTempManager) is never touched. Returns State and Code: REMOVED; KEPT_CONFIG
+      (the user's thresholds file is in it: the folder stays, and nothing is tried); KEPT (with the code: any check
+      that failed, or the system's refusal).
+    #>
+    param([string]$Folder, [string[]]$Owners)
+    if (-not $script:AtmMonitoringEnabled) { return [pscustomobject]@{ State = 'KEPT'; Code = 'MONITORING_GATE_CLOSED' } }
+    $kept = { param($c) return [pscustomobject]@{ State = 'KEPT'; Code = $c } }
+    $expected = Get-AtmMonitorFolder
+    if (-not $expected -or -not $Folder -or -not [string]::Equals($Folder.TrimEnd('\'), $expected.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) { return (& $kept 'MONITOR_FOLDER_REFUSED') }
+    $path = $expected.TrimEnd('\')
+    $chain = Test-AtmPathChain $path
+    if ($chain.Status -cne 'OK') { return (& $kept ('MONITOR_FOLDER_' + $chain.Status)) }
+    $a = $null
+    try { $a = [IO.File]::GetAttributes($path) } catch { return (& $kept ('MONITOR_FOLDER_' + (Get-AtmFileErrorKind $_.Exception))) }
+    if (($a -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return (& $kept 'MONITOR_FOLDER_REPARSE') }
+    if (($a -band [IO.FileAttributes]::Directory) -eq 0) { return (& $kept 'MONITOR_FOLDER_NOT_A_FOLDER') }
+    $owner = Get-AtmMonitorFileOwner $path
+    if (-not $owner -or @($Owners) -cnotcontains $owner) { return (& $kept 'MONITOR_FOLDER_FOREIGN_OWNER') }
+    $items = $null
+    try { $items = @((New-Object IO.DirectoryInfo($path)).GetFileSystemInfos()) } catch { return (& $kept 'MONITOR_FOLDER_LIST_FAILED') }
+    if ($items.Count -gt 0) {
+        if (@($items | Where-Object { $_.Name -ceq $script:AtmMonitorConfigName }).Count -gt 0) { return [pscustomobject]@{ State = 'KEPT_CONFIG'; Code = $null } }
+        return (& $kept 'MONITOR_FOLDER_NOT_EMPTY')
+    }
+    try { [IO.Directory]::Delete($path, $false) } catch { return (& $kept ('MONITOR_FOLDER_REMOVE_' + (Get-AtmInnerException $_.Exception).GetType().Name)) }
+    return [pscustomobject]@{ State = 'REMOVED'; Code = $null }
+}
+
+function Invoke-AtmMonitorRemoveHistory {
+    <#
+      monitor remove-history (phase M4b; ADR-0017 sections 3 and 5). In order, with nothing asked before the plan: the
+      gate closed (every distributed copy) refuses with MONITORING_GATE_CLOSED before anything else is read or asked; no
+      presenter or reader; the console, observed by the engine itself (CONSOLE_NOT_OBSERVED); the collection task in any
+      state other than ABSENT (MONITOR_HISTORY_TASK_PRESENT: its next run would create the folder again, and the result
+      names monitor disable); the history folder: absent (MONITOR_HISTORY_ABSENT, nothing to do), or refused by the
+      check that creates nothing (a reparse point in its chain, its owner or its permissions: the code, nothing
+      touched); the inventory, where anything unexpected refuses the whole removal (MONITOR_HISTORY_UNEXPECTED, with the
+      count of the items not touched). Then the plan is shown, and the phrase REMOVER HISTORICO DO MONITORAMENTO is asked
+      (MONITOR_HISTORY_NOT_CONFIRMED). Only then the collector's per-user mutex is taken without waiting (busy:
+      MONITOR_HISTORY_BUSY, nothing removed; an abandoned one is taken, as the collector does), the inventory is taken
+      again under it (other names: MONITOR_HISTORY_CHANGED, nothing removed), and each file of the plan goes through the
+      engine's file removal, which checks it again; the first failure stops the rest, with its code and the count of the
+      files already removed. Without the thresholds file and with every file removed, the history folder goes through
+      the removal of the empty folder; with the thresholds file it stays (KEPT_CONFIG). The mutex is released. Returns
+      Operation, Aborted, Plan, Done, Removed (a count), Problems (the count of unexpected items), ConfigKept and Folder
+      (State and Code; $null unless every file of the plan was removed). File names never reach the result: only counts.
+    #>
+    param([scriptblock]$PlanPresenter, [scriptblock]$ConfirmationReader)
+    if (-not $script:AtmMonitoringEnabled) { return [pscustomobject]@{ Operation = 'remove-history'; Aborted = 'MONITORING_GATE_CLOSED'; Plan = $null; Done = $false; Removed = 0; Problems = 0; ConfigKept = $false; Folder = $null } }
+    $st = [ordered]@{ Operation = 'remove-history'; Aborted = $null; Plan = $null; Done = $false; Removed = 0; Problems = 0; ConfigKept = $false; Folder = $null }
+    $end = { return [pscustomobject]$st }
+    if (-not $PlanPresenter -or -not $ConfirmationReader) { $st.Aborted = 'SEM_APRESENTACAO_OU_CONFIRMACAO'; return (& $end) }
+    if (-not (Get-AtmEngineConsoleObservation).Observed) { $st.Aborted = 'CONSOLE_NOT_OBSERVED'; return (& $end) }
+    if ((Get-AtmMonitorTaskState).State -cne 'ABSENT') { $st.Aborted = 'MONITOR_HISTORY_TASK_PRESENT'; return (& $end) }
+    $folder = Get-AtmMonitorFolder
+    if (-not $folder) { $st.Aborted = 'MONITOR_FOLDER_UNKNOWN'; return (& $end) }
+    $folder = $folder.TrimEnd('\')
+    $chain = Test-AtmPathChain $folder
+    if ($chain.Status -ceq 'NOT_FOUND') { $st.Aborted = 'MONITOR_HISTORY_ABSENT'; return (& $end) }
+    if ($chain.Status -cne 'OK') { $st.Aborted = 'MONITOR_FOLDER_' + $chain.Status; return (& $end) }
+    $ident = $null
+    try { $ident = Get-AtmMonitorIdentity } catch { $ident = $null }
+    if ($null -eq $ident -or -not $ident.Sid) { $st.Aborted = 'MONITOR_IDENTITY_UNAVAILABLE'; return (& $end) }
+    # The folder rule of a record folder, checked without creating anything (the pin is released at once).
+    Initialize-AtmNative
+    $chk = [AgentTempManager.AtmCleanLog]::Pin($folder, $ident.Sid)
+    try { if ($null -ne $chk.Error) { $st.Aborted = 'MONITOR_FOLDER_' + $chk.Error; return (& $end) } } finally { $chk.Dispose() }
+    $inv = Get-AtmMonitorHistoryInventory -Folder $folder -Owners $ident.Owners
+    if ($inv.Code) { $st.Aborted = $inv.Code; return (& $end) }
+    $st.ConfigKept = [bool]$inv.ConfigKept
+    if ($inv.Unexpected -gt 0) { $st.Problems = [int]$inv.Unexpected; $st.Aborted = 'MONITOR_HISTORY_UNEXPECTED'; $st.Plan = [pscustomobject]@{ Folder = $folder; Records = $inv.Records; Partials = $inv.Partials; Bytes = $inv.Bytes; ConfigKept = [bool]$inv.ConfigKept; FolderGoes = $false; Phrase = $null }; return (& $end) }
+    $st.Plan = [pscustomobject]@{ Folder = $folder; Records = $inv.Records; Partials = $inv.Partials; Bytes = $inv.Bytes; ConfigKept = [bool]$inv.ConfigKept; FolderGoes = (-not $inv.ConfigKept); Phrase = $script:AtmMonitorRemoveHistoryPhrase }
+    & $PlanPresenter $st.Plan
+    if ([string](& $ConfirmationReader $script:AtmMonitorRemoveHistoryPhrase 'monitor-remove-history') -cne $script:AtmMonitorRemoveHistoryPhrase) { $st.Aborted = 'MONITOR_HISTORY_NOT_CONFIRMED'; return (& $end) }
+    $mutex = $null; $held = $false
+    try { $mutex = New-Object System.Threading.Mutex($false, (Get-AtmMonitorMutexName -Sid $ident.Sid)) } catch { $st.Aborted = 'MONITOR_MUTEX_' + (Get-AtmInnerException $_.Exception).GetType().Name; return (& $end) }
+    try {
+        try { $held = $mutex.WaitOne(0) }
+        catch {
+            $inner = Get-AtmInnerException $_.Exception
+            if ($inner -is [Threading.AbandonedMutexException]) { $held = $true } else { $st.Aborted = 'MONITOR_MUTEX_' + $inner.GetType().Name; return (& $end) }
+        }
+        if (-not $held) { $st.Aborted = 'MONITOR_HISTORY_BUSY'; return (& $end) }
+        $again = Get-AtmMonitorHistoryInventory -Folder $folder -Owners $ident.Owners
+        if ($again.Code -or $again.Unexpected -gt 0 -or [bool]$again.ConfigKept -ne [bool]$inv.ConfigKept -or (@($again.Names) -join '|') -cne (@($inv.Names) -join '|')) { $st.Aborted = 'MONITOR_HISTORY_CHANGED'; return (& $end) }
+        foreach ($n in @($inv.Names)) {
+            $c = Invoke-AtmMonitorPrune -Folder $folder -Name $n -Owners $ident.Owners
+            if ($null -ne $c) { $st.Aborted = $c; return (& $end) }
+            $st.Removed++
+        }
+        $st.Done = $true
+        if ($inv.ConfigKept) { $st.Folder = [pscustomobject]@{ State = 'KEPT_CONFIG'; Code = $null } }
+        else { $st.Folder = Remove-AtmMonitorEmptyFolder -Folder $folder -Owners $ident.Owners }
+        return (& $end)
+    } finally {
+        if ($held) { try { $mutex.ReleaseMutex() } catch { $null = $_ } }
+        $mutex.Dispose()
+    }
 }
