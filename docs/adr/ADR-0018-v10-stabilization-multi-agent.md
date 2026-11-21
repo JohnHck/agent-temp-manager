@@ -584,7 +584,7 @@ as changed by S2.
   26 rows, with the overloads of `2`, `3`, `6` and `10`. A table test reads every `exit` of the launcher and of the two
   scheduled entry points statically and compares the codes per verb with the table. The exits without a literal code
   are resolved from `Invoke-AtmGuiCommand`, the recovery engine's code table and the collector's `ExitCode` values. An
-  undocumented code, a documented code that cannot be returned, and an exit that cannot be resolved each fail. A second
+  undocumented code, a documented code that cannot be returned, and an exit that cannot be resolved each fail; no other script of `src` may hold an `exit` (the libraries run inside the launcher's process), and the `.cmd` shim only relays the code. A second
   case checks the recovery engine's literal codes against its table, both ways. The child-process cases that already
   run the codes with the gates closed are cited, not duplicated. Known limit, documented: a failure before the
   launcher's main error handler ends with PowerShell's own code, usually `1`.

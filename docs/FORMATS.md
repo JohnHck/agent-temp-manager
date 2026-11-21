@@ -172,7 +172,7 @@ They stay as they are: renumbering them would break the scheduled tasks and the 
 
 **Known limit.** A failure before the launcher's main error handler can run, such as a library or a provider that does
 not load in a source checkout, ends with PowerShell's own code for an uncaught error, usually `1`. That collides with
-"unknown command". An installed copy whose integrity check fails ends with `5` instead.
+"unknown command". An installed copy whose integrity check fails ends with `5` instead. The `agent-temp.cmd` shim only relays the launcher's code (`exit /b %ERRORLEVEL%`); if Windows PowerShell itself cannot start, the code is cmd's own.
 
 ## Internal formats
 
@@ -220,7 +220,7 @@ The area "Contratos de formato" of `tests/Run-Tests.ps1` runs in both shells.
 | `atm.audit/1` | "atm.audit/1: schema e o primeiro campo": over the V10-S1 golden fixture, the export of before (the function of `ede257d`, embedded verbatim) plus the `schema` line equals the export of now, byte for byte |
 | `atm.audit/1` | "atm.audit/1: golden da versao": the shape of the document (each path, the members in order, the JSON type) equals the golden, with no member more or less; a member removed and one added are reported |
 | `atm.diagnose/2` | "atm.diagnose/2: golden da versao": the same, over the golden fixture with every diagnose source injected; the field-level test against [DIAGNOSE-SCHEMA.md](DIAGNOSE-SCHEMA.md) stays in the area "Diagnose" |
-| exit codes | "Codigos de saida por verbo": the table here and the one in USAGE equal the suite's table; a static reading of every `exit` of the launcher and of the two entry points gives the same codes per verb, with the non-literal exits resolved from `Invoke-AtmGuiCommand`, the recovery code table and the collector's `ExitCode` values; a planted `exit 9`, an exit that cannot be resolved, and a code removed from or added to the table each fail |
+| exit codes | "Codigos de saida por verbo": the table here and the one in USAGE equal the suite's table; a static reading of every `exit` of the launcher and of the two entry points gives the same codes per verb, with the non-literal exits resolved from `Invoke-AtmGuiCommand`, the recovery code table and the collector's `ExitCode` values; no other script of `src` has an `exit`, and the shim only relays the code; a planted `exit 9`, an exit that cannot be resolved, an `exit` planted in a library, and a code removed from or added to the table each fail |
 | exit codes | "Codigos da recuperacao nos dois sentidos": every literal code of the recovery engine's four exit functions is in its table, and every code of the table is literal, relayed or an outcome |
 | `monitor.json` | "monitor.json (entrada estavel)": the five keys accepted with their values; `schema`, a key in another case and another key each refuse the file with `MON_CONFIG_INVALID` (`UNKNOWN_KEY`); the key list is pinned. The full reader is covered in the area "V0.5 M2" ("M2: monitor.json (so leitura)") |
 | `atm.quarantine-policy/1` | "atm.quarantine-policy/1 (entrada estavel)": the four members accepted with their values; an unknown key, a key in another case, another version and no schema each give `QUARANTINE_POLICY_INVALID`. The full reader is covered in the area "Isolamento P4" ("Politica config\quarantine.policy.json") |

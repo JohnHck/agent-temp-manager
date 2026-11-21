@@ -25215,6 +25215,17 @@ $.toolVersion = string
         }
         return [pscustomobject]@{ Codes = $codes; Unresolved = $unresolved.ToArray() }
     }
+    function Get-AtmS2StrayExits {
+        # The exit statements of -Texts (relative name -> script text): every script of src outside the three the scan
+        # reads must have none, since a dot-sourced library that exits ends the launcher with a code the table never sees.
+        param([hashtable]$Texts)
+        $out = New-Object System.Collections.Generic.List[string]
+        foreach ($k in @($Texts.Keys | Sort-Object)) {
+            $ast = ConvertFrom-AtmS2Text $Texts[$k] $k
+            foreach ($e in @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.ExitStatementAst] }, $true))) { $out.Add($k + ':' + $e.Extent.StartLineNumber) }
+        }
+        return $out.ToArray()
+    }
     function ConvertFrom-AtmS2Codes {
         # '0, 2, 20-31' -> the sorted codes.
         param([string]$Text)
@@ -25336,7 +25347,7 @@ $.toolVersion = string
         $vsrc = { param($Op) $v = $vt[$Op]; @($v) }.GetNewClosure()
         $procRows = $g.Fixture.Procs
         $idSrc = { [pscustomobject]@{ Name = 'GOLD\owner'; Sid = 'S-1-5-21-1-2-3-1001'; IsAdmin = $false; ElevationTypeRaw = 3; IntegrityRid = 0x2000; SessionId = 1 } }
-        $d = Invoke-AtmDiagnose -InventoryArgs $g.Args -IdentitySource $idSrc -ProcessSource ({ $procRows }.GetNewClosure()) -CpuSampleMs 0 -Providers @(Get-AtmProviders | Where-Object { [string]$_.Id -ceq 'claude-code' }) -PseudonymKey ([byte[]](1..32)) -ServiceSource { param($Names) @() } -VirtualizationSource $vsrc -SelfPid 77777 -ServiceDependencySource { param($Names) @() } -ServiceWait { param($Ms) }
+        $d = Invoke-AtmDiagnose -InventoryArgs $g.Args -IdentitySource $idSrc -ProcessSource ({ $procRows }.GetNewClosure()) -CpuSampleMs 0 -Providers @(Get-AtmProviders | Where-Object { [string]$_.Id -ceq 'claude-code' }) -PseudonymKey ([byte[]](1..32)) -ServiceSource { param($Names) @() } -VirtualizationSource $vsrc -SelfPid 77777 -ServiceDependencySource { param($Names) @() } -ServiceWait { param($Ms) } -DeadlineSeconds 300
         $dj = ConvertTo-AtmDiagnoseJson -Result $d
         $diff = @(Compare-AtmS2Shape -Expected $s2DiagnoseShape -Actual (Get-AtmFormatShape -Json $dj))
         Assert-True ($diff.Count -eq 0 -and $s2DiagnoseShape.Count -eq 177) "forma igual ao golden ($($s2DiagnoseShape.Count) linhas): $($diff -join ' | ')"
@@ -25367,6 +25378,19 @@ $.toolVersion = string
         $tb = [ordered]@{}; foreach ($k in @($s2ExitCodeTable.Keys)) { $tb[$k] = $s2ExitCodeTable[$k] }
         $tb['tui'] = '0'; $tb['audit'] = '0, 3'
         Assert-Eq ((Compare-AtmS2ExitCodes -Table $tb -ScanKey $s2ExitScanKey -Scan $scan) -join ' ; ') 'UNREACHABLE audit 3 ; UNDOCUMENTED tui 6' 'codigo tirado (tui 6) e posto (audit 3) na tabela'
+        # No exit anywhere else in src (the libraries and providers run inside the launcher's process); a planted one is
+        # found. The shim only relays the launcher's code.
+        $others = @{}
+        foreach ($f in @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Where-Object { $_.Extension -eq '.ps1' })) {
+            $rel = $f.FullName.Substring($srcDir.Length).TrimStart('\')
+            if (@('agent-temp.ps1', 'bin\agent-temp-monitor.ps1', 'bin\agent-temp-autopurge.ps1') -notcontains $rel) { $others[$rel] = [IO.File]::ReadAllText($f.FullName) }
+        }
+        Assert-True ($others.Count -ge 10 -and $others.ContainsKey('lib\Gui.ps1') -and $others.ContainsKey('providers\ClaudeCode.ps1')) "outros scripts de src lidos ($($others.Count))"
+        Assert-Eq ((Get-AtmS2StrayExits -Texts $others) -join ' ; ') '' 'nenhum exit fora do lancador e dos dois pontos de entrada'
+        $pl3 = $others.Clone(); $pl3['lib\Report.ps1'] = $others['lib\Report.ps1'] + "`r`nfunction Test-AtmS2Plant { exit 3 }`r`n"
+        Assert-True ((@(Get-AtmS2StrayExits -Texts $pl3) -join ' ; ') -clike 'lib\Report.ps1:*') 'exit plantado numa biblioteca: encontrado'
+        $shim = [IO.File]::ReadAllText((Join-Path $srcDir 'bin\agent-temp.cmd'))
+        Assert-Eq (@([regex]::Matches($shim, '(?im)^\s*exit\b.*$') | ForEach-Object { $_.Value.Trim() }) -join ' ; ') 'exit /b %ERRORLEVEL%' 'o atalho .cmd so repassa o codigo do lancador'
     }
     Test-Case 'Contratos de formato' 'Codigos da recuperacao nos dois sentidos: todo codigo literal das quatro funcoes de saida esta na tabela do motor, e todo codigo da tabela e literal, repassado ou desfecho' {
         $r = Get-AtmS2RecoverLiterals -Text ([IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Recover.ps1')))
