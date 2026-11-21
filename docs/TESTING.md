@@ -70,7 +70,8 @@ Windows Server 2022 or Windows 11 ARM64, with the installer under PowerShell 5.1
 gate, CLI from a new process with the machine PATH, clean of an old session root stops without deleting it, update,
 rollback, tamper detection (exit 5) and repair, an unlisted file in `lib\` shown by `verify` as `WARN` with exit 0
 and gone once moved out, a real standard user (created only in the VM) running audit, preview
-and verify without write access to the install directory, uninstall (directory and PATH entry removed). Evidence is
+and verify without write access to the install directory, a second standard user for the cross-user rows
+(V1.0 S5, see "Cross-user rows in the install e2e"), uninstall (directory and PATH entry removed). Evidence is
 uploaded as artifacts.
 
 Then each published version is installed and taken through the same cycle on every OS and installer shell: 0.1.0,
@@ -1310,6 +1311,53 @@ both areas.
 The V10-S1 dry addition also writes both definitions into the same copy of `src`: `verify` lists them, `audit` and
 `diagnose` show them, and the `Engine.*.ps1` hashes stay equal. The engine-literal scan also looks for their ids and
 names.
+
+## Cross-user rows in the install e2e (V1.0 S5, CI only)
+
+`tests/e2e/Invoke-InstallE2E.ps1` ([ADR-0018](adr/ADR-0018-v10-stabilization-multi-agent.md) phase S5, V10-D7 (a))
+creates a second disposable standard user, B, exactly as it creates the first, A: a random name, a random password
+built directly as a `SecureString`, member of Users only (by the SID `S-1-5-32-545`), asserted not an administrator.
+The steps run on every OS and installer shell of the `install e2e` job, after `v3-x2-lock-across-identities` and
+before the uninstall, with every gate closed. The disposable-machine guard is unchanged.
+
+| Step | What it checks |
+|---|---|
+| `multi-user-second-user-create` | B created like A; not an administrator |
+| `multi-user-fixtures` | A and B each start a helper (`Start-Process -Credential -LoadUserProfile`). It creates, in that user's own TEMP, a `claude-code` tree `claude\<scope>\<two session ids>`, with one dummy file and one empty folder per root: one root set back 10 days, one with its real times. No agent, no credential. Each fixture is under that profile's `AppData\Local\Temp\claude`. The helpers stay alive until a stop file or their own 40-minute deadline, so both registry hives are loaded (checked) and both environments are readable: the classes do not depend on timing. Nothing is terminated. The listing before is taken |
+| `multi-user-audit-elevated` | `audit -IncludeOtherUsers -ExportJson`, elevated. Per user: 2 partitions with the fixture's scope, every one with that user's SID; the old root `SessionRoot`, `ORPHAN_SUSPECTED`, no flag; the new root `RECENT`; the profile `AUDITADO` or `AUDITADO_PARCIAL`. `audit` always inventories every profile: the switch is passed, and preview and clean are the ones it changes |
+| `multi-user-preview-elevated` | `preview -IncludeOtherUsers`: the new roots `BLOCKED` (`class RECENT`); the old roots of A and B in the same category, the gate's result: `ELIGIBLE` when the process coverage is complete, otherwise `BLOCKED` with `COBERTURA_DE_PROCESSOS_INCOMPLETA`. Never `INVESTIGATE` or `ELIGIBLE_WITH_DECLARED_RISK`; no requirement of the switch, no owner, ACL or parent-chain reason. Contrast: without the switch, the same old roots carry the requirement `-IncludeOtherUsers (another user's profile)` |
+| `multi-user-clean-gate-closed` | `clean -AllowListFile` with both old roots and `-IncludeOtherUsers`: exit 3, with `EXCLUSAO_REAL_DESABILITADA_V0_1` (gate reached) or `NENHUM_CAMINHO_ELEGIVEL` (blocked before the gate), the code recorded; both roots intact, content included |
+| `multi-user-audit-as-A-not-elevated` | `audit -ExportJson` as A, not elevated (`elevated administrator: NO`): A's own 2 partitions; no partition of B; B's profile `INACESSIVEL` or `TEMP_NAO_VERIFICAVEL`, never `SEM_TEMP_CLAUDE` ("cannot look" is never "nothing found") |
+| `multi-user-f05-two-owners` | F-05's owner rule with two real owners (below) |
+| `multi-user-no-new-files` | the listing again, identical to the one before the audits, previews, clean and F-05 |
+
+* **F-05.** A root of another owner inside a base never reaches the F-05 attribution rule: that rule reads the owner of
+  the base folder only (`src/lib/Engine.Audit.ps1`, F05-OWNER-ATTRIBUTION), and such a root meets the gate's owner check
+  instead. So the step takes the reverse path the round allows and proves the case documented in `SECURITY-MODEL.md`:
+  the profile listed first in ProfileList (the namer) has the `TEMP` value of its own loaded environment
+  (`HKU\<SID>\Environment`) pointed at the other profile's TEMP for one `audit -IncludeOtherUsers -ExportJson` and one
+  inventory by the installed engine. The value is restored in a `finally`, with its original kind, and checked after.
+  Expected: the base stays with its owner (the owner's 2 partitions, its SID, every one `SHARED_TEMP`: the old root
+  `LIVENESS_UNKNOWN`, the new one `RECENT`); the namer gets `OWNER_NOT_PROFILE` for that base, no base and no partition;
+  `BASE_OWNER_NOT_PROFILE` is counted; the base is shared with the namer. Without a `TEMP` value of its own, or if that
+  environment cannot be opened for writing, the step is NOT_TESTED and nothing is changed (no value is created or
+  taken out).
+* **The listing** covers each user's base (`<profile>\AppData\Local\Temp\claude`, recursively) and, for each profile,
+  `.claude` and the product's folders under `AppData\Local` and `AppData\Roaming`: existence, relative name, length and
+  last write time. A folder the runner account cannot list (a protected DACL of the product) is one line with the
+  exception's type, and the step details count them. The whole profile is not compared: while its hive is loaded,
+  Windows itself writes there.
+* **Privacy.** Step details and messages carry codes, counts and the labels A and B only (the job log is not
+  sanitized). The raw outputs and exports name both accounts and their profiles, so they stay in the users' folders or
+  in a work folder of the runner account, never in `-OutDir`.
+* **Cleanup.** Nothing is added: B's account and profile stay on the disposable runner. The script's last line removes
+  A's account, as before; A's profile folder stays.
+* **Static check** (suite, area "Ambiente de teste", case V10-S5, both shells): B created like A (the `SecureString`
+  built character by character, never from text; Users by SID; the administrator assert); the guard unchanged and
+  before any step; no removal or termination verb in the S5 region; the `TEMP` restore in a `finally`; the helpers'
+  stop files written after the last S5 step; no S5 output in `-OutDir`; the S5 steps in order, between X2 and the
+  uninstall.
+
 ## Future: isolation, quarantine and Recovery Mode (0.3.x and V0.4)
 
 Criteria proposed by [ADR-0013](adr/ADR-0013-isolation-quarantine-recovery-mode.md) for accepting an implementation.

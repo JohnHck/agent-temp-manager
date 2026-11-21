@@ -3,7 +3,7 @@
   End-to-end validation of a real installation on a DISPOSABLE Windows machine (a GitHub-hosted runner).
 .DESCRIPTION
   Refuses to run anywhere else unless -DisposableMachine is given: it installs into %ProgramFiles%, changes the
-  machine PATH, creates a temporary local standard user and creates a fake agent session under the current
+  machine PATH, creates two temporary local standard users and creates a fake agent session under the current
   user's TEMP. Steps:
     build the release from the checkout; check SHA256SUMS; extract to an administrator-only folder; install (no
     -ProjectsFile); the fixed folder of the recovery logs (V0.4 R4: owner, DACL, recover start and undo stopped by the
@@ -25,7 +25,7 @@
     final stop of its own services); only its summaries are kept. Then V0.5 M3b: the REAL Task Scheduler for the
     collector's task under a test name, through tests\e2e\Invoke-MonitorE2E.ps1 (CI-only, never shipped): leg A (the
     standard user: register, read back, run once, remove, read back absent) and leg B (elevated: monitor enable refused
-    for the elevated token); only its summaries are kept.
+    for the elevated token); only its summaries are kept. Then V10-S5: the cross-user rows with a second standard user.
   Writes summary.json and raw outputs to -OutDir. Exit code = number of failed steps (NOT TESTED is not a failure
   and not a pass).
 #>
@@ -1079,6 +1079,342 @@ if ($l.Acquired) {
     Assert ((& $read "$a\after.txt") -ceq 'ACQUIRED') "lock depois das duas ordens: $(& $read "$a\after.txt")"
     'standard user holds -> elevated account BUSY; elevated account holds -> standard user BUSY (never DENIED); free after both (CI evidence, not the V4 row)'
 }
+
+# >>> V10-S5 second standard user (begin)
+# V10-S5 (ADR-0018 section 6, V10-D7 (a)): a second disposable standard user, created exactly like the first one (above),
+# and the cross-user rows, on this installation, with the gates closed:
+#   * audit, preview and clean, elevated, with -IncludeOtherUsers, over both users' bases. Each user creates its own
+#     fixture tree in its own TEMP (claude-code layout; empty or dummy files only: no agent, no credential);
+#   * audit as the first user, not elevated: the second user's base is never read and never reported empty;
+#   * F-05's owner rule with two real owners: the profile listed first in ProfileList has its TEMP pointed at the other
+#     profile's TEMP for one inventory, then restored. This is the documented F-05 case: a root of another owner inside a
+#     base never reaches the attribution rule, only the gate's owner check;
+#   * no new file in either base or in the product's folders of either profile, before and after.
+# Each fixture helper stays alive until a stop file or its own deadline, so that user's registry hive stays loaded and its
+# environment is readable; nothing is terminated. The step details and messages carry codes, counts and the labels A and
+# B only (the job log is not sanitized); raw outputs and exports stay in the users' folders or in a work folder of this
+# account, never in -OutDir. The two users and their profiles stay on this disposable machine (no removal is added here).
+$userNameB = 'atme2eb' + (Get-Random -Minimum 1000 -Maximum 9999)
+$userDirB = Join-Path $env:SystemDrive 'atm-e2e-user-b'
+$credB = $null
+$s5Work = Join-Path ([IO.Path]::GetTempPath()) ('atm-e2e-s5-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$script:s5 = $null
+$script:s5Holders = New-Object System.Collections.Generic.List[object]
+Step 'multi-user-second-user-create' {
+    if (-not $cred) { throw 'usuario de teste indisponivel' }
+    # Random password built directly as a SecureString (never a plain string), used only in this VM.
+    $chars = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'.ToCharArray()
+    $sec = New-Object Security.SecureString
+    foreach ($ch in @((1..20 | ForEach-Object { $chars | Get-Random }) + @('#', '7', 'a', 'Z'))) { $sec.AppendChar($ch) }
+    $sec.MakeReadOnly()
+    $null = New-LocalUser -Name $userNameB -Password $sec -AccountNeverExpires -PasswordNeverExpires -Description 'atm e2e second user (disposable runner)'
+    # Member of Users only (by SID: group names are localized).
+    if (-not @(Get-LocalGroupMember -SID 'S-1-5-32-545' | Where-Object { $_.Name -like "*\$userNameB" }).Count) { Add-LocalGroupMember -SID 'S-1-5-32-545' -Member $userNameB }
+    $script:credB = New-Object Management.Automation.PSCredential(".\$userNameB", $sec)
+    [void][IO.Directory]::CreateDirectory($userDirB)
+    $null = icacls $userDirB /grant "${userNameB}:(OI)(CI)M"
+    $isAdmin = @(Get-LocalGroupMember -SID 'S-1-5-32-544' | Where-Object { $_.Name -like "*\$userNameB" }).Count -gt 0
+    Assert (-not $isAdmin) 'segundo usuario de teste nao pode ser administrador'
+    'second standard user B (Users only, not an administrator)'
+}
+$credB = $script:credB
+# Run as each user, in its own TEMP: <TEMP>\claude\<scope>\<two session ids>. The first root is set back 10 days, the
+# second keeps its real times. It writes its result (names only, no path of another account), then stays alive.
+$s5FixtureHelper = @'
+param([string]$Out, [string]$Stop, [string]$Label)
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 2.0
+$r = [ordered]@{}
+try {
+    # The engine derives another profile's TEMP from its profile folder (%USERPROFILE%\AppData\Local\Temp), never from a
+    # process; the fixture goes exactly there.
+    $prof = [Environment]::GetFolderPath('UserProfile')
+    if (-not $prof) { $prof = $env:USERPROFILE }
+    $base = Join-Path $prof 'AppData\Local\Temp\claude'
+    $scope = 'C--atm-s5-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '-' + $Label
+    $ids = @([guid]::NewGuid().ToString(), [guid]::NewGuid().ToString())
+    foreach ($id in $ids) {
+        $root = Join-Path $base "$scope\$id"
+        [void][IO.Directory]::CreateDirectory((Join-Path $root 'work'))
+        [void][IO.Directory]::CreateDirectory((Join-Path $root 'empty'))
+        [IO.File]::WriteAllText((Join-Path $root 'work\fixture.txt'), "atm e2e fixture: no agent, no credential`n")
+    }
+    Start-Sleep -Seconds 2
+    $old = [datetime]::UtcNow.AddDays(-10)
+    $oldRoot = Join-Path $base "$scope\$($ids[0])"
+    foreach ($f in @([IO.Directory]::GetFiles($oldRoot, '*', [IO.SearchOption]::AllDirectories))) { [IO.File]::SetCreationTimeUtc($f, $old); [IO.File]::SetLastWriteTimeUtc($f, $old) }
+    foreach ($d in @(@([IO.Directory]::GetDirectories($oldRoot, '*', [IO.SearchOption]::AllDirectories) | Sort-Object Length -Descending) + @($oldRoot))) { [IO.Directory]::SetCreationTimeUtc($d, $old); [IO.Directory]::SetLastWriteTimeUtc($d, $old) }
+    $r.scope = $scope; $r.old = $ids[0]; $r.new = $ids[1]
+} catch { $r.error = $_.Exception.GetType().Name }
+$tmp = $Out + '.tmp'
+[IO.File]::WriteAllText($tmp, ($r | ConvertTo-Json -Compress))
+[IO.File]::Move($tmp, $Out)
+# Stays alive (its profile, and so its registry hive, stays loaded) until the stop file or its own deadline; ends by itself.
+$deadline = [datetime]::UtcNow.AddMinutes(40)
+while ([datetime]::UtcNow -lt $deadline -and -not (Test-Path -LiteralPath $Stop)) { Start-Sleep -Milliseconds 500 }
+'@
+function Invoke-S5Agent([string]$ArgLine, [string]$File) {
+    # Invoke-Agent's way (a new process with the machine PATH), but the output goes to this account's work folder: it
+    # names both test accounts and their profiles, so it is never put in -OutDir.
+    $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $out = & cmd.exe /c "set `"PATH=$machinePath`" && agent-temp $ArgLine" 2>&1
+    $code = $LASTEXITCODE
+    $text = ($out | ForEach-Object { "$_" }) -join "`r`n"
+    [IO.File]::WriteAllText($File, $text)
+    return [pscustomobject]@{ Code = $code; Text = $text }
+}
+function Get-S5Parts($Export, $User) { return @(@($Export.partitions) | Where-Object { [string]$_.scope -eq $User.Scope }) }
+function Get-S5Root([object[]]$Parts, [string]$Id) { return @($Parts | Where-Object { (Split-Path -Leaf ([string]$_.path)) -eq $Id }) }
+function Get-S5Listing($Users) {
+    # Each user's base, recursively, and the product's folders and .claude of each profile (existence, then recursively):
+    # relative name, length (-1 for a folder) and last write time.
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($u in @($Users)) {
+        foreach ($rel in @('TEMP-BASE', '.claude', 'AppData\Local\AgentTempManager', 'AppData\Roaming\AgentTempManager')) {
+            $d = $(if ($rel -ceq 'TEMP-BASE') { $u.Base } else { Join-Path $u.Profile $rel })
+            $here = [IO.Directory]::Exists($d)
+            $lines.Add("$($u.Label)|$rel|$here")
+            if (-not $here) { continue }
+            # A folder this account cannot list (a protected DACL of the product) is one stable line, with no path.
+            try { $items = @(Get-ChildItem -LiteralPath $d -Recurse -Force -ErrorAction Stop) }
+            catch { $lines.Add("$($u.Label)|$rel|UNREADABLE|$($_.Exception.GetType().Name)"); continue }
+            foreach ($it in $items) {
+                $len = $(if ($it.PSIsContainer) { -1 } else { $it.Length })
+                $lines.Add(('{0}|{1}|{2}|{3}|{4}' -f $u.Label, $rel, $it.FullName.Substring($d.Length), $len, $it.LastWriteTimeUtc.Ticks))
+            }
+        }
+    }
+    return , @($lines | Sort-Object)
+}
+Step 'multi-user-fixtures' {
+    if (-not $cred -or -not $credB) { throw 'usuarios de teste indisponiveis' }
+    [void][IO.Directory]::CreateDirectory($s5Work)
+    $users = @()
+    foreach ($u in @(@('A', $userName, $userDir, $cred), @('B', $userNameB, $userDirB, $credB))) {
+        $hp = Join-Path $u[2] 's5-fixture.ps1'
+        [IO.File]::WriteAllText($hp, $s5FixtureHelper)
+        $out = Join-Path $u[2] 's5-fixture.json'
+        $stop = Join-Path $u[2] 's5-stop.txt'
+        try {
+            $p = Start-Process -FilePath $installerExe -ArgumentList "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$hp`" -Out `"$out`" -Stop `"$stop`" -Label $($u[0].ToLowerInvariant())" `
+                -Credential $u[3] -LoadUserProfile -WorkingDirectory $u[2] -WindowStyle Hidden -PassThru
+        } catch { $script:notTested = $true; return "process as user $($u[0]) did not start on this runner: $($_.Exception.GetType().Name)" }
+        $script:s5Holders.Add([pscustomobject]@{ Proc = $p; Stop = $stop })
+        $users += [pscustomobject]@{ Label = $u[0]; Sid = (Get-LocalUser -Name $u[1]).SID.Value; Out = $out; Profile = $null; Base = $null; Scope = $null; Old = $null; New = $null; OldPath = $null }
+    }
+    $deadline = [datetime]::UtcNow.AddMinutes(4)
+    while ([datetime]::UtcNow -lt $deadline -and @($users | Where-Object { -not (Test-Path -LiteralPath $_.Out) }).Count -gt 0) { Start-Sleep -Milliseconds 500 }
+    foreach ($u in $users) {
+        Assert (Test-Path -LiteralPath $u.Out) "$($u.Label): helper da fixture sem resultado"
+        $j = [IO.File]::ReadAllText($u.Out) | ConvertFrom-Json
+        Assert (-not $j.PSObject.Properties['error']) "$($u.Label): helper da fixture falhou ($(if ($j.PSObject.Properties['error']) { $j.error }))"
+        # The profile folder as Windows records it (the engine derives every path of another profile from it).
+        $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$($u.Sid)")
+        Assert ($null -ne $k) "$($u.Label): perfil fora da ProfileList"
+        try { $u.Profile = [Environment]::ExpandEnvironmentVariables([string]$k.GetValue('ProfileImagePath')) } finally { $k.Close() }
+        $u.Base = Join-Path $u.Profile 'AppData\Local\Temp\claude'
+        $u.Scope = [string]$j.scope; $u.Old = [string]$j.old; $u.New = [string]$j.new
+        foreach ($id in @($u.Old, $u.New)) { Assert ([IO.File]::Exists((Join-Path $u.Base "$($u.Scope)\$id\work\fixture.txt"))) "$($u.Label): raiz da fixture fora de <perfil>\AppData\Local\Temp\claude" }
+    }
+    # Both hives loaded (the helpers are alive): their environments are read, so the classes do not depend on timing.
+    $miss = @($users)
+    $hd = [datetime]::UtcNow.AddSeconds(60)
+    while ($true) {
+        $loaded = @([Microsoft.Win32.Registry]::Users.GetSubKeyNames())
+        $miss = @($users | Where-Object { $loaded -notcontains $_.Sid })
+        if ($miss.Count -eq 0 -or [datetime]::UtcNow -ge $hd) { break }
+        Start-Sleep -Milliseconds 500
+    }
+    Assert ($miss.Count -eq 0) "hive do registro nao carregado: $((@($miss | ForEach-Object { $_.Label })) -join ',')"
+    $script:s5 = [pscustomobject]@{ Users = $users; Before = (Get-S5Listing $users) }
+    "A and B each created 2 session roots in their own TEMP (one 10 days old, one new; dummy files only); both registry hives loaded; $($script:s5.Before.Count) listing line(s) before, $(@($script:s5.Before | Where-Object { $_ -like '*|UNREADABLE|*' }).Count) folder(s) not listable"
+}
+Step 'multi-user-audit-elevated' {
+    if ($null -eq $script:s5) { throw 'fixture da S5 indisponivel' }
+    $exp = Join-Path $s5Work 'audit-elevated.json'
+    $r = Invoke-S5Agent ('audit -NoProgress -Lang en-US -IncludeOtherUsers -ExportJson "' + $exp + '"') (Join-Path $s5Work 'audit-elevated.txt')
+    Assert ($r.Code -eq 0 -and (Test-Path -LiteralPath $exp)) "audit elevado: exit $($r.Code)"
+    Assert ($r.Text -match 'elevated administrator: YES') 'audit elevado nao mostra a sessao elevada'
+    $j = [IO.File]::ReadAllText($exp) | ConvertFrom-Json
+    foreach ($u in $script:s5.Users) {
+        $mine = Get-S5Parts $j $u
+        Assert ($mine.Count -eq 2) "$($u.Label): $($mine.Count) particao(oes) da fixture, esperado 2"
+        Assert (@($mine | Where-Object { [string]$_.sid -cne $u.Sid }).Count -eq 0) "$($u.Label): particao da fixture atribuida a outro dono"
+        $o = Get-S5Root $mine $u.Old; $n = Get-S5Root $mine $u.New
+        Assert ($o.Count -eq 1 -and $n.Count -eq 1) "$($u.Label): raizes da fixture nao encontradas ($($o.Count), $($n.Count))"
+        Assert ($o[0].kind -ceq 'SessionRoot' -and $o[0].class -ceq 'ORPHAN_SUSPECTED' -and @($o[0].flags).Count -eq 0) "$($u.Label) raiz antiga: $($o[0].kind) $($o[0].class) [$((@($o[0].flags)) -join ',')]"
+        Assert ($n[0].kind -ceq 'SessionRoot' -and $n[0].class -ceq 'RECENT') "$($u.Label) raiz nova: $($n[0].kind) $($n[0].class) [$((@($n[0].flags)) -join ',')]"
+        $st = @(@($j.profiles) | Where-Object { [string]$_.sid -ceq $u.Sid } | ForEach-Object { [string]$_.status })
+        Assert (@($st | Where-Object { $_ -ceq 'AUDITADO' -or $_ -ceq 'AUDITADO_PARCIAL' }).Count -ge 1) "$($u.Label): perfil $($st -join ',')"
+        $u.OldPath = [string]$o[0].path
+    }
+    'A and B: each base listed under its own owner, 2 partitions each as planted; old root ORPHAN_SUSPECTED with no flag, new root RECENT; both profiles audited'
+}
+function Get-S5PreviewRow([string]$Text, [string]$Id) {
+    # Whitespace removed (a redirected line may be wrapped): the category of the block that holds this root, and the rest
+    # of that block (its reason and evidence) up to the next block.
+    $flat = $Text -replace '\s+', ''
+    $m = [regex]::Match($flat, '\[(BLOCKED|INVESTIGATE|ELIGIBLE|ELIGIBLE_WITH_DECLARED_RISK)\][^\[]*?' + [regex]::Escape($Id) + '(.*?)(?=\[(?:BLOCKED|INVESTIGATE|ELIGIBLE|ELIGIBLE_WITH_DECLARED_RISK)\]|$)', 'Singleline')
+    if (-not $m.Success) { return $null }
+    return [pscustomobject]@{ Category = $m.Groups[1].Value; Rest = $m.Groups[2].Value }
+}
+$s5Requirement = '-IncludeOtherUsers(anotheruser'
+Step 'multi-user-preview-elevated' {
+    if ($null -eq $script:s5) { throw 'fixture da S5 indisponivel' }
+    $with = Invoke-S5Agent 'preview -NoProgress -Lang en-US -IncludeOtherUsers' (Join-Path $s5Work 'preview-include-other-users.txt')
+    Assert ($with.Code -eq 0) "preview -IncludeOtherUsers: exit $($with.Code)"
+    $without = Invoke-S5Agent 'preview -NoProgress -Lang en-US' (Join-Path $s5Work 'preview-own-only.txt')
+    Assert ($without.Code -eq 0) "preview sem -IncludeOtherUsers: exit $($without.Code)"
+    $oldCats = @()
+    foreach ($u in $script:s5.Users) {
+        $o = Get-S5PreviewRow $with.Text $u.Old; $n = Get-S5PreviewRow $with.Text $u.New
+        Assert ($null -ne $o -and $null -ne $n) "$($u.Label): raiz da fixture ausente do preview"
+        Assert ($n.Category -ceq 'BLOCKED' -and $n.Rest.Contains('classRECENT')) "$($u.Label) raiz nova: $($n.Category)"
+        # The gate's own result, as for any root (the deletion gate does not change the preview): ELIGIBLE with complete
+        # process coverage, otherwise BLOCKED by it; never the B1 exception (another profile, elevated), never INVESTIGATE.
+        Assert (@('ELIGIBLE', 'BLOCKED') -ccontains $o.Category) "$($u.Label) raiz antiga: $($o.Category)"
+        if ($o.Category -ceq 'BLOCKED') { Assert ($o.Rest.Contains('COBERTURA_DE_PROCESSOS_INCOMPLETA')) "$($u.Label) raiz antiga BLOCKED sem o motivo da cobertura" }
+        foreach ($bad in @($s5Requirement, 'OWNER_DIVERGENTE', 'ESCRITA_CONCEDIDA_A_TERCEIROS', 'OUTRO_USUARIO_EXIGE', 'ACL_ILEGIVEL', 'OWNER_ILEGIVEL', 'ESTRUTURA_PAI_INVALIDA')) {
+            Assert (-not $o.Rest.Contains($bad)) "$($u.Label) raiz antiga com -IncludeOtherUsers: $bad"
+        }
+        # Contrast: without the switch, the same root carries the requirement of the switch (another user's profile).
+        $c = Get-S5PreviewRow $without.Text $u.Old
+        Assert ($null -ne $c -and $c.Rest.Contains($s5Requirement)) "$($u.Label) raiz antiga sem -IncludeOtherUsers: sem a exigencia da chave"
+        $oldCats += $o.Category
+    }
+    Assert ((@($oldCats | Select-Object -Unique)).Count -eq 1) "raizes antigas de A e B em categorias diferentes: $($oldCats -join ',')"
+    "with -IncludeOtherUsers: old roots of A and B $($oldCats[0]) (the gate's result$(if ($oldCats[0] -ceq 'BLOCKED') { ', process coverage incomplete' })), never ELIGIBLE_WITH_DECLARED_RISK; new roots BLOCKED (RECENT); without the switch: the old roots carry its requirement"
+}
+Step 'multi-user-clean-gate-closed' {
+    if ($null -eq $script:s5 -or @($script:s5.Users | Where-Object { -not $_.OldPath }).Count -gt 0) { throw 'raizes antigas da S5 indisponiveis' }
+    $list = Join-Path $s5Work 'allowlist.txt'
+    [IO.File]::WriteAllText($list, ((@($script:s5.Users | ForEach-Object { $_.OldPath })) -join "`r`n"))
+    $r = Invoke-S5Agent ('clean -AllowListFile "' + $list + '" -IncludeOtherUsers -Lang en-US') (Join-Path $s5Work 'clean.txt')
+    foreach ($u in $script:s5.Users) {
+        $f = Join-Path $u.Base "$($u.Scope)\$($u.Old)\work\fixture.txt"
+        Assert ([IO.File]::Exists($f)) "$($u.Label): ARQUIVO APAGADO"
+        Assert ([IO.File]::ReadAllText($f) -ceq "atm e2e fixture: no agent, no credential`n") "$($u.Label): conteudo alterado"
+    }
+    Assert ($r.Code -eq 3) "clean: exit $($r.Code), esperado 3 (interrompido)"
+    $how = $(if ($r.Text -match 'EXCLUSAO_REAL_DESABILITADA_V0_1') { 'EXCLUSAO_REAL_DESABILITADA_V0_1 (gate reached)' } elseif ($r.Text -match 'NENHUM_CAMINHO_ELEGIVEL') { 'NENHUM_CAMINHO_ELEGIVEL (blocked before the gate)' } else { 'other' })
+    Assert ($how -cne 'other') 'clean sem o codigo da trava nem o de nenhum caminho elegivel'
+    "the old roots of A and B in an allow list, -IncludeOtherUsers: exit 3, $how; both roots intact"
+}
+Step 'multi-user-audit-as-A-not-elevated' {
+    if ($null -eq $script:s5) { throw 'fixture da S5 indisponivel' }
+    $ua = $script:s5.Users[0]; $ub = $script:s5.Users[1]
+    $exp = Join-Path $userDir 's5-audit-A.json'
+    $outFile = Join-Path $userDir 's5-audit-A.txt'
+    try {
+        $p = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') -ArgumentList "/c agent-temp audit -NoProgress -Lang en-US -ExportJson `"$exp`" > `"$outFile`" 2>&1" `
+            -Credential $cred -LoadUserProfile -WorkingDirectory $userDir -WindowStyle Hidden -PassThru -Wait
+    } catch { $script:notTested = $true; return "process as user A did not start on this runner: $($_.Exception.GetType().Name)" }
+    $text = $(if (Test-Path -LiteralPath $outFile) { [IO.File]::ReadAllText($outFile) } else { '' })
+    Assert ($p.ExitCode -eq 0 -and (Test-Path -LiteralPath $exp)) "audit como A: exit $($p.ExitCode)"
+    Assert ($text -match 'elevated administrator: NO') 'audit como A nao mostra a sessao nao elevada'
+    $j = [IO.File]::ReadAllText($exp) | ConvertFrom-Json
+    $own = Get-S5Parts $j $ua
+    Assert ($own.Count -eq 2 -and @($own | Where-Object { [string]$_.sid -cne $ua.Sid }).Count -eq 0) "A: $($own.Count) particao(oes) proprias da fixture, esperado 2"
+    $seen = @(@($j.partitions) | Where-Object { [string]$_.sid -ceq $ub.Sid -or [string]$_.scope -eq $ub.Scope })
+    Assert ($seen.Count -eq 0) "B: $($seen.Count) particao(oes) vistas por A sem elevacao"
+    # "Cannot look" is never "nothing found": the profile of B is inaccessible or its TEMP not verifiable, never SEM_TEMP_CLAUDE.
+    $st = @(@($j.profiles) | Where-Object { [string]$_.sid -ceq $ub.Sid } | ForEach-Object { [string]$_.status })
+    Assert ($st.Count -ge 1 -and @($st | Where-Object { @('INACESSIVEL', 'TEMP_NAO_VERIFICAVEL') -cnotcontains $_ }).Count -eq 0) "perfil de B visto por A: $($st -join ',')"
+    "A, not elevated: its own 2 partitions; B's base not read (B's profile $((@($st | Select-Object -Unique)) -join ',')), no partition of B, never reported empty"
+}
+# Elevated, the installed engine: the base states of both profiles and the owner's base, by SID and provider (never by
+# path). Booleans, codes and counts only.
+$s5F05Helper = @'
+param([string]$Inst, [string]$Out, [string]$Namer, [string]$Owner, [string]$Base)
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 2.0
+$r = [ordered]@{}
+try {
+    . (Join-Path $Inst 'lib\Engine.Audit.ps1')
+    Set-AtmLanguage -Requested 'en-US'
+    foreach ($pf in @(Get-ChildItem -LiteralPath (Join-Path $Inst 'providers') -Filter '*.ps1' -File | Sort-Object Name)) { . $pf.FullName }
+    $inv = Invoke-AtmInventory -NoProgress -ConfigDir (Join-Path $Inst 'config')
+    # Only the owner's claude-code base (any other base a profile names is not this case).
+    $isBase = { param([string]$P) [string]::Equals([string]$P, $Base, [StringComparison]::OrdinalIgnoreCase) }
+    $states = {
+        param([string]$Sid)
+        @(foreach ($key in @($inv.ProfileBaseStatus.Keys)) {
+                if (-not ([string]$key).StartsWith($Sid + '|', [StringComparison]::OrdinalIgnoreCase)) { continue }
+                foreach ($e in @($inv.ProfileBaseStatus[$key])) { if ([string]$e.Provider -ceq 'claude-code' -and (& $isBase $e.BasePath)) { [string]$e.Status } }
+            })
+    }
+    $r.namer = (@(& $states $Namer) | Sort-Object) -join ','
+    $r.owner = (@(& $states $Owner) | Sort-Object) -join ','
+    $b = @($inv.Bases | Where-Object { [string]$_.Sid -ceq $Owner -and [string]$_.Provider.Id -ceq 'claude-code' -and (& $isBase $_.Path) })
+    $r.ownerBases = $b.Count
+    $r.ownerBaseShared = ($b.Count -eq 1 -and [bool]$b[0].Shared)
+    $r.sharedWithNamer = ($b.Count -eq 1 -and @($b[0].SharedWith) -contains $Namer)
+    $r.namerBases = @($inv.Bases | Where-Object { [string]$_.Sid -ceq $Namer -and (& $isBase $_.Path) }).Count
+    $r.ownerNotProfile = 0
+    foreach ($g in @($inv.OwnerGaps)) { if ([string]$g.Code -ceq 'BASE_OWNER_NOT_PROFILE') { $r.ownerNotProfile += [int]$g.Count } }
+} catch { $r.error = $_.Exception.GetType().Name }
+# A base state can name a SID (SHARED_WITH_<SID>): never written.
+foreach ($key in @('namer', 'owner', 'error')) { if ($r.Contains($key)) { $r[$key] = [regex]::Replace([string]$r[$key], 'S-1-5-21-[0-9-]+', '<sid>') } }
+[IO.File]::WriteAllText($Out, ($r | ConvertTo-Json -Compress))
+'@
+Step 'multi-user-f05-two-owners' {
+    if ($null -eq $script:s5) { throw 'fixture da S5 indisponivel' }
+    $ua = $script:s5.Users[0]; $ub = $script:s5.Users[1]
+    # The profile enumerated first names the other's folder: the order in which an attribution by path went wrong (F-05).
+    $pl = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList')
+    try { $keys = @($pl.GetSubKeyNames()) } finally { $pl.Close() }
+    $ia = [array]::IndexOf($keys, $ua.Sid); $ib = [array]::IndexOf($keys, $ub.Sid)
+    Assert ($ia -ge 0 -and $ib -ge 0) 'A ou B fora da ProfileList'
+    $namer = $(if ($ia -lt $ib) { $ua } else { $ub }); $owner = $(if ($ia -lt $ib) { $ub } else { $ua })
+    # Exactly the string the engine derives for the owner's own TEMP (%USERPROFILE%\AppData\Local\Temp, with its profile).
+    $target = Join-Path $owner.Profile 'AppData\Local\Temp'
+    $exp = Join-Path $s5Work 'audit-f05.json'
+    $hp = Join-Path $s5Work 's5-f05-helper.ps1'; $hout = Join-Path $s5Work 's5-f05.json'
+    [IO.File]::WriteAllText($hp, $s5F05Helper)
+    $k = [Microsoft.Win32.Registry]::Users.OpenSubKey("$($namer.Sid)\Environment", $true)
+    if ($null -eq $k) { $script:notTested = $true; return "the environment of $($namer.Label) cannot be opened for writing: nothing changed" }
+    $orig = $null; $kind = $null; $r = $null
+    try {
+        $orig = $k.GetValue('TEMP', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        # Never a value created or taken out: without a TEMP value of its own the case is not tested.
+        if ($null -eq $orig) { $script:notTested = $true; return "$($namer.Label) has no TEMP value of its own: nothing changed" }
+        $kind = $k.GetValueKind('TEMP')
+        $k.SetValue('TEMP', $target, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+        try {
+            $r = Invoke-S5Agent ('audit -NoProgress -Lang en-US -IncludeOtherUsers -ExportJson "' + $exp + '"') (Join-Path $s5Work 'audit-f05.txt')
+            $null = & $installerExe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $hp -Inst $installDir -Out $hout -Namer $namer.Sid -Owner $owner.Sid -Base $owner.Base 2>&1
+        } finally { $k.SetValue('TEMP', $orig, $kind) }
+    } finally { $k.Close() }
+    $k2 = [Microsoft.Win32.Registry]::Users.OpenSubKey("$($namer.Sid)\Environment")
+    try { $now = $k2.GetValue('TEMP', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames); $nowKind = $k2.GetValueKind('TEMP') } finally { $k2.Close() }
+    Assert ([string]$now -ceq [string]$orig -and $nowKind -eq $kind) "TEMP de $($namer.Label) nao restaurado"
+    Assert ($r.Code -eq 0 -and (Test-Path -LiteralPath $exp)) "audit F-05: exit $($r.Code)"
+    $j = [IO.File]::ReadAllText($exp) | ConvertFrom-Json
+    # The base stays with its owner, shared with the profile that named it; the namer's own base is not named any more.
+    $op = Get-S5Parts $j $owner
+    Assert ($op.Count -eq 2 -and @($op | Where-Object { [string]$_.sid -cne $owner.Sid }).Count -eq 0) "$($owner.Label): $($op.Count) particao(oes) da fixture do dono, ou atribuidas a outro"
+    Assert (@($op | Where-Object { @($_.flags) -cnotcontains 'SHARED_TEMP' }).Count -eq 0) "$($owner.Label): particao sem SHARED_TEMP"
+    $o = Get-S5Root $op $owner.Old; $n = Get-S5Root $op $owner.New
+    Assert ($o.Count -eq 1 -and $o[0].class -ceq 'LIVENESS_UNKNOWN' -and $n.Count -eq 1 -and $n[0].class -ceq 'RECENT') "$($owner.Label): classes $(if ($o.Count) { $o[0].class }) / $(if ($n.Count) { $n[0].class })"
+    Assert ((Get-S5Parts $j $namer).Count -eq 0) "$($namer.Label): fixture propria ainda listada com o TEMP apontado para o outro perfil"
+    Assert (Test-Path -LiteralPath $hout) 'helper do motor sem resultado'
+    $h = [IO.File]::ReadAllText($hout) | ConvertFrom-Json
+    Assert (-not $h.PSObject.Properties['error']) "helper do motor: $(if ($h.PSObject.Properties['error']) { $h.error })"
+    Assert ($h.namer -ceq 'OWNER_NOT_PROFILE' -and $h.owner -ceq 'OK') "estados das bases: $($namer.Label)=$($h.namer), $($owner.Label)=$($h.owner)"
+    Assert ($h.ownerBases -eq 1 -and $h.ownerBaseShared -and $h.sharedWithNamer -and $h.namerBases -eq 0 -and $h.ownerNotProfile -ge 1) "base do dono: $([IO.File]::ReadAllText($hout))"
+    "$($namer.Label) (first in ProfileList) pointed at $($owner.Label)'s TEMP: the base stays with its owner $($owner.Label) (its partitions SHARED_TEMP: old LIVENESS_UNKNOWN, new RECENT), $($namer.Label) gets OWNER_NOT_PROFILE and no partition; $($namer.Label)'s TEMP restored"
+}
+Step 'multi-user-no-new-files' {
+    if ($null -eq $script:s5) { throw 'fixture da S5 indisponivel' }
+    $after = Get-S5Listing $script:s5.Users
+    $diff = @(Compare-Object -ReferenceObject $script:s5.Before -DifferenceObject $after)
+    Assert ($diff.Count -eq 0) "listagem antes/depois diferente: $($diff.Count) linha(s)"
+    "both bases and the product's folders and .claude of both profiles identical before and after the audits, previews, clean and F-05 ($($after.Count) line(s), $(@($after | Where-Object { $_ -like '*|UNREADABLE|*' }).Count) folder(s) not listable by this account)"
+}
+# The fixture helpers end by themselves on their stop files (never terminated), whatever the steps above did.
+foreach ($h in @($script:s5Holders)) { try { [IO.File]::WriteAllText($h.Stop, '1') } catch { $null = $_ } }
+foreach ($h in @($script:s5Holders)) { try { $null = $h.Proc.WaitForExit(60000) } catch { $null = $_ } }
+# <<< V10-S5 second standard user (end)
 
 # 0.3.x isolation, phase P6b: the uninstall and the task of the automatic purge. This account's task (the product's name)
 # is registered by the installed engine in a child process (schedule-autopurge itself refuses this elevated shell);
