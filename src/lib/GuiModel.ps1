@@ -16,7 +16,9 @@
 # disabled in this version. Phase P5: the live monitoring's choices (the six intervals), its status line, and the state
 # of the view STALE by slowness or age besides a failure. V0.4 R5 (ADR-0016): the recovery area (S), read only: the list
 # and the plan of the recovery engine over the collection Gui.ps1 made when the area was opened; executing stays in the
-# CLI.
+# CLI. V0.5 M5 (ADR-0017): the preventive monitoring area (M), view only: lines built here from the one status Gui.ps1
+# read when the area was opened (the gate as the status carries it, the history as it is, and with the gate open the
+# total, the delta, the trends, the thresholds and the alerts, each command as text); the collection task is not shown.
 
 function Get-AtmGuiIdentityHeader {
     # The process identity and its elevation state, as `version` shows them, and the language. -Source: test override
@@ -202,9 +204,9 @@ function Get-AtmGuiOpt {
 }
 
 function Get-AtmGuiNavItemList {
-    # The screens of the TUI menu that the GUI shows (keys 1 to 9, P, D and S), with the TUI's labels, titles and filters.
-    # D (P4b) opens the diagnose area; S (V0.4 R5) the recovery area, view only; isolation, cleanup and the quarantine
-    # area are never offered (ADR-0014 section 6).
+    # The screens of the TUI menu that the GUI shows (keys 1 to 9, P, D, S and M), with the TUI's labels, titles and
+    # filters. D (P4b) opens the diagnose area; S (V0.4 R5) the recovery area, view only; M (V0.5 M5) the preventive
+    # monitoring area, view only; isolation, cleanup and the quarantine area are never offered (ADR-0014 section 6).
     return @(
         @{ Key = '1'; Label = (Get-AtmText 'menu.dashboard'); Screen = @{ Name = 'dashboard'; Title = (Get-AtmText 'menu.dashboard') } }
         @{ Key = '2'; Label = (Get-AtmText 'menu.users'); Screen = @{ Name = 'users'; Title = (Get-AtmText 'menu.users') } }
@@ -218,6 +220,7 @@ function Get-AtmGuiNavItemList {
         @{ Key = 'P'; Label = (Get-AtmText 'menu.preview'); Screen = @{ Name = 'gates'; Title = (Get-AtmText 'gui.term.preview'); Filter = @{ Category = $null } } }
         @{ Key = 'D'; Label = (Get-AtmText 'menu.diagnose'); Screen = @{ Name = 'diag'; Title = (Get-AtmText 'tui.diag.title') } }
         @{ Key = 'S'; Label = (Get-AtmText 'menu.recover'); Screen = @{ Name = 'recover'; Title = (Get-AtmText 'menu.recoverTitle') } }
+        @{ Key = 'M'; Label = (Get-AtmText 'menu.monitor'); Screen = @{ Name = 'prevmon'; Title = (Get-AtmText 'menu.monitorTitle') } }
     )
 }
 
@@ -446,7 +449,13 @@ function Get-AtmGuiScreen {
     $isDiag = (@(Get-AtmGuiDiagScreenNames) -ccontains [string]$Screen.Name)
     # V0.4 R5: the recovery area does not depend on an audit; its collection is kept in the screen's filter.
     $isRec = (@('recover', 'rplan') -ccontains [string]$Screen.Name)
-    $vm = [ordered]@{ Name = $Screen.Name; Title = $Screen.Title; Kind = 'table'; Known = $known; Gone = $false; Columns = @(); Rows = @(); Items = @(); Pairs = @(); Lines = @(); Note = $(if ($known -or $isDiag -or $isRec) { $null } else { Get-AtmText 'gui.noAudit' }); Notice = $null; Pre = @(); Empty = $null; GateLines = @() }
+    # V0.5 M5: the preventive monitoring area does not depend on an audit either; its status is kept in the screen's filter.
+    $isPrevmon = ([string]$Screen.Name -ceq 'prevmon')
+    $vm = [ordered]@{ Name = $Screen.Name; Title = $Screen.Title; Kind = 'table'; Known = $known; Gone = $false; Columns = @(); Rows = @(); Items = @(); Pairs = @(); Lines = @(); Note = $(if ($known -or $isDiag -or $isRec -or $isPrevmon) { $null } else { Get-AtmText 'gui.noAudit' }); Notice = $null; Pre = @(); Empty = $null; GateLines = @() }
+    if ($isPrevmon) {
+        $vm.Kind = 'lines'; $vm.Columns = @((Get-AtmText 'gui.col.line')); $vm.Lines = @(Get-AtmGuiPrevmonText -Screen $Screen)
+        return [pscustomobject]$vm
+    }
     if ($isRec) {
         if ([string]$Screen.Name -ceq 'recover') {
             $t = Get-AtmGuiRecoverTable -Screen $Screen
@@ -519,6 +528,8 @@ function Invoke-AtmGuiNavKey {
     #  * D: the diagnose area (DIAG_OPEN, nothing moves yet); U, only inside the area: a new observation (DIAG_REFRESH);
     #  * S (V0.4 R5): the recovery area (RECOVER_OPEN, nothing moves yet: Gui.ps1 collects, then Invoke-AtmGuiNavRecover
     #    moves); Enter on its list: the plan of that service, from the kept collection;
+    #  * M (V0.5 M5): the preventive monitoring area (PREVMON_OPEN, nothing moves yet: Gui.ps1 reads the status once, then
+    #    Invoke-AtmGuiNavPrevmon moves); each opening reads again;
     #  * Enter on a row: user -> the roots of that user; project -> the roots of that project; root -> its detail (from
     #    the preview, with its gate: the detail shows the Preview line); in the diagnose area, as the TUI: a category ->
     #    its screen; a coverage record -> its detail; a finding -> its detail; a node -> its detail; an issue -> the
@@ -528,6 +539,7 @@ function Invoke-AtmGuiNavKey {
     if ($Busy) { return 'IGNORED' }
     if ($Key -ceq 'D') { return 'DIAG_OPEN' }
     if ($Key -ceq 'S') { return 'RECOVER_OPEN' }
+    if ($Key -ceq 'M') { return 'PREVMON_OPEN' }
     if ($Key -ceq 'U') {
         if (@(Get-AtmGuiDiagScreenNames) -ccontains [string](Get-AtmGuiNavTop -Nav $Nav).Name) { return 'DIAG_REFRESH' }
         return 'NONE'
@@ -1172,5 +1184,97 @@ function Invoke-AtmGuiNavRecover {
     if ($Result -cne 'OK') { return }
     while ($Nav.Stack.Count -gt 1) { $Nav.Stack.RemoveAt($Nav.Stack.Count - 1) }
     $Nav.Stack.Add(@{ Name = 'recover'; Title = (Get-AtmText 'menu.recoverTitle'); Filter = @{ R = $Recover }; Sel = 0 })
+    $Nav.Message = $null
+}
+
+# ------------------------------------------------------------------ the preventive monitoring area (V0.5 M5)
+# The history and the alerts of the preventive monitoring, view only, over the one status Gui.ps1 read when the area was
+# opened (kept in the screen's filter). The lines are built here from that object, with the catalog texts of monitor
+# status, in the same order (a test checks they equal the CLI's lines, the task's left out). Nothing here reads a file,
+# a gate or the scheduler: the gate is the status's GateOpen field. No line is an action: each command an alert names is
+# text for the person to run in a console.
+
+function Get-AtmGuiPrevmonLines {
+    # The lines of one status. Gate closed: the "not available in this release" text and the history as it is, no alert.
+    # Gate open, with trends: also the latest complete total and the delta, the total's trend, up to 5 groups, the
+    # thresholds' state and the alerts, each followed by the commands it names. Unrolled: callers wrap the result in @().
+    param($Status)
+    $out = New-Object System.Collections.Generic.List[string]
+    if ($Status.GateOpen) { $out.Add((Get-AtmText 'mon.gateOpen')) }
+    else { $out.Add((Get-AtmText 'mon.gateClosed')); $out.Add((Get-AtmText 'mon.optIn')) }
+    $h = $Status.History
+    switch ([string]$h.FolderState) {
+        'ABSENT' { $out.Add((Get-AtmText 'mon.historyAbsent')) }
+        'OK' {
+            $out.Add((Get-AtmText 'mon.historyCount' @($h.Records).Count))
+            if ($null -ne $Status.Latest) {
+                $lt = $Status.Latest
+                $out.Add((Get-AtmText 'mon.latest' $lt.Utc.ToString('yyyy-MM-dd HH:mm') $lt.Outcome $lt.Groups (Format-AtmMB $lt.Bytes)))
+                if (-not $Status.GateOpen) { $out.Add((Get-AtmText 'mon.residue')) }
+            }
+            if (@($h.Invalid).Count -gt 0) { $out.Add((Get-AtmText 'mon.invalid' @($h.Invalid).Count)) }
+            if ($h.ClockSkew -gt 0) { $out.Add((Get-AtmText 'mon.clockSkew' $h.ClockSkew)) }
+            if ($h.Partial -gt 0) { $out.Add((Get-AtmText 'mon.partial' $h.Partial)) }
+            if ($h.Unexpected -gt 0) { $out.Add((Get-AtmText 'mon.unexpected' $h.Unexpected)) }
+            if ($h.Skipped -gt 0) { $out.Add((Get-AtmText 'mon.skipped' $h.Skipped)) }
+        }
+        default { $out.Add((Get-AtmText 'mon.historyRefused' ([string]$h.FolderCode))) }
+    }
+    if ($Status.GateOpen -and $null -ne $Status.Trends) {
+        $tr = $Status.Trends
+        if ($null -ne $tr.LatestOk) { $out.Add((Get-AtmText 'mon.total' (Format-AtmGB $tr.LatestOkBytes) $tr.LatestOk.Utc.ToString('yyyy-MM-dd HH:mm'))) }
+        else { $out.Add((Get-AtmText 'mon.totalNone')) }
+        switch ([string]$tr.Delta.State) {
+            'OK' { $out.Add((Get-AtmText 'mon.deltaOk' ($(if ($tr.Delta.Bytes -gt 0) { '+' } else { '' }) + (Format-AtmGB $tr.Delta.Bytes)))) }
+            'GAP' { $out.Add((Get-AtmText 'mon.deltaGap')) }
+            default { $out.Add((Get-AtmText 'mon.deltaNone')) }
+        }
+        if ($tr.Total.State -ceq 'OK') { $out.Add((Get-AtmText 'mon.trendTotal' (Format-AtmGB $tr.Total.Slope) $tr.Total.Points)) }
+        else { $out.Add((Get-AtmText 'mon.trendInsufficient' $tr.Total.Points)) }
+        $topAll = @($tr.Top)
+        $top = @(for ($i = 0; $i -lt [math]::Min(5, $topAll.Count); $i++) { $topAll[$i] })
+        if ($top.Count -gt 0) {
+            $out.Add((Get-AtmText 'mon.trendGroups'))
+            foreach ($g in $top) { $out.Add((Get-AtmText 'mon.trendGroup' $g.Provider $(if ($g.Identified) { [string]$g.Project } else { Get-AtmText 'project.unknown' }) $g.Class (Format-AtmGB $g.Trend.Slope))) }
+        }
+        switch ([string]$Status.Config.State) {
+            'FILE' { $out.Add((Get-AtmText 'mon.configFile')) }
+            'REFUSED' { $out.Add((Get-AtmText 'mon.configRefused' ([string]$Status.Config.Code) ([string]$Status.Config.Reason))) }
+            default { $out.Add((Get-AtmText 'mon.configDefaults')) }
+        }
+        $al = @($Status.Alerts)
+        if ($al.Count -eq 0) { $out.Add((Get-AtmText 'mon.alertsNone')) }
+        foreach ($a in $al) {
+            # The engine gives a size alert its threshold in bytes (a [double]); the count and the refused file's reason
+            # are shown as they come.
+            $v = $a.Value; $t = $a.Threshold
+            if ($a.Threshold -is [double]) { $v = Format-AtmGB ([long]$a.Value); $t = Format-AtmGB ([long]$a.Threshold) }
+            $out.Add((Get-AtmText ('mon.alert.' + [string]$a.Code) $v $t))
+            if (@($a.Commands).Count -gt 0) { $out.Add((Get-AtmText 'mon.alertCommand' (@($a.Commands) -join (Get-AtmText 'mon.commandThen')))) }
+        }
+    }
+    $out.Add((Get-AtmText 'mon.nothingChanged'))
+    $out.Add((Get-AtmText 'gui.prevmon.viewOnly'))
+    return $out.ToArray()
+}
+
+function Get-AtmGuiPrevmonText {
+    # Screen `prevmon`: the lines of the status kept when the area was opened; after a failed read, only the line with its
+    # code. Unrolled: callers wrap the result in @().
+    param([hashtable]$Screen)
+    $pm = Get-AtmGuiOpt $Screen.Filter 'M'
+    if ($null -eq $pm -or $null -eq $pm.Status) { return @((Get-AtmText 'gui.prevmon.failed' $(if ($null -ne $pm -and $pm.Error) { [string]$pm.Error } else { '-' }))) }
+    return @(Get-AtmGuiPrevmonLines -Status $pm.Status)
+}
+
+function Invoke-AtmGuiNavPrevmon {
+    # The move after opening the preventive monitoring area (M; Gui.ps1 read the status, or not). -Result: OK, the area
+    # over the dashboard with the status kept in its filter; FAILED, the window stays where it is with the failure's code
+    # (never its message); anything else (IGNORED), nothing moves.
+    param([hashtable]$Nav, $Prevmon, [string]$Result)
+    if ($Result -ceq 'FAILED') { $Nav.Message = Get-AtmText 'gui.prevmon.failed' $(if ($null -ne $Prevmon) { [string]$Prevmon.Error } else { '-' }); return }
+    if ($Result -cne 'OK') { return }
+    while ($Nav.Stack.Count -gt 1) { $Nav.Stack.RemoveAt($Nav.Stack.Count - 1) }
+    $Nav.Stack.Add(@{ Name = 'prevmon'; Title = (Get-AtmText 'menu.monitorTitle'); Filter = @{ M = $Prevmon }; Sel = 0 })
     $Nav.Message = $null
 }

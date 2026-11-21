@@ -8,6 +8,13 @@ The code in this section reports version 0.3.1, which is not published: 0.3.0 is
 **A sixth, `AtmQuarantinePurgeEnabled`, is closed in every copy too**: in every copy `quarantine purge` only plans, and
 no space is freed.
 
+* Preventive monitoring, V05-M5 (ADR-0017 phase M5, the last phase of V0.5): the history and the alerts in the TUI, the GUI and the audit, **read only**, behind **the ninth gate, closed in every copy**. V0.5 is complete behind its gate.
+  * TUI: new menu key `M`, "Preventive monitoring: history and alerts (view only)". Entering the screen reads the status and the collection task's state once; `U` reads again. It shows the lines of `monitor status`. A failed read shows its code only.
+  * GUI (behind its own gate `AtmGuiEnabled`, closed in every copy): new area "Preventive monitoring", key `M` or its button. One status per opening. It shows the history, and with the gate open the total, the delta, the trend, up to 5 groups, the thresholds and the alerts, each command as text. The collection task's state is never shown. Nothing in the area runs.
+  * The GUI's closed list gains exactly one name, `Get-AtmMonitorStatus` (28 to 29; ADR-0014 section 3).
+  * `agent-temp audit`: at most one line under the first header, with the count of alerts, their codes and `agent-temp monitor status`, or a failure's code. With the gate closed (every copy) nothing is read and the output is unchanged. The line never enters `-ExportJson` and never changes the exit code.
+  * New suite area "V0.5 M5". The M1, M2 and M3a statics allow the TUI and the GUI exact names only, the launcher loads the engine in `audit`, `gui` and `tui` too, and the six counts of the closed list are 29.
+
 * Preventive monitoring, V05-M4b (ADR-0017 phase M4b; V05-D9 (a)): removal of the history, behind **the ninth gate, closed in every copy**, and the uninstaller's warning.
   * New subverb `agent-temp monitor remove-history`. With the gate closed (every copy) it refuses with `MONITORING_GATE_CLOSED` before it reads or asks anything (exit `3`).
   * Past the gate (the suite only, in its sandbox), in order:

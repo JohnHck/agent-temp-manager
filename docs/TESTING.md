@@ -1178,6 +1178,60 @@ published 0.1.0 package those steps are NOT_TESTED.
 NAO_TESTADO in the suite: the real history folder of any account; `monitor remove-history` through the CLI with the
 gate open; the uninstall warning for a real monitoring task (no copy can create one with the gate closed).
 
+### The TUI, the GUI and the audit line (V0.5 M5)
+
+The area "V0.5 M5" of `tests/Run-Tests.ps1` (ADR-0017 phase M5) runs in both shells, after the M4b area. The histories
+are planted in the suite's sandbox and read through the folder seam. The gate is opened only in memory, around a status
+or summary call, and closed again. The TUI gets the statuses through its two readers, and the GUI through its seam
+`$script:AtmGuiPrevmonSource`.
+
+* **The models,** in both languages, over seven histories: no folder, an empty one, only a `.partial`, a corrupt record,
+  `CLOCK_SKEW`, a refused `monitor.json` (`MON_CONFIG_INVALID`) and the six alerts. Each is checked with the gate
+  closed and open:
+  * the GUI's lines equal `monitor status`'s without the task's, plus the view-only line;
+  * the TUI's screen shows the view-only line and `monitor status`'s lines with the task's;
+  * with the gate closed: the notice and the history as it is, with no threshold or alert;
+  * no real path, and every text from the language's catalog;
+  * at most 5 groups.
+* **The TUI headless:** `M`, `U` and re-entry each read once; frames, scrolling and `Esc` read nothing; with the gate
+  open every line of `monitor status` reaches the frames; a failure shows its code only; nothing is asked.
+* **The GUI's session and view model:**
+  * `M` only asks for the area, and one opening reads once;
+  * busy (an audit, the preview or the diagnose): ignored;
+  * keys in the area, `Esc`, the live monitoring's tick and `F5` read nothing;
+  * the second opening reads again;
+  * a failure shows the code only and the window stays where it is.
+* **The audit line, gate closed:**
+  * the summary is `$null` with zero calls to the status, the history, the folder and the thresholds, all shadowed to
+    fail and count;
+  * the seam's folder is never created;
+  * `Show-AtmAudit`'s output is identical with and without the line.
+* **The audit line, gate open:**
+  * the six alerts give one line right under the first header, and nothing else changes;
+  * no folder or an empty one gives no line;
+  * a refused folder (forged) and a failed read give a line with their code, never the exception's message;
+  * `ConvertTo-AtmExportJson` is identical with the gate open and closed.
+* **The launcher:** a child process `agent-temp audit -Lang en-US` exits `0` with no monitoring line.
+* **Statics:**
+  * the closed list has 29 names, the new one exactly `Get-AtmMonitorStatus`, called only in `Invoke-AtmGuiPrevmon` and
+    never in the tick;
+  * planted forbidden names (the gate, the task's state, the history reader, the collector's functions, a tick that
+    reads) are refused;
+  * the GUI has one seam, assigned once, to `$null`;
+  * the TUI reads only at its expected places;
+  * the audit line's formatter only presents, the summary is called only by the launcher's `audit` and never throws,
+    and the export and the exit code do not depend on it;
+  * the texts exist in both languages.
+
+  Earlier statics adjusted, nothing loosened:
+  * M1: the launcher loads the engine in `audit`, `gui`, `monitor`, `tui` and `version`;
+  * M1, M2 and M3a: the TUI and the GUI read the monitoring by exact names only;
+  * the six counts of the closed list: 29;
+  * the TUI's menu keys, the GUI's screen keys, the access keys and the P6 tab order include `M`.
+
+NAO_TESTADO: pressing `M` or the button `ScreenM` in a real window with the engine's real status, and `M` in a real
+console with a keyboard.
+
 ## Future: isolation, quarantine and Recovery Mode (0.3.x and V0.4)
 
 Criteria proposed by [ADR-0013](adr/ADR-0013-isolation-quarantine-recovery-mode.md) for accepting an implementation.

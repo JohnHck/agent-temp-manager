@@ -133,8 +133,9 @@ phase M3b's CI harness). Each follows the same four steps:
   runs. It takes no arguments, checks the manifest before it loads any code, loads only `Engine.Audit.ps1`, the
   providers and `Engine.Monitor.ps1`, and calls `Invoke-AtmMonitorEntry`, which reads `AtmMonitoringEnabled` first on
   every run: closed, it exits without collecting, for example in a copy updated after the task was registered.
-* **Presentation.** The TUI and the GUI never register, remove or run either task (T-ISO-6). In phase M5 they read the
-  monitoring history through one read function (ADR-0014 section 3).
+* **Presentation.** The TUI and the GUI never register, remove or run either task (T-ISO-6). Since phase M5 the GUI
+  reads the monitoring through one read function, `Get-AtmMonitorStatus` (ADR-0014 section 3); the TUI reads the same
+  status and, for display only, the collection task's state.
 * **Removal.** Whether the uninstaller or the unschedule commands do more than today about the shared folder was
   **pending V05-D9** until 2026-11-18. Decided then, (a) plus (c): the uninstaller warns and names `monitor disable` and
   `monitor remove-history`, and the unschedule commands remove the folder `\AgentTempManager` when it is empty. Phase
@@ -228,7 +229,17 @@ default seams (ADR-0016's R6 record).
 trends, the thresholds and the alerts, and phase M3a the collection task, `monitor enable` and the collector's entry
 point (the scheduler layer above); with the gate closed nothing is scheduled or collected.
 
-* **Loading.** The launcher loads the engine only for `monitor` and `version`, and the collector's entry point
+* **Presentation in the TUI, the GUI and the audit (M5).** All read only, and none reads the gate: each shows the
+  status's `GateOpen` field.
+  * The TUI's screen `M` reads the status and the task's state on entry and on `U`, through two readers, and shows the
+    shared formatter's lines (`Get-AtmMonitorStatusLines`).
+  * The GUI's area `M` reads one status per opening (`Invoke-AtmGuiPrevmon`, a seam for the tests). Its view model
+    builds the lines itself, without the task's. The ticker and F5 never read it.
+  * `agent-temp audit` asks `Get-AtmMonitorAuditSummary`, whose first statement is the gate: closed, nothing is read.
+    `Get-AtmMonitorAuditLine` (`Report.ps1`) turns the summary into at most one line under the first header. The line
+    is never in `-ExportJson` and never changes the exit code.
+* **Loading.** The launcher loads the engine only for `monitor`, `version`, `audit` (the alert line, since M5) and the
+  TUI and GUI launch (the read-only views, since M5), and the collector's entry point
   `bin\agent-temp-monitor.ps1` loads it once; no other file loads it. It is in the launcher's integrity check,
   `AtmRequiredFiles` and the manifest. It depends on `Engine.Audit.ps1` and on the native pinned writer and folder
   policy of `Native.cs`; its task functions also call the scheduler helpers of `Engine.Isolate.ps1`, the console

@@ -837,6 +837,26 @@ function Get-AtmMonitorStatus {
     return [pscustomobject]@{ GateOpen = [bool]$script:AtmMonitoringEnabled; History = $h; Latest = $latest; Config = $config; Trends = $trends; Alerts = $alerts }
 }
 
+function Get-AtmMonitorAuditSummary {
+    <#
+      The alert line under the header of agent-temp audit (V0.5 M5, ADR-0017). The gate is its first statement: with it
+      closed (every distributed copy) $null is returned before anything is read, so the folder is never touched and the
+      audit's output stays as it was. With it open: Code $null and the codes of the alerts of Get-AtmMonitorStatus (none:
+      no line); a history that could not be read gives Code = its folder code; any exception gives Code =
+      MONITOR_READ_FAILED_<type> (never its message), and nothing is thrown, so the audit never fails because of it. Reads
+      only: nothing is written, created or run.
+    #>
+    if (-not $script:AtmMonitoringEnabled) { return $null }
+    try {
+        $st = Get-AtmMonitorStatus
+        $fs = [string]$st.History.FolderState
+        if ($fs -cne 'OK' -and $fs -cne 'ABSENT') { return [pscustomobject]@{ Code = $(if ($st.History.FolderCode) { [string]$st.History.FolderCode } else { 'HISTORY_' + $fs }); Alerts = @() } }
+        return [pscustomobject]@{ Code = $null; Alerts = @(@($st.Alerts) | ForEach-Object { [string]$_.Code }) }
+    } catch {
+        return [pscustomobject]@{ Code = ('MONITOR_READ_FAILED_' + $_.Exception.GetBaseException().GetType().Name.ToUpperInvariant()); Alerts = @() }
+    }
+}
+
 # ---------------------------------------------------------------------------------------------
 # Phase M2: the thresholds, the trends and the alerts. Read only and pure: nothing here writes, creates or fixes a file
 # (monitor.json included), runs a command, or calls an engine, a process, the scheduler or the network. An alert NAMES

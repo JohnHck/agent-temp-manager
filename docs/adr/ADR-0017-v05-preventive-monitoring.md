@@ -1,8 +1,10 @@
 # ADR-0017: Persistent preventive monitoring (V0.5)
 
-Status: ACCEPTED: V05-D1 to V05-D10 decided (D1-D7 2026-11-17, D8-D10 2026-11-18, as recommended); M0 to M3 (M3a and
-the M3b real-scheduler CI harness) and M4 (M4a: `monitor disable` and the empty task folder; M4b: `monitor
-remove-history` and the uninstaller's notice) implemented; M5 (the TUI and the GUI) next; gate closed in every copy. (Until 2026-11-17: PROPOSED, with V05-D1
+Status: ACCEPTED: V05-D1 to V05-D10 decided (D1-D7 2026-11-17, D8-D10 2026-11-18, as recommended); M0 to M5
+implemented (M3a and the M3b real-scheduler CI harness; M4a: `monitor disable` and the empty task folder; M4b: `monitor
+remove-history` and the uninstaller's notice; M5: the history and the alerts in the TUI, the GUI and a line under the
+header of `audit`, read only): V0.5 is complete behind its gate, which stays closed in every copy; M6 is out of V0.5
+(V05-D6 (a)). (Until 2026-11-17: PROPOSED, with V05-D1
 to V05-D10 open. From 2026-11-17 to 2026-11-18: ACCEPTED in part, with V05-D8, V05-D9 and V05-D10 open and only M0
 implemented.)
 Date: 2026-11-17
@@ -1097,4 +1099,81 @@ numbers below are those of the files as V05-M4b leaves them.
   * The warning names `monitor disable` and `monitor remove-history`, which the uninstall itself takes away from the
     machine. The text says the items stay; it does not say how to remove them once the product is gone.
 
-**Left for M5:** the TUI and the GUI.
+**Left for M5:** the TUI and the GUI. (Done by M5, below.)
+
+## M5 implementation record (V05-M5, 2026-11-21)
+
+The last phase of V0.5: presentation only. The history and the alerts appear in the TUI, the GUI and a line under the
+header of `agent-temp audit`. Every one of them only reads, and none of them reads the gate: the gate is the status's
+`GateOpen` field. The ninth gate stays `$false` in every copy, and so does the GUI's (`AtmGuiEnabled`). With the gate
+closed, each view says that the monitoring is not available in this release and shows the history as it is (normally
+absent), with no trend, threshold or alert. The line numbers below are those of the files as V05-M5 leaves them.
+
+* **The GUI's closed list (ADR-0014 section 3)** gains exactly one name, `Get-AtmMonitorStatus`
+  (`Engine.Monitor.ps1:816`), and goes from 28 to 29. This is the final name of the read function that section 3 had
+  provisionally called `Get-AtmMonitorHistory`. No formatter of `Report.ps1` joins the list: the GUI builds its own
+  lines (below). `Get-AtmMonitorHistory`, `Get-AtmMonitorTaskState`, `Get-AtmMonitorTaskLines`, the collector's
+  functions and the M3a and M4 functions are on the GUI's forbidden list by their exact names. `AtmMonitoringEnabled`
+  stays among the forbidden gate variables.
+* **The TUI,** key `M` on the menu (`Tui.ps1:439`), screen `monitor`. Entering it reads once: the status and the
+  collection task's state, through two readers (`Get-AtmTuiMonitorView`, `:981`). The defaults are
+  `Get-AtmMonitorStatus` and `Get-AtmMonitorTaskState`, set in `Start-AtmTui` (`:1083`), and tests inject their own.
+  The screen shows a "view only" line, then the lines of `monitor status` from the shared formatter
+  (`Get-AtmMonitorStatusLines`, `Report.ps1:1550`), including the task's lines. The task's state is shown in the TUI
+  only, never in the GUI.
+  * **U** on the screen reads again (`Tui.ps1:1226`, `:1287`), and so does entering it again with `M`.
+  * No frame, scroll or key reads anything else, and leaving the screen keeps nothing.
+  * A failed read shows only the exception's code (`tui.mon.failed`), never its message.
+  * The TUI's audit panel gains no line: that line, optional in the round, was left out.
+* **The GUI,** an area "Preventive monitoring", view only, opened by `M` or its button. The button has no access key of
+  its own, because Alt+M stays the live monitoring check box's.
+  * The only call is in `Invoke-AtmGuiPrevmon` (`Gui.ps1:363`): one status per opening, through the seam
+    `$script:AtmGuiPrevmonSource` (`:66`, `$null` outside the tests). It is ignored while an audit, the preview or the
+    diagnose runs. The live monitoring's ticker and F5 never call it; a static checks the ticker.
+  * The model builds the lines from that one object (`Get-AtmGuiPrevmonLines`, `GuiModel.ps1:1197`). They are the
+    lines of `monitor status` in the same order, without the task's. With the gate open: the latest complete total and
+    the delta, the trend, up to 5 groups, the thresholds' state and the alerts. Each command an alert names is plain
+    text, and a closing line says that nothing in the area runs.
+  * The area has no action: no button or key in it executes, writes, removes, collects or schedules.
+  * A failed read leaves the window where it is, with the code only (`gui.prevmon.failed`).
+  * Texts in both languages.
+* **The audit line.** `Get-AtmMonitorAuditSummary` (`Engine.Monitor.ps1:840`) is new and exists only for this line.
+  `Get-AtmMonitorStatus` alone could not serve: its reader runs whatever the gate, and the round requires that a closed
+  gate reads nothing and leaves the folder untouched.
+  * Its first statement is the gate: closed, it returns `$null` before anything is read.
+  * Open, it returns the alerts' codes. A history folder that is neither `OK` nor `ABSENT` (refused or unreadable)
+    becomes a line with the folder's code. Any exception becomes `MONITOR_READ_FAILED_<type>`. It never throws.
+  * `Get-AtmMonitorAuditLine` (`Report.ps1:1626`) turns the summary into at most one line: the count, the codes and
+    `agent-temp monitor status`, or the failure's code. With no alert, or with the gate closed, there is no line.
+  * `Show-AtmAudit` writes the line right under its first header (`:93`). With `$null`, the default, its output is
+    byte for byte what it was.
+  * The line never enters `-ExportJson` and never changes the exit code.
+  * The launcher loads the engine in `audit` (`agent-temp.ps1:284`), as it already did in `monitor` and `version`, and
+    past the GUI's gate in `gui` (`:259`) and in `tui` (`:273`). Loading it only defines functions and constants.
+* **Tests.** The suite's area "V0.5 M5" (`tests/Run-Tests.ps1`), after M4b. It covers:
+  * the TUI and GUI models over planted histories in both languages: no folder, an empty one, only a `.partial`, a
+    corrupt record, `CLOCK_SKEW`, a refused `monitor.json` (`MON_CONFIG_INVALID`) and the six alerts, with the gate
+    closed and open (open only in memory, around the call);
+  * the GUI lines equal to `monitor status`'s without the task, and the TUI's with it; their texts from the language's
+    catalog;
+  * the TUI headless: M, U and re-entry each read once, frames and scrolling read nothing, a failure shows the code;
+  * the GUI session: M, the seam, one read per opening, ignored while busy, ticker and F5 read nothing, a failure;
+  * the audit line with the gate closed: nothing read (status, history, folder and thresholds shadowed to fail and
+    count), the seam's folder never created, and the audit's output identical with and without the parameter;
+  * with the gate open: one line with the alerts, right under the header, and nothing else changed; no line without
+    alerts; the code of a refused folder or a failed read; `-ExportJson` identical;
+  * a child process `agent-temp audit` (exit 0, no monitoring line);
+  * the statics: the closed list of 29, with the new name exactly `Get-AtmMonitorStatus`; planted forbidden names
+    refused; the one seam; the places of each read in the TUI and the GUI.
+
+  The M1 static that pins where the launcher loads the engine now expects `audit`, `gui`, `monitor`, `tui` and
+  `version`. The M1, M2 and M3a statics that kept the TUI and the GUI away from the monitoring now allow exact names
+  only: the GUI `Get-AtmMonitorStatus`; the TUI also the shared formatter and `Get-AtmMonitorTaskState`. The six
+  earlier "28" counts of the closed list are now 29, with nothing else loosened.
+* **NOT_TESTED.**
+  * No one presses `M` or the button `ScreenM` in a real window with the engine's real status, and no one presses `M`
+    in a real console. The P6 window test checks only that the button is in the tab order and that its text comes from
+    the catalog. The models and the session cover the rest.
+  * The real history folder of any machine: every history in the tests is planted in the suite's sandbox.
+
+**V0.5 is complete behind its gate.** Opening it in a release is a decision of its own, outside this record.

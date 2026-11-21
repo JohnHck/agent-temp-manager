@@ -1059,7 +1059,7 @@ that only shows. Executing stays in the CLI (T-ISO-6), as restore does.
 * **Nothing else:** no service name is typed, and no key, button or menu starts, undoes, relaunches, elevates, takes the
   lock or writes a log.
 
-## Monitor (V0.5 M1 to M4b, unreleased; nothing is collected, scheduled or removed in any copy)
+## Monitor (V0.5 M1 to M5, unreleased; nothing is collected, scheduled or removed in any copy)
 
 Preventive monitoring ([ADR-0017](adr/ADR-0017-v05-preventive-monitoring.md)) will keep a small local history of what
 the audit shows, one history per user. Phase M1 adds the collector and the history storage behind the **ninth release
@@ -1323,6 +1323,27 @@ remove-history` refused, not confirmed or stopped (nothing scheduled or removed,
 `monitor remove-history` needs an interactive console. `monitor status`, `monitor disable` and `monitor
 remove-history` take no option other than `-Lang` and the display switches `-NoProgress` and `-Ascii`; `monitor
 enable` also takes `-IntervalHours`.
+
+### In the TUI, the GUI and the audit (V0.5 M5; view only)
+
+The history and the alerts also appear in the TUI, the desktop GUI (`agent-temp gui`, disabled in every copy) and
+`agent-temp audit`. None of them runs, schedules, writes or removes anything. With the monitoring gate closed, as in
+every copy, they say that monitoring is not available in this release, show the history as it is (normally none), and
+show no trend, threshold or alert.
+
+* **TUI, key `M`** ("Preventive monitoring: history and alerts (view only)"). Entering the screen reads once and shows
+  the lines of `monitor status`, the state of your collection task included. `U` reads again, and so does leaving and
+  pressing `M` again. Scrolling reads nothing. A failed read shows its code only.
+* **GUI, the "Preventive monitoring" area** (key `M` or its button; `Alt+M` stays the live monitoring check box). Each
+  opening reads once. The area shows the lines of `monitor status` without the task's. With the gate open it also
+  shows the latest complete total and the change, the trend, up to 5 groups, the thresholds' state and the alerts.
+  Each command an alert names is text for you to run in a console. The live monitoring's refresh and `F5` never read
+  it. A failed read leaves the window where it is, with the code only.
+* **`agent-temp audit`.** With the gate open (no copy), at most one line under the first header, for example
+  `Preventive monitoring: 2 alert(s) (MON_TOTAL, MON_GROWTH). See agent-temp monitor status; this audit ran nothing
+  for them.` A failed read gives one line with its code, and the audit goes on. There is no line when there is no
+  alert. With the gate closed (every copy) nothing of the monitoring is read and the audit's output is unchanged. The
+  line is never part of `-ExportJson` and never changes the exit code.
 
 ## Verify (installed copy)
 

@@ -1085,7 +1085,9 @@ the mover; a static suite test checks it.
   rotation and both removal functions return `MONITORING_GATE_CLOSED` before anything else; the collector takes no
   mutex and calls no audit. Nothing is scheduled or removed: `monitor enable`, `monitor disable` and `monitor
   remove-history` refuse before they read or ask anything, and the collector's entry point exits without collecting. `monitor status` and `version` only read, the collection task's
-  state included (a task left by another copy stays visible).
+  state included (a task left by another copy stays visible). Since M5 the TUI (with the task's state) and the GUI
+  (without it) read the same status, view only, and `audit` reads nothing of the monitoring: its alert line's summary
+  checks the gate first.
 * **The history folder:** `%LOCALAPPDATA%\AgentTempManager\Monitor`, per user, pinned with the T1 log's folder policy
   (no reparse point in its chain, owned by the user, created with a protected DACL, refused otherwise). Each collection
   is one new file, written as `.partial`, flushed and renamed; an existing name is refused. A reader never creates the

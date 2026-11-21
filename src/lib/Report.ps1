@@ -79,7 +79,9 @@ function Get-AtmProfileStatusLabel {
 function Get-AtmStatusText { param([string]$Code) return (Get-AtmText "status.$Code") }
 
 function Show-AtmAudit {
-    param($Inventory, [string]$User, [string]$Project, [string]$Root)
+    # -MonitorLine (V0.5 M5): at most one line (Text and Color, Get-AtmMonitorAuditLine) right under the first header;
+    # $null (the default, and always with the monitoring's gate closed) writes nothing, so the output is unchanged.
+    param($Inventory, [string]$User, [string]$Project, [string]$Root, $MonitorLine = $null)
     Show-AtmAutoPurgeNotice
     $inv = $Inventory
     $all = @($inv.Partitions | Where-Object { $_.Kind -ne 'NotScanned' })
@@ -88,6 +90,7 @@ function Show-AtmAudit {
 
     # 1. General summary: exclusive partitions only.
     Write-AtmHeader (Get-AtmText 'audit.s1')
+    if ($null -ne $MonitorLine) { Write-Host $MonitorLine.Text -ForegroundColor $MonitorLine.Color }
     $bytes = Get-AtmSum $all 'Bytes'
     Write-Host (Get-AtmText 'audit.runBy' $inv.Identity.Name $inv.Identity.Sid (Get-AtmYesNo $inv.Identity.IsAdmin -Upper))
     Write-Host (Get-AtmText 'audit.startEnd' (Format-AtmTime $inv.StartedUtc) (Format-AtmTime $inv.FinishedUtc))
@@ -1618,6 +1621,18 @@ function Show-AtmMonitorStatus {
     param($Status, $Task = $null)
     Write-AtmHeader (Get-AtmText 'mon.header')
     foreach ($l in (Get-AtmMonitorStatusLines -Status $Status -Task $Task)) { Write-Host ('  ' + $l.Text) -ForegroundColor $l.Color }
+}
+
+function Get-AtmMonitorAuditLine {
+    # The alert line of agent-temp audit (V0.5 M5): display only, from the summary it receives (Get-AtmMonitorAuditSummary).
+    # $null summary (the gate closed) or no alert: $null, no line. A Code: one line with that code (the audit is not
+    # affected). Otherwise one line with the count, the codes and agent-temp monitor status. Never part of -ExportJson.
+    param($Summary)
+    if ($null -eq $Summary) { return $null }
+    if ($Summary.Code) { return [pscustomobject]@{ Text = (Get-AtmText 'audit.monitorFailed' ([string]$Summary.Code)); Color = 'Yellow' } }
+    $codes = @($Summary.Alerts)
+    if ($codes.Count -eq 0) { return $null }
+    return [pscustomobject]@{ Text = (Get-AtmText 'audit.monitorAlerts' $codes.Count ($codes -join ', ')); Color = 'Yellow' }
 }
 
 function Get-AtmMonitorTaskLines {

@@ -14809,7 +14809,7 @@ try {
         }
         Assert-Eq ([regex]::Matches($tui, 'Invoke-AtmDiagnose @').Count) 1 'um unico ponto que executa o diagnose'
         $keysV01 = @(Get-AtmTuiMenuItems | ForEach-Object { $_.Key }) -join ''
-        Assert-Eq $keysV01 '123456789PDILZSRHQ' '33: menu V0.1 preservado (D acrescentado; I e Z da 0.3.x; S, so ver, do V0.4 R5)'
+        Assert-Eq $keysV01 '123456789PDILZSMRHQ' '33: menu V0.1 preservado (D acrescentado; I e Z da 0.3.x; S, so ver, do V0.4 R5; M, so ver, da V0.5 M5)'
         Assert-True ($script:AtmRealDeletionEnabled -eq $true -and $shippedDeletionGate -eq $false -and $script:AtmHandleDiagnosticsEnabled -eq $false -and $script:AtmWorktreeDiagnosticsEnabled -eq $false) '34: travas distribuidas fechadas (a suite so abre a de exclusao no sandbox)'
         foreach ($l in @('en-US', 'pt-BR')) { foreach ($k in @('menu.diagnose', 'tui.diag.noAuth', 'tui.diag.failed', 'tui.diag.stale', 'foot.diagList', 'foot.diagText', 'tui.diag.finding.no', 'tui.diag.elevUnknown')) { Assert-True $script:AtmMessages[$l].ContainsKey($k) "$k ($l)" } }
     }
@@ -15390,7 +15390,9 @@ try {
         'Get-AtmAutoPurgeNoticeLines', 'Get-AtmSum', 'Format-AtmMB', 'Format-AtmGB', 'Format-AtmTime', 'Get-AtmProfileStatusLabel', 'Get-AtmStatusText', 'Get-AtmIncompleteProfileCount',
         'Get-AtmYesNo', 'Get-AtmInventoryProfileList', 'Get-AtmBaseIndex', 'Get-AtmNotAuditedBaseStates',
         'Get-AtmCodeText', 'ConvertTo-AtmExceptionCode',
-        'Get-AtmRecoverCollection', 'Get-AtmRecoverList', 'Get-AtmRecoverPlan', 'Get-AtmRecoverListLines', 'Get-AtmRecoverPlanLines')
+        'Get-AtmRecoverCollection', 'Get-AtmRecoverList', 'Get-AtmRecoverPlan', 'Get-AtmRecoverListLines', 'Get-AtmRecoverPlanLines',
+        # V0.5 M5 (ADR-0017) adds exactly one, read only: the monitoring status (no Report formatter; GuiModel builds its own).
+        'Get-AtmMonitorStatus')
     $guiAllowedCmdlets = @('Write-Host', 'New-Object', 'Add-Type', 'ConvertFrom-Json')
     # Forbidden names (ADR-0014 section 3), searched in the text, case-insensitive, comments included.
     # V0.5 M3a: the exact names of the monitoring's register and write functions (never a prefix: the GUI may never read
@@ -15398,6 +15400,9 @@ try {
     $guiForbidden = @('Invoke-AtmClean', 'Invoke-AtmIsolate', 'Invoke-AtmRestore', 'Invoke-AtmPurge', 'Invoke-AtmAutoPurgeSchedule', 'Invoke-AtmAutoPurgeUnschedule', 'Invoke-AtmDiscardAuthorization',
         'Invoke-AtmMonitorEnable', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'Invoke-AtmMonitorEntry', 'Invoke-AtmMonitorDisable', 'Unregister-AtmMonitorTask', 'Remove-AtmEmptyTaskFolder',
         'Invoke-AtmMonitorRemoveHistory', 'Remove-AtmMonitorEmptyFolder', 'Get-AtmMonitorHistoryInventory',
+        # V0.5 M5: the GUI reads the monitoring only through Get-AtmMonitorStatus (closed list); never the task's state,
+        # its lines, the history reader itself, nor any function of the collector.
+        'Get-AtmMonitorTaskState', 'Get-AtmMonitorTaskLines', 'Get-AtmMonitorHistory', 'Invoke-AtmMonitorCollection', 'Invoke-AtmMonitorRotation', 'Invoke-AtmMonitorPrune', 'Open-AtmMonitorFolder', 'Write-AtmMonitorRecordFile',
         'AtmDeleter', 'AtmLockProbe', 'DeleteTree', 'Remove-Item', 'Move-Item', '::Delete(', '.Delete(', '::Move(', 'Set-Content', 'Add-Content', 'Out-File', 'New-Item', 'Set-ItemProperty', 'Set-Acl',
         '::WriteAll', '::AppendAll', '::Create(', '::OpenWrite(', 'CreateSubKey', 'SetValue', 'Start-Process', 'Stop-Process', 'Start-Service', 'Stop-Service', 'Set-Service', 'Restart-Service',
         'Suspend-Service', 'ScheduledTask', 'schtasks', 'Invoke-CimMethod', 'Invoke-WmiMethod', 'Set-CimInstance', 'Remove-CimInstance', 'Clipboard', 'Invoke-Expression', 'sc.exe', 'net stop', 'net start',
@@ -15496,6 +15501,8 @@ try {
                 foreach ($dn in @('Invoke-AtmGuiDiagnose', 'Invoke-AtmDiagnose', 'ConvertTo-AtmDiagnoseJson')) { if ($fd.Extent.Text.IndexOf($dn, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $bad.Add("${n}: diagnose no tick: $dn") } }
                 # V0.4 R5: nor the recovery collection.
                 foreach ($dn in @('Invoke-AtmGuiRecover', 'Get-AtmRecoverCollection')) { if ($fd.Extent.Text.IndexOf($dn, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $bad.Add("${n}: coleta da recuperacao no tick: $dn") } }
+                # V0.5 M5: nor the preventive monitoring's status (read only on opening its area).
+                foreach ($dn in @('Invoke-AtmGuiPrevmon', 'Get-AtmMonitorStatus')) { if ($fd.Extent.Text.IndexOf($dn, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $bad.Add("${n}: monitoramento preventivo no tick: $dn") } }
             }
         }
         # P5: exactly one timer in the GUI files, the live monitoring's System.Windows.Forms.Timer, created in Start-AtmGui.
@@ -15993,7 +16000,7 @@ Write-Output ('GUI-D7 edition={0} ps={1} clr={2} apartment={3} environment={4} w
     }
     Test-Case 'GUI P2' 'Estatico (P2): lista fechada com exatamente os oito nomes novos; costura da fonte do inventario com uma unica atribuicao a $null; nenhum timer, nenhuma caixa de texto editavel, nenhum closure; so Label, ListView e botoes; argumentos do inventario iguais aos do lancador; chaves de estado nos dois idiomas' {
         $p2 = @('Get-AtmAutoPurgeNoticeLines', 'Get-AtmSum', 'Format-AtmMB', 'Format-AtmGB', 'Format-AtmTime', 'Get-AtmProfileStatusLabel', 'Get-AtmStatusText', 'Get-AtmIncompleteProfileCount')
-        Assert-True ($guiAllowedEngine.Count -eq 28 -and @($p2 | Where-Object { $guiAllowedEngine -ccontains $_ }).Count -eq 8) "lista: os 9 nomes da P1, os 8 da P2, os 4 da P3, os 2 da P4b e os 5 do V0.4 R5, nenhum outro ($($guiAllowedEngine -join ','))"
+        Assert-True ($guiAllowedEngine.Count -eq 29 -and @($p2 | Where-Object { $guiAllowedEngine -ccontains $_ }).Count -eq 8) "lista: os 9 nomes da P1, os 8 da P2, os 4 da P3, os 2 da P4b, os 5 do V0.4 R5 e o 1 da V0.5 M5 (Get-AtmMonitorStatus), nenhum outro ($($guiAllowedEngine -join ','))"
         Assert-Eq ($guiAllowedCmdlets -join ',') 'Write-Host,New-Object,Add-Type,ConvertFrom-Json' 'cmdlets permitidos: os tres da P1 e ConvertFrom-Json da P4b'
         $gt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1')); $mt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\GuiModel.ps1'))
         Assert-True ([regex]::Matches($gt, '\$script:AtmGuiInventorySource\s*=').Count -eq 1 -and $gt -match '(?m)^\$script:AtmGuiInventorySource = \$null\r?$') 'costura da fonte do inventario: uma unica atribuicao, a $null'
@@ -16250,7 +16257,7 @@ Write-Output ('GUI-D7 edition={0} ps={1} clr={2} apartment={3} environment={4} w
     }
     Test-Case 'GUI P3' 'Estatico (P3): lista fechada com exatamente os quatro nomes novos; Show-AtmPathDetail plantado e recusado; nenhum timer, caixa de texto editavel, closure nem botao de cancelar (Esc volta uma tela); nenhuma dica de isolamento nem do detalhamento do CLI; telas 1 a 7 e 9; nome acessivel do catalogo nos controles novos; chaves novas nos dois idiomas' {
         $p3 = @('Get-AtmYesNo', 'Get-AtmInventoryProfileList', 'Get-AtmBaseIndex', 'Get-AtmNotAuditedBaseStates')
-        Assert-True ($guiAllowedEngine.Count -eq 28 -and @($p3 | Where-Object { $guiAllowedEngine -ccontains $_ }).Count -eq 4) "lista: os 4 nomes da P3 (28 com os 2 da P4b e os 5 do V0.4 R5) ($($guiAllowedEngine -join ','))"
+        Assert-True ($guiAllowedEngine.Count -eq 29 -and @($p3 | Where-Object { $guiAllowedEngine -ccontains $_ }).Count -eq 4) "lista: os 4 nomes da P3 (29 com os 2 da P4b, os 5 do V0.4 R5 e o 1 da V0.5 M5) ($($guiAllowedEngine -join ','))"
         $gt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1')); $mt = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\GuiModel.ps1'))
         foreach ($pair in @(@('Gui.ps1', $gt), @('GuiModel.ps1', $mt))) {
             # The preview call is P4a's (its static case checks that it is the only one).
@@ -16564,7 +16571,7 @@ if ($null -eq $res.env) {
         Assert-Eq (@(& $guiP3DetailText (Get-AtmGuiScreen -Inventory $back.Inv -Screen $o2.Top -Preview @($back.Preview))) -join "`n") (@(& $guiP3DetailText (Get-AtmGuiScreen -Inventory $inv -Screen $o1.Top -Preview $script:guiP4Rows)) -join "`n") 'reimportado: detalhe do preview igual'
     }
     Test-Case 'GUI P4a' 'Estatico (P4a): nenhum nome novo na lista fechada; Invoke-AtmPreview num unico lugar de src/lib/Gui*.ps1 (Invoke-AtmGuiPreview); Test-AtmCandidate plantado e recusado; costura do preview com uma unica atribuicao a $null; telas 1 a 9 e P; tecla P no KeyDown; um fechar durante o preview espera a chamada; nenhum timer, caixa de texto editavel, closure nem botao de cancelar; aviso fixo e chaves novas nos dois idiomas' {
-        Assert-True ($guiAllowedEngine.Count -eq 28 -and $guiAllowedEngine -ccontains 'Invoke-AtmPreview') "lista: nenhum nome novo na P4a (28 com os 2 da P4b e os 5 do V0.4 R5); o preview ja estava nela ($($guiAllowedEngine -join ','))"
+        Assert-True ($guiAllowedEngine.Count -eq 29 -and $guiAllowedEngine -ccontains 'Invoke-AtmPreview') "lista: nenhum nome novo na P4a (29 com os 2 da P4b, os 5 do V0.4 R5 e o 1 da V0.5 M5); o preview ja estava nela ($($guiAllowedEngine -join ','))"
         $gp = Join-Path $srcDir 'lib\Gui.ps1'; $mp = Join-Path $srcDir 'lib\GuiModel.ps1'
         $gt = [IO.File]::ReadAllText($gp); $mt = [IO.File]::ReadAllText($mp)
         Assert-Eq ([regex]::Matches($gt + "`n" + $mt, 'Invoke-AtmPreview\b').Count) 1 'Invoke-AtmPreview aparece num unico lugar do texto'
@@ -16589,7 +16596,7 @@ if ($null -eq $res.env) {
         Assert-True (@($pv | Where-Object { $_.Contains('comando fora da lista fechada: Test-AtmCandidate') }).Count -ge 1) "plantado Test-AtmCandidate: recusado ($($pv -join ' | '))"
         Assert-Eq ((& $guiCheck @($gp, $mp)) -join ' | ') '' 'arquivos reais dentro da lista fechada'
         $items = @(Get-AtmGuiNavItemList)
-        Assert-Eq (@($items | ForEach-Object { $_.Key }) -join ',') '1,2,3,4,5,6,7,8,9,P,D,S' 'telas da GUI: 1 a 9, P, (P4b) D e (V0.4 R5, so ver) S'
+        Assert-Eq (@($items | ForEach-Object { $_.Key }) -join ',') '1,2,3,4,5,6,7,8,9,P,D,S,M' 'telas da GUI: 1 a 9, P, (P4b) D, (V0.4 R5, so ver) S e (V0.5 M5, so ver) M'
         $i8 = @($items | Where-Object { $_.Key -ceq '8' })[0]; $iP = @($items | Where-Object { $_.Key -ceq 'P' })[0]
         Assert-True ($i8.Screen.Name -ceq 'gates' -and $i8.Screen.Filter.Category -ceq 'BLOCKED' -and $iP.Screen.Name -ceq 'gates' -and $null -eq $iP.Screen.Filter.Category -and $iP.Screen.Title -ceq 'Preview') '8 e P: a tela gates da TUI com o filtro de categoria'
         foreach ($w in @("`$kn -ceq 'P'", "elseif (`$guiSession.PreviewBusy) { `$guiSession.CloseAfterPreview = `$true; `$ev.Cancel = `$true }", "if (`$guiSession.CloseAfterPreview) { `$guiSession.CloseAfterPreview = `$false; `$guiForm.Close() }", "-Name 'PreviewNotice'", "Get-AtmText 'tui.computingPreview'")) { Assert-True ($gt.Contains($w)) "Gui.ps1: $w" }
@@ -17063,7 +17070,7 @@ if ($null -eq $res.env) {
         $script:caseNote = "$n textos da area conferidos, nenhum com a identidade ou o nome da maquina"
     }
     Test-Case 'GUI P4b' 'Estatico (P4b): lista fechada com exatamente os 2 nomes novos (23) e ConvertFrom-Json como quarto cmdlet; Invoke-AtmDiagnose, ConvertTo-AtmDiagnoseJson e ConvertFrom-Json num unico lugar (Invoke-AtmGuiDiagnose); ConvertTo-AtmAgentResourcesJson, a leitura de uma tabela da TUI e ConvertFrom-Json fora do lugar plantados e recusados; costura do diagnose com uma unica atribuicao a $null; nenhum timer, caixa de texto editavel, closure, botao de cancelar, ConvertTo-Json, Out-* nem Export-*; as copias das tabelas da TUI e de Format-AtmTuiUtc iguais as da TUI; teclas D e U; chaves novas nos dois idiomas' {
-        Assert-True ($guiAllowedEngine.Count -eq 28 -and $guiAllowedEngine[21] -ceq 'Get-AtmCodeText' -and $guiAllowedEngine[22] -ceq 'ConvertTo-AtmExceptionCode') "lista: 28 nomes, os 2 da P4b nas posicoes 22 e 23, antes dos 5 do V0.4 R5 ($($guiAllowedEngine -join ','))"
+        Assert-True ($guiAllowedEngine.Count -eq 29 -and $guiAllowedEngine[21] -ceq 'Get-AtmCodeText' -and $guiAllowedEngine[22] -ceq 'ConvertTo-AtmExceptionCode') "lista: 29 nomes, os 2 da P4b nas posicoes 22 e 23, antes dos 5 do V0.4 R5 e do 1 da V0.5 M5 ($($guiAllowedEngine -join ','))"
         Assert-Eq ($guiAllowedCmdlets -join ',') 'Write-Host,New-Object,Add-Type,ConvertFrom-Json' 'cmdlets: o quarto e ConvertFrom-Json'
         $gp = Join-Path $srcDir 'lib\Gui.ps1'; $mp = Join-Path $srcDir 'lib\GuiModel.ps1'
         $gt = [IO.File]::ReadAllText($gp); $mt = [IO.File]::ReadAllText($mp)
@@ -17598,7 +17605,7 @@ if ($null -eq $res.env) {
         $script:caseNote = "memoria: antes $(& $mb $m0) MB, depois do 1o audit $(& $mb $m1) MB, depois do 20o $(& $mb $m20) MB; crescimento $(& $mb $grow) MB (limite $(& $mb $limit) MB); o primeiro inventario coletado"
     }
     Test-Case 'GUI P5' 'Estatico (P5): nenhum nome novo na lista fechada (23) nem cmdlet novo; exatamente um System.Windows.Forms.Timer, criado em Start-AtmGui, e a palavra timer em nenhum outro lugar dos dois arquivos; costura do relogio com uma unica atribuicao a $null; a funcao do tick sem nenhum nome do diagnose e com o audit do F5; o intervalo DropDownList, nenhuma caixa de texto editavel; plantados e recusados: um segundo Forms.Timer, System.Timers.Timer, System.Threading.Timer, um tipo de timer, Register-ObjectEvent, Start-Job, Start-ThreadJob, [runspacefactory] e o diagnose dentro do tick; tecla de acesso M sem colisao; chaves novas nos dois idiomas' {
-        Assert-True ($guiAllowedEngine.Count -eq 28) "lista: 28 nomes, nenhum novo na P5 (os 5 do V0.4 R5 vieram depois) ($($guiAllowedEngine -join ','))"
+        Assert-True ($guiAllowedEngine.Count -eq 29 -and $guiAllowedEngine[28] -ceq 'Get-AtmMonitorStatus') "lista: 29 nomes, nenhum novo na P5 (os 5 do V0.4 R5 e o 1 da V0.5 M5 vieram depois) ($($guiAllowedEngine -join ','))"
         Assert-Eq ($guiAllowedCmdlets -join ',') 'Write-Host,New-Object,Add-Type,ConvertFrom-Json' 'cmdlets: nenhum novo'
         $gp = Join-Path $srcDir 'lib\Gui.ps1'; $mp = Join-Path $srcDir 'lib\GuiModel.ps1'
         $gt = [IO.File]::ReadAllText($gp); $mt = [IO.File]::ReadAllText($mp)
@@ -17643,7 +17650,12 @@ if ($null -eq $res.env) {
             Assert-True ($cat['gui.state.STALE_SLOW'].Contains('{0}') -and $cat['gui.state.STALE_SLOW'].Contains('{1}') -and $cat['gui.state.STALE_OLD'].Contains('{0}') -and $cat['gui.monitor.on'].Contains('{0}') -and $cat['gui.monitor.on'].Contains('{1}') -and $cat['gui.monitor.onBackoff'].Contains('{1}') -and $cat['gui.state.STALE_SLOW'].StartsWith($cat['gui.state.STALE'].Substring(0, 5))) "${lang}: as marcas de cada texto"
             $letters = New-Object System.Collections.Generic.List[string]
             foreach ($t in @($cat['gui.refresh'], $cat['gui.close'], $cat['gui.diagRefresh'], $cat['gui.monitor.check'], $cat['gui.monitor.intervalLabel'])) { $mm = [regex]::Match([string]$t, '&(\w)'); Assert-True $mm.Success "${lang}: tecla de acesso em '$t'"; $letters.Add($mm.Groups[1].Value.ToUpperInvariant()) }
-            foreach ($it in @(Get-AtmGuiNavItemList)) { $letters.Add(([string]$it.Key).ToUpperInvariant()) }
+            # V0.5 M5: the access keys of the screen buttons as the window writes them; the monitoring area's button has
+            # none (its key M, without Alt, is a screen key of the form; Alt+M stays the check box's).
+            foreach ($it in @(Get-AtmGuiNavItemList)) {
+                if ([string]$it.Key -ceq 'M') { Assert-True ([string]$cat['gui.prevmon.button'] -notmatch '&') "${lang}: o botao M sem tecla de acesso (Alt+M e da caixa)"; continue }
+                $mm = [regex]::Match(([string]$cat['gui.screenButton']).Replace('{0}', [string]$it.Key), '&(\w)'); Assert-True $mm.Success "${lang}: tecla de acesso do botao $($it.Key)"; $letters.Add($mm.Groups[1].Value.ToUpperInvariant())
+            }
             Assert-Eq ([regex]::Match($cat['gui.monitor.check'], '&(\w)').Groups[1].Value.ToUpperInvariant()) 'M' "${lang}: a caixa do monitoramento tem a tecla M"
             Assert-Eq @($letters.ToArray() | Sort-Object -Unique).Count $letters.Count "${lang}: nenhuma tecla de acesso repetida ($($letters.ToArray() -join ','))"
             Assert-True ($cat['gui.monitor.on'].Contains($(if ($lang -ceq 'pt-BR') { 'diagn' } else { 'diagnose' }))) "${lang}: a linha de status diz que o diagnose nunca roda sozinho"
@@ -17927,7 +17939,9 @@ if ($null -eq $res.env) {
         & $add 'hora do audit' (Get-AtmGuiDashboard -Inventory $Inv).AuditTime
         & $add 'hora sem audit' (Get-AtmGuiDashboard -Inventory $null).AuditTime
         foreach ($db in @((Get-AtmGuiDashboard -Inventory $Inv), (Get-AtmGuiDashboard -Inventory $null))) { foreach ($g in @($db.Groups)) { & $add 'resumo' $g.Title; foreach ($i in @($g.Items)) { & $add ('resumo ' + $i.Id) $i.Text } } }
-        foreach ($m in @(Get-AtmGuiNavItemList)) { & $add ('botao ' + $m.Key) (Get-AtmText 'gui.screenButton' $m.Key $m.Label) }
+        foreach ($m in @(Get-AtmGuiNavItemList)) { & $add ('botao ' + $m.Key) $(if ($m.Key -ceq 'M') { Get-AtmText 'gui.prevmon.button' } else { Get-AtmText 'gui.screenButton' $m.Key $m.Label }) }
+        # V0.5 M5: the monitoring area's progress text and its view-only line (its other lines: the M5 area checks them).
+        foreach ($k in @('gui.prevmon.running', 'gui.prevmon.viewOnly')) { & $add $k (Get-AtmText $k) }
         foreach ($s in @(Get-AtmGuiMonitorIntervals)) { & $add 'intervalo' (Format-AtmGuiInterval -Seconds $s) }
         $d = New-AtmGuiDiagState -View $Views['parcial']
         $scrs = New-Object System.Collections.Generic.List[object]
@@ -18002,7 +18016,7 @@ if ($null -eq $res.env) {
         $script:caseNote = "$n textos conferidos nos dois idiomas"
     }
     Test-Case 'GUI P6' 'Estatico (P6): nenhum nome novo na lista fechada (23) nem cmdlet novo; os arquivos reais sem cor fixa nem texto visivel literal; toda largura de coluna e de lista pela funcao de escala; AutoScaleMode Dpi; o Enter de um botao focado aperta o botao; plantados e recusados: Color com nome, FromArgb, ForeColor e BackColor fora de SystemColors, Text, AccessibleName, rotulo e coluna com texto literal; aceitos: SystemColors e texto vazio' {
-        Assert-True ($guiAllowedEngine.Count -eq 28) "lista: 28 nomes, nenhum novo na P6 (os 5 do V0.4 R5 vieram depois) ($($guiAllowedEngine -join ','))"
+        Assert-True ($guiAllowedEngine.Count -eq 29 -and $guiAllowedEngine[28] -ceq 'Get-AtmMonitorStatus') "lista: 29 nomes, nenhum novo na P6 (os 5 do V0.4 R5 e o 1 da V0.5 M5 vieram depois) ($($guiAllowedEngine -join ','))"
         Assert-Eq ($guiAllowedCmdlets -join ',') 'Write-Host,New-Object,Add-Type,ConvertFrom-Json' 'cmdlets: nenhum novo'
         $gp = Join-Path $srcDir 'lib\Gui.ps1'; $mp = Join-Path $srcDir 'lib\GuiModel.ps1'
         $gt = [IO.File]::ReadAllText($gp); $mt = [IO.File]::ReadAllText($mp)
@@ -18210,7 +18224,8 @@ if ($null -eq $res.env) {
 }
 ($res | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $Out -Encoding UTF8
 '@, (New-Object Text.UTF8Encoding $true))
-        $wantSeq = 'Monitor,MonitorInterval,Screen1,Screen2,Screen3,Screen4,Screen5,Screen6,Screen7,Screen8,Screen9,ScreenP,ScreenD,ScreenS,Summary,Classes,Refresh,Close'
+        # V0.5 M5: the monitoring area's button (ScreenM) right after ScreenS.
+        $wantSeq = 'Monitor,MonitorInterval,Screen1,Screen2,Screen3,Screen4,Screen5,Screen6,Screen7,Screen8,Screen9,ScreenP,ScreenD,ScreenS,ScreenM,Summary,Classes,Refresh,Close'
         $notes = New-Object System.Collections.Generic.List[string]
         foreach ($lang in @('en-US', 'pt-BR')) {
             $other = $(if ($lang -ceq 'en-US') { 'pt-BR' } else { 'en-US' })
@@ -21573,13 +21588,17 @@ exit 0
         # task's state, its reading, its comparison, its name and its interval.
         foreach ($fn in @('Get-AtmMonitorHistory', 'Get-AtmMonitorStatus', 'Get-AtmMonitorNewestName', 'Test-AtmMonitorRecordText', 'Get-AtmMonitorFolder', 'Get-AtmMonitorConfig', 'Get-AtmMonitorConfigFile', 'Get-AtmMonitorConfigValues',
                 'Get-AtmMonitorRecordBytes', 'Get-AtmMonitorGroupKey', 'Get-AtmMonitorSlope', 'Get-AtmMonitorEntryNames', 'Get-AtmMonitorTrends', 'Get-AtmMonitorAlerts',
-                'Get-AtmMonitorTaskState', 'Get-AtmMonitorTaskObject', 'Test-AtmMonitorTaskMatch', 'Get-AtmMonitorTaskName', 'Get-AtmMonitorTaskInterval', 'Get-AtmMonitorHistoryInventory')) {
+                'Get-AtmMonitorTaskState', 'Get-AtmMonitorTaskObject', 'Test-AtmMonitorTaskMatch', 'Get-AtmMonitorTaskName', 'Get-AtmMonitorTaskInterval', 'Get-AtmMonitorHistoryInventory',
+                'Get-AtmMonitorAuditSummary')) {
             $t = $defs[$fn].Extent.Text
             foreach ($pat in @('CreateNew', '::Pin(', 'File]::Move', 'Mutex', '::Delete(', 'WriteAll', 'CreateDirectory', 'Invoke-AtmMonitor', 'Open-AtmMonitorFolder', 'Write-AtmMonitorRecordFile', 'RegisterTaskDefinition', 'CreateFolder', 'NewTask', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition')) { Assert-True (-not $t.Contains($pat)) "leitor $fn sem '$pat'" }
         }
         Assert-True (-not $defs['Get-AtmMonitorTaskState'].Extent.Text.Contains('if (-not $script:AtmMonitoringEnabled)')) 'o estado da tarefa nao depende da trava (um residuo fica visivel)'
         Assert-True (-not $defs['Get-AtmMonitorHistory'].Extent.Text.Contains('AtmMonitoringEnabled')) 'o leitor nao depende da trava'
-        # The launcher: the engine in monitor and version only, once each; no collection, no seam.
+        # V0.5 M5: the audit line's reader checks the gate first, so with it closed nothing of the monitoring is read.
+        Assert-Eq (@($defs['Get-AtmMonitorAuditSummary'].Body.EndBlock.Statements)[0].Extent.Text) 'if (-not $script:AtmMonitoringEnabled) { return $null }' 'linha da auditoria: a trava e a primeira instrucao (V0.5 M5)'
+        # The launcher: the engine in monitor and version, and since V0.5 M5 in audit (the alert line, read only, gate
+        # first) and in the TUI and GUI launch (the read-only monitoring screens), once each; no collection, no seam.
         $launcher = @($all | Where-Object { $_.Rel -ceq 'agent-temp.ps1' })[0].Text
         $loadLine = ". (Join-Path `$here 'lib\Engine.Monitor.ps1')"
         $lBlock = $null; $lHits = New-Object System.Collections.Generic.List[string]
@@ -21587,7 +21606,7 @@ exit 0
             if ($ln -cmatch "^        '([a-z-]+)' \{\s*$") { $lBlock = $Matches[1] }
             if ($ln.Contains($loadLine)) { $lHits.Add([string]$lBlock) }
         }
-        Assert-Eq (@($lHits | Sort-Object) -join ',') 'monitor,version' "motor carregado so em monitor e version, uma vez cada ($($lHits -join ','))"
+        Assert-Eq (@($lHits | Sort-Object) -join ',') 'audit,gui,monitor,tui,version' "motor carregado so em audit (linha de alertas, V0.5 M5), gui e tui (telas de leitura, V0.5 M5), monitor e version, uma vez cada ($($lHits -join ','))"
         # V0.5 M3a: exactly one third loader, the collector's entry point (once); no other file of src loads the engine.
         $loaders = @($all | Where-Object { $_.Text.Contains($loadLine) } | ForEach-Object { $_.Rel } | Sort-Object)
         Assert-Eq ($loaders -join ',') 'agent-temp.ps1,bin\agent-temp-monitor.ps1' "motor carregado so pelo lancador e pelo ponto de entrada do coletor ($($loaders -join ','))"
@@ -21597,8 +21616,13 @@ exit 0
         foreach ($pat in @('Invoke-AtmMonitorCollection', 'Invoke-AtmMonitorRotation', 'Invoke-AtmMonitorPrune', 'Open-AtmMonitorFolder', 'Write-AtmMonitorRecordFile')) {
             foreach ($f in $all) { if ($f.Rel -cne 'lib\Engine.Monitor.ps1') { Assert-True (-not $f.Text.Contains($pat)) "$($f.Rel) nao chama $pat" } }
         }
+        # V0.5 M5: the TUI and the GUI read the monitoring through exact names only (the GUI the status, the TUI also the
+        # shared formatter and the task's state); none of them loads the engine (the launcher does), and no engine does.
+        $monTuiGuiAllowed = @{ 'lib\Tui.ps1' = @('Get-AtmMonitorStatusLines', 'Get-AtmMonitorTaskState', 'Get-AtmMonitorStatus'); 'lib\Gui.ps1' = @('Get-AtmMonitorStatus'); 'lib\GuiModel.ps1' = @() }
         foreach ($f in @($all | Where-Object { @('lib\Engine.Audit.ps1', 'lib\Engine.Clean.ps1', 'lib\Engine.Isolate.ps1', 'lib\Engine.Diagnose.ps1', 'lib\Engine.Recover.ps1', 'lib\Tui.ps1', 'lib\Gui.ps1', 'lib\GuiModel.ps1') -ccontains $_.Rel })) {
-            Assert-True (-not $f.Text.Contains('Engine.Monitor') -and -not $f.Text.Contains('AtmMonitor')) "$($f.Rel) nao carrega nem le o monitoramento"
+            $ft = $f.Text
+            if ($monTuiGuiAllowed.ContainsKey($f.Rel)) { foreach ($okName in $monTuiGuiAllowed[$f.Rel]) { $ft = $ft.Replace($okName, '') } }
+            Assert-True (-not $ft.Contains('Engine.Monitor') -and -not $ft.Contains('AtmMonitor')) "$($f.Rel) nao carrega o monitoramento e so o le pelos nomes exatos permitidos (V0.5 M5)"
         }
         $rep = @($all | Where-Object { $_.Rel -ceq 'lib\Report.ps1' })[0].Text
         $repFn = $rep.Substring($rep.IndexOf('function Get-AtmMonitorStatusLines'))
@@ -22134,8 +22158,15 @@ exit 0
             foreach ($pat in @('Get-AtmMonitorConfig', 'Get-AtmMonitorTrends', 'Get-AtmMonitorAlerts', 'AtmMonitorConfigName', 'AtmMonitorAlertCommands')) { Assert-True (-not $f.Text.Contains($pat)) "$($f.Rel) sem $pat" }
             if ($f.Rel -cne 'lib\I18n.ps1') { Assert-True (-not $f.Text.Contains('monitor.json')) "$($f.Rel) nao cita monitor.json" }
         }
+        # V0.5 M5: the TUI and the GUI read the monitoring by exact names only (the M1 static lists them); the GUI's model
+        # writes the alerts and the trends with the catalog's keys (mon.alert.*, mon.trend*), the TUI and the GUI window
+        # never do (the TUI uses the shared formatter); no file names a code or the thresholds file.
+        $monM2Allowed = @{ 'lib\Tui.ps1' = @('Get-AtmMonitorStatusLines', 'Get-AtmMonitorTaskState', 'Get-AtmMonitorStatus'); 'lib\Gui.ps1' = @('Get-AtmMonitorStatus'); 'lib\GuiModel.ps1' = @() }
         foreach ($f in @($all | Where-Object { @('lib\Tui.ps1', 'lib\Gui.ps1', 'lib\GuiModel.ps1') -ccontains $_.Rel })) {
-            foreach ($pat in @('AtmMonitor', 'mon.alert', 'mon.trend', 'MON_TOTAL', 'monitor.json')) { Assert-True (-not $f.Text.Contains($pat)) "$($f.Rel) sem a M2 ($pat)" }
+            $ft = $f.Text
+            foreach ($okName in $monM2Allowed[$f.Rel]) { $ft = $ft.Replace($okName, '') }
+            $m2Pats = @('AtmMonitor', 'MON_TOTAL', 'monitor.json'); if ($f.Rel -cne 'lib\GuiModel.ps1') { $m2Pats += @('mon.alert', 'mon.trend') }
+            foreach ($pat in $m2Pats) { Assert-True (-not $ft.Contains($pat)) "$($f.Rel) sem a M2 ($pat)" }
         }
         # monitor.json: the name once in the code; read by the config reader, accepted (never removed) by the rotation and
         # the history reader; not a record name, so neither the writer nor the removal accepts it.
@@ -22669,7 +22700,7 @@ exit 0
         Assert-Eq (& $uniq 'New-AtmMonitorTaskDefinition') 'Engine.Monitor.ps1:Register-AtmMonitorTask' 'a definicao so pelo registro'
         Assert-Eq (& $uniq 'Invoke-AtmMonitorEnable') 'agent-temp.ps1:script' 'o enable so pela CLI'
         Assert-Eq (& $uniq 'Invoke-AtmMonitorEntry') 'agent-temp-monitor.ps1:script' 'a execucao do coletor so pelo ponto de entrada'
-        Assert-Eq (& $uniq 'Get-AtmMonitorTaskState') 'agent-temp.ps1:script,Engine.Monitor.ps1:Invoke-AtmMonitorDisable,Engine.Monitor.ps1:Invoke-AtmMonitorEnable,Engine.Monitor.ps1:Invoke-AtmMonitorRemoveHistory' 'o estado: version, monitor status, o enable, o disable (V0.5 M4a) e o remove-history (V0.5 M4b)'
+        Assert-Eq (& $uniq 'Get-AtmMonitorTaskState') 'agent-temp.ps1:script,Engine.Monitor.ps1:Invoke-AtmMonitorDisable,Engine.Monitor.ps1:Invoke-AtmMonitorEnable,Engine.Monitor.ps1:Invoke-AtmMonitorRemoveHistory,Tui.ps1:Start-AtmTui' 'o estado: version, monitor status, o enable, o disable (V0.5 M4a), o remove-history (V0.5 M4b) e o leitor padrao da tela M da TUI (V0.5 M5, so leitura)'
         Assert-Eq (& $uniq 'Invoke-AtmMonitorRemoveHistory') 'agent-temp.ps1:script' 'o remove-history so pela CLI (V0.5 M4b)'
         Assert-Eq (& $uniq 'Remove-AtmMonitorEmptyFolder') 'Engine.Monitor.ps1:Invoke-AtmMonitorRemoveHistory' 'a pasta vazia do historico so pelo remove-history (V0.5 M4b)'
         Assert-Eq (& $uniq 'Get-AtmMonitorHistoryInventory') 'Engine.Monitor.ps1:Invoke-AtmMonitorRemoveHistory' 'o inventario so pelo remove-history (V0.5 M4b)'
@@ -22773,9 +22804,11 @@ exit 0
         Assert-True ($epText.Contains($rule) -and $cli.Contains($rule)) 'a regra das entradas do manifesto igual a do lancador'
         Assert-True ((& $strip (Get-ApFnBody $monFile 'Invoke-AtmMonitorEntry')).IndexOf('Initialize-AtmNative') -gt (& $strip (Get-ApFnBody $monFile 'Invoke-AtmMonitorEntry')).IndexOf('if (-not $script:AtmMonitoringEnabled)')) 'tipos nativos so depois da trava'
         Assert-True ($script:AtmRequiredFiles -contains 'bin\agent-temp-monitor.ps1') 'instalador exige o ponto de entrada'
-        # GUI and TUI: no new function; the GUI's forbidden list has the exact names (never a prefix).
+        # GUI and TUI: no new function; the GUI's forbidden list has the exact names (never a prefix). V0.5 M5: the TUI's
+        # monitoring screen alone may read the task's state (read only, shown with the shared formatter); the GUI never.
         foreach ($n in @('lib\Tui.ps1', 'lib\Gui.ps1', 'lib\GuiModel.ps1')) {
             $t = [IO.File]::ReadAllText((Join-Path $srcDir $n))
+            if ($n -ceq 'lib\Tui.ps1') { $t = $t.Replace('Get-AtmMonitorTaskState', '') }
             foreach ($fn in @('Invoke-AtmMonitorEnable', 'Register-AtmMonitorTask', 'New-AtmMonitorTaskDefinition', 'Invoke-AtmMonitorEntry', 'Get-AtmMonitorTaskState', 'Get-AtmMonitorTaskLines', 'Show-AtmMonitorEnablePlan', 'Show-AtmMonitorEnableResult', 'Invoke-AtmMonitorDisable', 'Unregister-AtmMonitorTask', 'Remove-AtmEmptyTaskFolder', 'Show-AtmMonitorDisablePlan', 'Show-AtmMonitorDisableResult', 'Get-AtmTaskFolderLine',
                     'Invoke-AtmMonitorRemoveHistory', 'Remove-AtmMonitorEmptyFolder', 'Get-AtmMonitorHistoryInventory', 'Invoke-AtmMonitorPrune', 'Show-AtmMonitorRemoveHistoryPlan', 'Show-AtmMonitorRemoveHistoryResult', 'Get-AtmMonitorHistoryFolderLine')) { Assert-True (-not $t.Contains($fn)) "$n sem $fn" }
         }
@@ -23718,7 +23751,7 @@ $got = $m.WaitOne(0)
         Assert-True ((Get-ApFnBody $monFile 'Invoke-AtmMonitorRemoveHistory') -cmatch "Operation = 'remove-history'; Aborted = \`$null; Plan = \`$null; Done = \`$false; Removed = 0; Problems = 0; ConfigKept = \`$false; Folder = \`$null \}" -and -not [regex]::IsMatch($rh, '\$st\.(Names|Files|Items)\b') -and -not $rh.Contains('$st.Plan = $inv')) 'o resultado so com contagens: nenhum nome de arquivo'
         Assert-True ((Get-ApFnBody $monFile 'Invoke-AtmMonitorRemoveHistory').Contains("`$script:AtmMonitorRemoveHistoryPhrase") -and ([IO.File]::ReadAllText($monFile) -match "(?m)^\`$script:AtmMonitorRemoveHistoryPhrase = 'REMOVER HISTORICO DO MONITORAMENTO'\r?$")) 'a frase fixa no codigo'
         $self = [IO.File]::ReadAllText((Join-Path $testsDir 'Run-Tests.ps1'))
-        $a0 = $self.IndexOf('-----' + ' V0.5 M4b ('); $a1 = $self.IndexOf("`n" + '} fin' + 'ally {', $a0)
+        $a0 = $self.IndexOf('-----' + ' V0.5 M4b ('); $a1 = $self.IndexOf('-----' + ' V0.5 M5 (', $a0)
         Assert-True ($a0 -gt 0 -and $a1 -gt $a0) 'area V0.5 M4b encontrada'
         $area = $self.Substring($a0, $a1 - $a0)
         Assert-True (-not $area.Contains('GITHUB_' + 'ACTIONS') -and -not $area.Contains('Start-' + 'Sleep') -and -not $area.Contains('m3RealSvc' + '.')) 'area sem caso so de CI, sem espera real e sem o agendador real'
@@ -23741,6 +23774,387 @@ $got = $m.WaitOne(0)
         $notice = @($selfAst.FindAll({ param($x) $x -is [Management.Automation.Language.CommandAst] -and [string]$x.GetCommandName() -ceq ('Get-AtmUninstall' + 'MonitorNotice') }, $true))
         Assert-True ($notice.Count -ge 5 -and @($notice | Where-Object { -not ($_.Extent.Text.Contains('-TaskLister') -and $_.Extent.Text.Contains('-FolderProbe')) }).Count -eq 0) "o aviso do desinstalador so com as duas costuras na suite ($($notice.Count))"
         Assert-Eq (Get-AtmPathPresence $monRealFolder) $monRealBefore 'a pasta real do historico deste usuario como estava no inicio da suite'
+    }
+
+    # ------------------------------------------------------------------ V0.5 M5 (preventive monitoring: the presentation in the TUI, the GUI and the audit line, read only, gate closed, ADR-0017)
+    # The statuses come from history folders of the sandbox planted by the case (M2's helpers) and read through the folder
+    # seam; the gate is opened only around a status or summary call (Get-MonStatusOpen, Get-M5SummaryOpen) and closed
+    # again. The TUI receives them through its two readers, the GUI through its seam ($script:AtmGuiPrevmonSource). No
+    # case opens a gate in a file, writes outside the sandbox, removes, schedules or runs anything; none uses the real folder.
+    $m5Key = { param([string]$Key, [char]$Char = [char]0) New-Object ConsoleKeyInfo($Char, [ConsoleKey]$Key, $false, $false, $false) }
+    $m5Sq = { param($Text) ConvertTo-AtmAscii (([string]$Text) -replace '\s', '') }
+    $m5Prof = New-TestProfile 'm5view'; $null = New-TestRoot -ProfileInfo $m5Prof
+    $m5Ia = Get-InvArgs -Profiles @($m5Prof)
+    $m5Inv = Invoke-AtmInventory @m5Ia
+    $script:m5Task = [pscustomobject]@{ State = 'ABSENT'; GateOpen = $false }
+    $m5Six = 'MON_TOTAL,MON_GROWTH,MON_ORPHAN_SUSPECTED,MON_LIVENESS_UNKNOWN,MON_COLLECTION,MON_CONFIG_INVALID'
+    function Get-M5SummaryOpen {
+        # The audit line's summary with the gate open in this process only.
+        $script:AtmMonitoringEnabled = $true
+        try { return (Get-AtmMonitorAuditSummary) } finally { $script:AtmMonitoringEnabled = $false }
+    }
+    function Set-M5SixAlerts {
+        # The history of the M2 case that raises the six alerts, in a new folder of the sandbox (the folder seam).
+        $f = New-MonHist
+        [void](Write-MonAt -Folder $f -Hours (-96) -Kind 'INCOMPLETE'); [void](Write-MonAt -Folder $f -Hours (-72) -Kind 'FAILED'); [void](Write-MonAt -Folder $f -Hours (-48) -Kind 'COVERAGE')
+        for ($k = 0; $k -le 4; $k++) { [void](Write-MonAt -Folder $f -Hours (-40 + 10 * $k) -Parts @((New-MonPart -Project 'o' -Class 'ORPHAN_SUSPECTED' -Bytes (6GB + 1GB * $k)), (New-MonPart -Project 'l' -Class 'LIVENESS_UNKNOWN' -Bytes (6GB + 1GB * $k)), (New-MonPart -Project 'r' -Bytes (10GB + 1GB * $k)))) }
+        for ($k = 0; $k -le 2; $k++) { [void](Write-MonAt -Folder $f -Hours (1 + $k) -Kind 'INCOMPLETE') }
+        Write-MonConfig -Folder $f -Text '{"totalGiB":20,"windowDays":7}'
+        return $f
+    }
+    function Get-M5Variants {
+        # Each variant: @(label, status with the gate closed, status with the gate open in memory): no folder, an empty
+        # one, only a .partial, a corrupt record, CLOCK_SKEW, a refused monitor.json (MON_CONFIG_INVALID) and six alerts.
+        $out = New-Object System.Collections.Generic.List[object]
+        $script:monN++
+        $script:AtmMonitorFolderPath = Join-Path $sandbox ('m5-none-' + $script:monN + '\AgentTempManager\Monitor')
+        $out.Add(@('sem pasta', (Get-AtmMonitorStatus), (Get-MonStatusOpen)))
+        $null = New-MonHist
+        $out.Add(@('vazia', (Get-AtmMonitorStatus), (Get-MonStatusOpen)))
+        $f = New-MonHist; Write-MonPlanted $f ((Get-MonName ($monT0.AddHours(-1)) 'c0000001') + '.partial') 5
+        $out.Add(@('so .partial', (Get-AtmMonitorStatus), (Get-MonStatusOpen)))
+        $f = New-MonHist; [void](Write-MonAt -Folder $f -Hours (-2)); Write-MonPlanted $f (Get-MonName ($monT0.AddHours(-1)) 'c0000002') 7
+        $out.Add(@('corrompido', (Get-AtmMonitorStatus), (Get-MonStatusOpen)))
+        $f = New-MonHist; $n2 = Write-MonAt -Folder $f -Hours 0; [void](Write-MonAt -Folder $f -Hours (-10) -Previous $n2)
+        $out.Add(@('CLOCK_SKEW', (Get-AtmMonitorStatus), (Get-MonStatusOpen)))
+        $f = New-MonHist; [void](Write-MonAt -Folder $f -Hours (-2)); Write-MonConfig -Folder $f -Text '{"growthGiBPerDay":3,"extra":1}'
+        $out.Add(@('monitor.json recusado', (Get-AtmMonitorStatus), (Get-MonStatusOpen)))
+        $null = Set-M5SixAlerts
+        $out.Add(@('seis alertas', (Get-AtmMonitorStatus), (Get-MonStatusOpen)))
+        return , $out.ToArray()
+    }
+    # One headless TUI run: the keys and the monitoring readers (the inventory given: no audit runs).
+    $m5Tui = { param([object[]]$Keys, [scriptblock]$StatusReader, [scriptblock]$TaskReader, [int]$W = 160, [int]$H = 70)
+        $script:m5Keys = New-Object System.Collections.Generic.Queue[object]; foreach ($k in $Keys) { $script:m5Keys.Enqueue($k) }
+        $script:m5Frames = New-Object System.Collections.Generic.List[string]; $script:m5Prompts = New-Object System.Collections.Generic.List[string]
+        $ks = { if ($script:m5Keys.Count -gt 0) { $script:m5Keys.Dequeue() } else { $null } }
+        $lr = { param($p, $shown) $null = $shown; $script:m5Prompts.Add([string]$p); '' }
+        $rd = { param($frame) $script:m5Frames.Add((($frame | ForEach-Object { ($_ | ForEach-Object { $_.Text }) -join '' }) -join "`n")) }
+        $ta = @{ InventoryArgs = $m5Ia; Inventory = $m5Inv; KeySource = $ks; Renderer = $rd; LineReader = $lr; Width = $W; Height = $H; MonitorStatusReader = $StatusReader; MonitorTaskReader = $TaskReader }
+        $st = Start-AtmTui @ta
+        [pscustomobject]@{ State = $st; Frames = $script:m5Frames.ToArray(); Prompts = $script:m5Prompts.ToArray() } }
+    # The lines Show-AtmAudit writes (the host stream), as text.
+    $m5Audit = { param($Line, [switch]$NoLine)
+        if ($NoLine) { return @(& { Show-AtmAudit -Inventory $m5Inv } 6>&1 | ForEach-Object { [string]$_ }) }
+        return @(& { Show-AtmAudit -Inventory $m5Inv -MonitorLine $Line } 6>&1 | ForEach-Object { [string]$_ }) }
+
+    Test-Case 'V0.5 M5' 'M5: modelos da TUI e da GUI (sem janela, en-US e pt-BR) - sem pasta, vazia, so .partial, corrompido, CLOCK_SKEW, monitor.json recusado (MON_CONFIG_INVALID) e seis alertas, trava fechada e aberta (so em memoria): a GUI mostra as linhas do monitor status sem as da tarefa, mais a linha so-ver; a TUI as do monitor status com a tarefa; trava fechada: o aviso e o historico como esta, nenhum alerta; nenhum caminho real; textos do catalogo do idioma' {
+        $old = Get-AtmLanguage
+        try {
+            foreach ($pair in @(@('en-US', 'pt-BR'), @('pt-BR', 'en-US'))) {
+                $lang = $pair[0]
+                Set-AtmLanguage -Requested $lang
+                $cat = & $guiP6Catalog $pair[0] $pair[1]
+                $vars = Get-M5Variants
+                Assert-Eq $vars.Count 7 "$($lang): sete variantes"
+                foreach ($v in $vars) {
+                    foreach ($gate in @(@('fechada', $v[1]), @('aberta', $v[2]))) {
+                        $st = $gate[1]; $lbl = "$($lang) $($v[0]), trava $($gate[0])"
+                        Assert-Eq ([bool]$st.GateOpen) ($gate[0] -ceq 'aberta') "${lbl}: GateOpen do status"
+                        $gl = @(Get-AtmGuiPrevmonLines -Status $st)
+                        $cl = @(@(Get-AtmMonitorStatusLines -Status $st -Task $null | ForEach-Object { $_.Text }) + @((Get-AtmText 'gui.prevmon.viewOnly')))
+                        Assert-Eq ($gl -join "`n") ($cl -join "`n") "${lbl}: GUI = linhas do monitor status sem a tarefa + a linha so-ver"
+                        $vm = Get-AtmGuiScreen -Inventory $null -Screen @{ Name = 'prevmon'; Title = (Get-AtmText 'menu.monitorTitle'); Filter = @{ M = @{ Status = $st; Error = $null } }; Sel = 0 }
+                        Assert-True ($vm.Kind -ceq 'lines' -and (@($vm.Lines) -join "`n") -ceq ($gl -join "`n") -and (@($vm.Columns) -join '|') -ceq (Get-AtmText 'gui.col.line') -and $null -eq $vm.Note) "${lbl}: tela prevmon da GUI com essas linhas"
+                        $tl = @(Get-AtmTuiTextLines -State @{ Inventory = $null } -Screen @{ Name = 'monitor'; Filter = @{ Status = $st; Task = $script:m5Task; Error = $null } } -Width 400 | ForEach-Object { $_.Text.Trim() } | Where-Object { $_ -ne '' })
+                        $te = @(@((Get-AtmText 'tui.mon.viewOnly')) + @(Get-AtmMonitorStatusLines -Status $st -Task $script:m5Task | ForEach-Object { $_.Text.Trim() }))
+                        Assert-Eq ($tl -join "`n") ($te -join "`n") "${lbl}: TUI = so-ver + linhas do monitor status com a tarefa"
+                        Assert-True ($tl -ccontains (Get-AtmText 'mon.task.absent') -and $gl -cnotcontains (Get-AtmText 'mon.task.absent')) "${lbl}: a tarefa so na TUI"
+                        $lad = [Environment]::GetFolderPath('LocalApplicationData')
+                        Assert-True (-not (($gl + $tl) -join ' ').Contains($sandbox) -and -not (($gl + $tl) -join ' ').Contains($lad)) "${lbl}: nenhum caminho real (a pasta so pela forma de ambiente)"
+                        if (-not $st.GateOpen) {
+                            Assert-True ($gl[0] -ceq (Get-AtmText 'mon.gateClosed') -and $gl -ccontains (Get-AtmText 'mon.optIn') -and @(@($st.Alerts) | Where-Object { $null -ne $_ }).Count -eq 0) "${lbl}: nao disponivel nesta versao, sem alerta"
+                            Assert-True ($gl -cnotcontains (Get-AtmText 'mon.alertsNone') -and $gl -cnotcontains (Get-AtmText 'mon.configDefaults') -and -not ($gl -join ' ').Contains('agent-temp preview')) "${lbl}: nada de limiar nem alerta"
+                        } else { Assert-True ($gl[0] -ceq (Get-AtmText 'mon.gateOpen')) "${lbl}: a trava aberta dita" }
+                        $bad = & $guiP6CheckTexts $cat @(@($gl | ForEach-Object { , @('prevmon', $_) }) + @(, @('titulo', (Get-AtmText 'gui.screenTitle' $vm.Title)))) $guiP6Codes
+                        Assert-True ($bad.Count -eq 0) ("${lbl}: textos do catalogo: " + ($bad -join ' ; '))
+                    }
+                }
+                $by = @{}; foreach ($v in $vars) { $by[$v[0]] = $v }
+                Assert-True ($by['sem pasta'][1].History.FolderState -ceq 'ABSENT' -and $by['vazia'][1].History.FolderState -ceq 'OK' -and @($by['vazia'][1].History.Records).Count -eq 0) "$($lang): sem pasta ABSENT; vazia OK sem registro"
+                Assert-True ($by['so .partial'][1].History.Partial -eq 1 -and @($by['corrompido'][1].History.Invalid).Count -eq 1 -and $by['CLOCK_SKEW'][1].History.ClockSkew -eq 1) "$($lang): .partial, corrompido e CLOCK_SKEW contados"
+                Assert-True ($by['monitor.json recusado'][2].Config.State -ceq 'REFUSED' -and (Get-MonCodes $by['monitor.json recusado'][2].Alerts) -ceq 'MON_CONFIG_INVALID' -and (@(Get-AtmGuiPrevmonLines -Status $by['monitor.json recusado'][2]) -ccontains (Get-AtmText 'mon.configRefused' 'MON_CONFIG_INVALID' 'UNKNOWN_KEY'))) "$($lang): monitor.json recusado, MON_CONFIG_INVALID"
+                $six = $by['seis alertas'][2]
+                Assert-Eq (Get-MonCodes $six.Alerts) $m5Six "$($lang): seis alertas com a trava aberta"
+                $g6 = @(Get-AtmGuiPrevmonLines -Status $six)
+                $withCmd = @(@($six.Alerts) | Where-Object { @($_.Commands).Count -gt 0 })
+                Assert-True ($withCmd.Count -ge 4 -and @($withCmd | Where-Object { $g6 -cnotcontains (Get-AtmText 'mon.alertCommand' (@($_.Commands) -join (Get-AtmText 'mon.commandThen'))) }).Count -eq 0 -and ($g6 -join ' ').Contains('agent-temp preview')) "$($lang): cada comando como texto ($($withCmd.Count) alertas com comando)"
+                $gc6 = @(Get-AtmGuiPrevmonLines -Status $by['seis alertas'][1])
+                Assert-True ($gc6 -ccontains (Get-AtmText 'mon.residue') -and $gc6 -ccontains (Get-AtmText 'mon.historyCount' 11)) "$($lang): trava fechada, o historico como esta (11 registros e o residuo)"
+                # The top 5 groups: a status with seven groups shows five, the largest first (the same as the CLI).
+                $fake = $six.PSObject.Copy(); $tr = $six.Trends.PSObject.Copy()
+                $tr.Top = @(1..7 | ForEach-Object { [pscustomobject]@{ Provider = 'claude-code'; Project = ('g' + $_); Identified = $true; Class = 'RECENT'; Trend = [pscustomobject]@{ Slope = [long](100MB * (8 - $_)) } } })
+                $fake.Trends = $tr
+                $gf = @(Get-AtmGuiPrevmonLines -Status $fake)
+                Assert-True ($gf -ccontains (Get-AtmText 'mon.trendGroup' 'claude-code' 'g5' 'RECENT' (Format-AtmGB (300MB))) -and $gf -cnotcontains (Get-AtmText 'mon.trendGroup' 'claude-code' 'g6' 'RECENT' (Format-AtmGB (200MB)))) "$($lang): ate 5 grupos"
+                Reset-MonSeams
+            }
+        } finally { Reset-MonSeams; Set-AtmLanguage -Requested $old }
+    }
+    Test-Case 'V0.5 M5' 'M5: TUI sem console (en-US e pt-BR) - M entra na tela e le uma vez o status e o estado da tarefa pelos leitores; U le de novo; rolar, quadros e Esc nao leem; entrar de novo le de novo; trava fechada: o aviso e nenhum alerta; trava aberta (em memoria): os seis alertas com os comandos como texto; falha: so o codigo, nunca a mensagem; nenhuma pergunta' {
+        $old = Get-AtmLanguage
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                $null = New-MonHist
+                $script:m5Cur = Get-AtmMonitorStatus
+                $script:m5S = 0; $script:m5T = 0
+                $walk = @((& $m5Key 'M' 'm'), (& $m5Key 'U' 'u'), (& $m5Key 'PageDown'), (& $m5Key 'DownArrow'), (& $m5Key 'Escape'), (& $m5Key 'M' 'm'), (& $m5Key 'Escape'), (& $m5Key 'Q' 'q'))
+                $r = & $m5Tui $walk { $script:m5S++; $script:m5Cur } { $script:m5T++; $script:m5Task }
+                $all = (& $m5Sq (@($r.Frames) -join "`n"))
+                Assert-True ($script:m5S -eq 3 -and $script:m5T -eq 3 -and $r.State.MonitorReads -eq 3) "$($lang): M, U e M de novo: tres leituras de cada ($script:m5S, $script:m5T)"
+                Assert-True ($r.Frames.Count -gt 6 -and $r.Prompts.Count -eq 0 -and $r.State.Stack.Count -eq 1) "$($lang): varios quadros sem leitura, nenhuma pergunta, de volta ao menu ($($r.Frames.Count))"
+                foreach ($k in @('tui.mon.viewOnly', 'mon.gateClosed', 'mon.optIn', 'mon.task.absent', 'tui.mon.reread', 'foot.monitor', 'menu.monitor')) { Assert-True ($all.Contains((& $m5Sq (Get-AtmText $k)))) "$($lang): quadro com $k" }
+                Assert-True (-not $all.Contains((& $m5Sq (Get-AtmText 'mon.alertsNone'))) -and -not $all.Contains('agent-temppreview')) "$($lang): trava fechada, nenhum alerta"
+                # Gate open (in memory, only around the status call): the six alerts and their commands, as text.
+                $null = Set-M5SixAlerts
+                $script:m5Cur = Get-MonStatusOpen
+                $script:m5S = 0
+                $r = & $m5Tui @((& $m5Key 'M' 'm'), (& $m5Key 'Escape'), (& $m5Key 'Q' 'q')) { $script:m5S++; $script:m5Cur } { $script:m5Task }
+                $all = (& $m5Sq (@($r.Frames) -join "`n"))
+                $miss = @(Get-AtmMonitorStatusLines -Status $script:m5Cur -Task $script:m5Task | Where-Object { -not $all.Contains((& $m5Sq $_.Text)) } | ForEach-Object { $_.Text })
+                Assert-True ($script:m5S -eq 1 -and $all.Contains((& $m5Sq (Get-AtmText 'mon.gateOpen'))) -and $all.Contains('agent-temppreview') -and $miss.Count -eq 0) "$($lang): trava aberta, todas as linhas do monitor status (os alertas e os comandos como texto) ($($miss -join ' | '))"
+                Assert-True ($r.Prompts.Count -eq 0 -and -not $all.Contains((& $m5Sq $sandbox))) "$($lang): nenhuma pergunta, nenhum caminho"
+                # A failed read: the code only; the screen says so and nothing else.
+                $script:m5S = 0
+                $r = & $m5Tui @((& $m5Key 'M' 'm'), (& $m5Key 'U' 'u'), (& $m5Key 'Escape'), (& $m5Key 'Q' 'q')) { $script:m5S++; throw [IO.IOException]::new('m5-secret-detail') } { $script:m5Task }
+                $all = (& $m5Sq (@($r.Frames) -join "`n"))
+                Assert-True ($script:m5S -eq 2 -and $all.Contains((& $m5Sq (Get-AtmText 'tui.mon.failed' (ConvertTo-AtmExceptionCode 'IOException')))) -and -not $all.Contains('m5-secret-detail') -and -not $all.Contains((& $m5Sq (Get-AtmText 'mon.gateClosed')))) "$($lang): falha so com o codigo"
+                Reset-MonSeams
+            }
+        } finally { Reset-MonSeams; Set-AtmLanguage -Requested $old }
+    }
+    Test-Case 'V0.5 M5' 'M5: GUI (sessao e modelo de vista, sem janela; en-US e pt-BR) - M so pede a area; Invoke-AtmGuiPrevmon le o status uma vez por abertura pelo seam; ocupado (auditoria, preview, diagnose): ignorado; teclas na area, Esc, o tick do monitoramento ao vivo e F5 nao leem; as linhas sao as do modelo; trava aberta (em memoria): os seis alertas; falha: so o codigo, a janela fica onde esta' {
+        $old = Get-AtmLanguage
+        $savedPm = $script:AtmGuiPrevmonSource; $savedInv = $script:AtmGuiInventorySource
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                $null = New-MonHist
+                $script:m5Cur = Get-AtmMonitorStatus; $script:m5GuiN = 0
+                $script:AtmGuiPrevmonSource = { $script:m5GuiN++; $script:m5Cur }
+                $script:AtmGuiInventorySource = { param($a) $null = $a; $m5Inv }
+                $gs = Initialize-AtmGuiSession -ConfigDir $cfgDir
+                Assert-True ($null -eq $gs.Prevmon -and $gs.PrevmonCalls -eq 0 -and $gs.PrevmonFailures -eq 0) "$($lang): sessao nova sem status"
+                Assert-Eq (Invoke-AtmGuiNavKey -Nav $gs.Nav -Inventory $gs.Inventory -Key 'M' -Busy $false) 'PREVMON_OPEN' "$($lang): M pede a area"
+                Assert-True ($script:m5GuiN -eq 0 -and $gs.PrevmonCalls -eq 0 -and $gs.Nav.Stack.Count -eq 1) "$($lang): M sozinho nao le"
+                Assert-Eq (Invoke-AtmGuiNavKey -Nav $gs.Nav -Inventory $gs.Inventory -Key 'M' -Busy $true) 'IGNORED' "$($lang): ocupado, M ignorado"
+                foreach ($b in @('Busy', 'PreviewBusy', 'DiagBusy')) { $gs[$b] = $true; Assert-Eq (Invoke-AtmGuiPrevmon -Session $gs) 'IGNORED' "$($lang): $b, ignorado"; $gs[$b] = $false }
+                Assert-Eq $script:m5GuiN 0 "$($lang): ocupado, nenhuma leitura"
+                $script:m5Started = 0
+                Assert-Eq (Invoke-AtmGuiPrevmon -Session $gs -OnStart { $script:m5Started++ }) 'OK' "$($lang): abertura le"
+                Invoke-AtmGuiNavPrevmon -Nav $gs.Nav -Prevmon $gs.Prevmon -Result 'OK'
+                $top = Get-AtmGuiNavTop -Nav $gs.Nav
+                Assert-True ($script:m5GuiN -eq 1 -and $script:m5Started -eq 1 -and $gs.PrevmonCalls -eq 1 -and $gs.Nav.Stack.Count -eq 2 -and $top.Name -ceq 'prevmon' -and $top.Title -ceq (Get-AtmText 'menu.monitorTitle')) "$($lang): uma leitura, a area sobre o painel"
+                $vm = Get-AtmGuiScreen -Inventory $gs.Inventory -Screen $top
+                Assert-Eq (@($vm.Lines) -join "`n") (@(Get-AtmGuiPrevmonLines -Status $script:m5Cur) -join "`n") "$($lang): linhas do modelo"
+                Assert-True (@($vm.Lines)[0] -ceq (Get-AtmText 'mon.gateClosed') -and @($vm.Lines)[-1] -ceq (Get-AtmText 'gui.prevmon.viewOnly') -and @($vm.Lines) -cnotcontains (Get-AtmText 'mon.task.absent')) "$($lang): nao disponivel nesta versao, so ver, sem tarefa"
+                foreach ($k in @('DownArrow', 'Return', 'End', 'Home')) { $null = Invoke-AtmGuiNavKey -Nav $gs.Nav -Inventory $gs.Inventory -Key $k -Busy $false; $null = Get-AtmGuiScreen -Inventory $gs.Inventory -Screen (Get-AtmGuiNavTop -Nav $gs.Nav) }
+                Assert-True ($script:m5GuiN -eq 1 -and (Get-AtmGuiNavTop -Nav $gs.Nav).Name -ceq 'prevmon') "$($lang): teclas na area nao leem nem saem"
+                $gs.Monitor = $true; $gs.NextDueUtc = [datetime]::UtcNow.AddMinutes(-1)
+                Assert-Eq (Invoke-AtmGuiTick -Session $gs -Now ([datetime]::UtcNow) -Pump { }) 'REFRESHED' "$($lang): o tick auditou"
+                Assert-Eq (Invoke-AtmGuiRefresh -Session $gs -Pump { }) 'OK' "$($lang): F5 auditou"
+                $gs.Monitor = $false
+                Assert-True ($script:m5GuiN -eq 1 -and $gs.PrevmonCalls -eq 1 -and (Get-AtmGuiNavTop -Nav $gs.Nav).Name -ceq 'prevmon') "$($lang): tick e F5, nenhuma leitura; a tela fica"
+                Assert-Eq (Invoke-AtmGuiNavKey -Nav $gs.Nav -Inventory $gs.Inventory -Key 'Escape' -Busy $false) 'RENDER' "$($lang): Esc volta"
+                Assert-True ($script:m5GuiN -eq 1 -and $gs.Nav.Stack.Count -eq 1) "$($lang): Esc nao le"
+                # Second opening, gate open in memory: the six alerts, each command as text.
+                $null = Set-M5SixAlerts
+                $script:m5Cur = Get-MonStatusOpen
+                Assert-Eq (Invoke-AtmGuiPrevmon -Session $gs) 'OK' "$($lang): segunda abertura"
+                Invoke-AtmGuiNavPrevmon -Nav $gs.Nav -Prevmon $gs.Prevmon -Result 'OK'
+                $vm = Get-AtmGuiScreen -Inventory $gs.Inventory -Screen (Get-AtmGuiNavTop -Nav $gs.Nav)
+                Assert-True ($script:m5GuiN -eq 2 -and $gs.Nav.Stack.Count -eq 2 -and (@($vm.Lines) -join "`n") -ceq (@(Get-AtmGuiPrevmonLines -Status $script:m5Cur) -join "`n") -and (@($vm.Lines) -join ' ').Contains('agent-temp preview') -and @($vm.Lines)[0] -ceq (Get-AtmText 'mon.gateOpen')) "$($lang): cada abertura le de novo; seis alertas com os comandos como texto"
+                # A failed read: only the code; the window stays where it is.
+                $script:AtmGuiPrevmonSource = { $script:m5GuiN++; throw [IO.IOException]::new('m5-secret-detail') }
+                Assert-Eq (Invoke-AtmGuiPrevmon -Session $gs) 'FAILED' "$($lang): falha"
+                Invoke-AtmGuiNavPrevmon -Nav $gs.Nav -Prevmon $gs.Prevmon -Result 'FAILED'
+                Assert-True ($gs.PrevmonFailures -eq 1 -and $null -eq $gs.Prevmon.Status -and $gs.Nav.Message -ceq (Get-AtmText 'gui.prevmon.failed' (ConvertTo-AtmExceptionCode 'IOException')) -and -not ([string]$gs.Nav.Message).Contains('m5-secret-detail') -and $gs.Nav.Stack.Count -eq 2) "$($lang): falha so com o codigo ($($gs.Nav.Message))"
+                $nv = Get-AtmGuiScreen -Inventory $null -Screen @{ Name = 'prevmon'; Title = 'x'; Filter = $null; Sel = 0 }
+                Assert-Eq (@($nv.Lines) -join '|') (Get-AtmText 'gui.prevmon.failed' '-') "$($lang): sem status (tela forjada), so a linha que o diz"
+                Reset-MonSeams
+            }
+        } finally { Reset-MonSeams; $script:AtmGuiPrevmonSource = $savedPm; $script:AtmGuiInventorySource = $savedInv; Set-AtmLanguage -Requested $old }
+    }
+    Test-Case 'V0.5 M5' 'M5: linha da auditoria com a trava fechada - Get-AtmMonitorAuditSummary devolve $null sem ler nada (status, historico, pasta e limiares sombreados para falhar e contar: zero chamadas; a pasta da costura nunca criada); nenhuma linha; a saida do Show-AtmAudit identica byte a byte com e sem o parametro; controle positivo: com a trava aberta em memoria a sombra e alcancada' {
+        Assert-Eq $script:AtmMonitoringEnabled $false 'trava fechada neste processo'
+        $k = @{ N = 0 }
+        function Get-AtmMonitorStatus { $k.N++; throw 'M5_READ' }
+        function Get-AtmMonitorHistory { $k.N++; throw 'M5_READ' }
+        function Get-AtmMonitorFolder { $k.N++; throw 'M5_READ' }
+        function Get-AtmMonitorConfig { $k.N++; throw 'M5_READ' }
+        function Get-AtmMonitorConfigFile { $k.N++; throw 'M5_READ' }
+        try {
+            $script:monN++
+            $base = Join-Path $sandbox ('m5-seam-' + $script:monN)
+            $script:AtmMonitorFolderPath = Join-Path $base 'AgentTempManager\Monitor'
+            $old = Get-AtmLanguage
+            try {
+                foreach ($lang in @('en-US', 'pt-BR')) {
+                    Set-AtmLanguage -Requested $lang
+                    $sum = Get-AtmMonitorAuditSummary
+                    Assert-True ($null -eq $sum -and $k.N -eq 0) "$($lang): resumo `$null, nenhuma leitura ($($k.N))"
+                    Assert-True ($null -eq (Get-AtmMonitorAuditLine -Summary $sum)) "$($lang): nenhuma linha"
+                    $o0 = & $m5Audit -NoLine
+                    $o1 = & $m5Audit $null
+                    $o2 = & $m5Audit (Get-AtmMonitorAuditLine -Summary (Get-AtmMonitorAuditSummary))
+                    Assert-True ($o0.Count -gt 5 -and ($o1 -join "`n") -ceq ($o0 -join "`n") -and ($o2 -join "`n") -ceq ($o0 -join "`n")) "$($lang): saida identica com e sem a linha ($($o0.Count) linhas)"
+                    foreach ($key in @('audit.monitorAlerts', 'audit.monitorFailed')) { $pre = ([string]$script:AtmMessages[$lang][$key]).Split('{')[0]; Assert-True ($pre.Length -gt 10 -and -not ($o0 -join "`n").Contains($pre)) "$($lang): nada de $key na saida" }
+                    Assert-Eq $k.N 0 "$($lang): ainda nenhuma leitura"
+                }
+            } finally { Set-AtmLanguage -Requested $old }
+            Assert-True (-not [IO.Directory]::Exists($base)) 'a pasta da costura nunca criada nem lida'
+            $sum = Get-M5SummaryOpen
+            Assert-True ($k.N -ge 1 -and $null -ne $sum -and $sum.Code -ceq 'MONITOR_READ_FAILED_RUNTIMEEXCEPTION' -and @($sum.Alerts).Count -eq 0) "controle positivo: com a trava aberta a sombra e alcancada ($($k.N), $($sum.Code))"
+            Assert-Eq $script:AtmMonitoringEnabled $false 'trava fechada de novo'
+        } finally { Reset-MonSeams }
+    }
+    Test-Case 'V0.5 M5' 'M5: linha da auditoria com a trava aberta (so em memoria; en-US e pt-BR) - seis alertas: uma linha com a contagem, os codigos e agent-temp monitor status, logo abaixo do primeiro cabecalho e nada mais muda; sem pasta, vazia: nenhuma linha; pasta recusada (forjada): a linha com o codigo; falha de leitura: a linha com o codigo, nunca a mensagem, e a auditoria segue; -ExportJson identico com a trava aberta e fechada' {
+        $old = Get-AtmLanguage
+        try {
+            foreach ($lang in @('en-US', 'pt-BR')) {
+                Set-AtmLanguage -Requested $lang
+                $o0 = & $m5Audit -NoLine
+                $null = Set-M5SixAlerts
+                $sum = Get-M5SummaryOpen
+                Assert-True ($null -eq $sum.Code -and (@($sum.Alerts) -join ',') -ceq $m5Six) "$($lang): resumo com os seis codigos"
+                $line = Get-AtmMonitorAuditLine -Summary $sum
+                Assert-True ($null -ne $line -and $line.Text -ceq (Get-AtmText 'audit.monitorAlerts' 6 ($m5Six.Replace(',', ', '))) -and $line.Text.Contains('agent-temp monitor status') -and $line.Color -ceq 'Yellow') "$($lang): uma linha com a contagem, os codigos e o comando ($($line.Text))"
+                $o3 = & $m5Audit $line
+                $i = [array]::IndexOf($o3, $line.Text)
+                $h = -1; for ($j = 0; $j -lt $o0.Count; $j++) { if ($h -lt 0 -and $o0[$j].Contains((Get-AtmText 'audit.s1'))) { $h = $j } }
+                $rest = @(for ($j = 0; $j -lt $o3.Count; $j++) { if ($j -ne $i) { $o3[$j] } })
+                Assert-True ($o3.Count -eq $o0.Count + 1 -and $h -ge 0 -and $i -eq $h + 2 -and $o3[$h + 1] -ceq ('=' * 100) -and ($rest -join "`n") -ceq ($o0 -join "`n")) "$($lang): a linha logo abaixo do primeiro cabecalho; nada mais muda (linha $i, cabecalho $h)"
+                foreach ($c in @(@('sem pasta', { $script:monN++; $script:AtmMonitorFolderPath = Join-Path $sandbox ('m5-none-' + $script:monN + '\AgentTempManager\Monitor') }), @('vazia', { $null = New-MonHist }))) {
+                    & $c[1]
+                    $s = Get-M5SummaryOpen
+                    Assert-True ($null -eq $s.Code -and @($s.Alerts).Count -eq 0 -and $null -eq (Get-AtmMonitorAuditLine -Summary $s)) "$($lang) $($c[0]): nenhum alerta, nenhuma linha"
+                }
+                & {
+                    function Get-AtmMonitorStatus { [pscustomobject]@{ GateOpen = $true; History = [pscustomobject]@{ FolderState = 'REFUSED'; FolderCode = 'MONITOR_FOLDER_REFUSED' }; Alerts = @() } }
+                    $s = Get-M5SummaryOpen
+                    $l = Get-AtmMonitorAuditLine -Summary $s
+                    Assert-True ($s.Code -ceq 'MONITOR_FOLDER_REFUSED' -and $l.Text -ceq (Get-AtmText 'audit.monitorFailed' 'MONITOR_FOLDER_REFUSED')) "$($lang): pasta recusada, a linha com o codigo"
+                }
+                & {
+                    function Get-AtmMonitorStatus { throw [IO.IOException]::new('m5-secret-detail') }
+                    $s = Get-M5SummaryOpen
+                    $l = Get-AtmMonitorAuditLine -Summary $s
+                    Assert-True ($s.Code -ceq 'MONITOR_READ_FAILED_IOEXCEPTION' -and $l.Text -ceq (Get-AtmText 'audit.monitorFailed' 'MONITOR_READ_FAILED_IOEXCEPTION') -and -not $l.Text.Contains('m5-secret-detail')) "$($lang): falha, a linha com o codigo e nunca a mensagem"
+                    $o4 = & $m5Audit $l
+                    Assert-True ($o4.Count -eq $o0.Count + 1 -and $o4 -ccontains $l.Text) "$($lang): a auditoria segue com a linha"
+                }
+                Assert-Eq $script:AtmMonitoringEnabled $false "$($lang): trava fechada de novo"
+                Reset-MonSeams
+            }
+        } finally { Reset-MonSeams; Set-AtmLanguage -Requested $old }
+        $j0 = ConvertTo-AtmExportJson -Inventory $m5Inv
+        try {
+            $null = Set-M5SixAlerts
+            $script:AtmMonitoringEnabled = $true
+            try { $j1 = ConvertTo-AtmExportJson -Inventory $m5Inv } finally { $script:AtmMonitoringEnabled = $false }
+        } finally { Reset-MonSeams }
+        Assert-True ($j1 -ceq $j0 -and -not $j0.Contains('MON_TOTAL') -and -not $j0.Contains('monitor status')) '-ExportJson identico com a trava aberta e fechada, sem a linha'
+    }
+    Test-Case 'V0.5 M5' 'M5: lancador (processo filho, en-US) - agent-temp audit sai 0, com o cabecalho e sem nenhuma linha do monitoramento (trava fechada); a pasta real do historico como estava' {
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$(Join-Path $srcDir 'agent-temp.ps1')`" audit -Lang en-US -NoProgress") -TimeoutSec 600
+        Assert-Eq $r.Exit 0 "audit sai 0 ($($r.Exit))"
+        $en = $script:AtmMessages['en-US']
+        Assert-True ($r.Text.Contains([string]$en['audit.s1'])) 'audit com o primeiro cabecalho'
+        foreach ($key in @('audit.monitorAlerts', 'audit.monitorFailed')) { $pre = ([string]$en[$key]).Split('{')[0]; Assert-True (-not $r.Text.Contains($pre)) "audit sem $key" }
+        Assert-Eq (Get-AtmPathPresence $monRealFolder) $monRealBefore 'a pasta real do historico como estava'
+    }
+    Test-Case 'V0.5 M5' 'M5 (estatico): lista fechada da GUI com 29 nomes, o novo exatamente Get-AtmMonitorStatus, chamado so em Invoke-AtmGuiPrevmon (uma vez) e nunca no tick; os nomes proibidos plantados numa copia recusados; um seam da GUI, a $null; TUI so le (leitores padrao em Start-AtmTui, formatador compartilhado na tela, leitura so em Get-AtmTuiMonitorView); linha da auditoria: o formatador so apresenta, o resumo so pelo lancador no audit, a exportacao e o codigo de saida sem ela; textos nos dois idiomas' {
+        $lib = Join-Path $srcDir 'lib'
+        Assert-True ($guiAllowedEngine.Count -eq 29 -and $guiAllowedEngine[28] -ceq 'Get-AtmMonitorStatus' -and @($guiAllowedEngine | Where-Object { $_ -like '*Monitor*' }).Count -eq 1) "lista: 29 nomes, o novo exatamente Get-AtmMonitorStatus ($($guiAllowedEngine -join ','))"
+        $real = @(Get-ChildItem -LiteralPath $lib -Filter 'Gui*.ps1' | ForEach-Object { $_.FullName })
+        Assert-Eq ((& $guiCheck $real) -join ' | ') '' 'arquivos reais dentro da lista fechada'
+        foreach ($n in @('Get-AtmMonitorTaskState', 'Get-AtmMonitorTaskLines', 'Get-AtmMonitorHistory', 'Invoke-AtmMonitorCollection', 'Invoke-AtmMonitorRotation', 'Invoke-AtmMonitorPrune', 'Open-AtmMonitorFolder', 'Write-AtmMonitorRecordFile', 'Invoke-AtmMonitorEnable', 'Register-AtmMonitorTask', 'Invoke-AtmMonitorDisable', 'Invoke-AtmMonitorRemoveHistory')) { Assert-True ($guiForbidden -ccontains $n) "proibido na GUI: $n" }
+        Assert-True ($guiOtherGates -ccontains 'AtmMonitoringEnabled' -and $guiForbidden -cnotcontains 'Get-AtmMonitorStatus') 'a trava do monitoramento proibida na GUI; o status permitido'
+        $calls = New-Object System.Collections.Generic.List[string]
+        foreach ($gf in @(Get-ChildItem -LiteralPath $lib -Filter 'Gui*.ps1')) {
+            $a = [Management.Automation.Language.Parser]::ParseFile($gf.FullName, [ref]$null, [ref]$null)
+            foreach ($c in @($a.FindAll({ param($x) $x -is [Management.Automation.Language.CommandAst] -and [string]$x.GetCommandName() -like '*AtmMonitor*' }, $true))) {
+                $fp = $c.Parent; while ($null -ne $fp -and -not ($fp -is [Management.Automation.Language.FunctionDefinitionAst])) { $fp = $fp.Parent }
+                $calls.Add($gf.Name + ':' + $(if ($fp) { $fp.Name } else { '-' }) + ':' + $c.GetCommandName())
+            }
+        }
+        Assert-Eq ($calls.ToArray() -join ',') 'Gui.ps1:Invoke-AtmGuiPrevmon:Get-AtmMonitorStatus' 'GUI: o status so em Invoke-AtmGuiPrevmon, uma vez; nenhuma outra funcao do monitoramento'
+        Assert-Eq (@(Get-ApCallers 'Invoke-AtmGuiPrevmon' | Sort-Object) -join ',') 'Gui.ps1:Start-AtmGui' 'a abertura da area so pela janela (tecla M ou o botao)'
+        $pl = Join-Path $sandbox 'm5-gui-plant'
+        [void][IO.Directory]::CreateDirectory($pl)
+        $gt = [IO.File]::ReadAllText((Join-Path $lib 'Gui.ps1')); $mt = [IO.File]::ReadAllText((Join-Path $lib 'GuiModel.ps1'))
+        $gc = Join-Path $pl 'Gui.ps1'; $mc = Join-Path $pl 'GuiModel.ps1'
+        [IO.File]::WriteAllText($gc, $gt, (New-Object Text.UTF8Encoding $false))
+        $plants = @(
+            @(("`r`n# " + 'AtmMonitoring' + "Enabled`r`n"), ('trava de outra funcionalidade: ' + 'AtmMonitoring' + 'Enabled')),
+            @(("`r`n# " + 'Get-AtmMonitor' + "TaskState`r`n"), ('nome proibido: ' + 'Get-AtmMonitor' + 'TaskState')),
+            @(("`r`n# " + 'get-atmmonitor' + "history`r`n"), ('nome proibido: ' + 'Get-AtmMonitor' + 'History')),
+            @(("`r`n# " + 'Invoke-AtmMonitor' + "CollectionCore`r`n"), ('nome proibido: ' + 'Invoke-AtmMonitor' + 'Collection')),
+            @(("`r`n# " + 'Write-AtmMonitor' + "RecordFile`r`n"), ('nome proibido: ' + 'Write-AtmMonitor' + 'RecordFile')),
+            @(("`r`nfunction Invoke-AtmGuiTick { " + 'Invoke-AtmGuiPrevmon -Session $null' + " }`r`n"), 'monitoramento preventivo no tick: Invoke-AtmGuiPrevmon'),
+            @(("`r`nfunction Invoke-AtmGuiTick { " + 'Get-AtmMonitorStatus' + " }`r`n"), 'monitoramento preventivo no tick: Get-AtmMonitorStatus'),
+            @(("`r`nfunction Get-AtmGuiM5Plant { " + 'Get-AtmMonitorStatusLines -Status $null' + " }`r`n"), 'comando fora da lista fechada: Get-AtmMonitorStatusLines'))
+        foreach ($pp in $plants) {
+            [IO.File]::WriteAllText($mc, $mt + $pp[0], (New-Object Text.UTF8Encoding $false))
+            $pv = & $guiCheck @($gc, $mc)
+            Assert-True (@($pv | Where-Object { $_.Contains($pp[1]) }).Count -ge 1) "plantado ($($pp[1])): recusado ($($pv -join ' | '))"
+        }
+        [IO.File]::WriteAllText($mc, $mt, (New-Object Text.UTF8Encoding $false))
+        Assert-Eq ((& $guiCheck @($gc, $mc)) -join ' | ') '' 'controle: a copia sem planta passa'
+        $srcAll = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File -Filter '*.ps1' | ForEach-Object { [IO.File]::ReadAllText($_.FullName) }) -join "`n"
+        Assert-True ([regex]::Matches($srcAll, 'AtmGuiPrevmonSource\s*=').Count -eq 1 -and $srcAll -match '(?m)^\$script:AtmGuiPrevmonSource = \$null\r?$') 'seam da GUI: uma atribuicao, a $null'
+        # The TUI: the default readers only in Start-AtmTui, the shared formatter only on the screen, the read only in
+        # Get-AtmTuiMonitorView (called on entering the screen and on U); no gate, no write, no task action.
+        $tuiTxt = [IO.File]::ReadAllText((Join-Path $lib 'Tui.ps1'))
+        $ta = [Management.Automation.Language.Parser]::ParseInput($tuiTxt, [ref]$null, [ref]$null)
+        $tcalls = @($ta.FindAll({ param($x) $x -is [Management.Automation.Language.CommandAst] -and ([string]$x.GetCommandName() -like '*AtmMonitor*' -or [string]$x.GetCommandName() -ceq 'Get-AtmTuiMonitorView') }, $true) | ForEach-Object {
+                $fp = $_.Parent; while ($null -ne $fp -and -not ($fp -is [Management.Automation.Language.FunctionDefinitionAst])) { $fp = $fp.Parent }
+                $(if ($fp) { $fp.Name } else { '-' }) + ':' + $_.GetCommandName() } | Sort-Object)
+        Assert-Eq ($tcalls -join ',') 'Get-AtmTuiTextLines:Get-AtmMonitorStatusLines,Start-AtmTui:Get-AtmMonitorStatus,Start-AtmTui:Get-AtmMonitorTaskState,Start-AtmTui:Get-AtmTuiMonitorView,Start-AtmTui:Get-AtmTuiMonitorView' 'TUI: leitores padrao, formatador e a leitura so nos pontos previstos'
+        $mvBody = @($ta.FindAll({ param($x) $x -is [Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -ceq 'Get-AtmTuiMonitorView' }, $true))[0].Extent.Text
+        Assert-True ($mvBody.Contains('& $State.MonitorStatusReader') -and $mvBody.Contains('& $State.MonitorTaskReader') -and $mvBody.Contains('ConvertTo-AtmExceptionCode')) 'TUI: a leitura pelos dois leitores; falha so com o codigo'
+        foreach ($n in @('AtmMonitoringEnabled', 'Invoke-AtmMonitor', 'Register-AtmMonitor', 'Unregister-AtmMonitor', 'Remove-AtmMonitor', 'Open-AtmMonitorFolder', 'Write-AtmMonitor', 'Get-AtmMonitorHistory', 'AtmMonitorFolderPath', 'monitor.json')) { Assert-True ($tuiTxt.IndexOf($n, [StringComparison]::OrdinalIgnoreCase) -lt 0) "Tui.ps1 sem '$n'" }
+        # The audit line: the formatter only presents what it receives; the summary only from the launcher's audit.
+        $repTxt = [IO.File]::ReadAllText((Join-Path $lib 'Report.ps1'))
+        $alFn = $repTxt.Substring($repTxt.IndexOf('function Get-AtmMonitorAuditLine'), $repTxt.IndexOf('function Get-AtmMonitorTaskLines') - $repTxt.IndexOf('function Get-AtmMonitorAuditLine'))
+        $alCode = ($alFn -replace '(?m)#.*$', '').Replace('function Get-AtmMonitorAuditLine', '')
+        foreach ($n in @('AtmMonitoringEnabled', 'Get-AtmMonitor', 'Invoke-Atm', 'Write-Host', 'GetFolderPath', 'AtmMonitorFolderPath')) { Assert-True (-not $alCode.Contains($n)) "formatador da linha sem '$n'" }
+        Assert-Eq (@(Get-ApCallers 'Get-AtmMonitorAuditSummary' | Sort-Object) -join ',') 'agent-temp.ps1:script' 'o resumo so pelo lancador'
+        Assert-Eq (@(Get-ApCallers 'Get-AtmMonitorAuditLine' | Sort-Object) -join ',') 'agent-temp.ps1:script' 'a linha so pelo lancador'
+        $cli = [IO.File]::ReadAllText((Join-Path $srcDir 'agent-temp.ps1'))
+        $a0 = $cli.IndexOf("        'audit' {"); $a1 = $cli.IndexOf("        'preview' {", $a0)
+        $aud = $cli.Substring($a0, $a1 - $a0)
+        Assert-True ([regex]::Matches($cli, 'Get-AtmMonitorAuditSummary').Count -eq 1 -and $aud.Contains('-MonitorLine (Get-AtmMonitorAuditLine -Summary (Get-AtmMonitorAuditSummary))')) 'o resumo uma vez, no audit, como parametro do Show-AtmAudit'
+        $exp = $aud.Substring($aud.IndexOf('if ($ExportJson) {'))
+        $exits = @([regex]::Matches($aud, '(?m)^\s+exit\s+(\S+)') | ForEach-Object { $_.Groups[1].Value }) -join ','
+        Assert-True ($exp.Contains('-Text (ConvertTo-AtmExportJson -Inventory $inv) -Policy') -and $exp.IndexOf('Monitor', [StringComparison]::OrdinalIgnoreCase) -lt 0 -and $exits -ceq '0') "a exportacao sem a linha; o audit sai 0 como antes ($exits)"
+        $sumFn = @([Management.Automation.Language.Parser]::ParseFile((Join-Path $lib 'Engine.Monitor.ps1'), [ref]$null, [ref]$null).FindAll({ param($x) $x -is [Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -ceq 'Get-AtmMonitorAuditSummary' }, $true))[0]
+        $sumCode = [regex]::Replace([regex]::Replace($sumFn.Body.Extent.Text, '(?s)<#.*?#>', ''), '(?m)#.*$', '')
+        Assert-True ($sumCode.Contains('} catch {') -and -not $sumCode.Contains('throw')) 'o resumo nunca lanca (a auditoria nunca falha por ele)'
+        $keys = @('audit.monitorAlerts', 'audit.monitorFailed', 'menu.monitor', 'menu.monitorTitle', 'tui.mon.reading', 'tui.mon.viewOnly', 'tui.mon.failed', 'tui.mon.reread', 'foot.monitor', 'gui.prevmon.button', 'gui.prevmon.viewOnly', 'gui.prevmon.failed', 'gui.prevmon.running')
+        foreach ($key in $keys) {
+            $en = $script:AtmMessages['en-US'][$key]; $pt = $script:AtmMessages['pt-BR'][$key]
+            Assert-True ($en -and $pt -and $en -cne $pt) "$key nos dois idiomas, traduzido"
+            Assert-Eq (@([regex]::Matches($pt, '\{\d\}') | ForEach-Object { $_.Value } | Sort-Object) -join ',') (@([regex]::Matches($en, '\{\d\}') | ForEach-Object { $_.Value } | Sort-Object) -join ',') "$($key): mesmos marcadores"
+        }
+        foreach ($l in @('en-US', 'pt-BR')) { Assert-True (([string]$script:AtmMessages[$l]['audit.monitorAlerts']).Contains('agent-temp monitor status') -and ([string]$script:AtmMessages[$l]['audit.monitorFailed']).Contains('agent-temp monitor status')) "a linha cita agent-temp monitor status ($l)" }
+        foreach ($l in @('en-US', 'pt-BR')) { foreach ($key in @('gui.prevmon.button', 'gui.prevmon.viewOnly', 'gui.prevmon.failed', 'gui.prevmon.running')) { Assert-True (([string]$script:AtmMessages[$l][$key]).IndexOf('AtmMonitoring', [StringComparison]::OrdinalIgnoreCase) -lt 0) "$key ($l) sem a trava" } }
+        # The M5 area: no CI-only case, no real wait, no real folder as a target, no gate opened outside a helper's try.
+        $self = [IO.File]::ReadAllText((Join-Path $testsDir 'Run-Tests.ps1'))
+        $b0 = $self.IndexOf('-----' + ' V0.5 M5 ('); $b1 = $self.IndexOf("`n" + '} fin' + 'ally {', $b0)
+        Assert-True ($b0 -gt 0 -and $b1 -gt $b0) 'area V0.5 M5 encontrada'
+        $area = $self.Substring($b0, $b1 - $b0)
+        Assert-True (-not $area.Contains('GITHUB_' + 'ACTIONS') -and -not $area.Contains('Start-' + 'Sleep') -and -not $area.Contains('$monRealFolder' + ' -') -and -not [regex]::IsMatch($area, 'AtmMonitorFolderPath = \$monRealFolder')) 'area sem caso so de CI, sem espera real e sem a pasta real como alvo'
+        $opens = [regex]::Matches($area, [regex]::Escape('$script:AtmMonitoringEnabled = $true')).Count
+        $closes = [regex]::Matches($area, [regex]::Escape('$script:AtmMonitoringEnabled = $false')).Count
+        Assert-True ($opens -ge 1 -and $closes -ge $opens) "cada abertura da trava fechada de novo na area ($opens, $closes)"
+        Assert-Eq (Get-AtmPathPresence $monRealFolder) $monRealBefore 'a pasta real do historico deste usuario como estava no inicio da suite'
+    }
+    Test-Case 'V0.5 M5' 'M5 janela real da GUI (o botao e a tecla M numa sessao interativa com o status real do motor) e a tela M da TUI num console real com teclado: NAO_TESTADO' {
+        $script:caseSkipped = $true
+        $script:caseNote = 'ninguem pressiona M nem o botao ScreenM numa janela real com o status real do motor, nem a tecla M num console real (a janela de P6 so confere o botao ScreenM na ordem de tabulacao e o seu texto no catalogo); o modelo coberto: Get-AtmGuiPrevmonLines, a tela prevmon de Get-AtmGuiScreen, Invoke-AtmGuiNavKey M, Invoke-AtmGuiPrevmon e Invoke-AtmGuiNavPrevmon pelo seam, o tick e o F5; a TUI por Start-AtmTui sem console com teclas, leitores e quadros injetados'
     }
 } finally {
     # The console encoding of this process is restored, even when the suite aborts (a redirected console may refuse it).

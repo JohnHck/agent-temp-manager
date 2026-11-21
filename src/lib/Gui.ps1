@@ -33,6 +33,10 @@
 # read-only collection of the recovery engine on the UI thread (no progress, as the preview), then its list; Enter shows
 # the plan of a service chosen from that list. The live monitoring's ticker never collects. There is no button that
 # executes or undoes anything: executing stays in the CLI (T-ISO-6).
+# V0.5 M5 (ADR-0017): the preventive monitoring area (M), view only. Opening it is the one action that reads the
+# monitoring: one status on the UI thread (the history, and with the monitoring's gate open the alerts), shown as lines;
+# the collection task is not shown. Each command an alert names is text; no button, link or key runs it, and the live
+# monitoring's ticker never reads it.
 
 # Release gate of the desktop GUI (D-A). Closed in every distributed copy: `agent-temp gui` opens no window and loads no
 # WinForms assembly. Tests open it only in their own process memory.
@@ -49,7 +53,8 @@ $script:AtmGuiExitEnvironment = 8
 # throws. Diagnose source (P4b): called with the diagnose arguments (InventoryArgs, which carries the ProgressCallback);
 # returns a diagnose result or throws. Clock source (P5): returns the current time as a UTC [datetime]; used only for
 # "now" (the audit time, the duration of a refresh and the live monitoring's schedule). Recover source (V0.4 R5): called
-# with no argument when the recovery area is opened; returns one collection of the recovery engine or throws.
+# with no argument when the recovery area is opened; returns one collection of the recovery engine or throws. Prevmon
+# source (V0.5 M5): called with no argument when the preventive monitoring area is opened; returns one status or throws.
 $script:AtmGuiApartmentSource = $null
 $script:AtmGuiDesktopSource = $null
 $script:AtmGuiAssemblyLoader = $null
@@ -58,6 +63,7 @@ $script:AtmGuiPreviewSource = $null
 $script:AtmGuiDiagnoseSource = $null
 $script:AtmGuiClockSource = $null
 $script:AtmGuiRecoverSource = $null
+$script:AtmGuiPrevmonSource = $null
 
 # P5: a wake of the ticker this close to the due time counts as due (the ticker and the clock have different
 # granularity), in milliseconds.
@@ -126,6 +132,9 @@ function Initialize-AtmGuiSession {
         # V0.4 R5: the recovery area's last opening (its collection and list, or the exception code of its failure) and
         # the counters of the openings that collected.
         Recover = $null; RecoverCalls = 0; RecoverFailures = 0
+        # V0.5 M5: the preventive monitoring area's last opening (its status, or the exception code of its failure) and
+        # the counters of the openings that read.
+        Prevmon = $null; PrevmonCalls = 0; PrevmonFailures = 0
     }
 }
 
@@ -347,6 +356,31 @@ function Invoke-AtmGuiRecover {
     } catch {
         $Session.Recover = @{ Collection = $null; List = $null; Error = (ConvertTo-AtmExceptionCode $_.Exception.GetBaseException().GetType().Name) }
         $Session.RecoverFailures++
+        return 'FAILED'
+    }
+}
+
+function Invoke-AtmGuiPrevmon {
+    # V0.5 M5: the only place the GUI reads the preventive monitoring, on the explicit action of opening its area (M or its
+    # button), never from the live monitoring's ticker. One call on the calling (UI) thread: one status of the monitoring
+    # engine (Get-AtmMonitorStatus: the history as it is, and the alerts only where that engine's gate is open). -OnStart
+    # runs just before the call, only when the call happens. Returns:
+    #  OK       the session keeps the new status (each opening reads again);
+    #  IGNORED  an audit, the preview or the diagnose runs: no call;
+    #  FAILED   nothing is kept but the exception code (never its message); nothing is shown.
+    # Nothing is written, created, collected, scheduled or run here.
+    param([hashtable]$Session, [scriptblock]$OnStart)
+    if ($Session.Busy -or $Session.PreviewBusy -or $Session.DiagBusy) { return 'IGNORED' }
+    try {
+        if ($null -ne $OnStart) { & $OnStart }
+        $Session.PrevmonCalls++
+        $st = $null
+        if ($null -ne $script:AtmGuiPrevmonSource) { $st = & $script:AtmGuiPrevmonSource } else { $st = Get-AtmMonitorStatus }
+        $Session.Prevmon = @{ Status = $st; Error = $null }
+        return 'OK'
+    } catch {
+        $Session.Prevmon = @{ Status = $null; Error = (ConvertTo-AtmExceptionCode $_.Exception.GetBaseException().GetType().Name) }
+        $Session.PrevmonFailures++
         return 'FAILED'
     }
 }
@@ -661,7 +695,9 @@ function Start-AtmGui {
         foreach ($m in @(Get-AtmGuiNavItemList)) {
             $b = New-Object -TypeName System.Windows.Forms.Button
             $b.Name = 'Screen' + $m.Key
-            $b.Text = Get-AtmText 'gui.screenButton' $m.Key $m.Label
+            # V0.5 M5: the M button has no access key of its own (Alt+M belongs to the live monitoring's check box); the
+            # M key opens it as the other screen keys do.
+            $b.Text = $(if ($m.Key -ceq 'M') { Get-AtmText 'gui.prevmon.button' } else { Get-AtmText 'gui.screenButton' $m.Key $m.Label })
             $b.AccessibleName = ($b.Text -replace '&', '')
             $b.Tag = [string]$m.Key
             $b.AutoSize = $true
@@ -831,6 +867,14 @@ function Start-AtmGui {
             $guiProgress.Text = Get-AtmText 'rec.view.running'
             $guiForm.Refresh()
         }
+        # V0.5 M5: while the monitoring status is read, the screens and Refresh are disabled and the progress label shows a
+        # fixed text. Painted before the call starts.
+        $guiPrevmonStart = {
+            $guiRefresh.Enabled = $false
+            $guiScreens.Enabled = $false
+            $guiProgress.Text = Get-AtmText 'gui.prevmon.running'
+            $guiForm.Refresh()
+        }
         $guiNavKey = {
             param([string]$Key)
             $r = Invoke-AtmGuiNavKey -Nav $guiSession.Nav -Inventory $guiSession.Inventory -Key $Key -Busy ([bool]$guiSession.Busy -or [bool]$guiSession.PreviewBusy -or [bool]$guiSession.DiagBusy) -Preview $guiSession.Preview -Diag $guiSession.Diag
@@ -863,8 +907,20 @@ function Start-AtmGui {
                 }
                 Invoke-AtmGuiNavRecover -Nav $guiSession.Nav -Recover $guiSession.Recover -Result $rr
             }
+            if ($r -ceq 'PREVMON_OPEN') {
+                # V0.5 M5: M or its button: the session's function reads the status (each opening), then the area opens.
+                # Drawn by the RENDER branch below, which never asks for the preview after M.
+                $pr = $null
+                try { $pr = Invoke-AtmGuiPrevmon -Session $guiSession -OnStart $guiPrevmonStart }
+                finally {
+                    $guiProgress.Text = ''
+                    $guiRefresh.Enabled = $true
+                    $guiScreens.Enabled = $true
+                }
+                Invoke-AtmGuiNavPrevmon -Nav $guiSession.Nav -Prevmon $guiSession.Prevmon -Result $pr
+            }
             if ($r -ceq 'CLOSE') { $guiForm.Close() }
-            elseif ($r -ceq 'RENDER' -or $r -ceq 'RECOVER_OPEN') {
+            elseif ($r -ceq 'RENDER' -or $r -ceq 'RECOVER_OPEN' -or $r -ceq 'PREVMON_OPEN') {
                 # P4a: opening P or 8 asks for the preview; the session's function decides whether the engine is called
                 # (once per audit; never before an audit).
                 if ($r -ceq 'RENDER' -and (Get-AtmGuiNavTop -Nav $guiSession.Nav).Name -ceq 'gates') {
@@ -923,7 +979,7 @@ function Start-AtmGui {
                     }
                 }
                 # Keys.Return and Keys.Enter are one value; its name can be either.
-                if ($kn -cmatch '^(D|NumPad)[1-9]$' -or $kn -ceq 'P' -or $kn -ceq 'D' -or $kn -ceq 'S' -or $kn -ceq 'U' -or $kn -ceq 'Return' -or $kn -ceq 'Enter' -or $kn -ceq 'Escape') {
+                if ($kn -cmatch '^(D|NumPad)[1-9]$' -or $kn -ceq 'P' -or $kn -ceq 'D' -or $kn -ceq 'S' -or $kn -ceq 'M' -or $kn -ceq 'U' -or $kn -ceq 'Return' -or $kn -ceq 'Enter' -or $kn -ceq 'Escape') {
                     $ev.Handled = $true
                     $ev.SuppressKeyPress = $true
                     & $guiNavKey $kn

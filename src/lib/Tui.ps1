@@ -19,6 +19,10 @@
 #    read-only collection of the recovery engine, then its list; Enter shows the plan of a service chosen from that list
 #    (never a typed name), computed from the same collection. Executing stays in the CLI, as restoring does (T-ISO-6):
 #    the area asks nothing, takes no lock, writes no log, controls no service and requests no elevation.
+#  * V0.5 M5 (ADR-0017): the monitoring screen (M) only reads. Entering it, or U on it, reads the monitoring status and
+#    the collection task's state once (the readers; tests inject them) and shows them with the lines of monitor status
+#    (Get-AtmMonitorStatusLines). What was read lives in that screen only; leaving it keeps nothing. It never enables,
+#    disables, collects, prunes, removes or schedules anything: each command an alert names is text for the user.
 Set-StrictMode -Version 2.0
 
 $script:AtmTuiClassColor = @{ ACTIVE_EVIDENCE = 'Red'; RECENT = 'Yellow'; LIVENESS_UNKNOWN = 'DarkYellow'; ORPHAN_SUSPECTED = 'Cyan'; NOT_SCANNED = 'DarkGray' }
@@ -331,6 +335,13 @@ function Get-AtmTuiTextLines {
             # collection, with the lines the CLI writes for recover plan and the CLI-only note.
             foreach ($pl in @(Get-AtmRecoverPlanLines -Plan $Screen.Filter.Plan -View)) { & $add $pl.Text $pl.Color }
         }
+        'monitor' {
+            # V0.5 M5: what entering the screen (or U) read, with the lines of monitor status; this frame reads nothing.
+            & $add (Get-AtmText 'tui.mon.viewOnly') 'Green'
+            & $add ''
+            if ($Screen.Filter.Error) { & $add (Get-AtmText 'tui.mon.failed' $Screen.Filter.Error) 'Yellow' }
+            else { foreach ($ml in @(Get-AtmMonitorStatusLines -Status $Screen.Filter.Status -Task $Screen.Filter.Task)) { & $add $ml.Text $ml.Color } }
+        }
     }
     return $L.ToArray()
 }
@@ -424,6 +435,8 @@ function Get-AtmTuiMenuItems {
         @{ Key = 'Z'; Label = (Get-AtmText 'menu.quarantine'); Screen = @{ Name = 'quarantine'; Title = (Get-AtmText 'menu.quarantineTitle') } }
         # V0.4 R5: the recovery area, view only (list and plan; executing stays in the CLI).
         @{ Key = 'S'; Label = (Get-AtmText 'menu.recover'); Screen = @{ Name = 'recover'; Title = (Get-AtmText 'menu.recoverTitle') } }
+        # V0.5 M5: the monitoring screen, view only (the history, the alerts and the task; acting stays in the CLI).
+        @{ Key = 'M'; Label = (Get-AtmText 'menu.monitor'); Screen = @{ Name = 'monitor'; Title = (Get-AtmText 'menu.monitorTitle') } }
         @{ Key = 'R'; Label = (Get-AtmText 'menu.reaudit'); Screen = @{ Name = 'reaudit' } }
         @{ Key = 'H'; Label = (Get-AtmText 'menu.help'); Screen = @{ Name = 'help'; Title = (Get-AtmText 'menu.help') } }
         @{ Key = 'Q'; Label = (Get-AtmText 'menu.quit'); Screen = @{ Name = 'quit' } }
@@ -593,13 +606,13 @@ function Get-AtmTuiFrame {
             # Where the visible lines are, so more content is never hidden silently.
             $footer = Get-AtmText 'foot.diagText' $(if ($tl.Count) { $scr.Top + 1 } else { 0 }) $last $tl.Count
         }
-        { $_ -in @('errors', 'detail', 'help', 'qdetail', 'rplan') } {
+        { $_ -in @('errors', 'detail', 'help', 'qdetail', 'rplan', 'monitor') } {
             $tl = Get-AtmTuiTextLines -State $State -Screen $scr -Width $w
             $scr.Count = $tl.Count
             $vis = [math]::Max(1, $bodyH - 1)
             if ($scr.Top -gt [math]::Max(0, $tl.Count - $vis)) { $scr.Top = [math]::Max(0, $tl.Count - $vis) }
             for ($i = $scr.Top; $i -lt [math]::Min($tl.Count, $scr.Top + $vis); $i++) { $lines.Add(@(New-AtmSeg (' ' + $tl[$i].Text) $tl[$i].Fg)) }
-            $footer = Get-AtmText $(if ($scr.Name -eq 'qdetail') { 'foot.qdetail' } else { 'foot.text' })
+            $footer = Get-AtmText $(if ($scr.Name -eq 'qdetail') { 'foot.qdetail' } elseif ($scr.Name -eq 'monitor') { 'foot.monitor' } else { 'foot.text' })
         }
     }
     # The message and the footer (keys) always stay on screen: the body gives way when the frame is taller.
@@ -650,7 +663,7 @@ function Write-AtmTuiFrameToConsole {
 # the diagnose.
 
 $script:AtmTuiListScreens = @('users', 'projects', 'roots', 'gates', 'quarantine', 'diag', 'dcov', 'dlist', 'dnodes', 'dissues', 'recover')
-$script:AtmTuiTextScreens = @('errors', 'detail', 'help', 'qdetail', 'dsum', 'dcovdet', 'dfind', 'dnode', 'rplan')
+$script:AtmTuiTextScreens = @('errors', 'detail', 'help', 'qdetail', 'dsum', 'dcovdet', 'dfind', 'dnode', 'rplan', 'monitor')
 $script:AtmTuiDiagScreens = @('diag', 'dcov', 'dlist', 'dnodes', 'dissues', 'dsum', 'dcovdet', 'dfind', 'dnode')
 $script:AtmTuiDiagStateColor = @{ IN_USE = 'Red'; UNKNOWN = 'Yellow'; NO_DEPENDENCY_OBSERVED = 'Green'; RUNTIME_NOT_DIAGNOSED = 'DarkGray' }
 # Strength is told by its marker, not by color alone.
@@ -965,6 +978,23 @@ function Invoke-AtmTuiRecover {
     }
 }
 
+function Get-AtmTuiMonitorView {
+    # V0.5 M5: the only place the TUI reads the monitoring, on the explicit action of entering its screen (M) or U on it
+    # (never per frame): the status and the collection task's state, once each, through the readers (tests inject them).
+    # Returns the filter of the screen (Status, Task, Error); the state keeps nothing of it. A failure gives Error = the
+    # exception code only (never its message), and nothing else is shown. Nothing is written, created, run or scheduled.
+    param($State)
+    & $State.Draw (Get-AtmTuiBusyFrame -State $State -Text (Get-AtmText 'tui.mon.reading'))
+    $State.MonitorReads++
+    try {
+        $st = & $State.MonitorStatusReader
+        $tk = & $State.MonitorTaskReader
+        return @{ Status = $st; Task = $tk; Error = $null }
+    } catch {
+        return @{ Status = $null; Task = $null; Error = (ConvertTo-AtmExceptionCode $_.Exception.GetBaseException().GetType().Name) }
+    }
+}
+
 # ------------------------------------------------------------------ actions
 
 function Invoke-AtmTuiAudit {
@@ -1063,10 +1093,13 @@ function Start-AtmTui {
                        Get-AtmAutoPurgeTaskState, read only). The TUI only shows it: it never schedules or unschedules.
       -RecoverCollectionRunner: scriptblock() -> one collection of the recovery engine (tests; default
                        Get-AtmRecoverCollection with its own deadline). Called only when the recovery area is entered.
+      -MonitorStatusReader / -MonitorTaskReader: scriptblock() -> the monitoring status / the collection task's state
+                       (tests; default Get-AtmMonitorStatus / Get-AtmMonitorTaskState, both read only). Called only when
+                       the monitoring screen is entered or U is pressed on it.
     #>
     param([hashtable]$InventoryArgs = @{}, [scriptblock]$KeySource, [scriptblock]$Renderer, [scriptblock]$LineReader, [switch]$Ascii, [int]$Width = 0, [int]$Height = 0, $Inventory,
         [hashtable]$DiagnoseArgs = $null, [scriptblock]$DiagnoseRunner = $null, [scriptblock]$KeyFlush = $null, [scriptblock]$AutoPurgeTaskReader = $null,
-        [scriptblock]$RecoverCollectionRunner = $null)
+        [scriptblock]$RecoverCollectionRunner = $null, [scriptblock]$MonitorStatusReader = $null, [scriptblock]$MonitorTaskReader = $null)
     $headless = [bool]$Renderer
     $useAscii = $Ascii -or -not (Test-AtmTuiUnicodeDefault)
     # Callbacks below rely on dynamic scoping with tui-prefixed names (no GetNewClosure: such closures
@@ -1086,6 +1119,11 @@ function Start-AtmTui {
         # entering it collected.
         Recover = $null; RecoverRuns = 0
         RecoverRunner = $(if ($null -ne $RecoverCollectionRunner) { $RecoverCollectionRunner } else { { Get-AtmRecoverCollection } })
+        # V0.5 M5: the monitoring screen's readers, and how many times entering it (or U) read; what they return lives
+        # in the screen's filter only.
+        MonitorReads = 0
+        MonitorStatusReader = $(if ($null -ne $MonitorStatusReader) { $MonitorStatusReader } else { { Get-AtmMonitorStatus } })
+        MonitorTaskReader = $(if ($null -ne $MonitorTaskReader) { $MonitorTaskReader } else { { Get-AtmMonitorTaskState } })
     }
     $tuiHeadless = $headless
     $sizeOf = {
@@ -1184,6 +1222,8 @@ function Start-AtmTui {
                     # because they show items of the previous result.
                     if ($inDiag -and $ch -match '^[uU]$') { $push = @{ Name = 'diagrefresh' } }
                     elseif ($inDiag) { $null = $ch }
+                    # U (monitoring screen only, V0.5 M5): read the status and the task's state again.
+                    elseif ($scr.Name -ceq 'monitor' -and $ch -match '^[uU]$') { $push = @{ Name = 'monrefresh' } }
                     elseif ($ch -match '^[rR]$') { $push = @{ Name = 'reaudit' } }
                     elseif ($ch -match '^[iI]$' -and $scr.Name -in @('detail', 'roots', 'gates')) {
                         # I over a root (its detail, or the selected row): the isolation engine, with that exact path.
@@ -1237,6 +1277,18 @@ function Start-AtmTui {
                         # time it is entered.
                         $okR = Invoke-AtmTuiRecover -State $state; & $KeyFlush
                         if ($okR) { $state.Stack.Add(@{ Name = 'recover'; Title = $push.Title; Sel = 0; Top = 0; Count = 0; Filter = $null }) }
+                    }
+                    'monitor' {
+                        # V0.5 M5: entering the monitoring screen reads once; what it read stays in this screen only.
+                        $mv = Get-AtmTuiMonitorView -State $state; & $KeyFlush
+                        if ($mv.Error) { $state.Message = (Get-AtmText 'tui.mon.failed' $mv.Error) }
+                        $state.Stack.Add(@{ Name = 'monitor'; Title = $push.Title; Sel = 0; Top = 0; Count = 0; Filter = $mv })
+                    }
+                    'monrefresh' {
+                        # U on it: read again, replacing what the screen held.
+                        $scr.Filter = Get-AtmTuiMonitorView -State $state; & $KeyFlush
+                        $scr.Top = 0
+                        $state.Message = $(if ($scr.Filter.Error) { Get-AtmText 'tui.mon.failed' $scr.Filter.Error } else { Get-AtmText 'tui.mon.reread' })
                     }
                     default {
                         $s = @{} + $push

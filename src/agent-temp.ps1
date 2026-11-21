@@ -250,10 +250,13 @@ try {
             # V0.2.1 (ADR-0014): presentation only. With the release gate closed (every copy): GUI_GATE_CLOSED, exit 7,
             # no window and no WinForms assembly. Past it: an STA thread and an interactive desktop, or exit 8 with the
             # reason; never relaunched in another shell (GUI-D7). V0.4 R5: past the gate, the recovery engine is loaded too,
-            # for the read-only recovery area (its collection, list and plan; the window never executes).
+            # for the read-only recovery area (its collection, list and plan; the window never executes). V0.5 M5: past the
+            # gate, the monitoring engine too, for the view-only monitoring area (its status only; loading it defines
+            # functions and constants only).
             if ($script:AtmGuiEnabled) {
                 Initialize-AtmNative -LibDir (Join-Path $here 'lib')
                 . (Join-Path $here 'lib\Engine.Recover.ps1')
+                . (Join-Path $here 'lib\Engine.Monitor.ps1')
             }
             exit (Invoke-AtmGuiCommand)
         }
@@ -264,15 +267,23 @@ try {
                 exit 6
             }
             # V0.4 R5: the recovery engine, for the TUI's read-only recovery area (its collection, list and plan; the TUI
-            # never executes). Loading it defines functions and constants only.
+            # never executes). Loading it defines functions and constants only. V0.5 M5: the monitoring engine, for the
+            # TUI's view-only monitoring screen (M; it reads the status and the task state, never acts).
             . (Join-Path $here 'lib\Engine.Recover.ps1')
+            . (Join-Path $here 'lib\Engine.Monitor.ps1')
             $null = Start-AtmTui -InventoryArgs $invArgs -Ascii:$Ascii
             exit 0
         }
         'audit' {
             $inv = Invoke-AtmInventory @cliInvArgs
             if ($Path) { Show-AtmPathDetail -Inventory $inv -Path $Path }
-            else { Show-AtmAudit -Inventory $inv -User $User -Project $Project -Root $Root }
+            else {
+                # V0.5 M5: at most one alert line under the first header. The engine's summary decides first whether
+                # anything is read (in every distributed copy nothing is, and no line is written); it never throws, and
+                # the line never enters -ExportJson nor changes the exit code.
+                . (Join-Path $here 'lib\Engine.Monitor.ps1')
+                Show-AtmAudit -Inventory $inv -User $User -Project $Project -Root $Root -MonitorLine (Get-AtmMonitorAuditLine -Summary (Get-AtmMonitorAuditSummary))
+            }
             if ($ExportJson) {
                 if (-not (Test-AtmOutputPathOutsideBases -Path $ExportJson -Inventory $inv -MustNotExist)) { throw (Get-AtmText 'cli.exportRefused') }
                 # FINAL-A (F-02): the same rules, checked again with the folder and its ancestors pinned; the file is created
