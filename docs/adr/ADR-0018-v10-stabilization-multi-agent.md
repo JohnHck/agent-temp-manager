@@ -384,7 +384,7 @@ interactive UAC consent and no second real administrator.
 |---|---|---|
 | Clean environment | **yes** | each job starts from a fresh runner; the install e2e installs the package and checks it (`tests/e2e/Invoke-InstallE2E.ps1`) |
 | Elevated | **partly** | the runner account is an elevated administrator with no prompt (`TESTING.md:56`); the elevated **requester** path through a real UAC consent is not provable: operator |
-| Multi-user | **yes, two standard users (since S5); a second administrator: no** | one disposable standard user existed before S5: created at `Invoke-InstallE2E.ps1:693-711` (Users group only, by SID, random `SecureString` password, asserted not an administrator) and reused through `Start-Process -Credential` (all in `Invoke-InstallE2E.ps1`): `audit`, `preview` and `verify` as that user (`:721`); the write probe on the install folder (`:735`); the automatic-purge task helper (`:782`); the V2 clean harness, leg A (`:864`); the isolation harness, leg A (`:914`); R6, leg A (`:974`); M3b, leg A (`:1019`; `Invoke-MonitorE2E.ps1:10` says it reuses this user); and the lock held and probed across identities (`:1059`, `:1073`). **Since S5 (V10-D7 (a)): yes for the cross-user rows.** A second disposable standard user is created the same way (`:1103-1119`), and both users plant a dummy `claude-code` fixture in their own TEMP (`:1193`). The e2e then proves: another profile's base under its own owner, in an elevated `audit` (`:1236`); `-IncludeOtherUsers` in `preview` and `clean` with the gates closed (`:1266`, `:1292`); a standard user that cannot read the other profile's base, reported as not readable, never empty (`:1307`); F-05's owner rule with two real owners (`:1364`); no new file in either base or product folder (`:1411`). See the S5 implementation record. A second real **administrator** stays with the operator |
+| Multi-user | **yes, two standard users (since S5); a second administrator: no** | one disposable standard user existed before S5: created at `Invoke-InstallE2E.ps1:693-711` (Users group only, by SID, random `SecureString` password, asserted not an administrator) and reused through `Start-Process -Credential` (all in `Invoke-InstallE2E.ps1`): `audit`, `preview` and `verify` as that user (`:721`); the write probe on the install folder (`:735`); the automatic-purge task helper (`:782`); the V2 clean harness, leg A (`:864`); the isolation harness, leg A (`:914`); R6, leg A (`:974`); M3b, leg A (`:1019`; `Invoke-MonitorE2E.ps1:10` says it reuses this user); and the lock held and probed across identities (`:1059`, `:1073`). **Since S5 (V10-D7 (a)): yes for the cross-user rows.** A second disposable standard user is created the same way (`:1103-1119`), and both users plant a dummy `claude-code` fixture in their own TEMP (`:1225`). The e2e then proves: another profile's base under its own owner, in an elevated `audit` (`:1275`); `-IncludeOtherUsers` in `preview` and `clean` with the gates closed (`:1306`, `:1333`); a standard user that cannot read the other profile's base, reported as not readable, never empty (`:1349`); F-05's owner rule with two real owners (`:1407`); no new file in either base or product folder (`:1455`). See the S5 implementation record. A second real **administrator** stays with the operator |
 | Windows 10 | **no** | no Windows 10 client runner: operator (the manual rows of `release/PRIVILEGE-MATRIX-RUNBOOK.md`) |
 | Windows 11 | **partly** | ARM64 in CI; x64: operator (`TESTING.md:60`) |
 | PowerShell 5.1 | **yes** | the `test (powershell)`, ARM64 powershell and installer-powershell jobs |
@@ -679,7 +679,7 @@ each checks are listed in `docs/TESTING.md`, "Cross-user rows in the install e2e
 
 - **The second user** (`:1103-1119`) is created exactly like the first (`:697-712`): a random name (`atme2eb` and four digits); a random
   password built directly as a `SecureString`; Users only, by SID; asserted not an administrator. Each user starts a
-  helper with `Start-Process -Credential -LoadUserProfile` (`:1193`). The helper plants a `claude-code` tree in that
+  helper with `Start-Process -Credential -LoadUserProfile` (`:1225`). The helper plants a `claude-code` tree in that
   user's own TEMP, with dummy files only: one root set back 10 days and one new. It then stays alive until a stop file
   or its own deadline, so both registry hives stay loaded and both environments are readable. Nothing is terminated.
 - **The rows of section 6 that move from the operator to CI:**
@@ -700,9 +700,10 @@ each checks are listed in `docs/TESTING.md`, "Cross-user rows in the install e2e
     (`src/agent-temp.ps1:277-297`). The step passes it anyway; `preview` and `clean` are the commands it changes, and
     the preview step also checks the contrast without it.
   - **"No new file in any profile".** The listing covers both bases and, in each profile, `.claude` and the product's
-    folders. The whole profile is not stable while its hive is loaded, because Windows writes there. A file or folder
-    added or removed, a size changed or a file written fails the step; a folder whose last write time alone changed is
-    not a new file, so it is counted and named in the step's detail.
+    folders. The whole profile is not stable while its hive is loaded, because Windows writes there. The baseline is a
+    control listing taken 8 s after the first one and before any product step; a checkpoint after each product step
+    names the step a change appears after. Against the baseline, any change fails: a file or folder added or removed,
+    a size, or a last write time, a folder's included.
   - **Cleanup.** The round says both users stay on the disposable machine, "as the first one already does". The
     script's last line removes the first user's **account** (`Remove-LocalUser`, unchanged); its profile folder stays.
     S5 adds no removal: B's account and profile stay. Found, not changed; reported to the maintainer.

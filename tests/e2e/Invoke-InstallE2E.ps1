@@ -1190,6 +1190,38 @@ function Get-S5Listing($Users) {
     }
     return , @($lines | Sort-Object)
 }
+function Get-S5Changes([string[]]$Before, [string[]]$After) {
+    # Per entry (label, area, relative name: synthetic fixture names or the product's own, never a profile path or an
+    # account): ADDED or REMOVED (a new or missing file or folder), SIZE (length changed), FILETIME (a file's last write
+    # time) or TIME (a folder's last write time).
+    $index = { param([string[]]$L) $m = @{}; foreach ($x in @($L)) { $p = $x.Split('|'); $m[(@($p[0..([Math]::Min(2, $p.Count - 1))]) -join '|')] = $p }; $m }
+    $b = & $index $Before; $a = & $index $After
+    $changes = New-Object System.Collections.Generic.List[string]
+    foreach ($key in @($a.Keys | Sort-Object)) {
+        if (-not $b.ContainsKey($key)) { $changes.Add("ADDED $key"); continue }
+        $pa = $a[$key]; $pb = $b[$key]
+        if ($pa.Count -ge 5 -and $pb.Count -ge 5) { if ($pa[3] -cne $pb[3]) { $changes.Add("SIZE $key") } elseif ($pa[4] -cne $pb[4]) { $changes.Add($(if ($pa[3] -ceq '-1') { "TIME $key" } else { "FILETIME $key" })) } }
+    }
+    foreach ($key in @($b.Keys | Sort-Object)) { if (-not $a.ContainsKey($key)) { $changes.Add("REMOVED $key") } }
+    return , $changes.ToArray()
+}
+function Format-S5Changes([string[]]$Changes) {
+    # At most 12, the session ids named as the old and the new root of the fixture.
+    $t = (@($Changes) | Select-Object -First 12) -join ' ; '
+    if ($null -ne $script:s5) { foreach ($u in @($script:s5.Users)) { $t = $t.Replace([string]$u.Old, '<old-root>').Replace([string]$u.New, '<new-root>') } }
+    return $t
+}
+function Add-S5Checkpoint([string]$After) {
+    # A listing after each product step, compared with the previous one: which step a change appears after. Never stops
+    # the run (called outside the steps).
+    try {
+        if ($null -eq $script:s5) { return }
+        $now = Get-S5Listing $script:s5.Users
+        $c = Get-S5Changes $script:s5.Last $now
+        $script:s5.Trail.Add([pscustomobject]@{ After = $After; Changes = $c })
+        $script:s5.Last = $now
+    } catch { $script:s5.Trail.Add([pscustomobject]@{ After = $After; Changes = @("CHECKPOINT_FAILED $($_.Exception.GetType().Name)") }) }
+}
 Step 'multi-user-fixtures' {
     if (-not $cred -or -not $credB) { throw 'usuarios de teste indisponiveis' }
     [void][IO.Directory]::CreateDirectory($s5Work)
@@ -1230,8 +1262,15 @@ Step 'multi-user-fixtures' {
         Start-Sleep -Milliseconds 500
     }
     Assert ($miss.Count -eq 0) "hive do registro nao carregado: $((@($miss | ForEach-Object { $_.Label })) -join ',')"
-    $script:s5 = [pscustomobject]@{ Users = $users; Before = (Get-S5Listing $users) }
-    "A and B each created 2 session roots in their own TEMP (one 10 days old, one new; dummy files only); both registry hives loaded; $($script:s5.Before.Count) listing line(s) before, $(@($script:s5.Before | Where-Object { $_ -like '*|UNREADABLE|*' }).Count) folder(s) not listable"
+    $script:s5 = [pscustomobject]@{ Users = $users; Before = $null; Last = $null; Trail = (New-Object System.Collections.Generic.List[object]) }
+    # Control: a second listing 8 s after the first, before any audit, preview or clean. A change here is the fixture's
+    # own (nothing of the product has run on these bases yet); the control listing is the baseline.
+    $first = Get-S5Listing $users
+    Start-Sleep -Seconds 8
+    $control = Get-S5Listing $users
+    $ctl = Get-S5Changes $first $control
+    $script:s5.Before = $control; $script:s5.Last = $control
+    "A and B each created 2 session roots in their own TEMP (one 10 days old, one new; dummy files only); both registry hives loaded; $($control.Count) listing line(s), $(@($control | Where-Object { $_ -like '*|UNREADABLE|*' }).Count) folder(s) not listable; control listing 8 s later, before any product step: $($ctl.Count) change(s)$(if ($ctl.Count) { ' (' + (Format-S5Changes $ctl) + ')' }) - the control listing is the baseline"
 }
 Step 'multi-user-audit-elevated' {
     if ($null -eq $script:s5) { throw 'fixture da S5 indisponivel' }
@@ -1263,6 +1302,7 @@ function Get-S5PreviewRow([string]$Text, [string]$Id) {
     return [pscustomobject]@{ Category = $m.Groups[1].Value; Rest = $m.Groups[2].Value }
 }
 $s5Requirement = '-IncludeOtherUsers(anotheruser'
+Add-S5Checkpoint 'audit-elevated'
 Step 'multi-user-preview-elevated' {
     if ($null -eq $script:s5) { throw 'fixture da S5 indisponivel' }
     $with = Invoke-S5Agent 'preview -NoProgress -Lang en-US -IncludeOtherUsers' (Join-Path $s5Work 'preview-include-other-users.txt')
@@ -1289,6 +1329,7 @@ Step 'multi-user-preview-elevated' {
     Assert ((@($oldCats | Select-Object -Unique)).Count -eq 1) "raizes antigas de A e B em categorias diferentes: $($oldCats -join ',')"
     "with -IncludeOtherUsers: old roots of A and B $($oldCats[0]) (the gate's result$(if ($oldCats[0] -ceq 'BLOCKED') { ', process coverage incomplete' })), never ELIGIBLE_WITH_DECLARED_RISK; new roots BLOCKED (RECENT); without the switch: the old roots carry its requirement"
 }
+Add-S5Checkpoint 'preview-elevated'
 Step 'multi-user-clean-gate-closed' {
     if ($null -eq $script:s5 -or @($script:s5.Users | Where-Object { -not $_.OldPath }).Count -gt 0) { throw 'raizes antigas da S5 indisponiveis' }
     $list = Join-Path $s5Work 'allowlist.txt'
@@ -1304,6 +1345,7 @@ Step 'multi-user-clean-gate-closed' {
     Assert ($how -cne 'other') 'clean sem o codigo da trava nem o de nenhum caminho elegivel'
     "the old roots of A and B in an allow list, -IncludeOtherUsers: exit 3, $how; both roots intact"
 }
+Add-S5Checkpoint 'clean-gate-closed'
 Step 'multi-user-audit-as-A-not-elevated' {
     if ($null -eq $script:s5) { throw 'fixture da S5 indisponivel' }
     $ua = $script:s5.Users[0]; $ub = $script:s5.Users[1]
@@ -1361,6 +1403,7 @@ try {
 foreach ($key in @('namer', 'owner', 'error')) { if ($r.Contains($key)) { $r[$key] = [regex]::Replace([string]$r[$key], 'S-1-5-21-[0-9-]+', '<sid>') } }
 [IO.File]::WriteAllText($Out, ($r | ConvertTo-Json -Compress))
 '@
+Add-S5Checkpoint 'audit-as-A-not-elevated'
 Step 'multi-user-f05-two-owners' {
     if ($null -eq $script:s5) { throw 'fixture da S5 indisponivel' }
     $ua = $script:s5.Users[0]; $ub = $script:s5.Users[1]
@@ -1408,35 +1451,20 @@ Step 'multi-user-f05-two-owners' {
     Assert ($h.ownerBases -eq 1 -and $h.ownerBaseShared -and $h.sharedWithNamer -and $h.namerBases -eq 0 -and $h.ownerNotProfile -ge 1) "base do dono: $([IO.File]::ReadAllText($hout))"
     "$($namer.Label) (first in ProfileList) pointed at $($owner.Label)'s TEMP: the base stays with its owner $($owner.Label) (its partitions SHARED_TEMP: old LIVENESS_UNKNOWN, new RECENT), $($namer.Label) gets OWNER_NOT_PROFILE and no partition; $($namer.Label)'s TEMP restored"
 }
+Add-S5Checkpoint 'f05-two-owners'
 Step 'multi-user-no-new-files' {
     if ($null -eq $script:s5) { throw 'fixture da S5 indisponivel' }
     $after = Get-S5Listing $script:s5.Users
-    # Per entry (label, area, relative name: synthetic fixture names or the product's own, never a profile path or an
-    # account): ADDED or REMOVED (a new or missing file or folder), SIZE (length changed), FILETIME (a file written) or
-    # TIME (a folder's last write time only: reported, never a new file).
-    $index = { param([string[]]$L) $m = @{}; foreach ($x in @($L)) { $p = $x.Split('|'); $m[(@($p[0..([Math]::Min(2, $p.Count - 1))]) -join '|')] = $p }; $m }
-    $b = & $index $script:s5.Before; $a = & $index $after
-    $changes = New-Object System.Collections.Generic.List[string]
-    foreach ($key in @($a.Keys | Sort-Object)) {
-        if (-not $b.ContainsKey($key)) { $changes.Add("ADDED $key"); continue }
-        $pa = $a[$key]; $pb = $b[$key]
-        if ($pa.Count -ge 5 -and $pb.Count -ge 5) { if ($pa[3] -cne $pb[3]) { $changes.Add("SIZE $key") } elseif ($pa[4] -cne $pb[4]) { $changes.Add($(if ($pa[3] -ceq '-1') { "TIME $key" } else { "FILETIME $key" })) } }
-    }
-    foreach ($key in @($b.Keys | Sort-Object)) { if (-not $a.ContainsKey($key)) { $changes.Add("REMOVED $key") } }
-    $hard = @($changes | Where-Object { -not $_.StartsWith('TIME ') })
-    $time = @($changes | Where-Object { $_.StartsWith('TIME ') })
-    # The session ids named as the old and the new root of the fixture.
-    $show = {
-        param([string[]]$C)
-        $t = (@($C) | Select-Object -First 12) -join ' ; '
-        foreach ($u in @($script:s5.Users)) { $t = $t.Replace([string]$u.Old, '<old-root>').Replace([string]$u.New, '<new-root>') }
-        $t
-    }
-    Assert ($hard.Count -eq 0) "listagem antes/depois: $($hard.Count) entrada(s) nova(s), removida(s), com tamanho alterado ou arquivo gravado: $(& $show $hard)"
-    "no file or folder added, removed or resized and no file written in both bases and the product's folders and .claude of both profiles across the audits, previews, clean and F-05 ($($after.Count) line(s), $(@($after | Where-Object { $_ -like '*|UNREADABLE|*' }).Count) folder(s) not listable by this account); folders with only their last write time changed: $($time.Count)$(if ($time.Count) { ' (' + (& $show $time) + ')' })"
+    # Against the control baseline, every change fails (a folder's time included: something was created, removed or
+    # timed inside it). The checkpoints say after which product step each change appeared.
+    $all = Get-S5Changes $script:s5.Before $after
+    $trail = @($script:s5.Trail.ToArray() | Where-Object { @($_.Changes).Count -gt 0 } | ForEach-Object { "after $($_.After): $(Format-S5Changes $_.Changes)" })
+    Assert ($all.Count -eq 0) "listagem contra a linha de base de controle: $($all.Count) mudanca(s): $(Format-S5Changes $all) | por passo: $($trail -join ' | ')"
+    "no file or folder added, removed, resized or re-timed in both bases and the product's folders and .claude of both profiles across the audits, previews, clean and F-05, against the control baseline ($($after.Count) line(s), $(@($after | Where-Object { $_ -like '*|UNREADABLE|*' }).Count) folder(s) not listable by this account); checkpoints after each product step: $($script:s5.Trail.Count), all without change"
 }
 # The fixture helpers end by themselves on their stop files (never terminated), whatever the steps above did.
-# In a child scope, with a name of its own: at script level $h is already a typed variable (a [ref] out argument above).
+# A generic List through @() throws ArgumentException ("Argument types do not match") under this script's StrictMode on
+# Windows PowerShell (reproduced): ToArray(), in a child scope, with a variable of its own.
 # Whatever happens here, the run goes on (a helper not told to stop ends by itself at its deadline).
 try {
     & {
