@@ -4586,6 +4586,58 @@ exit 0
         Assert-Eq ([regex]::Matches($iso.Substring(0, $iP), '\$script:AtmQuarantinePurgeEnabled').Count) 1 'isolar, restaurar e a gestao nunca leem a trava do expurgo (so a atribuicao)'
         foreach ($n in @('lib\Engine.Clean.ps1', 'lib\Engine.Audit.ps1', 'lib\Engine.Diagnose.ps1', 'lib\Tui.ps1')) { Assert-True (-not [IO.File]::ReadAllText((Join-Path $srcDir $n)).Contains('AtmQuarantinePurgeEnabled')) "$n nunca le a trava do expurgo" }
     }
+    Test-Case 'Isolamento P4' 'Nove travas (SR-08): em src e install, nenhum Set-Variable, New-Variable, Remove-Variable ou Get-Variable (nem os apelidos sv, nv, rv, gv) que nomeie uma trava, nenhum [ref] de uma trava e nenhum caminho Variable: de uma trava, em qualquer caixa; cada forma plantada numa copia e recusada; a copia sem planta passa' {
+        # V10-S6c SR-08: the single-assignment test above matches only '<gate>\s*='; these are the indirect forms that
+        # would set, create, remove or alias a gate without that text. Every line of every file is read, comments included.
+        $gates = @('AtmRealDeletionEnabled', 'AtmWorktreeDiagnosticsEnabled', 'AtmHandleDiagnosticsEnabled', 'AtmDiagnoseExportEnabled', 'AtmIsolationEnabled', 'AtmQuarantinePurgeEnabled', 'AtmGuiEnabled', 'AtmRecoveryEnabled', 'AtmMonitoringEnabled')
+        $gateForms = {
+            param([string[]]$Files)
+            $bad = New-Object System.Collections.Generic.List[string]
+            foreach ($f in $Files) {
+                $lines = [IO.File]::ReadAllText($f) -split "`r?`n"
+                for ($i = 0; $i -lt $lines.Count; $i++) {
+                    $l = $lines[$i]
+                    $at = '{0}:{1}' -f (Split-Path -Leaf $f), ($i + 1)
+                    foreach ($g in $gates) {
+                        if ($l.IndexOf($g, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+                        $w = '\b' + $g + '\b'
+                        if ($l -match ('(?i)\b(Set|New|Remove|Get)-Variable\b.*' + $w)) { $bad.Add("${at}: cmdlet de variavel com $g") }
+                        if ($l -match ('(?i)(^|[;{(|&=])\s*(sv|nv|rv|gv)\s.*' + $w)) { $bad.Add("${at}: apelido de cmdlet de variavel com $g") }
+                        if ($l -match ('(?i)\[ref\]\s*\$\{?((script|global|local|private):)?' + $w)) { $bad.Add("${at}: [ref] de $g") }
+                        if ($l -match ('(?i)\bvariable:[^\s''"]*' + $w)) { $bad.Add("${at}: caminho Variable: de $g") }
+                    }
+                }
+            }
+            return ,$bad
+        }.GetNewClosure()
+        $root = Split-Path -Parent $testsDir
+        $real = @(Get-ChildItem -LiteralPath $srcDir, (Join-Path $root 'install') -Recurse -File | ForEach-Object { $_.FullName })
+        Assert-True ($real.Count -ge 20) "arquivos de src e install lidos ($($real.Count))"
+        Assert-Eq ((& $gateForms $real) -join ' | ') '' 'src e install: nenhuma forma indireta que nomeie uma trava'
+        $pl = Join-Path $sandbox 's6c-gate-forms'
+        [void][IO.Directory]::CreateDirectory($pl)
+        $orig = [IO.File]::ReadAllText((Join-Path $srcDir 'lib\Engine.Clean.ps1'))
+        $copy = Join-Path $pl 'Engine.Clean.ps1'
+        # The gate names are split here so that no other static scan of this file reads a planted form as code.
+        $d = 'AtmReal' + 'DeletionEnabled'; $r = 'AtmRecovery' + 'Enabled'; $m = 'AtmMonitoring' + 'Enabled'
+        $plants = @(
+            @("Set-Variable -Name $d -Value `$true -Scope Script", 'cmdlet de variavel'),
+            @("New-Variable -Name $r -Value `$true -Scope Script -Force", 'cmdlet de variavel'),
+            @("Remove-Variable -Name $m -Scope Script", 'cmdlet de variavel'),
+            @("(Get-Variable -Name $d -Scope Script).Value = `$true", 'cmdlet de variavel'),
+            @("set-variable $($r.ToLowerInvariant()) `$true -scope script", 'cmdlet de variavel'),
+            @("`$x = [ref]`$script:$d; `$x.Value = `$true", '[ref] de'),
+            @("`$x = [REF]`$$m", '[ref] de'),
+            @("Set-Item -Path Variable:script:$r -Value `$true", 'caminho Variable:'),
+            @("sv $d `$true -Scope Script", 'apelido de cmdlet de variavel'))
+        foreach ($pp in $plants) {
+            [IO.File]::WriteAllText($copy, $orig + "`r`n" + $pp[0] + "`r`n", (New-Object Text.UTF8Encoding $false))
+            $pv = & $gateForms @($copy)
+            Assert-True (@($pv | Where-Object { $_.Contains($pp[1]) }).Count -ge 1) "plantado ($($pp[0])): recusado ($($pv -join ' | '))"
+        }
+        [IO.File]::WriteAllText($copy, $orig, (New-Object Text.UTF8Encoding $false))
+        Assert-Eq ((& $gateForms @($copy)) -join ' | ') '' 'controle: a copia sem planta passa'
+    }
     Test-Case 'Isolamento P4' 'Travas independentes nos dois sentidos: com a do isolamento aberta (e a de exclusao do clean, aberta pela suite) o expurgo para em EXPURGO_REAL_DESABILITADO sem perguntar; com a do expurgo aberta, isolar e restaurar param nas suas e o clean com a sua fechada para na dele; o expurgo alem da sua trava funciona com as outras fechadas' {
         $e = New-RstEntry 'purindep'
         if (-not $e) { return }
@@ -20117,12 +20169,15 @@ if ($null -eq $res.env) {
         } finally { Reset-R4Gate; $script:AtmCleanLockName = $prevLock }
         Assert-Eq $script:AtmRecoveryEnabled $false 'trava fechada de novo'
     }
-    Test-Case 'V0.4 R4' 'R4 lado que pede (token nao elevado, PRIV-2 e PRIV-7): start coleta e mostra o plano, o aviso do UAC e relanca so o bin\agent-temp.cmd instalado com os argumentos fixos e o marcador (nenhum caminho); undo mostra so o pedido com o run id e nada coleta; sem instalacao verificada, alvo recusado ou nao declarado e uso errado nada e pedido; nenhum log, lock, seam, pergunta nem chave' {
+    Test-Case 'V0.4 R4' 'R4 lado que pede (token nao elevado, PRIV-2 e PRIV-7): start coleta e mostra o plano, o aviso do UAC e relanca so o agent-temp.ps1 instalado, pelo powershell.exe do diretorio do sistema por caminho absoluto (SR-03), com os argumentos fixos e o marcador (nenhum outro caminho); undo mostra so o pedido com o run id e nada coleta; sem instalacao verificada, alvo recusado ou nao declarado e uso errado nada e pedido; nenhum log, lock, seam, pergunta nem chave' {
         $s = New-R2Sim 'r4req'
         if (-not $s) { return }
         $name = 'Svc.A-1 b_2'
         $s.Service = $name; $s.Row.Name = $name; $s.Hints = @([pscustomobject]@{ Name = $name; Role = $null; ExpectedImage = $s.Img })
-        $exe = Join-Path $r4Root 'bin\agent-temp.cmd'
+        # SR-03: Windows PowerShell from the system directory, by absolute path (an .exe: no file association), running
+        # the installed agent-temp.ps1 with bin\agent-temp.cmd's own flags.
+        $exe = [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell\v1.0\powershell.exe')
+        $pre = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $r4Root 'agent-temp.ps1') + '" '
         $files0 = Get-R4Files $s.Dir
         $op = New-TestCleanOperator
         $io = New-R4Io
@@ -20131,9 +20186,10 @@ if ($null -eq $res.env) {
         Assert-Eq ($io.Kinds -join ',') 'plan,elevationNotice,end' 'plano, aviso do UAC e fim; nenhuma identidade, resultado nem chave'
         $p = @(Get-R4Shown $io 'plan')[0]
         Assert-True ($p.Offered -and $p.GateOpen -and [string]$p.PlanId -cmatch '^[0-9a-f]{64}$') 'plano oferecido, com a trava aberta (so um pedido)'
-        Assert-True ($io.Launches.Count -eq 1 -and $io.Launches[0].File -ceq $exe -and $io.Launches[0].Extra -eq 0 -and $o.LaunchFile -ceq $exe) 'um unico pedido, do lancador instalado no caminho instalado'
-        Assert-Eq $io.Launches[0].Arguments ('recover start -Operation REC-SVC-START -Service "' + $name + '" -AtmElevatedRecovery') 'argumentos fixos: verbo, operacao, nome entre aspas e marcador'
-        Assert-True (-not $io.Launches[0].Arguments.Contains('\') -and -not $io.Launches[0].Arguments.Contains(':') -and $o.LaunchArguments -ceq $io.Launches[0].Arguments) 'nenhum caminho nos argumentos'
+        Assert-True ($io.Launches.Count -eq 1 -and $io.Launches[0].File -ceq $exe -and $io.Launches[0].Extra -eq 0 -and $o.LaunchFile -ceq $exe -and $exe.EndsWith('.exe')) 'um unico pedido, do powershell.exe do diretorio do sistema por caminho absoluto'
+        Assert-Eq $io.Launches[0].Arguments ($pre + 'recover start -Operation REC-SVC-START -Service "' + $name + '" -AtmElevatedRecovery') 'argumentos: as flags do shim, o agent-temp.ps1 instalado entre aspas, e os fixos: verbo, operacao, nome entre aspas e marcador'
+        $tail = $io.Launches[0].Arguments.Substring($pre.Length)
+        Assert-True ($io.Launches[0].Arguments.StartsWith($pre) -and -not $tail.Contains('\') -and -not $tail.Contains(':') -and $o.LaunchArguments -ceq $io.Launches[0].Arguments) 'nenhum caminho nos argumentos fixos (so o do agent-temp.ps1 instalado)'
         $n = @(Get-R4Shown $io 'elevationNotice')[0]
         Assert-True ($n.Verb -ceq 'start' -and $n.Operation -ceq 'REC-SVC-START' -and $n.Target -ceq $name) 'aviso: a operacao e o alvo'
         $e = @(Get-R4Shown $io 'end')[0]
@@ -20145,7 +20201,8 @@ if ($null -eq $res.env) {
         $o = Invoke-R4Open (Get-R4Args $s $io $op @{ RunId = $rid } 'undo')
         Assert-True ($o.Side -ceq 'REQUESTER' -and $o.ExitCode -eq 20 -and $o.Launches -eq 1 -and $s.Reads -eq $reads) "undo: so o pedido, nada coletado ($($o.ExitCode))"
         Assert-Eq ($io.Kinds -join ',') 'undoRequest,elevationNotice,end' 'undo: pedido, aviso do UAC e fim'
-        Assert-Eq $io.Launches[0].Arguments ('recover undo -RunId ' + $rid + ' -AtmElevatedRecovery') 'argumentos fixos do undo'
+        Assert-True ($io.Launches[0].File -ceq $exe) 'undo: o mesmo powershell.exe por caminho absoluto'
+        Assert-Eq $io.Launches[0].Arguments ($pre + 'recover undo -RunId ' + $rid + ' -AtmElevatedRecovery') 'argumentos fixos do undo, depois das flags do shim e do agent-temp.ps1 instalado'
         $q = @(Get-R4Shown $io 'undoRequest')[0]
         Assert-True ($q.RunId -ceq $rid -and $null -eq $q.LogDir -and $q.GateOpen -and @(Get-R4Shown $io 'elevationNotice')[0].RunId -ceq $rid) 'pedido e aviso com o run id'
         # Nothing is requested without a verified installation, for a refused or undeclared target, or for wrong usage.
@@ -20541,9 +20598,28 @@ if ($null -eq $res.env) {
         $cliCode = & $strip $cli
         Assert-Eq (& $count $cliCode 'Invoke-AtmRecoverCommand @recCmd') 1 'o lancador chama o comando uma vez'
         foreach ($p in @('ElevatedLauncherImpl', 'RequesterEvidence', 'LogDirBase', 'EngineArgs', $launchFn, 'AtmRecoveryEnabled =', 'AtmRecoverOperationTaken', 'ServiceControlImpl', 'ServiceStopImpl')) { Assert-True (-not $cli.Contains($p)) "lancador sem '$p'" }
-        Assert-True ($cliCode.Contains("Elevated = [bool]`$AtmElevatedRecovery") -and $cliCode.Contains('BoundNames = [string[]]@($PSBoundParameters.Keys)') -and $cliCode.Contains("LauncherListed = [bool]`$integrity.Listed.ContainsKey('bin\agent-temp.cmd')") -and $cliCode.Contains('InstallRoot = $here')) 'o lancador passa o marcador, os nomes ligados, a instalacao verificada e a propria pasta'
+        Assert-True ($cliCode.Contains("Elevated = [bool]`$AtmElevatedRecovery") -and $cliCode.Contains('BoundNames = [string[]]@($PSBoundParameters.Keys)') -and $cliCode.Contains("LauncherListed = [bool]`$integrity.Listed.ContainsKey('agent-temp.ps1')") -and $cliCode.Contains('InstallRoot = $here')) 'o lancador passa o marcador, os nomes ligados, a instalacao verificada (o agent-temp.ps1, que roda elevado, listado e verificado: SR-03) e a propria pasta'
+        Assert-True (-not $cliCode.Contains("Listed.ContainsKey('bin\agent-temp.cmd')")) 'SR-03: a verificacao do relancamento nao segue mais o shim, que nao roda elevado'
         $cmd = $fn['Invoke-AtmRecoverCommand']
-        Assert-True ($cmd.Contains("'recover start -Operation ' + `$Operation + ' -Service `"' + `$Service + '`" -AtmElevatedRecovery'") -and $cmd.Contains("'recover undo -RunId ' + `$RunId + ' -AtmElevatedRecovery'") -and $cmd.Contains("Join-Path `$InstallRoot 'bin\agent-temp.cmd'")) 'argumentos fixos e o lancador instalado'
+        Assert-True ($cmd.Contains("'recover start -Operation ' + `$Operation + ' -Service `"' + `$Service + '`" -AtmElevatedRecovery'") -and $cmd.Contains("'recover undo -RunId ' + `$RunId + ' -AtmElevatedRecovery'")) 'argumentos fixos'
+        # SR-03: the target is Windows PowerShell by absolute path from the system directory, with the shim's flags and the
+        # installed agent-temp.ps1; nothing in that step reads the environment or names the shim.
+        Assert-True ($cmd.Contains("`$file = [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell\v1.0\powershell.exe')") -and $cmd.Contains("`$argLine = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"' + (Join-Path `$InstallRoot 'agent-temp.ps1') + '`" ' + `$fixed")) 'SR-03: powershell.exe do diretorio do sistema, flags do shim e o agent-temp.ps1 instalado'
+        $l0 = $cmd.IndexOf("'RECOVER_ELEVATION_NEEDS_INSTALL'"); $l1 = $cmd.IndexOf('$out.LaunchFile = $file')
+        Assert-True ($l0 -gt 0 -and $l1 -gt $l0) 'SR-03: o passo que monta o pedido, depois da instalacao verificada'
+        $build = $cmd.Substring($l0, $l1 - $l0)
+        foreach ($p in @('$env:', 'SystemRoot', 'GetEnvironmentVariable', 'agent-temp.cmd', 'cmd.exe', 'ComSpec')) { Assert-True ($build.IndexOf($p, [StringComparison]::OrdinalIgnoreCase) -lt 0) "SR-03: o pedido sem '$p'" }
+        $shim = [IO.File]::ReadAllText((Join-Path $srcDir 'bin\agent-temp.cmd'))
+        Assert-True ($shim.Contains('"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%ATM_ROOT%\agent-temp.ps1" %*') -and $shim.Contains('set "PSModulePath=%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules"')) 'SR-03: as mesmas flags e o mesmo diretorio de modulos do shim'
+        # SR-03: the elevated copy pins PSModulePath itself, first statement after the parameters, from the system directory
+        # and with .NET only (no cmdlet that could load a module from the path it was given).
+        $ctk = $null; $cer = $null
+        $cast = [Management.Automation.Language.Parser]::ParseInput($cli, [ref]$ctk, [ref]$cer)
+        Assert-Eq @($cer).Count 0 'lancador sem erro de sintaxe'
+        $pin = "if (`$AtmElevatedRecovery) { [Environment]::SetEnvironmentVariable('PSModulePath', [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell\v1.0\Modules'), 'Process') }"
+        $first = @($cast.EndBlock.Statements)[0].Extent.Text
+        Assert-Eq $first $pin 'SR-03: a fixacao do PSModulePath da copia relancada e a primeira instrucao, do diretorio do sistema'
+        Assert-Eq (& $count $cliCode 'PSModulePath') 1 'SR-03: uma unica fixacao no lancador'
         # The gate first, then the guard, then the sides.
         $last = -1
         foreach ($p in @("'RECOVER_VERB_INVALID'", "'RECOVER_ARGUMENTS_INVALID'", 'if (-not $script:AtmRecoveryEnabled)', "'RECUPERACAO_REAL_DESABILITADA'", 'if ($script:AtmRecoverOperationTaken)', '$script:AtmRecoverOperationTaken = $true', 'if ($Elevated)', "`$out.Side = 'SAME_PROCESS'", "`$out.Side = 'REQUESTER'")) {
@@ -24760,6 +24836,63 @@ function New-AtmGenericTestProvider {
         } finally { $script:AtmProviders.Clear(); foreach ($x in $snap) { $script:AtmProviders.Add($x) } }
         Assert-Eq (@(Get-AtmProviders | ForEach-Object { $_.Id }) -join ',') $before 'registro restaurado (somente claude-code)'
     }
+    # >>> V10-S6c SR-01: TempSubdir must name a plain child folder of TEMP.
+    function Get-AtmSr01Refusals {
+        # Registers each TempSubdir in a v1 and in a v2 provider and returns what went wrong: the message must be exactly
+        # err.providerSubdir, and the registry, read right after the refused call and before it is put back, must hold
+        # the same objects in the same order.
+        param([string[]]$Values)
+        $wrong = New-Object System.Collections.Generic.List[string]
+        $v1 = ConvertTo-AtmTestV1Provider ((Get-AtmProviders)[0])
+        foreach ($v in $Values) {
+            $o1 = $v1.PSObject.Copy(); $o1.Id = 'sr01-v1'; $o1.TempSubdir = $v
+            foreach ($o in @($o1, (New-AtmS1FixtureProvider @{ TempSubdir = $v }))) {
+                $before = @(Get-AtmProviders)
+                $msg = $null; $after = @()
+                try {
+                    try { Register-AtmProvider $o } catch { $msg = $_.Exception.Message }
+                    $after = @(Get-AtmProviders)
+                } finally { $script:AtmProviders.Clear(); foreach ($x in $before) { $script:AtmProviders.Add($x) } }
+                $same = ($after.Count -eq $before.Count)
+                if ($same) { for ($i = 0; $i -lt $before.Count; $i++) { if (-not [object]::ReferenceEquals($after[$i], $before[$i])) { $same = $false } } }
+                if ($msg -cne (Get-AtmText 'err.providerSubdir' $v)) { $wrong.Add("[$v] $($o.Id): '$msg'") }
+                if (-not $same) { $wrong.Add("[$v] $($o.Id): registro alterado ($($before.Count) -> $($after.Count))") }
+            }
+        }
+        return ,$wrong
+    }
+    Test-Case 'Contrato de provider' 'SR-01: TempSubdir feito so de pontos (., .., ...) recusado com err.providerSubdir, em v1 e v2; o registro nao muda' {
+        $w = Get-AtmSr01Refusals @('.', '..', '...', '....')
+        Assert-True ($w.Count -eq 0) "so pontos: recusado, mensagem exata, registro intacto: $($w -join ' | ')"
+    }
+    Test-Case 'Contrato de provider' 'SR-01: TempSubdir terminado em ponto (a., abc.., x.y.) recusado com err.providerSubdir, em v1 e v2; o registro nao muda' {
+        $w = Get-AtmSr01Refusals @('a.', 'abc..', 'x.y.', '-.')
+        Assert-True ($w.Count -eq 0) "terminado em ponto: recusado, mensagem exata, registro intacto: $($w -join ' | ')"
+    }
+    Test-Case 'Contrato de provider' 'SR-01: TempSubdir com nome de dispositivo reservado (CON, PRN, AUX, NUL, COM0-COM9, LPT0-LPT9), em qualquer caixa, sozinho ou com extensao, recusado com err.providerSubdir, em v1 e v2; o registro nao muda' {
+        $names = New-Object System.Collections.Generic.List[string]
+        foreach ($n in @('CON', 'PRN', 'AUX', 'NUL')) { $names.Add($n) }
+        foreach ($p in @('COM', 'LPT')) { foreach ($d in 0..9) { $names.Add($p + $d) } }
+        $values = New-Object System.Collections.Generic.List[string]
+        foreach ($n in $names) { $values.Add($n); $values.Add($n.ToLowerInvariant()); $values.Add($n.ToLowerInvariant() + '.txt') }
+        foreach ($v in @('Com1', 'nUl', 'Aux.tar.gz', 'lPt9.log')) { $values.Add($v) }
+        Assert-Eq $values.Count 76 'valores: 24 nomes em tres formas e quatro em caixa mista'
+        $w = Get-AtmSr01Refusals $values.ToArray()
+        Assert-True ($w.Count -eq 0) "dispositivo reservado: recusado, mensagem exata, registro intacto: $($w -join ' | ')"
+    }
+    Test-Case 'Contrato de provider' 'SR-01 controle: o claude-code distribuido e TempSubdir validos vizinhos das tres formas (.cache, a.b, console, com10, nul-x, lpt, x.nul, auxiliary) continuam aceitos; registro restaurado' {
+        $before = @(Get-AtmProviders | ForEach-Object { $_.Id }) -join ','
+        $wrong = New-Object System.Collections.Generic.List[string]
+        foreach ($v in @('atm-conformance-fixture', '.cache', 'a.b', 'console', 'com10', 'nul-x', 'lpt', 'x.nul', 'auxiliary')) {
+            $m = Invoke-AtmS1Register (New-AtmS1FixtureProvider @{ TempSubdir = $v })
+            if ($null -ne $m) { $wrong.Add("[$v]: '$m'") }
+        }
+        Assert-True ($wrong.Count -eq 0) "TempSubdir validos aceitos: $($wrong -join ' | ')"
+        $cc = Get-AtmS1ShippedProvider 'ClaudeCode.ps1' 'claude-code'
+        Assert-True ($null -ne $cc -and $cc.TempSubdir -ceq 'claude' -and $null -eq (Invoke-AtmS1Register $cc)) 'claude-code distribuido aceito, TempSubdir claude'
+        Assert-Eq (@(Get-AtmProviders | ForEach-Object { $_.Id }) -join ',') $before 'registro restaurado'
+    }
+    # <<< V10-S6c SR-01 (end)
     Test-Case 'Contrato de provider' 'Registro mais estrito (V10-D5 (b)): com temp, os cinco membros Get* precisam ser script block e ScopePattern/RootPattern precisam compilar como regex, em v1 e v2; chaves err.providerTempMember e err.providerPattern nos dois idiomas, citando o membro e nunca o valor; [regex] aceito' {
         $claude = (Get-AtmProviders)[0]
         $v1 = ConvertTo-AtmTestV1Provider $claude

@@ -31,6 +31,10 @@ param(
     [switch]$AtmElevatedRecovery
 )
 
+# SR-03: a recovery copy relaunched elevated starts without bin\agent-temp.cmd, so it pins its module path here, as the
+# shim does, before any command that could load a module: the system module directory, taken from GetSystemDirectory
+# and never from the environment it was given (with another account's credentials, the requester's). .NET only here.
+if ($AtmElevatedRecovery) { [Environment]::SetEnvironmentVariable('PSModulePath', [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell\v1.0\Modules'), 'Process') }
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 # Cosmetic only: a redirected or legacy console keeps its encoding.
@@ -513,14 +517,15 @@ try {
                 # V0.4 R4 (ADR-0016, R4 implementation record): one operation per process, through the recovery engine
                 # (Invoke-AtmRecoverCommand). With the recovery gate closed (every copy): the plan, or the inverse plan, then
                 # exit 27, with no elevation requested and nothing asked, locked or logged. Past the gate: an elevated token
-                # acts here; any other relaunches this installation's own bin\agent-temp.cmd once, through UAC, with fixed
-                # arguments and never a path, and reports only by that copy's exit code. The exit codes are in docs/USAGE.md.
+                # acts here; any other relaunches this installation's own agent-temp.ps1 once, through UAC, by Windows
+                # PowerShell from the system directory (SR-03: no file association), with fixed arguments and no path but
+                # that script's, and reports only by that copy's exit code. The exit codes are in docs/USAGE.md.
                 if ($recSub -ceq 'start') {
                     if ($null -eq $(if ($Operation) { Get-AtmRecoveryOperation $Operation } else { $null })) { Write-Host (Get-AtmText 'cli.recoverOperationInvalid' (@($script:AtmRecoveryCatalog | ForEach-Object { $_.Id }) -join ', ')) -ForegroundColor Red; exit 2 }
                     if (-not $Service -or $Service.Length -gt 256 -or $Service -cnotmatch '^[A-Za-z0-9_.\- ]+$') { Write-Host (Get-AtmText 'cli.recoverServiceInvalid') -ForegroundColor Red; exit 2 }
                 } elseif (-not (Test-AtmRecoverRunIdForm $RunId)) { Write-Host (Get-AtmText 'cli.recoverRunIdInvalid') -ForegroundColor Red; exit 2 }
                 $recCmd = @{ Verb = $recSub; Operation = $Operation; Service = $Service; RunId = $RunId; Elevated = [bool]$AtmElevatedRecovery; BoundNames = [string[]]@($PSBoundParameters.Keys)
-                    Installed = [bool]$integrity.Installed; LauncherListed = [bool]$integrity.Listed.ContainsKey('bin\agent-temp.cmd'); InstallRoot = $here; InventoryArgs = $invArgs
+                    Installed = [bool]$integrity.Installed; LauncherListed = [bool]$integrity.Listed.ContainsKey('agent-temp.ps1'); InstallRoot = $here; InventoryArgs = $invArgs
                     Presenter = { param($kind, $data) Show-AtmRecoverCommandOutput -Kind $kind -Data $data }
                     ConfirmationReader = { param($phrase, $kind, $rootPath, $choices, $info) Read-AtmCleanAnswer -Phrase $phrase -Kind $kind -RootPath $rootPath -Choices $choices -Info $info -LineReader { param($pr) Read-Host $pr } }
                     KeyReader = { Wait-AtmRecoverKey } }

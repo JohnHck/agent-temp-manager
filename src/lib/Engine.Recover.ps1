@@ -1505,7 +1505,8 @@ function Get-AtmRecoverRequesterEvidence {
 function Invoke-AtmRecoverElevatedLaunchDefault {
     <#
       The default elevated launcher (PRIV-4, PRIV-7): ShellExecuteEx with the elevation verb, which shows the UAC prompt,
-      for the installed launcher (-FilePath) with the fixed arguments; waits for that process and reads its exit code.
+      for Windows PowerShell by its absolute path (-FilePath, an .exe: no file association) running the installed
+      agent-temp.ps1 with the fixed arguments (SR-03); waits for that process and reads its exit code.
       Returns Started, ExitCode and Win32Error: a refused, cancelled or failed request gives the Win32 error of the failed
       start; no process at all gives Started false with none. Called only by Invoke-AtmRecoverCommand, past the recovery
       gate, when no -ElevatedLauncherImpl is given: the suite and the CI never reach it.
@@ -1610,8 +1611,9 @@ function Invoke-AtmRecoverCommand {
       waitKey. -Verb start (-Operation, -Service) or undo (-RunId), checked by the launcher and again here (USAGE).
       -Elevated: the launcher's marker of a relaunched copy, as bound; it proves nothing and only makes the copy stricter.
       -BoundNames: the parameter names the launcher bound (a relaunched copy accepts AtmRecoverElevatedArguments only).
-      -Installed, -LauncherListed (bin\agent-temp.cmd listed and verified by the launcher's manifest check) and
-      -InstallRoot (the launcher's own folder): the relaunch is only ever of the installed launcher, at its installed path.
+      -Installed, -LauncherListed (agent-temp.ps1, the file that runs elevated, listed and verified by the launcher's
+      manifest check; SR-03) and -InstallRoot (the launcher's own folder): the relaunch is only ever of the installed
+      agent-temp.ps1, at its installed path, by Windows PowerShell from the system directory.
       -InventoryArgs and -DeadlineSeconds: for the engine. -ConfirmationReader: the typed phrase, in this console.
       -KeyReader: the key a relaunched copy waits for before its window closes.
       Test seams, never passed by the launcher: -ElevatedLauncherImpl scriptblock(filePath, arguments) returning Started,
@@ -1628,7 +1630,7 @@ function Invoke-AtmRecoverCommand {
           PLAN_REFUSED, and nothing is requested); undo: the run id only (this token cannot read the fixed folder); an
           installed copy (NOT_INSTALLED); the notice that UAC is requested for this one operation and why (PRIV-2); one
           call to the elevated launcher; its exit code (Get-AtmRecoverLaunchExitCode). It takes no lock, reads no log and
-          passes no path but the installed launcher's own.
+          passes no path but the installed agent-temp.ps1's own.
       Returns Side, ExitCode, Code, Detail, Relayed, Launches, LaunchFile, LaunchArguments, Result (the engine's), RunId,
       LogDir and Requester. An unexpected failure is UNEXPECTED, by its exception type only.
     #>
@@ -1726,8 +1728,13 @@ function Invoke-AtmRecoverCommand {
             if (-not $plan.Offered) { return (& $finish 3 'RECOVERY_REFUSED' (@($plan.Codes) -join ',')) }
         } else { & $atmRecShow 'undoRequest' ([pscustomobject]@{ RunId = $RunId; LogDir = $null; GateOpen = $true }) }
         if (-not $Installed -or -not $LauncherListed -or -not $InstallRoot) { return (& $finish 31 'RECOVER_ELEVATION_NEEDS_INSTALL' $null) }
-        $file = Join-Path $InstallRoot 'bin\agent-temp.cmd'
-        $argLine = $(if ($Verb -ceq 'start') { 'recover start -Operation ' + $Operation + ' -Service "' + $Service + '" -AtmElevatedRecovery' } else { 'recover undo -RunId ' + $RunId + ' -AtmElevatedRecovery' })
+        # SR-03 (V1.0 security review): no file association chooses what runs elevated. The target is Windows PowerShell
+        # 5.1 by its absolute path, with bin\agent-temp.cmd's own flags, running this installation's verified
+        # agent-temp.ps1. The path comes from the system directory (GetSystemDirectory), never from the requester's
+        # environment, which with another account's credentials would choose what runs as that account.
+        $file = [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell\v1.0\powershell.exe')
+        $fixed = $(if ($Verb -ceq 'start') { 'recover start -Operation ' + $Operation + ' -Service "' + $Service + '" -AtmElevatedRecovery' } else { 'recover undo -RunId ' + $RunId + ' -AtmElevatedRecovery' })
+        $argLine = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $InstallRoot 'agent-temp.ps1') + '" ' + $fixed
         $out.LaunchFile = $file; $out.LaunchArguments = $argLine
         & $atmRecShow 'elevationNotice' ([pscustomobject]@{ Verb = $Verb; Operation = $Operation; Target = $Service; RunId = $RunId })
         $out.Launches = $out.Launches + 1

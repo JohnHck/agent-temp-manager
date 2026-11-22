@@ -86,7 +86,11 @@ function Register-AtmProvider {
     $required = $(if ($isTemp) { $script:AtmProviderMembers } else { @('Id', 'DisplayName') })
     foreach ($m in $required) { if ($names -notcontains $m) { throw (Get-AtmText 'err.providerMember' $m) } }
     if (-not (Test-AtmProviderId -Id $Provider.Id -Contract $contract)) { throw (Get-AtmText 'err.providerId' $Provider.Id) }
-    if ($isTemp -and $Provider.TempSubdir -notmatch '^[A-Za-z0-9._-]+$') { throw (Get-AtmText 'err.providerSubdir' $Provider.TempSubdir) }
+    # SR-01 (V1.0 security review): the base must be a plain child folder of TEMP. Refused besides the character rule:
+    # a value made only of dots or ending in a dot (Windows strips trailing dots, so it aliases TEMP, its parent or
+    # another name), and a reserved device name, case-insensitive, alone or with an extension (nul, Com1, nul.txt).
+    if ($isTemp -and ($Provider.TempSubdir -notmatch '^[A-Za-z0-9._-]+$' -or $Provider.TempSubdir -match '\.$' -or
+            $Provider.TempSubdir -match '^(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(\.|$)')) { throw (Get-AtmText 'err.providerSubdir' $Provider.TempSubdir) }
     if ($isTemp) {
         # V10-D5 (b): one key per rule; the message names the member, never its value.
         foreach ($m in $script:AtmProviderTempScriptMembers) { if (-not ($Provider.$m -is [scriptblock])) { throw (Get-AtmText 'err.providerTempMember' $m) } }
