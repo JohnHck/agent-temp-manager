@@ -28,7 +28,7 @@ it completely and does not change its number.
 
 | Member | Type | Meaning |
 |---|---|---|
-| `TempSubdir` | string `^[A-Za-z0-9._-]+$` | Directory the agent creates under each TEMP candidate (the *base*). |
+| `TempSubdir` | string `^[A-Za-z0-9._-]+$`, not made only of dots, not ending in a dot, not a reserved device name (SR-01) | Directory the agent creates under each TEMP candidate (the *base*): a plain child folder of TEMP. |
 | `ScopePattern` | regex (a `[string]` that compiles, or a `[regex]`) | First-level directories under the base (project scopes). A scope that does not match gets the hard flag `UNRECOGNIZED_SLUG`. |
 | `RootPattern` | regex (as above) | Second-level directories: session roots, the only deletable unit. Anything else is another kind and never a session root. |
 | `EnvVarNames` | string[] | Per-user environment variables the engine reads for this provider (user registry and, for the current user, the current process). |
@@ -49,7 +49,7 @@ refused value:
 | `Capabilities` non-empty, exact names, no duplicates | `err.providerCapabilities` |
 | with `temp`, the eleven members present; without it, `Id` and `DisplayName` | `err.providerMember` |
 | `Id` matches `^[a-z0-9-]+$` (v2: lower case exactly; v1: case-insensitive) | `err.providerId` |
-| with `temp`, `TempSubdir` matches `^[A-Za-z0-9._-]+$` | `err.providerSubdir` |
+| with `temp`, `TempSubdir` matches `^[A-Za-z0-9._-]+$`, is not made only of dots (`.`, `..`), does not end in a dot (`a.`), and is not a reserved device name, case-insensitive, alone or with an extension (`CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`; `nul.txt`) (V1.0, SR-01) | `err.providerSubdir` |
 | with `temp`, the five `Get*` members are script blocks (V1.0, V10-D5 (b)) | `err.providerTempMember` |
 | with `temp`, `ScopePattern` and `RootPattern` compile as regular expressions (V1.0, V10-D5 (b)) | `err.providerPattern` |
 | a runtime member, when present, needs `runtime` and is a script block | `err.providerRuntimeMember` |
@@ -147,6 +147,16 @@ report or TUI reads them, and a provider may leave them out. Do not rely on them
 * **Loading.** The launcher dot-sources every provider file before running a command (in an installed copy, only
   manifest-verified files). A file whose registration throws stops the launcher with that error. The product does not
   skip a failing provider (V10-D5 kept this).
+* **The id is what is trusted** (SR-02 of the [V1.0 security review](release/V1.0-SECURITY-REVIEW.md), residual R-02).
+  Three facts go together:
+  * the B1 restricted exception follows the provider **id**, not the file (`Engine.Clean.ps1:174`);
+  * registering an id that is already registered **replaces** the earlier provider (`Register-AtmProvider`), so a file
+    that declares `Id = 'claude-code'` with another layout inherits the exception for its roots;
+  * an **installed** copy loads only the provider files its manifest lists and whose hashes match, from a folder only
+    administrators can write; a **development** copy (a source checkout, with no manifest) trusts its own source tree,
+    and whoever can add a file to its `src/providers/` can also edit its engines.
+
+  The review records this as a residual for the maintainer to accept, with no code change.
 
 ### Versioning
 

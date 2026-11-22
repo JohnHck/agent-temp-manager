@@ -77,7 +77,7 @@ the `language` field says which language the run used.
 
 - **Schema id:** `atm.audit/1`, the first member (`schema`), in `src/lib/Report.ps1:230`.
 - **Producer:** `ConvertTo-AtmExportJson` (`src/lib/Report.ps1:225-241`), written by `agent-temp audit -ExportJson
-  <new file>` (`src/agent-temp.ps1:287-293`) to a new file outside the audited directories.
+  <new file>` (`src/agent-temp.ps1:291-297`) to a new file outside the audited directories.
 - **Consumer:** none in the repository. The installer's end-to-end test only parses it.
 - **Compatibility:** V1.0 S2 added `schema` as the first member. The rest of the document is byte for byte the same as
   before, so a reader of the old export that ignores unknown fields reads the new one unchanged.
@@ -210,6 +210,36 @@ That is refused, never misread.
 The pilot summary refuses a schema outside its list (`LOG_SCHEMA_UNKNOWN`) and a log that mixes two schemas
 (`LOG_SCHEMA_MIXED`). `recover undo` refuses another schema as `UNDO_SOURCE_INVALID`, before anything is collected,
 shown or asked.
+
+### Privacy of the logs
+
+SR-04 of the [V1.0 security review](release/V1.0-SECURITY-REVIEW.md) asked for these paragraphs, added in V10-S6c.
+Unlike the audit export, the logs are **local evidence for the operator**: they record what was planned, confirmed and
+done, so that the operator can check it later. That is why some of them keep full paths and the account that ran.
+Each log is a local file. The operator names it (`-LogFile`, or `-RecordFile` for the discard authorization), except
+the automatic purge's log, kept in its own `AutoPurgeLog` folder, and the log of a recovery relaunched past its gate,
+kept in the recovery's fixed folder. **No command of the product sends, uploads or exports a log.** The only readers are the operator, `recover undo` (its own
+run's log) and the V5 pilot summary tool in `tools/`, which is not part of the installed product and writes only counts
+and closed codes.
+
+* **clean** (`atm.cleanlog/1`): `run-start` holds `user` and `sid`, the account of the process that ran, and
+  `elevated`. The `plan`, `declaration`, `skip`, `intent` and `result` records hold `path`, the full path of the
+  session root. A `result` can also hold `failedAt`, the full path of the file or folder where the deleter stopped,
+  and an `abortReason` whose text can contain that path (`PINNED_DIR_CHANGED: <path>`).
+* **discard authorization** (`atm.discard-authorization/2`): `processIdentity` holds `name` and `sid` of the process,
+  with `identifiesRespondent = false` (it never says who answered). `root` holds `path`, the full path of the root,
+  and `profileSid`, the SID of the profile that owns it, which can be another user's.
+* **isolate** (`atm.isolatelog/1`, written by `isolate` and `quarantine restore`): `run-start` holds `user` and `sid`.
+  The `plan`, `skip` and `move-intent` records of `isolate` hold `path`, the full path of the root. `quarantine
+  restore` records `destination`, the full path it restores to, in `run-start`, `restore-intent` and `restore-result`.
+* **purge** (`atm.purgelog/1`): `run-start` holds `user` and `sid`. The other records name the quarantine entry by its
+  id (`entryId`) and hold counts, never a path.
+* **auto-purge** (`atm.autopurgelog/1`): `run-start` holds `user` and `sid`, the account whose scheduled task ran. The
+  other records name entries by id and hold counts and codes, never a path.
+* **recover** (`atm.recoverlog/1`): never the token's name or SID, a command line, a path of another user or an account
+  name beyond the three standard service accounts. The executable is a full path only under a well-known program
+  location ([ADR-0016](adr/ADR-0016-v04-assisted-recovery.md) `:145-150`, `:533-536`). The suite checks it:
+  `V0.4 R2 :: R2 privacidade do log ...` and `V0.4 R3 :: R3 privacidade do log do desfazer ...`.
 
 ## Tests
 

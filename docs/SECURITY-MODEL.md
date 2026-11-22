@@ -1267,6 +1267,23 @@ the mover; a static suite test checks it.
   a related service that is neither declared nor a system service. The plan never shows the token's identity (the
   window of an R4 run shows the identity that acts, outside the plan and the log). The plan id
   hashes the plan's inputs and leaves out the token.
+* **Residual: the window between the revalidation and the service-control call** (SR-06 of the
+  [V1.0 security review](release/V1.0-SECURITY-REVIEW.md), recorded in V10-S6c; reached by no shipped copy, behind the
+  recovery gate). The revalidation of R2 and R3 is the last read before the `intent` record and the call. Between them,
+  another process can still start, stop or reconfigure the service. The window cannot be closed: the service control
+  manager has no compare-and-start or compare-and-stop, so a state checked can always change before the control
+  arrives. What covers it is the read-back. After the call the engine reads the service again, records "after" and a
+  field-by-field diff, and names an outcome from what it read, never from what it expected:
+  * R2: a service started meanwhile makes the start return "already running", which is `FAILED` with no wait, never
+    `COMPLETE` (`V0.4 R2 :: R2 desfecho FAILED: ... outro codigo do seam (dependencia, ja em execucao) e FAILED sem
+    espera, nunca COMPLETE`); a service still pending at the end of the wait is `PARTIAL` (`V0.4 R2 :: R2 desfecho
+    PARTIAL ...`); access denied is `REFUSED`, with "after" read (`V0.4 R2 :: R2 desfecho REFUSED ...`);
+  * R3: a service back to `RUNNING`, or never leaving it, is `FAILED` (`V0.4 R3 :: R3 desfecho FAILED ...`); each seam
+    result maps to its own outcome (`V0.4 R3 :: R3 cada resultado do seam de parada ...`); a change seen before the
+    call is `REVALIDATION_REFUSED` with the field named (the `V0.4 R2` and `V0.4 R3` "revalidacao" cases).
+
+  Nothing is compensated or retried. The real service control manager in this window is not tested (the `NAO_TESTADO`
+  cases of R3).
 
 ## Execution policy
 
@@ -1324,6 +1341,18 @@ Integrity at install and at every run:
 * Limits: the local manifest proves integrity against the release, not authenticity against an administrator who
   can also change the launcher and the manifest. A file could change between its hash check and its load; both
   happen inside the administrator-only install directory. Source checkouts have no integrity guarantee.
+* Residual: the two-step removal of the product's own directories (SR-07 of the
+  [V1.0 security review](release/V1.0-SECURITY-REVIEW.md), recorded in V10-S6c). `Remove-AtmOwnTree`
+  (`install/InstallCommon.ps1:170-186`) removes only `<InstallDir>`, `<InstallDir>.previous` and the
+  `.staging-<8 hex>` and `.recovery-<8 hex>` siblings. It first walks the tree and refuses any reparse point, then
+  deletes it recursively by name (`[IO.Directory]::Delete(..., $true)`). These are two separate steps, so a reparse
+  point swapped in between is not excluded by the code. All these directories sit in the parent of the install
+  directory, which install and update refuse when standard users can write it, or when it is a reparse point
+  (`:619-623`). Only an administrator can therefore make the swap, and an administrator can already change the
+  installation. Uninstall and rollback do not check that parent again: they rely on the check made when the
+  installation was created or updated. The installer does not use the product's pinned deleter (`AtmDeleter`, in
+  `lib\Native.cs`) because it runs before the product is in place (install and update), and after it is gone
+  (uninstall, where the copy being removed is the one that holds the deleter).
 * Uninstall removes the PATH entry only if the installer added it.
 
 Operational advice:

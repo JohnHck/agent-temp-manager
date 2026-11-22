@@ -81,3 +81,12 @@ Nothing in this record may be cited as proof that a large agent temporary folder
 * **Prevention still comes first.** The decided dedicated base for agent temporary files (`CLAUDE_CODE_TMPDIR`; the
   base runbook is a publication blocker in [V0.3-RC.md](../release/V0.3-RC.md#g-publication-blockers)) keeps them
   out of the profile's TEMP. Isolation is containment and recovery after the fact; it does not replace prevention.
+
+## Status at V1.0 review (2026-11-21)
+
+Appended in V10-S6c (SR-09). The record above is dated 2026-11-01 and is not changed. This is the current state, as
+recorded in the [V1.0 security review](../release/V1.0-SECURITY-REVIEW.md): the product has an isolation engine
+(`src/lib/Engine.Isolate.ps1`), which moves a session root into a quarantine. It sits behind its own release gate,
+`AtmIsolationEnabled`, which is `$false` in every copy. In every copy `isolate` only plans, so no shipped copy moves or
+isolates anything. The statement above that the product has no operation that moves or isolates anything does not
+match the code at the time of this note.
