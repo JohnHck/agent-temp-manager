@@ -240,6 +240,43 @@ function Invoke-AtmTestChild {
     return (ConvertFrom-AtmTestJobResult -Result $r)
 }
 
+# V10-GUI-TEMP: a real-window GUI child gets a TEMP of its own, a new empty folder inside the sandbox, with TEMP and TMP
+# pointing at it ([IO.Path]::GetTempPath() reads TMP first). "Nothing left in TEMP" is that folder still empty after the
+# child exits, counted recursively: what other processes of the runner create in the shared TEMP no longer enters the
+# count, and anything the child leaves anywhere under its own does. The folder is inside the sandbox, so a leftover there
+# also counts in the child's own sandbox count: the two counters overlap by design, and only this one names entries.
+function New-AtmGuiChildTemp {
+    param([string]$Root, [string]$Label)
+    $dir = Join-Path $Root ('gui-temp-' + $Label + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    [void][IO.Directory]::CreateDirectory($dir)
+    $map = @{}
+    foreach ($k in [Environment]::GetEnvironmentVariables().Keys) { $map[[string]$k] = [Environment]::GetEnvironmentVariable([string]$k) }
+    $map['TEMP'] = $dir; $map['TMP'] = $dir
+    return [pscustomobject]@{ Path = $dir; Environment = $map }
+}
+# The verdict after the child exits. Seen: what the child reported for [IO.Path]::GetTempPath(), $env:TEMP and $env:TMP,
+# in that order; all three must be the private folder, or a child that ignored the variables would pass with an empty
+# folder. A missing or unreadable folder fails (Count -1), never counts as empty. Names: the first 5 entries in ordinal
+# order, relative to the private folder. A mismatch prints only which of the three differ, never the path itself.
+function Get-AtmGuiChildTempVerdict {
+    param([pscustomobject]$Temp, [object[]]$Seen)
+    $want = $Temp.Path.TrimEnd('\')
+    $seenOk = @(@($Seen) | ForEach-Object { ([string]$_).TrimEnd('\').Equals($want, [StringComparison]::OrdinalIgnoreCase) })
+    $routed = ($seenOk.Count -eq 3 -and $seenOk -notcontains $false)
+    $count = -1; $names = [string[]]@()
+    if (-not [IO.Directory]::Exists($Temp.Path)) { $names = [string[]]@('<private TEMP missing>') }
+    else {
+        try {
+            $all = [string[]]@(Get-ChildItem -LiteralPath $Temp.Path -Recurse -Force -ErrorAction Stop | ForEach-Object { $_.FullName.Substring($want.Length).TrimStart('\') })
+            [Array]::Sort($all, [StringComparer]::Ordinal)
+            $count = $all.Count; $names = [string[]]@($all | Select-Object -First 5)
+        } catch { $names = [string[]]@('<private TEMP unreadable: ' + $_.Exception.GetType().Name + '>') }
+    }
+    $text = 'TEMP ' + $count + $(if ($names.Count -gt 0) { ' [' + ($names -join ', ') + ']' } else { '' })
+    if (-not $routed) { $text += '; TEMP do filho nao e o privado (GetTempPath, TEMP, TMP: ' + (@($seenOk | ForEach-Object { [int]$_ }) -join '/') + ')' }
+    return [pscustomobject]@{ Ok = ($routed -and $count -eq 0); Routed = $routed; Count = $count; Names = $names; Text = $text }
+}
+
 # Test-only FSCTL helper (FINAL-A M-1, FINAL-B F-10): turns an existing empty folder into a junction through another
 # handle opened with FILE_WRITE_ATTRIBUTES. Used on sandbox fixtures only.
 function Initialize-AtmTestReparse {
@@ -15780,6 +15817,44 @@ $res.afterGui = (& $wf)
         Assert-Eq (@($gui | ForEach-Object { (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash }) -join ',') $hashBefore 'arquivos reais inalterados'
         $script:caseNote = 'permitidos: ' + (($guiAllowedEngine + $guiAllowedCmdlets) -join ', ') + ' e as funcoes dos proprios arquivos'
     }
+    # V10-GUI-TEMP: the control of the private TEMP check used by every real-window case. It needs no window, so it runs in
+    # both shells; the child is minimal, but it is launched and judged by the same two helpers as the real harnesses, and
+    # it plants from its own side through [IO.Path]::GetTempPath(), so the plant also proves the routing.
+    Test-Case 'GUI P2' 'TEMP privado do processo filho de janela real (V10-GUI-TEMP), controle sem janela: o filho ve GetTempPath, TEMP e TMP no TEMP privado; uma sobra aninhada plantada pelo proprio filho e contada de forma recursiva e nomeada pelo caminho relativo; sete entradas dao contagem 7 e exatamente 5 nomes; um filho sem o TEMP privado e recusado mesmo com a pasta vazia; uma pasta ausente e recusada; a pasta vazia passa' {
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $child = Join-Path $sandbox 'gui-temp-control-child.ps1'
+        [IO.File]::WriteAllText($child, @'
+param([string]$Out, [string]$Plant)
+$ErrorActionPreference = 'Stop'
+$t = [IO.Path]::GetTempPath()
+if ($Plant -ceq 'nested' -or $Plant -ceq 'seven') { [void][IO.Directory]::CreateDirectory((Join-Path $t 'sub\deep')); [IO.File]::WriteAllText((Join-Path $t 'sub\deep\left.txt'), 'x') }
+if ($Plant -ceq 'seven') { foreach ($n in @('a.tmp', 'b.tmp', 'c.tmp', 'd.tmp')) { [IO.File]::WriteAllText((Join-Path $t $n), 'x') } }
+(@{ tempSeen = @($t, $env:TEMP, $env:TMP) } | ConvertTo-Json -Depth 3) | Set-Content -LiteralPath $Out -Encoding UTF8
+'@, (New-Object Text.UTF8Encoding $true))
+        $runOne = { param([string]$Plant, [switch]$Shared)
+            $ct = New-AtmGuiChildTemp -Root $sandbox -Label ('control-' + $Plant)
+            $out = Join-Path $sandbox ('gui-temp-control-' + $Plant + $(if ($Shared) { '-shared' } else { '' }) + '.json')
+            $cl = "`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Out `"$out`" -Plant $Plant"
+            # -Shared: the child is launched as before this round, with this process's TEMP and TMP.
+            $r = $(if ($Shared) { Invoke-AtmTestChild -CommandLine $cl -TimeoutSec 120 } else { Invoke-AtmTestChild -Environment $ct.Environment -CommandLine $cl -TimeoutSec 120 })
+            Assert-True ($r.Exit -eq 0 -and (Test-Path -LiteralPath $out -PathType Leaf)) "controle ${Plant}: processo filho saida $($r.Exit) $($r.Text)"
+            $j = Get-Content -LiteralPath $out -Raw -Encoding UTF8 | ConvertFrom-Json
+            Get-AtmGuiChildTempVerdict -Temp $ct -Seen @($j.tempSeen)
+        }
+        $v = & $runOne 'none'
+        Assert-True ($v.Ok -and $v.Routed -and $v.Count -eq 0 -and $v.Text -ceq 'TEMP 0') "controle vazio: passa ($($v.Text))"
+        $v = & $runOne 'nested'
+        Assert-True ((-not $v.Ok) -and $v.Routed -and $v.Count -eq 3) "controle aninhado: contado de forma recursiva, 3 entradas ($($v.Text))"
+        Assert-True ($v.Text -ceq 'TEMP 3 [sub, sub\deep, sub\deep\left.txt]') "controle aninhado: a mensagem nomeia as entradas pelo caminho relativo ($($v.Text))"
+        $v = & $runOne 'seven'
+        Assert-True ((-not $v.Ok) -and $v.Routed -and $v.Count -eq 7 -and $v.Names.Count -eq 5) "controle sete: contagem 7 e 5 nomes ($($v.Text))"
+        Assert-True ($v.Text -ceq 'TEMP 7 [a.tmp, b.tmp, c.tmp, d.tmp, sub]') "controle sete: os 5 primeiros em ordem ordinal ($($v.Text))"
+        $v = & $runOne 'none' -Shared
+        Assert-True ((-not $v.Ok) -and (-not $v.Routed) -and $v.Count -eq 0 -and $v.Text.EndsWith('nao e o privado (GetTempPath, TEMP, TMP: 0/0/0)')) "controle sem TEMP privado: recusado mesmo com a pasta vazia ($($v.Text))"
+        $never = Join-Path $sandbox 'gui-temp-never-created'
+        $v = Get-AtmGuiChildTempVerdict -Temp ([pscustomobject]@{ Path = $never }) -Seen @($never, $never, $never)
+        Assert-True ((-not $v.Ok) -and $v.Routed -and $v.Count -eq -1 -and $v.Text -ceq 'TEMP -1 [<private TEMP missing>]') "controle pasta ausente: recusada, nunca contada como vazia ($($v.Text))"
+    }
     Test-Case 'GUI P2' 'Janela real (Windows PowerShell; trava aberta e fonte do inventario dublada so num processo filho): abre com o audit, mostra os numeros do dashboard e CURRENT, atualiza uma vez por F5 (um F5 durante o audit e ignorado), um pedido de fechar durante o audit o cancela e a janela fecha com 0; titulo, identidade, elevacao e idioma; nos dois idiomas; nenhum processo filho, timer ou arquivo deixado no sandbox, na configuracao ou no TEMP; sem janela possivel: NAO_TESTADO' {
         if ($PSVersionTable.PSEdition -ne 'Desktop') { $script:caseSkipped = $true; $script:caseNote = 'PowerShell 7: janela real NAO_TESTADO nesta fase (GUI-D7)'; return }
         Assert-True (-not (& $guiTimerFree ([IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1')))).Contains('Timer')) 'P2: nenhum timer criado (desde a P5, so o do monitoramento ao vivo)'
@@ -15794,8 +15869,8 @@ $res = [ordered]@{ env = (Test-AtmGuiEnvironment) }
 if ($null -eq $res.env) {
     $names = { param($p, [switch]$Top) $h = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase); foreach ($e in @(Get-ChildItem -LiteralPath $p -Recurse:(-not $Top) -Force -ErrorAction SilentlyContinue)) { [void]$h.Add($e.FullName) }; , $h }
     $kids = { @(Get-CimInstance -ClassName Win32_Process -Filter ('ParentProcessId = {0}' -f $PID) | ForEach-Object { [int]$_.ProcessId }) }
-    $temp = [IO.Path]::GetTempPath()
-    $b1 = & $names $Sandbox; $b2 = & $names (Join-Path $Src 'config'); $b3 = & $names $temp -Top
+    $res.tempSeen = @([IO.Path]::GetTempPath(), $env:TEMP, $env:TMP)
+    $b1 = & $names $Sandbox; $b2 = & $names (Join-Path $Src 'config')
     $k1 = & $kids
     $script:AtmGuiEnabled = $true
     # An exception in an event handler ends the child with its message, instead of a modal error dialog that would hang
@@ -15847,16 +15922,16 @@ if ($null -eq $res.env) {
     $res.disposed = ($null -ne $script:guiForm -and [bool]$script:guiForm.IsDisposed)
     $k2 = & $kids
     $res.newProcesses = @($k2 | Where-Object { $k1 -notcontains $_ }).Count
-    $a1 = & $names $Sandbox; $a2 = & $names (Join-Path $Src 'config'); $a3 = & $names $temp -Top
+    $a1 = & $names $Sandbox; $a2 = & $names (Join-Path $Src 'config')
     $res.newSandbox = @($a1 | Where-Object { -not $b1.Contains($_) }).Count
     $res.newConfig = @($a2 | Where-Object { -not $b2.Contains($_) }).Count
-    $res.newTemp = @($a3 | Where-Object { -not $b3.Contains($_) }).Count
 }
 ($res | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $Out -Encoding UTF8
 '@, (New-Object Text.UTF8Encoding $true))
         foreach ($lang in @('en-US', 'pt-BR')) {
             $out = Join-Path $sandbox ('gui-window-' + $lang + '.json')
-            $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Lang $lang -Sandbox `"$sandbox`" -Out `"$out`"") -TimeoutSec 180
+            $ct = New-AtmGuiChildTemp -Root $sandbox -Label ('p2-' + $lang)
+            $r = Invoke-AtmTestChild -Environment $ct.Environment -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Lang $lang -Sandbox `"$sandbox`" -Out `"$out`"") -TimeoutSec 180
             Assert-True ($r.Exit -eq 0 -and (Test-Path -LiteralPath $out -PathType Leaf)) "janela ${lang}: processo filho saida $($r.Exit) $($r.Text)"
             $j = Get-Content -LiteralPath $out -Raw -Encoding UTF8 | ConvertFrom-Json
             if ($null -ne $j.env) { $script:caseSkipped = $true; $script:caseNote = "runner sem janela possivel ($($j.env)): NAO_TESTADO"; return }
@@ -15884,7 +15959,8 @@ if ($null -eq $res.env) {
             Assert-Eq ([int]$j.newProcesses) 0 "janela ${lang}: nenhum processo filho deixado"
             Assert-Eq ([int]$j.newSandbox) 0 "janela ${lang}: nenhum arquivo novo no sandbox"
             Assert-Eq ([int]$j.newConfig) 0 "janela ${lang}: nenhum arquivo novo na configuracao"
-            Assert-Eq ([int]$j.newTemp) 0 "janela ${lang}: nenhum arquivo novo no TEMP"
+            $tv = Get-AtmGuiChildTempVerdict -Temp $ct -Seen @($j.tempSeen)
+            Assert-True $tv.Ok "janela ${lang}: nenhum arquivo novo no TEMP privado do processo filho ($($tv.Text))"
         }
         $script:caseNote = 'janela real em en-US e pt-BR: audit ao abrir, F5 uma vez, F5 durante o audit ignorado, fechar durante o audit cancelado; sem timer'
     }
@@ -16377,8 +16453,8 @@ $res = [ordered]@{ env = (Test-AtmGuiEnvironment) }
 if ($null -eq $res.env) {
     $names = { param($p, [switch]$Top) $h = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase); foreach ($e in @(Get-ChildItem -LiteralPath $p -Recurse:(-not $Top) -Force -ErrorAction SilentlyContinue)) { [void]$h.Add($e.FullName) }; , $h }
     $kids = { @(Get-CimInstance -ClassName Win32_Process -Filter ('ParentProcessId = {0}' -f $PID) | ForEach-Object { [int]$_.ProcessId }) }
-    $temp = [IO.Path]::GetTempPath()
-    $b1 = & $names $Sandbox; $b2 = & $names (Join-Path $Src 'config'); $b3 = & $names $temp -Top
+    $res.tempSeen = @([IO.Path]::GetTempPath(), $env:TEMP, $env:TMP)
+    $b1 = & $names $Sandbox; $b2 = & $names (Join-Path $Src 'config')
     $k1 = & $kids
     $script:guiInv = Import-Clixml -LiteralPath $InvFile
     $script:AtmGuiEnabled = $true
@@ -16419,16 +16495,16 @@ if ($null -eq $res.env) {
     $res.disposed = ($null -ne $script:guiForm -and [bool]$script:guiForm.IsDisposed)
     $k2 = & $kids
     $res.newProcesses = @($k2 | Where-Object { $k1 -notcontains $_ }).Count
-    $a1 = & $names $Sandbox; $a2 = & $names (Join-Path $Src 'config'); $a3 = & $names $temp -Top
+    $a1 = & $names $Sandbox; $a2 = & $names (Join-Path $Src 'config')
     $res.newSandbox = @($a1 | Where-Object { -not $b1.Contains($_) }).Count
     $res.newConfig = @($a2 | Where-Object { -not $b2.Contains($_) }).Count
-    $res.newTemp = @($a3 | Where-Object { -not $b3.Contains($_) }).Count
 }
 ($res | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $Out -Encoding UTF8
 '@, (New-Object Text.UTF8Encoding $true))
         foreach ($lang in @('en-US', 'pt-BR')) {
             $out = Join-Path $sandbox ('gui-p3-window-' + $lang + '.json')
-            $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Lang $lang -Sandbox `"$sandbox`" -Out `"$out`" -InvFile `"$cx`"") -TimeoutSec 180
+            $ct = New-AtmGuiChildTemp -Root $sandbox -Label ('p3-' + $lang)
+            $r = Invoke-AtmTestChild -Environment $ct.Environment -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Lang $lang -Sandbox `"$sandbox`" -Out `"$out`" -InvFile `"$cx`"") -TimeoutSec 180
             Assert-True ($r.Exit -eq 0 -and (Test-Path -LiteralPath $out -PathType Leaf)) "janela P3 ${lang}: processo filho saida $($r.Exit) $($r.Text)"
             $j = Get-Content -LiteralPath $out -Raw -Encoding UTF8 | ConvertFrom-Json
             if ($null -ne $j.env) { $script:caseSkipped = $true; $script:caseNote = "runner sem janela possivel ($($j.env)): NAO_TESTADO"; return }
@@ -16473,7 +16549,8 @@ if ($null -eq $res.env) {
                 if ($w[2]) { Assert-True ([string]$s.rowsName).Contains(($w[1] -replace '^[^:]*:\s*', '')) "janela P3 ${lang} passo ${i}: nome acessivel da lista com a tela ($($s.rowsName))" }
             }
             Assert-True ([bool]$j.escClosed -and [bool]$j.disposed) "janela P3 ${lang}: Esc no dashboard fechou a janela; formulario liberado"
-            Assert-True ([int]$j.newProcesses -eq 0 -and [int]$j.newSandbox -eq 0 -and [int]$j.newConfig -eq 0 -and [int]$j.newTemp -eq 0) "janela P3 ${lang}: nada deixado (processos $($j.newProcesses), sandbox $($j.newSandbox), configuracao $($j.newConfig), TEMP $($j.newTemp))"
+            $tv = Get-AtmGuiChildTempVerdict -Temp $ct -Seen @($j.tempSeen)
+            Assert-True ([int]$j.newProcesses -eq 0 -and [int]$j.newSandbox -eq 0 -and [int]$j.newConfig -eq 0 -and $tv.Ok) "janela P3 ${lang}: nada deixado (processos $($j.newProcesses), sandbox $($j.newSandbox), configuracao $($j.newConfig), $($tv.Text))"
         }
         Assert-True (-not (& $guiTimerFree ([IO.File]::ReadAllText((Join-Path $srcDir 'lib\Gui.ps1')))).Contains('Timer')) 'P3: nenhum timer criado (desde a P5, so o do monitoramento ao vivo)'
     }
@@ -16702,8 +16779,8 @@ $res = [ordered]@{ env = (Test-AtmGuiEnvironment) }
 if ($null -eq $res.env) {
     $names = { param($p, [switch]$Top) $h = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase); foreach ($e in @(Get-ChildItem -LiteralPath $p -Recurse:(-not $Top) -Force -ErrorAction SilentlyContinue)) { [void]$h.Add($e.FullName) }; , $h }
     $kids = { @(Get-CimInstance -ClassName Win32_Process -Filter ('ParentProcessId = {0}' -f $PID) | ForEach-Object { [int]$_.ProcessId }) }
-    $temp = [IO.Path]::GetTempPath()
-    $b1 = & $names $Sandbox; $b2 = & $names (Join-Path $Src 'config'); $b3 = & $names $temp -Top
+    $res.tempSeen = @([IO.Path]::GetTempPath(), $env:TEMP, $env:TMP)
+    $b1 = & $names $Sandbox; $b2 = & $names (Join-Path $Src 'config')
     $k1 = & $kids
     $data = Import-Clixml -LiteralPath $InvFile
     $script:guiInv = $data.Inv
@@ -16756,16 +16833,16 @@ if ($null -eq $res.env) {
     $res.disposed = ($null -ne $script:guiForm -and [bool]$script:guiForm.IsDisposed)
     $k2 = & $kids
     $res.newProcesses = @($k2 | Where-Object { $k1 -notcontains $_ }).Count
-    $a1 = & $names $Sandbox; $a2 = & $names (Join-Path $Src 'config'); $a3 = & $names $temp -Top
+    $a1 = & $names $Sandbox; $a2 = & $names (Join-Path $Src 'config')
     $res.newSandbox = @($a1 | Where-Object { -not $b1.Contains($_) }).Count
     $res.newConfig = @($a2 | Where-Object { -not $b2.Contains($_) }).Count
-    $res.newTemp = @($a3 | Where-Object { -not $b3.Contains($_) }).Count
 }
 ($res | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $Out -Encoding UTF8
 '@, (New-Object Text.UTF8Encoding $true))
         foreach ($lang in @('en-US', 'pt-BR')) {
             $out = Join-Path $sandbox ('gui-p4a-window-' + $lang + '.json')
-            $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Lang $lang -Sandbox `"$sandbox`" -Out `"$out`" -InvFile `"$cx`"") -TimeoutSec 180
+            $ct = New-AtmGuiChildTemp -Root $sandbox -Label ('p4a-' + $lang)
+            $r = Invoke-AtmTestChild -Environment $ct.Environment -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Lang $lang -Sandbox `"$sandbox`" -Out `"$out`" -InvFile `"$cx`"") -TimeoutSec 180
             Assert-True ($r.Exit -eq 0 -and (Test-Path -LiteralPath $out -PathType Leaf)) "janela P4a ${lang}: processo filho saida $($r.Exit) $($r.Text)"
             $j = Get-Content -LiteralPath $out -Raw -Encoding UTF8 | ConvertFrom-Json
             if ($null -ne $j.env) { $script:caseSkipped = $true; $script:caseNote = "runner sem janela possivel ($($j.env)): NAO_TESTADO"; return }
@@ -16811,7 +16888,8 @@ if ($null -eq $res.env) {
                 Assert-True ([string]$s.identity -ceq $idLine -and ([string]$s.state).Contains($wantState)) "janela P4a ${lang} passo ${i}: cabecalho com identidade e estado ($($s.identity) / $($s.state))"
             }
             Assert-True ([string]$j.drDuring -ceq 'None' -and [bool]$j.closed -and [string]$snaps[7].dialog -cne 'None' -and [bool]$j.disposed) "janela P4a ${lang}: fechar durante o preview esperou a chamada e fechou depois ($($j.drDuring) -> $($snaps[7].dialog)); formulario liberado"
-            Assert-True ([int]$j.newProcesses -eq 0 -and [int]$j.newSandbox -eq 0 -and [int]$j.newConfig -eq 0 -and [int]$j.newTemp -eq 0) "janela P4a ${lang}: nada deixado (processos $($j.newProcesses), sandbox $($j.newSandbox), configuracao $($j.newConfig), TEMP $($j.newTemp))"
+            $tv = Get-AtmGuiChildTempVerdict -Temp $ct -Seen @($j.tempSeen)
+            Assert-True ([int]$j.newProcesses -eq 0 -and [int]$j.newSandbox -eq 0 -and [int]$j.newConfig -eq 0 -and $tv.Ok) "janela P4a ${lang}: nada deixado (processos $($j.newProcesses), sandbox $($j.newSandbox), configuracao $($j.newConfig), $($tv.Text))"
         }
         $script:caseNote = 'janela real em en-US e pt-BR: P, Enter com a linha Preview, Esc, 8, Esc, F5, P chamado de novo; fechar durante o preview esperou a chamada'
     }
@@ -17227,8 +17305,8 @@ $res = [ordered]@{ env = (Test-AtmGuiEnvironment) }
 if ($null -eq $res.env) {
     $names = { param($p, [switch]$Top) $h = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase); foreach ($e in @(Get-ChildItem -LiteralPath $p -Recurse:(-not $Top) -Force -ErrorAction SilentlyContinue)) { [void]$h.Add($e.FullName) }; , $h }
     $kids = { @(Get-CimInstance -ClassName Win32_Process -Filter ('ParentProcessId = {0}' -f $PID) | ForEach-Object { [int]$_.ProcessId }) }
-    $temp = [IO.Path]::GetTempPath()
-    $b1 = & $names $Sandbox; $b2 = & $names (Join-Path $Src 'config'); $b3 = & $names $temp -Top
+    $res.tempSeen = @([IO.Path]::GetTempPath(), $env:TEMP, $env:TMP)
+    $b1 = & $names $Sandbox; $b2 = & $names (Join-Path $Src 'config')
     $k1 = & $kids
     $data = Import-Clixml -LiteralPath $InvFile
     $script:guiInv = $data.Inv
@@ -17290,16 +17368,16 @@ if ($null -eq $res.env) {
     $res.disposed = ($null -ne $script:guiForm -and [bool]$script:guiForm.IsDisposed)
     $k2 = & $kids
     $res.newProcesses = @($k2 | Where-Object { $k1 -notcontains $_ }).Count
-    $a1 = & $names $Sandbox; $a2 = & $names (Join-Path $Src 'config'); $a3 = & $names $temp -Top
+    $a1 = & $names $Sandbox; $a2 = & $names (Join-Path $Src 'config')
     $res.newSandbox = @($a1 | Where-Object { -not $b1.Contains($_) }).Count
     $res.newConfig = @($a2 | Where-Object { -not $b2.Contains($_) }).Count
-    $res.newTemp = @($a3 | Where-Object { -not $b3.Contains($_) }).Count
 }
 ($res | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $Out -Encoding UTF8
 '@, (New-Object Text.UTF8Encoding $true))
         foreach ($lang in @('en-US', 'pt-BR')) {
             $out = Join-Path $sandbox ('gui-p4b-window-' + $lang + '.json')
-            $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Lang $lang -Sandbox `"$sandbox`" -Out `"$out`" -InvFile `"$cx`"") -TimeoutSec 180
+            $ct = New-AtmGuiChildTemp -Root $sandbox -Label ('p4b-' + $lang)
+            $r = Invoke-AtmTestChild -Environment $ct.Environment -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Lang $lang -Sandbox `"$sandbox`" -Out `"$out`" -InvFile `"$cx`"") -TimeoutSec 180
             Assert-True ($r.Exit -eq 0 -and (Test-Path -LiteralPath $out -PathType Leaf)) "janela P4b ${lang}: processo filho saida $($r.Exit) $($r.Text)"
             $j = Get-Content -LiteralPath $out -Raw -Encoding UTF8 | ConvertFrom-Json
             if ($null -ne $j.env) { $script:caseSkipped = $true; $script:caseNote = "runner sem janela possivel ($($j.env)): NAO_TESTADO"; return }
@@ -17352,7 +17430,8 @@ if ($null -eq $res.env) {
             }
             Assert-True ([int]$snaps[4].sel -eq 5 -and [string]$snaps[7].message -ceq $refreshed) "janela P4b ${lang}: a linha 5 escolhida ($($snaps[4].sel)); U diz que o resultado e novo ($($snaps[7].message))"
             Assert-True ([bool]$j.disposed) "janela P4b ${lang}: formulario liberado"
-            Assert-True ([int]$j.newProcesses -eq 0 -and [int]$j.newSandbox -eq 0 -and [int]$j.newConfig -eq 0 -and [int]$j.newTemp -eq 0) "janela P4b ${lang}: nada deixado (processos $($j.newProcesses), sandbox $($j.newSandbox), configuracao $($j.newConfig), TEMP $($j.newTemp))"
+            $tv = Get-AtmGuiChildTempVerdict -Temp $ct -Seen @($j.tempSeen)
+            Assert-True ([int]$j.newProcesses -eq 0 -and [int]$j.newSandbox -eq 0 -and [int]$j.newConfig -eq 0 -and $tv.Ok) "janela P4b ${lang}: nada deixado (processos $($j.newProcesses), sandbox $($j.newSandbox), configuracao $($j.newConfig), $($tv.Text))"
         }
         $script:caseNote = 'janela real em en-US e pt-BR: D, Enter no resumo, Esc, worktrees com a linha de desabilitado, Esc, U chamado de novo, F5, D sem chamada nova'
     }
@@ -17756,8 +17835,8 @@ $res = [ordered]@{ env = (Test-AtmGuiEnvironment) }
 if ($null -eq $res.env) {
     $names = { param($p, [switch]$Top) $h = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase); foreach ($e in @(Get-ChildItem -LiteralPath $p -Recurse:(-not $Top) -Force -ErrorAction SilentlyContinue)) { [void]$h.Add($e.FullName) }; , $h }
     $kids = { @(Get-CimInstance -ClassName Win32_Process -Filter ('ParentProcessId = {0}' -f $PID) | ForEach-Object { [int]$_.ProcessId }) }
-    $temp = [IO.Path]::GetTempPath()
-    $b1 = & $names $Sandbox; $b2 = & $names (Join-Path $Src 'config'); $b3 = & $names $temp -Top
+    $res.tempSeen = @([IO.Path]::GetTempPath(), $env:TEMP, $env:TMP)
+    $b1 = & $names $Sandbox; $b2 = & $names (Join-Path $Src 'config')
     $k1 = & $kids
     $data = Import-Clixml -LiteralPath $InvFile
     $script:guiInv = $data.Inv
@@ -17872,16 +17951,16 @@ if ($null -eq $res.env) {
     $res.disposed = ($null -ne $script:guiForm -and [bool]$script:guiForm.IsDisposed)
     $k2 = & $kids
     $res.newProcesses = @($k2 | Where-Object { $k1 -notcontains $_ }).Count
-    $a1 = & $names $Sandbox; $a2 = & $names (Join-Path $Src 'config'); $a3 = & $names $temp -Top
+    $a1 = & $names $Sandbox; $a2 = & $names (Join-Path $Src 'config')
     $res.newSandbox = @($a1 | Where-Object { -not $b1.Contains($_) }).Count
     $res.newConfig = @($a2 | Where-Object { -not $b2.Contains($_) }).Count
-    $res.newTemp = @($a3 | Where-Object { -not $b3.Contains($_) }).Count
 }
 ($res | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $Out -Encoding UTF8
 '@, (New-Object Text.UTF8Encoding $true))
         foreach ($lang in @('en-US', 'pt-BR')) {
             $out = Join-Path $sandbox ('gui-p5-window-' + $lang + '.json')
-            $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Lang $lang -Sandbox `"$sandbox`" -Out `"$out`" -InvFile `"$cx`"") -TimeoutSec 180
+            $ct = New-AtmGuiChildTemp -Root $sandbox -Label ('p5-' + $lang)
+            $r = Invoke-AtmTestChild -Environment $ct.Environment -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Lang $lang -Sandbox `"$sandbox`" -Out `"$out`" -InvFile `"$cx`"") -TimeoutSec 180
             Assert-True ($r.Exit -eq 0 -and (Test-Path -LiteralPath $out -PathType Leaf)) "janela P5 ${lang}: processo filho saida $($r.Exit) $($r.Text)"
             $j = Get-Content -LiteralPath $out -Raw -Encoding UTF8 | ConvertFrom-Json
             if ($null -ne $j.env) { $script:caseSkipped = $true; $script:caseNote = "runner sem janela possivel ($($j.env)): NAO_TESTADO"; return }
@@ -17929,7 +18008,8 @@ if ($null -eq $res.env) {
             Assert-True (@($snaps | Where-Object { [bool]$_.leak }).Count -eq 0) "janela P5 ${lang}: nada da mensagem da excecao nem do progresso em nenhum controle"
             Assert-True ([bool]$j.tickerDisposed -and [string]$j.afterClose -ceq 'SKIPPED_NOT_DUE' -and [int]$j.callsAfterClose -eq 5 -and [int]$j.callsAtEnd -eq 5 -and [bool]$j.closing -and -not [bool]$j.monitorAfter) "janela P5 ${lang}: fechar: ticker liberado, um tick depois nao faz nada ($($j.afterClose); $($j.tickerDisposed))"
             Assert-True ([bool]$j.disposed) "janela P5 ${lang}: formulario liberado"
-            Assert-True ([int]$j.newProcesses -eq 0 -and [int]$j.newSandbox -eq 0 -and [int]$j.newConfig -eq 0 -and [int]$j.newTemp -eq 0) "janela P5 ${lang}: nada deixado (processos $($j.newProcesses), sandbox $($j.newSandbox), configuracao $($j.newConfig), TEMP $($j.newTemp))"
+            $tv = Get-AtmGuiChildTempVerdict -Temp $ct -Seen @($j.tempSeen)
+            Assert-True ([int]$j.newProcesses -eq 0 -and [int]$j.newSandbox -eq 0 -and [int]$j.newConfig -eq 0 -and $tv.Ok) "janela P5 ${lang}: nada deixado (processos $($j.newProcesses), sandbox $($j.newSandbox), configuracao $($j.newConfig), $($tv.Text))"
         }
         $script:caseNote = 'janela real em en-US e pt-BR: UNKNOWN ao abrir, ligar, 30 s, tick, projeto, falha, F5 e diagnose com tick dentro, antes da hora, desligar, fechar com o ticker liberado'
     }
@@ -18146,8 +18226,8 @@ $res = [ordered]@{ env = (Test-AtmGuiEnvironment) }
 if ($null -eq $res.env) {
     $names = { param($p, [switch]$Top) $h = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase); foreach ($e in @(Get-ChildItem -LiteralPath $p -Recurse:(-not $Top) -Force -ErrorAction SilentlyContinue)) { [void]$h.Add($e.FullName) }; , $h }
     $kids = { @(Get-CimInstance -ClassName Win32_Process -Filter ('ParentProcessId = {0}' -f $PID) | ForEach-Object { [int]$_.ProcessId }) }
-    $temp = [IO.Path]::GetTempPath()
-    $b1 = & $names $Sandbox; $b2 = & $names (Join-Path $Src 'config'); $b3 = & $names $temp -Top
+    $res.tempSeen = @([IO.Path]::GetTempPath(), $env:TEMP, $env:TMP)
+    $b1 = & $names $Sandbox; $b2 = & $names (Join-Path $Src 'config')
     $k1 = & $kids
     $data = Import-Clixml -LiteralPath $InvFile
     $script:guiInv = $data.Inv; $script:guiPrev = $data.Preview; $script:guiRes = $data.Res
@@ -18296,10 +18376,9 @@ if ($null -eq $res.env) {
     $res.disposed = ($null -ne $script:guiForm -and [bool]$script:guiForm.IsDisposed)
     $k2 = & $kids
     $res.newProcesses = @($k2 | Where-Object { $k1 -notcontains $_ }).Count
-    $a1 = & $names $Sandbox; $a2 = & $names (Join-Path $Src 'config'); $a3 = & $names $temp -Top
+    $a1 = & $names $Sandbox; $a2 = & $names (Join-Path $Src 'config')
     $res.newSandbox = @($a1 | Where-Object { -not $b1.Contains($_) }).Count
     $res.newConfig = @($a2 | Where-Object { -not $b2.Contains($_) }).Count
-    $res.newTemp = @($a3 | Where-Object { -not $b3.Contains($_) }).Count
 }
 ($res | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $Out -Encoding UTF8
 '@, (New-Object Text.UTF8Encoding $true))
@@ -18309,7 +18388,8 @@ if ($null -eq $res.env) {
         foreach ($lang in @('en-US', 'pt-BR')) {
             $other = $(if ($lang -ceq 'en-US') { 'pt-BR' } else { 'en-US' })
             $out = Join-Path $sandbox ('gui-p6-window-' + $lang + '.json')
-            $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Lang $lang -Sandbox `"$sandbox`" -Out `"$out`" -InvFile `"$cx`"") -TimeoutSec 240
+            $ct = New-AtmGuiChildTemp -Root $sandbox -Label ('p6-' + $lang)
+            $r = Invoke-AtmTestChild -Environment $ct.Environment -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Lang $lang -Sandbox `"$sandbox`" -Out `"$out`" -InvFile `"$cx`"") -TimeoutSec 240
             Assert-True ($r.Exit -eq 0 -and (Test-Path -LiteralPath $out -PathType Leaf)) "janela P6 ${lang}: processo filho saida $($r.Exit) $($r.Text)"
             $j = Get-Content -LiteralPath $out -Raw -Encoding UTF8 | ConvertFrom-Json
             if ($null -ne $j.env) { $script:caseSkipped = $true; $script:caseNote = "runner sem janela possivel ($($j.env)): NAO_TESTADO"; return }
@@ -18362,7 +18442,8 @@ if ($null -eq $res.env) {
             $uw = @(([string]$j.widths.users) -split ',')
             Assert-True ([string]$j.widths.Summary -ceq (& $sc @(200, 340)) -and [string]$j.widths.Classes -ceq (& $sc @(220, 120, 160)) -and [string]$j.widths.detail -ceq (& $sc @(260, 640)) -and [string]$j.widths.errors -ceq (& $sc @(900)) -and $uw.Count -ge 4 -and @($uw | Where-Object { [int]$_ -ne (Get-AtmGuiScaled -Pixels 150 -Dpi $dpi) }).Count -eq 0) "janela P6 ${lang}: larguras pela funcao de escala em $dpi DPI (painel $($j.widths.Summary) e $($j.widths.Classes); usuarios $($j.widths.users); detalhe $($j.widths.detail); erros $($j.widths.errors))"
             Assert-True ([bool]$j.tickerDisposed -and [bool]$j.closing -and -not [bool]$j.monitorAfter -and [bool]$j.disposed) "janela P6 ${lang}: fechada com o ticker liberado e o monitoramento desligado"
-            Assert-True ([int]$j.newProcesses -eq 0 -and [int]$j.newSandbox -eq 0 -and [int]$j.newConfig -eq 0 -and [int]$j.newTemp -eq 0) "janela P6 ${lang}: nada deixado (processos $($j.newProcesses), sandbox $($j.newSandbox), configuracao $($j.newConfig), TEMP $($j.newTemp))"
+            $tv = Get-AtmGuiChildTempVerdict -Temp $ct -Seen @($j.tempSeen)
+            Assert-True ([int]$j.newProcesses -eq 0 -and [int]$j.newSandbox -eq 0 -and [int]$j.newConfig -eq 0 -and $tv.Ok) "janela P6 ${lang}: nada deixado (processos $($j.newProcesses), sandbox $($j.newSandbox), configuracao $($j.newConfig), $($tv.Text))"
             $notes.Add("${lang}: DPI $dpi (DeviceDpi $($j.dpi.device), DpiX $($j.dpi.dpiX)), $($items.Count) textos, ordem de tabulacao $(@($j.seq) -join ' > ')")
         }
         $script:caseNote = 'janela real: ' + ($notes -join ' | ')
@@ -18399,8 +18480,8 @@ if ($null -eq $res.env) {
             $k.Close()
         }
         , $set }
-    $temp = [IO.Path]::GetTempPath()
-    $b1 = & $names $Sandbox; $b2 = & $names (Join-Path $Src 'config'); $b3 = & $names $temp -Top; $b4 = & $reg
+    $res.tempSeen = @([IO.Path]::GetTempPath(), $env:TEMP, $env:TMP)
+    $b1 = & $names $Sandbox; $b2 = & $names (Join-Path $Src 'config'); $b4 = & $reg
     $k1 = & $kids
     $data = Import-Clixml -LiteralPath $InvFile
     $script:guiInv = $data.Inv; $script:guiPrev = $data.Preview; $script:guiRes = $data.Res
@@ -18483,10 +18564,9 @@ if ($null -eq $res.env) {
     $res.invCalls = $script:guiInvCalls; $res.prevCalls = $script:guiPrevCalls; $res.diagCalls = $script:guiDiagCalls
     $k2 = & $kids
     $res.newProcesses = @($k2 | Where-Object { $k1 -notcontains $_ }).Count
-    $a1 = & $names $Sandbox; $a2 = & $names (Join-Path $Src 'config'); $a3 = & $names $temp -Top; $a4 = & $reg
+    $a1 = & $names $Sandbox; $a2 = & $names (Join-Path $Src 'config'); $a4 = & $reg
     $res.newSandbox = @($a1 | Where-Object { -not $b1.Contains($_) }).Count
     $res.newConfig = @($a2 | Where-Object { -not $b2.Contains($_) }).Count
-    $res.newTemp = @($a3 | Where-Object { -not $b3.Contains($_) }).Count
     $res.newRegistry = @($a4 | Where-Object { -not $b4.Contains($_) }).Count
 }
 ($res | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $Out -Encoding UTF8
@@ -18496,8 +18576,9 @@ if ($null -eq $res.env) {
         foreach ($lang in @('en-US', 'pt-BR')) {
             foreach ($path in @('esc', 'close', 'audit', 'preview', 'diag', 'monitor')) {
                 $out = Join-Path $sandbox ('gui-p6-close-' + $path + '-' + $lang + '.json')
+                $ct = New-AtmGuiChildTemp -Root $sandbox -Label ('p6close-' + $path + '-' + $lang)
                 $one = [Diagnostics.Stopwatch]::StartNew()
-                $r = Invoke-AtmTestChild -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Lang $lang -Path $path -Sandbox `"$sandbox`" -Out `"$out`" -InvFile `"$cx`"") -TimeoutSec 180
+                $r = Invoke-AtmTestChild -Environment $ct.Environment -CommandLine ("`"$shell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$child`" -Src `"$srcDir`" -Lang $lang -Path $path -Sandbox `"$sandbox`" -Out `"$out`" -InvFile `"$cx`"") -TimeoutSec 180
                 $one.Stop()
                 $times.Add(('{0}/{1} {2} ms' -f $path, $lang, $one.ElapsedMilliseconds))
                 $w = "fechamento $path ${lang}"
@@ -18509,7 +18590,8 @@ if ($null -eq $res.env) {
                 Assert-True ([bool]$j.after.closing -and -not [bool]$j.after.monitor -and -not [bool]$j.after.due -and [string]$j.after.dr -ceq 'Cancel') "${w}: fechada no caminho, sem monitoramento nem hora marcada ($($j.after.closing); $($j.after.monitor); $($j.after.dr))"
                 Assert-True ([bool]$j.tickerDisposed -and [string]$j.afterClose -ceq 'SKIPPED_NOT_DUE' -and [int]$j.afterCalls -eq [int]$j.after.invCalls -and [int]$s.tickRuns -eq [int]$j.after.tickRuns -and [bool]$s.closing -and -not [bool]$s.monitor) "${w}: ticker liberado, um tick depois de fechar nao faz nada ($($j.afterClose); audits $($j.afterCalls)/$($j.after.invCalls); ticks $($s.tickRuns)/$($j.after.tickRuns))"
                 Assert-True ([bool]$j.disposed) "${w}: formulario liberado"
-                Assert-True ([int]$j.newProcesses -eq 0 -and [int]$j.newSandbox -eq 0 -and [int]$j.newConfig -eq 0 -and [int]$j.newTemp -eq 0 -and [int]$j.newRegistry -eq 0) "${w}: nada deixado (processos $($j.newProcesses), sandbox $($j.newSandbox), configuracao $($j.newConfig), TEMP $($j.newTemp), registro $($j.newRegistry))"
+                $tv = Get-AtmGuiChildTempVerdict -Temp $ct -Seen @($j.tempSeen)
+                Assert-True ([int]$j.newProcesses -eq 0 -and [int]$j.newSandbox -eq 0 -and [int]$j.newConfig -eq 0 -and $tv.Ok -and [int]$j.newRegistry -eq 0) "${w}: nada deixado (processos $($j.newProcesses), sandbox $($j.newSandbox), configuracao $($j.newConfig), $($tv.Text), registro $($j.newRegistry))"
                 switch ($path) {
                     { $_ -ceq 'esc' -or $_ -ceq 'close' } { Assert-True ([int]$j.invCalls -eq 1 -and [int]$s.refreshes -eq 1 -and [int]$s.cancelled -eq 0 -and [int]$j.prevCalls -eq 0 -and [int]$j.diagCalls -eq 0) "${w}: so o audit de abertura ($($j.invCalls))" }
                     'audit' { Assert-True ([int]$j.invCalls -eq 2 -and [int]$s.refreshes -eq 1 -and [int]$s.cancelled -eq 1 -and [string]$j.during.dr -ceq 'None' -and [bool]$j.during.closing -and [bool]$j.during.cancel) "${w}: o audit em curso e cancelado no callback seguinte e a janela fecha depois dele (audits $($j.invCalls), cancelados $($s.cancelled), durante: $($j.during.dr), $($j.during.cancel))" }
