@@ -77,7 +77,7 @@ the `language` field says which language the run used.
 
 - **Schema id:** `atm.audit/1`, the first member (`schema`), in `src/lib/Report.ps1:230`.
 - **Producer:** `ConvertTo-AtmExportJson` (`src/lib/Report.ps1:225-241`), written by `agent-temp audit -ExportJson
-  <new file>` (`src/agent-temp.ps1:291-297`) to a new file outside the audited directories.
+  <new file>` (`src/agent-temp.ps1:292-298`) to a new file outside the audited directories.
 - **Consumer:** none in the repository. The installer's end-to-end test only parses it.
 - **Compatibility:** V1.0 S2 added `schema` as the first member. The rest of the document is byte for byte the same as
   before, so a reader of the old export that ignores unknown fields reads the new one unchanged.

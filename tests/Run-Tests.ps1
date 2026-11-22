@@ -20616,7 +20616,7 @@ if ($null -eq $res.env) {
         $ctk = $null; $cer = $null
         $cast = [Management.Automation.Language.Parser]::ParseInput($cli, [ref]$ctk, [ref]$cer)
         Assert-Eq @($cer).Count 0 'lancador sem erro de sintaxe'
-        $pin = "if (`$AtmElevatedRecovery) { [Environment]::SetEnvironmentVariable('PSModulePath', [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell\v1.0\Modules'), 'Process') }"
+        $pin = "if (`$AtmElevatedRecovery -and `$PSVersionTable.PSEdition -ceq 'Desktop') { [Environment]::SetEnvironmentVariable('PSModulePath', [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell\v1.0\Modules'), 'Process') }"
         $first = @($cast.EndBlock.Statements)[0].Extent.Text
         Assert-Eq $first $pin 'SR-03: a fixacao do PSModulePath da copia relancada e a primeira instrucao, do diretorio do sistema'
         Assert-Eq (& $count $cliCode 'PSModulePath') 1 'SR-03: uma unica fixacao no lancador'

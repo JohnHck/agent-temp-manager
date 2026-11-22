@@ -34,7 +34,8 @@ param(
 # SR-03: a recovery copy relaunched elevated starts without bin\agent-temp.cmd, so it pins its module path here, as the
 # shim does, before any command that could load a module: the system module directory, taken from GetSystemDirectory
 # and never from the environment it was given (with another account's credentials, the requester's). .NET only here.
-if ($AtmElevatedRecovery) { [Environment]::SetEnvironmentVariable('PSModulePath', [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell\v1.0\Modules'), 'Process') }
+# The relaunch is always Windows PowerShell 5.1 (Desktop); a marker passed to PowerShell 7 by hand keeps its own path.
+if ($AtmElevatedRecovery -and $PSVersionTable.PSEdition -ceq 'Desktop') { [Environment]::SetEnvironmentVariable('PSModulePath', [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell\v1.0\Modules'), 'Process') }
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 # Cosmetic only: a redirected or legacy console keeps its encoding.
