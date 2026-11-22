@@ -1,6 +1,6 @@
 # ADR-0018: V1.0 stabilization and multi-agent support
 
-Status: ACCEPTED (V10-D1 to V10-D8 decided 2026-11-21, as recommended; S1 implemented, see the implementation record)
+Status: ACCEPTED (V10-D1 to V10-D8 decided 2026-11-21, as recommended; S1, S2, S3, S5 and S6 implemented, see the implementation records)
 Date: 2026-11-21
 Phase: V1.0 (phases S0 to S7 below, each a future round with its own contract and tests)
 
@@ -714,3 +714,28 @@ each checks are listed in `docs/TESTING.md`, "Cross-user rows in the install e2e
   in a `finally`, and the order of the steps.
 - **Unchanged:** every file of `src/`, `install/`, `tools/` and `.github/`; B1, RECENT (72 hours), the flags, the
   classification, eligibility and every format; the disposable-machine guard (`:42-44`). The nine gates stay `$false`.
+
+## Implementation record (S6, 2026-11-22)
+
+S6 is done. The maintainer accepted the security review on 2026-11-22 (V10-D4 (a)). Its rounds:
+
+| Round | PR | What |
+|---|---|---|
+| S6a | #136 | The evidence pack per component, with no verdicts: [V1.0-SECURITY-EVIDENCE.md](../release/V1.0-SECURITY-EVIDENCE.md). |
+| S6b | — | The auditor's verdicts, findings SR-01 to SR-09 and residuals R-01 to R-13, written by the auditor session. |
+| S6c | #137 | The review published unedited, with the fixes: SR-01 (stricter `TempSubdir`), SR-03 (relaunch without file association, behind the recovery gate), SR-08 (gate test hardening) and the documentation findings. |
+| S6d | #138 | The auditor's fix-verification addendum. |
+| S6e | this change | The maintainer's acceptance, recorded in the review's sign-off and here. |
+
+- **Record:** [V1.0-SECURITY-REVIEW.md](../release/V1.0-SECURITY-REVIEW.md).
+  - No finding of high severity.
+  - Two medium findings, both fixed.
+  - One low finding, SR-02, accepted as residual R-02.
+- **What the acceptance covers:** the residuals R-01 to R-13 as the record describes them.
+- **What it does not cover:**
+  - It opens no gate and authorizes no release.
+  - It does not replace the operator's items (section 6, S7).
+  - Before a gate opens, that gate's residuals are reviewed again (the record, "What this review does not cover").
+- **Scope in time:** the review is of `main` at `e645be8`, the code as of S5. Section 9 says S6 closes after S1 to S5, and S4 has not landed yet. It waits for the operator to observe the agent's image name and marker. When S4 lands, its provider gets an auditor's review addendum to this record, under the same checklist (5.1), before V1.0 closes.
+- **Also landed during S6:** V10-GUI-TEMP (#139). The real-window GUI tests now use a private TEMP per child process. This is test-only, and it removes an intermittent CI failure.
+- **Unchanged:** B1, RECENT (72 hours), the flags, the classification, eligibility and every format. The nine gates stay `$false`.
