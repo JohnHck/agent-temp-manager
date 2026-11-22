@@ -1215,8 +1215,9 @@ the mover; a static suite test checks it.
   implementation record):
   * **An elevated administrator token** acts in its own process (the manual model).
   * **Any other token is only a requester.** It shows the plan (for undo, only the run id: it cannot read the log
-    folder) and a notice that names the operation and why UAC is requested. Then it relaunches `bin\agent-temp.cmd` of
-    its own verified installation once, through UAC (`ShellExecuteEx` with `runas`, in one default launcher), with a
+    folder) and a notice that names the operation and why UAC is requested. Then it relaunches `agent-temp.ps1` of
+    its own verified installation once, by `powershell.exe` from the system directory (SR-03, V10-S6c; before it,
+    `bin\agent-temp.cmd`), through UAC (`ShellExecuteEx` with `runas`, in one default launcher), with a
     fixed argument line: the verb, the operation and the name or the run id, and a marker. It passes no path, file or
     plan, takes no lock, reads no log, and reports only by that copy's exit code (40 to 44 for the prompt's outcomes,
     never a reason guessed from one number).
